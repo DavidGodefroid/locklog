@@ -32,6 +32,9 @@ const (
 // part of a word holding a digit (parts are split at = : , ; ( ) [ ] { } "
 // ' / and @) becomes Variable. Words are joined by one space. It reads
 // masked text only: a template carries less than the text it comes from.
+// A bare placeholder equal to Other is written ⟦other:…⟧, so that a
+// template is never the overflow key. It runs in time linear in its input
+// and stops reading once the template is over MaxTemplateBytes.
 func Template(masked string) string {
 	var b strings.Builder
 	words := 0
@@ -58,18 +61,26 @@ func Template(masked string) string {
 }
 
 func templateWord(b *strings.Builder, w string) {
-	for len(w) > 0 {
-		if strings.HasPrefix(w, mask.Open) {
+	// closed is false once w holds no ⟧ past the current point: every ⟦
+	// left is then literal (without it, each lone ⟦ would search the rest
+	// of w again: quadratic).
+	closed := true
+	for len(w) > 0 && b.Len() <= MaxTemplateBytes {
+		if closed && strings.HasPrefix(w, mask.Open) {
 			if end := strings.Index(w, mask.Close); end >= 0 {
 				ph := w[:end+len(mask.Close)]
-				if i := strings.IndexByte(ph, ':'); i >= 0 {
+				switch i := strings.IndexByte(ph, ':'); {
+				case i >= 0:
 					b.WriteString(ph[:i+1] + "…" + mask.Close)
-				} else {
+				case ph == Other:
+					b.WriteString(mask.Open + "other:…" + mask.Close)
+				default:
 					b.WriteString(ph)
 				}
 				w = w[end+len(mask.Close):]
 				continue
 			}
+			closed = false
 		}
 		i := 0
 		for i < len(w) && !templateDelim(w[i]) && !strings.HasPrefix(w[i:], mask.Open) {
@@ -130,7 +141,12 @@ type PatternsResult struct {
 	Distinct int   `json:"distinct"`
 	Records  int64 `json:"records"`
 	NoText   int64 `json:"no_text,omitempty"`
-	Untimed  int64 `json:"untimed,omitempty"`
+	// Untimed counts the matching untimed records of the window's plan.
+	Untimed int64 `json:"untimed,omitempty"`
+	// Truncated is set when the window or the baseline had more distinct
+	// patterns than MaxGroups (or MaxGroupBytes): the rest count under
+	// Other, in their own group.
+	Truncated bool `json:"truncated,omitempty"`
 	// With a baseline: New are the top patterns absent from it, Gone the
 	// top patterns of the baseline absent from the window.
 	BaselineFrom   *time.Time     `json:"baseline_from,omitempty"`
@@ -170,10 +186,10 @@ func (e *Engine) Patterns(ctx context.Context, q PatternsQuery) (_ PatternsResul
 	if len(q.Sources) == 0 {
 		q.Sources = append([]string(nil), e.names...)
 	}
-	maxRange := e.o.Limits.LocalRange
+	maxRange, remoteRange, hasRemote := e.o.Limits.LocalRange, e.o.Limits.RemoteRange, false
 	for _, s := range q.Sources {
 		if _, ok := e.o.Sources[s]; ok && e.remote(s) {
-			maxRange = min(maxRange, e.o.Limits.RemoteRange)
+			maxRange, hasRemote = min(maxRange, remoteRange), true
 		}
 	}
 	last := q.Last
@@ -200,6 +216,10 @@ func (e *Engine) Patterns(ctx context.Context, q PatternsQuery) (_ PatternsResul
 		if d > 400*24*time.Hour {
 			return PatternsResult{}, refuse(EBadQuery, "baseline", "want an offset of at most 400d")
 		}
+		if 2*q.To.Sub(q.From) > remoteRange && hasRemote {
+			return PatternsResult{}, &Error{Code: EOverBudget, Span: "baseline", Message: fmt.Sprintf("the window and its baseline are over the %s range budget of remote sources", remoteRange),
+				Estimate: &Estimate{Range: 2 * q.To.Sub(q.From)}}
+		}
 		q.offset = d
 		base = q.Query
 		base.From, base.To = q.From.Add(-d), q.To.Add(-d)
@@ -210,6 +230,7 @@ func (e *Engine) Patterns(ctx context.Context, q PatternsQuery) (_ PatternsResul
 	var f *frozen
 	chunk, gran := 0, 0
 	a := newAgg()
+	a.base = newAgg()
 	if cursor != "" {
 		var err *Error
 		if f, err = e.resume(st, digest); err != nil {
@@ -217,7 +238,7 @@ func (e *Engine) Patterns(ctx context.Context, q PatternsQuery) (_ PatternsResul
 		}
 		chunk, gran = st.Chunk, st.Granule
 		var ok bool
-		if a, ok = e.aggs.get(st.Cache); !ok {
+		if a, ok = e.aggs.get(st.Cache); !ok || a.base == nil {
 			return PatternsResult{}, &Error{Code: EStale, Span: "cursor", Message: "the cursor expired: run the query again"}
 		}
 		defer func() {
@@ -239,6 +260,7 @@ func (e *Engine) Patterns(ctx context.Context, q PatternsQuery) (_ PatternsResul
 			if err != nil {
 				return PatternsResult{}, err
 			}
+			a.winChunks = len(plan.Chunks)
 			plan = withBaseline(plan, bp, compressed)
 			var local, remote int64
 			for _, c := range plan.Chunks {
@@ -252,6 +274,9 @@ func (e *Engine) Patterns(ctx context.Context, q PatternsQuery) (_ PatternsResul
 				return PatternsResult{}, &Error{Code: EOverBudget, Message: "the plan of the window and its baseline exceeds this call's byte budget (narrow the range or the sources, or ask for locklog_scan)",
 					Estimate: &Estimate{Bytes: plan.Bytes(), Granules: plan.Granules(), Range: 2 * q.To.Sub(q.From)}}
 			}
+		}
+		if q.offset == 0 {
+			a.winChunks = len(plan.Chunks)
 		}
 		f = e.freeze(digest, plan)
 	}
@@ -274,7 +299,11 @@ func (e *Engine) Patterns(ctx context.Context, q PatternsQuery) (_ PatternsResul
 			return
 		}
 		if !timed {
-			a.untimed++
+			// Untimed records count from the window's chunks only:
+			// the baseline's would be counted on top of them.
+			if b.chunk < a.winChunks {
+				a.untimed++
+			}
 			return
 		}
 		m := rec.Message()
@@ -288,21 +317,24 @@ func (e *Engine) Patterns(ctx context.Context, q PatternsQuery) (_ PatternsResul
 			return
 		}
 		p := Template(m)
-		a.add(bucket, []*string{&p}, 1, t, true)
+		if bucket == windowBucket {
+			a.add(bucket, []*string{&p}, 1, t, true)
+		} else {
+			a.base.add(bucket, []*string{&p}, 1, t, true)
+		}
 	})
 	if err != nil {
 		return PatternsResult{}, err
 	}
 	res.Scanned, res.MaskedFailures, res.Untimed, res.NoText = sc, failures, a.untimed, a.noText
+	res.Truncated = a.truncated || a.base.truncated
 	win, bl := map[string]*Group{}, map[string]*Group{}
 	for _, g := range a.groups {
-		k := *g.Key[0]
-		if g.Bucket.Equal(windowBucket) {
-			win[k] = g
-			res.Records += g.N
-		} else {
-			bl[k] = g
-		}
+		win[*g.Key[0]] = g
+		res.Records += g.N
+	}
+	for _, g := range a.base.groups {
+		bl[*g.Key[0]] = g
 	}
 	res.Distinct = len(win)
 	group := func(k string, g *Group, withBase bool) PatternGroup {
@@ -358,7 +390,9 @@ func (e *Engine) Patterns(ctx context.Context, q PatternsQuery) (_ PatternsResul
 		res.Cursor = e.seal("Lc1", st)
 		// The plan holds the window, then the baseline: until the window
 		// is read, coverage is the window's.
-		if cu, ok := coveredUntil(f.plan, chunk, gran, q.Query); ok {
+		asc := q.Query
+		asc.Order = "asc" // the plan is read in time order
+		if cu, ok := coveredUntil(f.plan, chunk, gran, asc); ok {
 			res.CoveredUntil = &cu
 		}
 	} else {
@@ -371,20 +405,15 @@ func (e *Engine) Patterns(ctx context.Context, q PatternsQuery) (_ PatternsResul
 // withBaseline appends to the window's plan the granules of the baseline's
 // plan it does not hold: a granule both plans hold (an unindexed one is
 // planned for any range) is read once, its records sorted into the window
-// or the baseline by time. A baseline chunk is split into runs of the
-// granules left; a run of a compressed stream still costs its whole chunk
-// (decompressing from where the chunk starts).
+// or the baseline by time. The plans are made by two calls: the last
+// granule of a growing stream may differ between them ([k, size1) and
+// [k, size2)), so a baseline granule is left out when it overlaps any
+// window granule of its stream, not only when it equals one. A baseline
+// chunk is split into runs of the granules left; a run of a compressed
+// stream still costs its whole chunk (decompressing from where the chunk
+// starts).
 func withBaseline(win, base source.Byteplan, compressed func(source.Chunk) bool) source.Byteplan {
-	type gk struct {
-		src, stream string
-		start, end  int64
-	}
-	seen := map[gk]bool{}
-	for _, c := range win.Chunks {
-		for _, g := range c.Granules {
-			seen[gk{c.Source, c.Stream, g.Start, g.End}] = true
-		}
-	}
+	inWin := windowSpans(win.Chunks)
 	out := source.Byteplan{Chunks: slices.Clip(win.Chunks)}
 	for _, c := range base.Chunks {
 		var run []source.Granule
@@ -404,7 +433,7 @@ func withBaseline(win, base source.Byteplan, compressed func(source.Chunk) bool)
 			run = nil
 		}
 		for _, g := range c.Granules {
-			if seen[gk{c.Source, c.Stream, g.Start, g.End}] {
+			if inWin.overlaps(c.Source, c.Stream, g.Start, g.End) {
 				flush()
 				continue
 			}
@@ -413,6 +442,30 @@ func withBaseline(win, base source.Byteplan, compressed func(source.Chunk) bool)
 		flush()
 	}
 	return out
+}
+
+// spans are the granule intervals of chunks, by source and stream.
+type spans map[[2]string][][2]int64
+
+func windowSpans(chunks []source.Chunk) spans {
+	s := spans{}
+	for _, c := range chunks {
+		k := [2]string{c.Source, c.Stream}
+		for _, g := range c.Granules {
+			s[k] = append(s[k], [2]int64{g.Start, g.End})
+		}
+	}
+	return s
+}
+
+// overlaps reports whether [start, end) overlaps a span of the stream.
+func (s spans) overlaps(src, stream string, start, end int64) bool {
+	for _, iv := range s[[2]string{src, stream}] {
+		if start < iv[1] && iv[0] < end {
+			return true
+		}
+	}
+	return false
 }
 
 // String describes a pattern group (tests and status screens).

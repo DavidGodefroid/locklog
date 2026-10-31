@@ -53,8 +53,10 @@ uses [Semantic Versioning](https://semver.org/).
   (pseudonyms keep their kind, `⟦email:…⟧`; digit-bearing parts become
   `<*>`), with first/last times, an optional `baseline` offset (the same
   window earlier: baseline counts, `new` and `gone` patterns, each granule
-  read once), plan-based admission and free continuations; `count` gains
-  `by_pattern`.
+  read once, even when a file grows between the two plans; the baseline's
+  patterns capped apart from the window's, `truncated` past the cap; with a
+  remote source both windows fit its range budget), plan-based admission
+  and free continuations; `count` gains `by_pattern`.
 
 ### Fixed
 

@@ -3,8 +3,11 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -265,5 +268,204 @@ func TestWithBaselineReadsGranulesOnce(t *testing.T) {
 	}
 	if want := "x[10,30)=20 x[0,10)=10 x[30,50)=20 gz[0,20)=99 y[10,20)=10"; strings.Join(desc, " ") != want {
 		t.Fatalf("%s", strings.Join(desc, " "))
+	}
+}
+
+// TestWithBaselineGrowingStream: the two plans are made by two calls; the
+// last granule of a growing stream differs between them and is read once.
+func TestWithBaselineGrowingStream(t *testing.T) {
+	g := func(a, b int64) source.Granule { return source.Granule{Start: a, End: b, Bytes: b - a} }
+	win := source.Byteplan{Chunks: []source.Chunk{{Source: "s", Stream: "x", Granules: []source.Granule{g(0, 10), g(10, 20)}, Bytes: 20}}}
+	base := source.Byteplan{Chunks: []source.Chunk{{Source: "s", Stream: "x", Granules: []source.Granule{g(0, 10), g(10, 35)}, Bytes: 35},
+		{Source: "s", Stream: "x", Granules: []source.Granule{g(35, 40)}, Bytes: 5}}}
+	got := withBaseline(win, base, func(source.Chunk) bool { return false })
+	var desc []string
+	for _, c := range got.Chunks {
+		desc = append(desc, fmt.Sprintf("%s[%d,%d)", c.Stream, c.Start(), c.End()))
+	}
+	if want := "x[0,20) x[35,40)"; strings.Join(desc, " ") != want {
+		t.Fatalf("%s, want %s", strings.Join(desc, " "), want)
+	}
+}
+
+// TestTemplateUnclosedIsLinear: a word of unclosed ⟦ (or one long word)
+// costs time linear in it and is cut at MaxTemplateBytes.
+func TestTemplateUnclosedIsLinear(t *testing.T) {
+	for _, in := range []string{strings.Repeat("⟦", 256<<10), "a⟦b:c⟧" + strings.Repeat("⟦x", 128<<10), strings.Repeat("x", 1<<20)} {
+		start := time.Now()
+		got := Template(in)
+		if d := time.Since(start); d > 200*time.Millisecond {
+			t.Errorf("%d bytes took %v", len(in), d)
+		}
+		if len(got) > MaxTemplateBytes+len(TemplateCut) || !strings.HasSuffix(got, TemplateCut) {
+			t.Errorf("not cut: %d bytes", len(got))
+		}
+	}
+}
+
+func BenchmarkTemplateUnclosed(b *testing.B) {
+	line := strings.Repeat("⟦", 256<<10)
+	b.SetBytes(int64(len(line)))
+	for b.Loop() {
+		Template(line)
+	}
+}
+
+// TestTemplateNeverOther: no template is the overflow key.
+func TestTemplateNeverOther(t *testing.T) {
+	for _, in := range []string{Other, " " + Other + " ", Template(Other)} {
+		if got := Template(in); got == Other {
+			t.Errorf("Template(%q) = Other", in)
+		}
+	}
+}
+
+// TestAggTruncated: an aggregate over MaxGroups says so; the baseline's
+// groups have their own cap.
+func TestAggTruncated(t *testing.T) {
+	a := newAgg()
+	a.base = newAgg()
+	for i := 0; i <= MaxGroups && !a.truncated; i++ {
+		k := fmt.Sprint(i)
+		a.add(windowBucket, []*string{&k}, 1, t0, true)
+	}
+	k := "one more"
+	a.base.add(baselineBucket, []*string{&k}, 1, t0, true)
+	if a.base.truncated || len(a.base.groups) != 1 {
+		t.Fatal("the baseline shares the window's cap")
+	}
+	if !a.truncated || a.groups[groupKey(windowBucket, []*string{ptr(Other)})] == nil {
+		t.Fatal("not truncated past the cap")
+	}
+	if c := a.clone(); c.base == a.base || len(c.base.groups) != 1 || c.size() != a.size() {
+		t.Fatal("clone shares or loses the baseline")
+	}
+}
+
+func ptr(s string) *string { return &s }
+
+// TestPatternsBaselineRemoteRange: with a remote source, the window and its
+// baseline together are within the remote range.
+func TestPatternsBaselineRemoteRange(t *testing.T) {
+	f := newFixture(t, "x\n", nil)
+	var sels []source.Selector
+	o := f.eng.o
+	o.Sources = map[string]source.Source{"loki": labelSource{sels: &sels}}
+	o.Now = func() time.Time { return t0.Add(30 * 24 * time.Hour) }
+	eng, err := New(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := Query{From: t0.Add(10 * 24 * time.Hour), To: t0.Add(10*24*time.Hour + 18*time.Hour)}
+	if _, err := eng.Patterns(ctx, PatternsQuery{Query: w}); err != nil {
+		t.Fatalf("an 18h remote window: %v", err)
+	}
+	if _, err := eng.Patterns(ctx, PatternsQuery{Query: w, Baseline: "24h"}); code(err) != EOverBudget {
+		t.Fatalf("an 18h remote window with a baseline: %v", err)
+	}
+	w.To = w.From.Add(12 * time.Hour)
+	if _, err := eng.Patterns(ctx, PatternsQuery{Query: w, Baseline: "24h"}); err != nil {
+		t.Fatalf("a 12h remote window with a baseline: %v", err)
+	}
+}
+
+// TestPatternsCursorKinds: a count's cursor does not continue a patterns
+// query, nor the reverse.
+func TestPatternsCursorKinds(t *testing.T) {
+	content := genLog(t0, 30000, "alpha.canary@example.org")
+	f := newFixture(t, content, oneGranulePerCall)
+	pr, err := f.eng.Patterns(ctx, PatternsQuery{Query: q(nil)})
+	if err != nil || pr.Complete {
+		t.Fatalf("%v complete=%v", err, pr.Complete)
+	}
+	cr, err := f.eng.Count(ctx, CountQuery{Query: q(nil), By: []string{"level"}})
+	if err != nil || cr.Cursor == "" {
+		t.Fatalf("%v cursor=%q", err, cr.Cursor)
+	}
+	if _, err := f.eng.Patterns(ctx, PatternsQuery{Query: q(func(q *Query) { q.Cursor = cr.Cursor })}); err == nil {
+		t.Error("a count cursor continued a patterns query")
+	}
+	if _, err := f.eng.Count(ctx, CountQuery{Query: q(func(q *Query) { q.Cursor = pr.Cursor }), By: []string{"level"}}); err == nil {
+		t.Error("a patterns cursor continued a count")
+	}
+}
+
+func letters(i int) string {
+	var b []byte
+	for k := 0; k < 4; k++ {
+		b = append(b, byte('a'+i%26))
+		i /= 26
+	}
+	return string(b)
+}
+
+// TestPatternsBaselineOwnCap: past the window's group cap, a pattern of
+// the baseline is still found there, and the answer says it is truncated.
+func TestPatternsBaselineOwnCap(t *testing.T) {
+	var b strings.Builder
+	w := t0.Add(time.Hour)
+	filler := strings.Repeat("lorem ipsum ", 40)
+	line := func(at time.Time, m string) {
+		fmt.Fprintf(&b, "time=%s level=info status=200 msg=%q\n", at.Format(time.RFC3339), m)
+	}
+	for i := 0; i < 12000; i++ {
+		line(w.Add(time.Duration(i%3000)*time.Second/3), "common thing")
+		line(w.Add(time.Duration(i%3000)*time.Second/3), "distinct "+letters(i)+" "+filler)
+	}
+	for i := 0; i < 100; i++ {
+		line(t0.Add(time.Duration(i)*time.Second), "common thing")
+	}
+	f := newFixture(t, b.String(), nil)
+	res, err := f.eng.Patterns(ctx, PatternsQuery{Query: q(func(q *Query) { q.From, q.To = w, w.Add(time.Hour) }), Baseline: "1h", Top: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, g := range res.New {
+		if g.Pattern == "common thing" {
+			t.Errorf("'common thing' reported NEW with baseline_n=%d though the baseline holds 100 of it; distinct=%d", *g.BaselineN, res.Distinct)
+		}
+	}
+	if !res.Truncated {
+		t.Errorf("not truncated with %d distinct patterns", res.Distinct)
+	}
+}
+
+// growingSource appends a record after its first plan: the window's and
+// the baseline's plans see two sizes of the file.
+type growingSource struct {
+	countingSource
+	path  string
+	calls *int
+}
+
+func (g growingSource) Plan(ctx context.Context, r source.Range, sel source.Selector) (source.Byteplan, error) {
+	p, err := g.countingSource.Plan(ctx, r, sel)
+	*g.calls++
+	if *g.calls == 1 {
+		fh, _ := os.OpenFile(g.path, os.O_APPEND|os.O_WRONLY, 0)
+		fmt.Fprintf(fh, "time=%s level=info status=200 msg=\"late line\"\n", t0.Add(3*time.Hour).Format(time.RFC3339))
+		fh.Close()
+	}
+	return p, err
+}
+
+func TestPatternsGrowingFileCountedOnce(t *testing.T) {
+	w := t0.Add(time.Hour)
+	content := patternLog(w, 100, "alpha %d")
+	calls := 0
+	var f *fixture
+	f = newFixture(t, content, func(o *Options) {
+		cs := o.Sources["app"].(countingSource)
+		o.Sources["app"] = growingSource{cs, "", &calls}
+	})
+	gs := f.eng.o.Sources["app"].(growingSource)
+	gs.path = filepath.Join(f.root, "logs", "app.log")
+	f.eng.o.Sources["app"] = gs
+	res, err := f.eng.Patterns(ctx, PatternsQuery{Query: q(func(q *Query) { q.From, q.To = w, w.Add(time.Hour) }), Baseline: "1h"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Records != 100 {
+		t.Errorf("window records = %d, want 100 (patterns %v, scanned %+v)", res.Records, res.Patterns, res.Scanned)
 	}
 }

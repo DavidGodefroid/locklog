@@ -93,11 +93,18 @@ type agg struct {
 	groups  map[string]*Group
 	untimed int64
 	noText  int64 // patterns: matching records without a message
-	indexed bool
-	from    time.Time
-	until   time.Time
-	noFrom  bool
-	bytes   int64 // memory of the groups (keys twice, plus overhead)
+	// patterns: the baseline's groups (capped on their own), and the
+	// number of plan chunks of the window (the baseline's follow).
+	base      *agg
+	winChunks int
+	// truncated is set once a group went to Other for MaxGroups or
+	// MaxGroupBytes.
+	truncated bool
+	indexed   bool
+	from      time.Time
+	until     time.Time
+	noFrom    bool
+	bytes     int64 // memory of the groups (keys twice, plus overhead)
 }
 
 func newAgg() *agg { return &agg{groups: map[string]*Group{}} }
@@ -121,6 +128,7 @@ func (a *agg) add(b time.Time, key []*string, n int64, t time.Time, timed bool) 
 	if g == nil {
 		size := groupOverhead + 2*int64(len(k))
 		if len(a.groups) >= MaxGroups || a.bytes+size > MaxGroupBytes {
+			a.truncated = true
 			o := Other
 			key = make([]*string, len(key))
 			for i := range key {
@@ -165,12 +173,12 @@ func (c *aggCache) put(a *agg) string {
 	if c.m == nil {
 		c.m = map[string]*agg{}
 	}
-	for len(c.o) > 0 && (len(c.o) >= maxAggs || c.bytes+a.bytes > maxAggBytes) {
-		c.bytes -= c.m[c.o[0]].bytes
+	for len(c.o) > 0 && (len(c.o) >= maxAggs || c.bytes+a.size() > maxAggBytes) {
+		c.bytes -= c.m[c.o[0]].size()
 		delete(c.m, c.o[0])
 		c.o = c.o[1:]
 	}
-	c.bytes += a.bytes
+	c.bytes += a.size()
 	var b [12]byte
 	rand.Read(b[:])
 	id := hex.EncodeToString(b[:])
@@ -200,7 +208,7 @@ func (c *aggCache) drop(id string) {
 	if !ok {
 		return
 	}
-	c.bytes -= a.bytes
+	c.bytes -= a.size()
 	delete(c.m, id)
 	c.o = slices.DeleteFunc(c.o, func(o string) bool { return o == id })
 }
@@ -213,7 +221,18 @@ func (a *agg) clone() *agg {
 		gg := *g
 		b.groups[k] = &gg // Key and the times are never mutated in place
 	}
+	if a.base != nil {
+		b.base = a.base.clone()
+	}
 	return &b
+}
+
+// size is the memory of a's groups, its baseline's included.
+func (a *agg) size() int64 {
+	if a.base == nil {
+		return a.bytes
+	}
+	return a.bytes + a.base.size()
 }
 
 func (q *CountQuery) bucketOf(t time.Time) time.Time {
@@ -531,7 +550,6 @@ func (e *Engine) countFailed(q *CountQuery, raw source.RawRecord, rec mask.Recor
 	a.add(q.bucketOf(t), key, 1, t, true)
 }
 
-// groupBy is the group key's parts: By fields, then ByLabels labels.
 // byCount is the number of keys a count groups by.
 func (q *CountQuery) byCount() int {
 	n := len(q.By) + len(q.ByLabels)
@@ -541,6 +559,7 @@ func (q *CountQuery) byCount() int {
 	return n
 }
 
+// groupBy is the group key's parts: By fields, then ByLabels labels.
 func (q *CountQuery) groupBy() []Pred {
 	var out []Pred
 	for _, b := range q.By {
