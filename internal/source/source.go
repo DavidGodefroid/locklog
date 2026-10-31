@@ -153,8 +153,8 @@ type RawRecord struct {
 	Ref   RawRef
 	Event parse.Event
 	// Granule identifies the granule the record belongs to, as the source
-	// numbers them (file: the absolute granule number of the stream;
-	// remote: the slice's index in its chunk).
+	// numbers them (file: the absolute granule number of the stream; other
+	// sources document theirs).
 	Granule int
 }
 
@@ -188,9 +188,11 @@ type Schema struct {
 	// Oldest and Newest bound the source's records, when known.
 	Oldest, Newest time.Time
 	// IndexedFrom is the start of the newest contiguous indexed span:
-	// every record from IndexedFrom on (up to IndexedUntil when set: a
+	// every record from IndexedFrom on (before IndexedUntil when set: a
 	// growing file's newest lines are being indexed) is in the local
-	// index. Zero when nothing can be claimed.
+	// index, allowing a minute of timestamp disorder. Zero when nothing can
+	// be claimed. It describes what the index holds: counts may still scan
+	// part of that range (a grown granule goes to the residual whole).
 	IndexedFrom, IndexedUntil time.Time
 	// FullyIndexed is set when every granule is indexed.
 	FullyIndexed bool

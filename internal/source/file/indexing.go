@@ -93,6 +93,9 @@ func (s *Source) store(fi fileInfo, size int64, gs []index.Granule) {
 			st.Tag = s.opts.Tag
 		}
 		st.PrefixLen, st.PrefixHash = fi.id.prefixLen, fi.id.prefixHash
+		if fi.id.compression != compNone {
+			st.FileSize = fi.id.size
+		}
 		if size >= 0 {
 			st.Size = size
 		}
@@ -134,7 +137,10 @@ func (s *Source) indexPlain(ctx context.Context, fi fileInfo, n int64) (int64, e
 	// Sealed only when the granule is whole and its last record was
 	// complete before the end of the file: a line still being written
 	// across the boundary is indexed again once complete.
-	sealed := end == (n+1)*source.GranuleBytes && !lastOpen && lastEnd <= size
+	// The reader must also have reached the boundary (a line starting at
+	// or after it): a held blank or partial tail line starting before it is
+	// not a record yet.
+	sealed := end == (n+1)*source.GranuleBytes && !lastOpen && lastEnd <= size && it.r.Offset() >= end
 	s.store(fi, -1, []index.Granule{b.Finish(n, start, end, sealed)})
 	return it.Processed(), nil
 }
@@ -223,7 +229,7 @@ func (s *Source) IndexCounts(ctx context.Context, q CountQuery) (CountResult, er
 	for _, c := range plan.Chunks {
 		fi, err := s.lookup(ctx, c.Stream)
 		if err != nil {
-			return CountResult{}, err
+			return CountResult{}, stale(err) // vanished since the plan
 		}
 		fields, isize, gs := s.streamIndex(fi)
 		size := streamSize(fi, isize)

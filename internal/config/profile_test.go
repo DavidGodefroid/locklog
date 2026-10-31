@@ -73,10 +73,10 @@ func TestDefaults(t *testing.T) {
 		t.Errorf("limits = %+v", p.Limits)
 	}
 	l := p.Limits
-	if l.Local.Range != 7*Day || l.Remote.Range != 24*time.Hour || l.Local.MaxBytes != 4*GiB || l.Remote.MaxBytes != 2*GiB ||
+	if l.Local.Range != 7*Day || l.Remote.Range != 24*time.Hour || l.Local.MaxBytes != 512*MiB || l.Remote.MaxBytes != 512*MiB ||
 		l.Local.BytesPerHour != 40*GiB || l.Remote.BytesPerHour != 20*GiB || l.MaxRecords != 200 || l.MaxOutputBytes != 64*KiB ||
 		l.LookupsPerHour != 50 || l.LookupsPerHourPerUID != 20 || l.PIIAddsPerHour != 10 || l.PIIRulesMax != 50 {
-		t.Errorf("default budgets differ from the design: %+v", l)
+		t.Errorf("default budgets differ from the design and docs/performance.md: %+v", l)
 	}
 	if p.IdleTimeout != DefaultIdle || p.MaxSession != DefaultMaxSession {
 		t.Errorf("session %s %s", p.IdleTimeout, p.MaxSession)
@@ -87,13 +87,29 @@ func TestDefaults(t *testing.T) {
 	}
 }
 
+func TestBudgetDefaultsFromTheSpikes(t *testing.T) {
+	for _, prod := range []bool{false, true} {
+		l := DefaultLimits(prod)
+		if l.Local.MaxBytes != 512*MiB || l.Remote.MaxBytes != 512*MiB {
+			t.Errorf("production=%v: max_bytes local %d remote %d", prod, l.Local.MaxBytes, l.Remote.MaxBytes)
+		}
+		want := 600
+		if prod {
+			want = 240
+		}
+		if l.Remote.RequestsPerMinute != want {
+			t.Errorf("production=%v: requests_per_minute %d, want %d", prod, l.Remote.RequestsPerMinute, want)
+		}
+	}
+}
+
 func TestProductionDefaults(t *testing.T) {
 	p := mustParse(t, strings.ReplaceAll(fileSrc, "staging", "prod")+"[profiles.prod]\nproduction = true\n")["prod"]
 	if !p.Production || p.Structured != StructuredRedactUnknown || p.Unmask != UnmaskNever {
 		t.Errorf("production defaults: %+v", p)
 	}
 	l := p.Limits
-	if l.Remote.BytesPerHour != 10*GiB || l.Remote.MetricQueriesPerHour != 60 || l.Remote.RequestsPerMinute != 60 || l.LookupsPerHour != 10 || l.LookupsPerHourPerUID != 10 {
+	if l.Remote.BytesPerHour != 10*GiB || l.Remote.MetricQueriesPerHour != 60 || l.Remote.RequestsPerMinute != 240 || l.LookupsPerHour != 10 || l.LookupsPerHourPerUID != 10 {
 		t.Errorf("production limits: %+v", l)
 	}
 }
