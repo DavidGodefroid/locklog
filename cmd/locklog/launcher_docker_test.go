@@ -31,30 +31,37 @@ func dockerEnv(t *testing.T, f *launcherFixture) (env []string, root, xdg string
 	if err := os.MkdirAll(xdg, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	ps := strings.Join([]string{
-		cid('a') + " shop-a ",
-		cid('b') + " shop-b ",
-		cid('c') + " api-1 ",
-		cid('d') + " other ",
-		cid('e') + " locklog-console-1 ",
-		cid('f') + " shop-labelled 1",
-		"abc shop-badid ",
-		strings.ToUpper(cid('9')) + " shop-upper ",
-		cid('7') + " shop-010 ",
-		cid('8') + " shop-big ",
-		cid('6') + " shop-renamed ",
-	}, "\\n") + "\\n"
-	inspect := strings.Join([]string{
-		cid('a') + "|/shop-a||json-file|3|true",
-		cid('b') + "|/shop-b||local||",
-		cid('c') + "|/api-1||json-file||",
-		cid('7') + "|/shop-010||json-file|010|false",
-		cid('8') + "|/shop-big||json-file|500|true",
-		// Renamed to a console name between the listing and inspect.
-		cid('6') + "|/locklog-console-2||json-file|1|false",
-	}, "\\n") + "\\n"
+	// The engine: `docker ps -q` ids (one listed twice), and one inspect
+	// record per id: "<id> <label 0|1> <driver> <max-file|-> <compress|-> /<name>".
+	ps := []string{cid('a'), cid('b'), cid('c'), cid('d'), cid('e'), cid('f'), "abc", strings.ToUpper(cid('9')),
+		cid('7'), cid('8'), cid('6'), cid('1'), cid('2'), cid('3'), cid('4'), cid('5'), cid('0'), cid('0')}
+	rec := map[byte]string{
+		'a': "0 json-file 3 true /shop-a",
+		'b': "0 local - - /shop-b",                                             // not json-file: skipped
+		'c': "0 json-file - - /api-1",                                          // defaults
+		'd': "0 json-file - - /other",                                          // no glob matches
+		'e': "0 json-file - - /locklog-console-1",                              // console by name
+		'f': "1 json-file - - /shop-labelled",                                  // console by label
+		'7': "0 json-file 010 false /shop-010",                                 // leading zeros
+		'8': "0 json-file 500 true /shop-big",                                  // clamped
+		'6': "0 json-file 1 false /locklog-console-2",                          // console by name
+		'1': "0 json-file - - /shop-evil\\nc " + cid('9') + " shop-forged 3 1", // a newline: two lines
+		'2': "0 json-file 3 1 /shop-z - /shop-y",                               // a log option with spaces
+		'3': "0 json-file - - /shop|x",                                         // not a container name
+		'4': "0 json-file - - /shop d",                                         // a space in the name
+		'5': "0 json-file - - /shop-five",                                      // claims another id (below)
+		'0': "0 json-file - - /shop-dup",                                       // listed twice
+	}
 	env = []string{"PLAN=profile staging false\\ndocker shop-*\\ndocker api-1\\n", "DOCKER_ROOT_DIR=" + dr,
-		"XDG_RUNTIME_DIR=" + xdg, "DOCKER_PS=" + ps, "DOCKER_INSPECT=" + inspect}
+		"XDG_RUNTIME_DIR=" + xdg, "DOCKER_PS=" + strings.Join(ps, "\\n") + "\\n"}
+	for c, r := range rec {
+		id := cid(c)
+		if c == '5' {
+			env = append(env, "I_"+id+"="+cid('a')+" "+r)
+			continue
+		}
+		env = append(env, "I_"+id+"="+id+" "+r)
+	}
 	return env, root, xdg
 }
 
@@ -65,6 +72,12 @@ var wantMap = []string{
 	"c " + cid('a') + " shop-a 3 1",
 	"c " + cid('c') + " api-1 1 0",
 	"locklog-map 1",
+	"x " + cid('0'),
+	"x " + cid('1'),
+	"x " + cid('2'),
+	"x " + cid('3'),
+	"x " + cid('4'),
+	"x " + cid('5'),
 	"x " + cid('6'),
 	"x " + cid('e'),
 	"x " + cid('f'),
@@ -150,7 +163,7 @@ func TestLauncherConsoleDocker(t *testing.T) {
 		t.Errorf("the containers root's dev:inode is not passed: %q", run)
 	}
 	if !strings.Contains(out, "bind "+root+" (read-only, non-recursive; the Docker containers root, group 0 for it only)") ||
-		!strings.Contains(out, "containers map "+dir+" at /run/locklog-map (read-only): 4 mapped, 3 console containers excluded, 1 skipped") {
+		!strings.Contains(out, "containers map "+dir+" at /run/locklog-map (read-only): 4 mapped, 9 console containers excluded, 6 skipped") {
 		t.Errorf("plan text:\n%s", out)
 	}
 	// The map: approved globs only, console containers excluded by label and
@@ -162,14 +175,10 @@ func TestLauncherConsoleDocker(t *testing.T) {
 	if fi, err := os.Stat(base); err != nil || fi.Mode().Perm() != 0o700 {
 		t.Errorf("map base %v %v", fi.Mode(), err)
 	}
-	// Only approved candidates are inspected.
-	for _, c := range calls {
-		if len(c) > 0 && c[0] == "inspect" && slices.Contains(c, "--format") {
-			for _, id := range []byte{'d', 'e', 'f'} {
-				if slices.Contains(c, cid(id)) {
-					t.Errorf("inspected %c: %q", id, c)
-				}
-			}
+	// No record parsed from a hostile name, label or log option.
+	for _, l := range ls {
+		if strings.Contains(l, "forged") || strings.Contains(l, cid('9')) || strings.Contains(l, "shop-y") || strings.Contains(l, "shop-dup") {
+			t.Errorf("injected entry: %q", l)
 		}
 	}
 	// The events loop: subscribed from before the first snapshot, stopped
@@ -299,7 +308,7 @@ func TestLauncherRefresh(t *testing.T) {
 			t.Fatalf("refresh: %v\n%s", err, out)
 		}
 		if !strings.Contains(out, "containers map v"+strconv.Itoa(v)+" of locklog-console-") ||
-			!strings.Contains(out, ": 4 mapped, 3 console containers excluded, 1 skipped") {
+			!strings.Contains(out, ": 4 mapped, 9 console containers excluded, 6 skipped") {
 			t.Errorf("refresh output:\n%s", out)
 		}
 		for _, c := range calls {
@@ -365,5 +374,32 @@ func TestLauncherMapLoopRestarts(t *testing.T) {
 	}
 	if vs, _ := mapVersions(t, mapDir(t, base)); len(vs) != 2 || vs[1] < 4 {
 		t.Errorf("versions %v", vs)
+	}
+}
+
+// gid 0 applies to the whole console: a docker line beside a file or
+// journald line is refused, before anything is bound or mapped.
+func TestLauncherConsoleDockerAlone(t *testing.T) {
+	consoleHost(t)
+	f := newLauncherFixture(t)
+	env, _, xdg := dockerEnv(t, f)
+	dir := filepath.Join(f.logs, "app")
+	for _, p := range []string{
+		"PLAN=profile staging false\\ndocker shop-*\\nfile " + dir + " " + dir + "/*.log\\n",
+		"PLAN=profile staging false\\nfile " + dir + " " + dir + "/*.log\\ndocker shop-*\\n",
+		"PLAN=profile staging false\\ndocker shop-*\\njournald\\n",
+	} {
+		out, calls, err := f.run(t, f.project, append(slices.Clone(env), p), "console")
+		if err == nil || !strings.Contains(out, "cannot share a console with file or journald sources") {
+			t.Errorf("%s: %v\n%s", p, err, out)
+		}
+		for _, c := range calls {
+			if slices.Contains(c, "console") || (len(c) > 0 && (c[0] == "ps" || c[0] == "events")) {
+				t.Errorf("%s: went on: %q", p, c)
+			}
+		}
+	}
+	if ds, _ := filepath.Glob(filepath.Join(xdg, "locklog", "map", "*", "map.v*")); len(ds) > 0 {
+		t.Errorf("a map was written: %q", ds)
 	}
 }

@@ -62,6 +62,9 @@ func Dir(glob string) string {
 // docker sources and, when it has one, the journal. Remote sources mount
 // nothing.
 func Lines(p config.Profile) ([]Line, error) {
+	if err := config.CheckDockerAlone(p.Sources); err != nil {
+		return nil, err
+	}
 	var out []Line
 	journald := false
 	for _, s := range p.Sources {

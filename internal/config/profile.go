@@ -324,6 +324,39 @@ func buildProfile(name string, r rawProfile, detectorsSet bool) (Profile, error)
 	return p, nil
 }
 
+// CheckDockerAlone refuses a docker source beside a file or journald source
+// (the mount plan applies it: a profile may still describe both, e.g. for
+// review, but no console mounts them together).
+// Reading the containers root needs gid 0, and a supplementary group applies
+// to the whole console process: beside other bound log directories it would
+// open every file of theirs readable by group root. Remote sources stay
+// allowed.
+func CheckDockerAlone(sources []Source) error {
+	docker, local := "", ""
+	for _, s := range sources {
+		switch s.Kind {
+		case KindDocker:
+			docker = s.Name
+		case KindFile, KindJournald:
+			local = s.Name
+		}
+	}
+	if docker != "" && local != "" {
+		return fmt.Errorf("source %q (docker) cannot share a profile with source %q (%s logs): the console reads the containers root with group 0, which would apply to every bound log directory; put the container logs in a profile of their own and run a separate console for them",
+			docker, local, kindOf(sources, local))
+	}
+	return nil
+}
+
+func kindOf(sources []Source, name string) string {
+	for _, s := range sources {
+		if s.Name == name {
+			return s.Kind
+		}
+	}
+	return ""
+}
+
 func buildLimits(r rawLimits, production bool) (Limits, error) {
 	l := DefaultLimits(production)
 	for _, b := range []struct {

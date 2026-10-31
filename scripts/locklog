@@ -10,9 +10,12 @@
 #              LOCKLOG_NETWORK names one; the log directories of the
 #              profile's mount plan bound read-only and non-recursive; the
 #              socket and home volumes. With a docker source: the Docker
-#              containers root bound read-only and non-recursive (gid 0
-#              added for it only), and the containers map (below) kept
-#              current by a `docker events` loop for the console's lifetime
+#              containers root bound read-only and non-recursive with gid 0,
+#              and the containers map (below) kept current by a `docker
+#              events` loop for the console's lifetime. gid 0 applies to the
+#              whole console, not to one mount: a docker source therefore
+#              runs in a console of its own, with no file or journald
+#              source beside it (remote sources are fine)
 #   refresh    rewrite the containers map of this project's console once
 #   mcp       as the image's agent account (uid 10052): the MCP server of
 #              a host agent (the non-production trial; the server refuses
@@ -345,6 +348,7 @@ plan_line() {
 	case "${1:-}" in
 	file)
 		[ $# -eq 3 ] || die "mount plan: malformed line: file $*"
+		local_lines=1
 		dir=$2
 		glob=$3
 		safe "$dir" && safe "$glob" || die "mount plan: $dir holds a character a mount cannot carry"
@@ -374,6 +378,7 @@ plan_line() {
 		;;
 	journald)
 		[ $# -eq 1 ] || die "mount plan: malformed line: $*"
+		local_lines=1
 		found=
 		for j in /var/log/journal /run/log/journal; do
 			physical "$j" || continue
@@ -390,9 +395,11 @@ plan_line() {
 }
 
 # The approved container globs of the docker sources (one per line, from the
-# plan's docker lines) and the containers root once bound.
+# plan's docker lines), the containers root once bound, and whether the plan
+# binds other log directories (file, journald lines).
 docker_globs=
 docker_root=
+local_lines=
 
 # add_docker_glob GLOB: a container name glob ([A-Za-z0-9_.*?-], as the
 # config allows), once.
@@ -412,11 +419,19 @@ $1
 
 # docker_root_bind: bind the Docker containers root (docker info
 # .DockerRootDir + /containers) read-only and non-recursive at its own path,
-# and add gid 0 (its directories are 0710 root:root, the json logs 0640):
-# the only path gid 0 is added for. The daemon is trusted for this path. You
-# usually cannot reach it (/var/lib/docker is 0710 root), so its dev:inode
-# is passed to the console only when you can stat it.
+# and add gid 0 (its directories are 0710 root:root, the json logs 0640,
+# and rotated files appear later: no narrower grant works). A supplementary
+# gid applies to the whole console process, not to one mount: with gid 0 the
+# console could read any file readable by group root in any of its mounts.
+# So gid 0 is added only when nothing else is bound: no file or journald
+# line (refused beside a docker line, here and by `locklog mounts`), only
+# the project's .locklog/ (read-only, yours), the locklog volumes and the
+# map directory (0644 files you wrote). The daemon is trusted for this path.
+# You usually cannot reach it (/var/lib/docker is 0710 root), so its
+# dev:inode is passed to the console only when you can stat it.
 docker_root_bind() {
+	[ -z "$local_lines" ] && [ -z "$mount_args" ] && [ -z "$seen_dirs" ] && [ -z "$gids" ] ||
+		die "a docker source cannot share a console with file or journald sources: the containers root is read with group 0, which would apply to every bound log directory; put the container logs in a profile of their own and run a separate console for them"
 	dr=$(docker info --format '{{.DockerRootDir}}' 2>/dev/null) || die "could not read the Docker root directory (docker info)"
 	r="${dr%/}/containers"
 	case "$r" in /?*) ;; *) die "the Docker root directory $dr is not an absolute path" ;; esac
@@ -497,71 +512,102 @@ ensure_map_dir() {
 # atomically (a temporary file in the same directory, then mv), and keep
 # the last two versions. Sets map_version, map_c (containers mapped), map_x
 # (console containers excluded) and map_skip (matching containers skipped:
-# not json-file, or not a valid name).
+# not json-file, or a record that does not parse).
+#
+# Nothing the engine prints is split on a separator a name, a label or a log
+# option could hold: the ids come from `docker ps -q` (validated, each once;
+# an id listed twice is excluded), and each container is inspected alone,
+# the label as a fixed token from a template conditional, the free-text
+# fields validated token by token, the name last; a record of another line
+# or field count, or another id, is excluded too (fail closed: an x line).
 write_map() {
 	if [ ! -d "$map_dir" ]; then
 		{ mkdir -p "$map_dir" && chmod 0755 "$map_dir"; } || return 1
 	fi
-	ps_out=$(docker ps -a --no-trunc --format '{{.ID}} {{.Names}} {{.Label "locklog.console"}}') || return 1
-	cands=
-	xs=
+	ids=$(docker ps -a -q --no-trunc) || return 1
 	cs=
+	xs=
 	map_c=0
 	map_x=0
 	map_skip=0
-	while read -r cid cname clabel; do
-		valid_id "${cid:-}" || continue
-		if [ -n "${clabel:-}" ] || is_console "${cname:-}"; then
+	seen=
+	dups=
+	while IFS= read -r cid; do
+		valid_id "$cid" || continue
+		case " $seen " in
+		*" $cid "*) dups="$dups $cid" ;;
+		*) seen="$seen $cid" ;;
+		esac
+	done <<EOF
+$ids
+EOF
+	set -f
+	for cid in $seen; do
+		case " $dups " in
+		*" $cid "*)
 			xs="${xs}x $cid
 "
 			map_x=$((map_x + 1))
 			continue
+			;;
+		esac
+		rec=$(docker inspect --type container --format '{{.Id}} {{if index .Config.Labels "locklog.console"}}1{{else}}0{{end}} {{.HostConfig.LogConfig.Type}} {{with index .HostConfig.LogConfig.Config "max-file"}}{{.}}{{else}}-{{end}} {{with index .HostConfig.LogConfig.Config "compress"}}{{.}}{{else}}-{{end}} {{.Name}}' "$cid" 2>/dev/null) || continue # gone since the listing
+		bad=
+		case "$rec" in *"
+"*) bad=1 ;; esac
+		if [ -z "$bad" ]; then
+			# shellcheck disable=SC2086 # split on purpose (set -f)
+			set -- $rec
+			[ $# -eq 6 ] && [ "$1" = "$cid" ] || bad=1
 		fi
-		if glob_match "${cname:-}"; then cands="$cands $cid"; fi
-	done <<EOF
-$ps_out
-EOF
-	if [ -n "$cands" ]; then
-		# The engine's answer per candidate: its name and label again (they
-		# may have changed since the listing), its log driver and options.
-		set -f
-		# shellcheck disable=SC2086 # the ids are split on purpose
-		info=$(docker inspect --format '{{.Id}}|{{.Name}}|{{index .Config.Labels "locklog.console"}}|{{.HostConfig.LogConfig.Type}}|{{index .HostConfig.LogConfig.Config "max-file"}}|{{index .HostConfig.LogConfig.Config "compress"}}' $cands 2>/dev/null) || :
-		set +f
-		while IFS='|' read -r cid cname clabel ctype mf cmp; do
-			valid_id "${cid:-}" || continue
-			case "$cands " in *" $cid "*) ;; *) continue ;; esac
-			cname=${cname#/}
-			if [ -n "$clabel" ] || is_console "$cname"; then
-				xs="${xs}x $cid
+		if [ -z "$bad" ]; then
+			label=$2
+			ctype=$3
+			mf=$4
+			cmp=$5
+			cname=${6#/}
+			case "$label" in 0 | 1) ;; *) bad=1 ;; esac
+			valid_name "$cname" || bad=1
+		fi
+		if [ -n "$bad" ] || [ "$label" = 1 ] || is_console "$cname"; then
+			xs="${xs}x $cid
 "
-				map_x=$((map_x + 1))
-				continue
-			fi
-			if ! valid_name "$cname" || ! glob_match "$cname" || [ "$ctype" != json-file ]; then
-				map_skip=$((map_skip + 1))
-				continue
-			fi
-			case "$mf" in
-			'') mf=1 ;;
-			*[!0-9]*)
-				map_skip=$((map_skip + 1))
-				continue
-				;;
-			esac
-			while :; do
-				case "$mf" in 0?*) mf=${mf#0} ;; *) break ;; esac
-			done
-			if [ ${#mf} -gt 3 ] || [ "$mf" -gt 100 ]; then mf=100; fi
-			[ "$mf" -ge 1 ] || mf=1
-			case "$cmp" in true) cmp=1 ;; *) cmp=0 ;; esac
-			cs="${cs}c $cid $cname $mf $cmp
+			map_x=$((map_x + 1))
+			[ -z "$bad" ] || map_skip=$((map_skip + 1))
+			continue
+		fi
+		glob_match "$cname" || continue
+		case "$ctype" in
+		json-file) ;;
+		*)
+			map_skip=$((map_skip + 1))
+			continue
+			;;
+		esac
+		case "$mf" in
+		-) mf=1 ;;
+		'' | *[!0-9]*)
+			map_skip=$((map_skip + 1))
+			continue
+			;;
+		esac
+		while :; do
+			case "$mf" in 0?*) mf=${mf#0} ;; *) break ;; esac
+		done
+		if [ ${#mf} -gt 3 ] || [ "$mf" -gt 100 ]; then mf=100; fi
+		[ "$mf" -ge 1 ] || mf=1
+		case "$cmp" in
+		true) cmp=1 ;;
+		false | -) cmp=0 ;;
+		*)
+			map_skip=$((map_skip + 1))
+			continue
+			;;
+		esac
+		cs="${cs}c $cid $cname $mf $cmp
 "
-			map_c=$((map_c + 1))
-		done <<EOF
-$info
-EOF
-	fi
+		map_c=$((map_c + 1))
+	done
 	set +f
 	n=0
 	for f in "$map_dir"/map.v*; do
@@ -840,6 +886,8 @@ $lines
 EOF
 	docker_args=
 	if [ -n "$docker_globs" ]; then
+		[ -z "$local_lines" ] ||
+			die "a docker source cannot share a console with file or journald sources: the containers root is read with group 0, which would apply to every bound log directory; put the container logs in a profile of their own and run a separate console for them"
 		docker_root_bind
 		ensure_map_dir "$name"
 		# The time before the snapshot: the events loop replays from it, so

@@ -71,8 +71,12 @@ info)
 	esac ;;
 ps) printf '%b' "${DOCKER_PS:-}" ;;
 inspect)
-	shift 3
-	for id in "$@"; do printf '%b' "${DOCKER_INSPECT:-}" | grep "^$id|" || :; done ;;
+	# docker inspect --type container --format F ID: the record in I_<ID>.
+	if [ "$2" = --type ]; then
+		eval "rec=\${I_$6:-}"
+		[ -n "$rec" ] || exit 1
+		printf '%b\n' "$rec"
+	fi ;;
 events)
 	echo $$ > '`+filepath.Join(root, "events.pid")+`'
 	printf '%b' "${EVENTS_OUT:-}"
