@@ -76,8 +76,15 @@ type Options struct {
 	InFlight int
 	// Limit overrides Limit (tests).
 	Limit int
-	Now   func() time.Time
+	// DescribeLookback is how far back Describe lists labels and values
+	// (0: DescribeLookback).
+	DescribeLookback time.Duration
+	Now              func() time.Time
 }
+
+// DescribeLookback is how far back Describe looks by default: a label or a
+// value seen only before it is not listed (it is still queryable).
+const DescribeLookback = 24 * time.Hour
 
 // Source is a Loki source. It is safe for concurrent use.
 type Source struct {
@@ -669,7 +676,8 @@ type labelsResponse struct {
 // labels' values (asked only for trusted labels), the names of other labels
 // (masked by the caller), and the source kind. Every label request carries
 // the profile's selector as its query: only the profile's streams are
-// described.
+// described. Labels and values are those of the last DescribeLookback
+// (Options.DescribeLookback): older ones are not listed, though queryable.
 func (s *Source) Describe(ctx context.Context) (source.Schema, error) {
 	sch := source.Schema{Kind: Kind, Format: s.o.Parser.Options().Format, Streams: 1}
 	sel, err := s.selector(source.Selector{}).Render()
@@ -679,7 +687,11 @@ func (s *Source) Describe(ctx context.Context) (source.Schema, error) {
 	end := s.o.Now()
 	v := url.Values{}
 	v.Set("query", sel)
-	v.Set("start", strconv.FormatInt(end.Add(-24*time.Hour).UnixNano(), 10))
+	lookback := s.o.DescribeLookback
+	if lookback <= 0 {
+		lookback = DescribeLookback
+	}
+	v.Set("start", strconv.FormatInt(end.Add(-lookback).UnixNano(), 10))
 	v.Set("end", strconv.FormatInt(end.UnixNano(), 10))
 	body, err := s.do(ctx, "/loki/api/v1/labels", v)
 	if err != nil {

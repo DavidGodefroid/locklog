@@ -1325,3 +1325,34 @@ func TestAroundByteLimit(t *testing.T) {
 		t.Fatalf("reread: %v", err)
 	}
 }
+
+// startsClient records the start of every request and answers no labels.
+type startsClient struct{ starts []string }
+
+func (c *startsClient) GetWith(_ context.Context, _ string, q url.Values, _ map[string]string) (egress.Response, error) {
+	c.starts = append(c.starts, q.Get("start"))
+	return egress.Response{Status: 200, Body: []byte(`{"status":"success","data":[]}`)}, nil
+}
+
+// TestDescribeLookback: Describe lists the labels of the last
+// DescribeLookback by default, of Options.DescribeLookback when set.
+func TestDescribeLookback(t *testing.T) {
+	p, _ := parse.New(parse.Options{})
+	now := t0.Add(time.Hour)
+	for _, tc := range []struct {
+		opt, want time.Duration
+	}{{0, DescribeLookback}, {7 * 24 * time.Hour, 7 * 24 * time.Hour}} {
+		c := &startsClient{}
+		s, err := New(Options{Name: "l", Client: c, Parser: p, Selector: map[string]string{"env": "prod"}, DescribeLookback: tc.opt, Now: func() time.Time { return now }})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Describe(ctx); err != nil {
+			t.Fatal(err)
+		}
+		want := strconv.FormatInt(now.Add(-tc.want).UnixNano(), 10)
+		if len(c.starts) == 0 || c.starts[0] != want {
+			t.Fatalf("lookback %v: starts %v, want %s", tc.opt, c.starts, want)
+		}
+	}
+}

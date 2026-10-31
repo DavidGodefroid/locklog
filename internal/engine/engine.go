@@ -482,6 +482,9 @@ func (e *Engine) run(ctx context.Context, plan source.Byteplan, chunk, gran int,
 	var sc Scanned
 	failures := 0
 	filtered := e.o.Prefilter && len(needles) > 0
+	// unknownEst is the bytes the last group of unknown bytes fetched,
+	// the estimate of the next one.
+	var unknownEst int64
 	for chunk < len(plan.Chunks) {
 		if callBytes > 0 && sc.Bytes >= callBytes {
 			return chunk, gran, sc, failures, nil
@@ -503,6 +506,14 @@ func (e *Engine) run(ctx context.Context, plan source.Byteplan, chunk, gran int,
 		// Stop before a group that would not fit (but always make
 		// progress on the first group of a call).
 		if sc.Granules > 0 && e.o.Cost.Time(planned*factor) > remaining {
+			return chunk, gran, sc, failures, nil
+		}
+		// A group of unknown bytes (a remote slice) is estimated by the
+		// last one this call fetched: one that would not fit the time or
+		// the bytes left is left to the next call, rather than fetched
+		// and dropped at its byte limit.
+		if planned == 0 && sc.Granules > 0 && unknownEst > 0 &&
+			(e.o.Cost.Time(unknownEst*factor) > remaining || callBytes > 0 && sc.Bytes+unknownEst > callBytes) {
 			return chunk, gran, sc, failures, nil
 		}
 		groupCtx, cancel := context.WithDeadline(ctx, deadline.Add(e.o.Limits.Deadline/2))
@@ -614,6 +625,7 @@ func (e *Engine) run(ctx context.Context, plan source.Byteplan, chunk, gran int,
 		switch {
 		case planned == 0:
 			sc.Bytes += fetched
+			unknownEst = fetched
 		case estimated(sub.Granules):
 			sc.Bytes += max(planned, fetched)
 		default:

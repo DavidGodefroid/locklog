@@ -2212,6 +2212,11 @@ func TestRemoteSlicesPaged(t *testing.T) {
 			if callBytes > budget+2*sliceBytes {
 				t.Fatalf("the call processed %d bytes for a %d budget", callBytes, budget)
 			}
+			// Slices of equal size: each is estimated by the last
+			// fetched, so none is fetched and then dropped.
+			if len(rem.limits) != first.Scanned.Granules {
+				t.Fatalf("%d scans for %d slices served", len(rem.limits), first.Scanned.Granules)
+			}
 			ts := recordTimes(t, first.Records)
 			newest := t0.Add(24 * time.Hour).Add(-24 * time.Hour / n)
 			if order == "desc" && !ts[0].Equal(newest) || order == "asc" && !ts[0].Equal(t0) {

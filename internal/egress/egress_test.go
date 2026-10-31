@@ -133,7 +133,10 @@ func TestGetWithHeaders(t *testing.T) {
 		t.Fatalf("GetWith: %v %+v", err, &s)
 	}
 	n := s.n.Load()
-	for _, h := range []string{"Authorization", "cookie", "X-Scope-OrgID", "Host"} {
+	for _, h := range []string{"Authorization", "cookie", "X-Scope-OrgID", "Host", "User-Agent", "x-query-tags"} {
+		if _, err := New(remote(srv.URL, config.AuthBearer, kconfig.TLSVerifyFull), LokiRoutes, Credentials{Secret: "s3cret"}, Options{RootCAs: roots(srv), Headers: map[string]string{h: "x"}}); err == nil {
+			t.Errorf("fixed header %s accepted", h)
+		}
 		if _, err := c.GetWith(context.Background(), "/loki/api/v1/labels", nil, map[string]string{h: "x"}); err == nil {
 			t.Errorf("header %s sent", h)
 		}
