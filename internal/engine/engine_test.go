@@ -1443,3 +1443,57 @@ func TestHugeExponentsAreNotNumbers(t *testing.T) {
 		t.Fatalf("%d, %d records in %v", len(recs), len(gt), time.Since(start))
 	}
 }
+
+// TestInMatchesEqual: the in predicate's set lookup answers as comparing
+// value by value would, numbers by exact value, text by text.
+func TestInMatchesEqual(t *testing.T) {
+	p := &Pred{Field: "v", Op: OpIn}
+	for _, r := range []string{`1`, `2.50`, `"3"`, `"x"`, `1e2`, `"⟦email:ABC⟧"`} {
+		s, n, err := scalarValue(json.RawMessage(r))
+		if err != nil {
+			t.Fatal(err)
+		}
+		p.vals, p.nums = append(p.vals, s), append(p.nums, n)
+	}
+	for _, v := range []val{
+		{mask.Number, "1"}, {mask.Number, "1.0"}, {mask.Number, "2.5"}, {mask.Number, "100"}, {mask.Number, "3"},
+		{mask.String, "3"}, {mask.String, "1"}, {mask.String, "x"}, {mask.String, "⟦email:ABC⟧"}, {mask.Number, "4"},
+		{mask.String, "2.5"}, {mask.Number, "0x1p3"}, {mask.Object, ""}, {mask.Bool, "true"},
+	} {
+		want := false
+		for i := range p.vals {
+			want = want || equal(p, i, v)
+		}
+		if got := p.inMatch(v); got != want {
+			t.Errorf("%+v: in %v, value by value %v", v, got, want)
+		}
+	}
+}
+
+// TestNumericInOnLongArrays: an in predicate with many numeric values on
+// records with long numeric arrays stays linear in the leaves.
+func TestNumericInOnLongArrays(t *testing.T) {
+	var b strings.Builder
+	for r := 0; r < 4; r++ {
+		fmt.Fprintf(&b, "{\"time\":\"2026-10-30T12:00:0%dZ\",\"v\":[", r)
+		for i := 0; i < 5000; i++ {
+			b.WriteString("1,")
+		}
+		b.WriteString("2],\"msg\":\"m\"}\n")
+	}
+	f := newFixture(t, b.String(), nil)
+	vals := make([]int, 64)
+	for i := range vals {
+		vals[i] = 1000 + i
+	}
+	vals[63] = 2
+	var preds []Pred
+	for i := 0; i < 32; i++ {
+		preds = append(preds, Pred{Field: "v", Op: OpIn, Value: raw(vals)})
+	}
+	start := time.Now()
+	recs, _ := allRecords(t, f.eng, q(func(q *Query) { q.Where = preds }))
+	if len(recs) != 4 || time.Since(start) > 3*time.Second {
+		t.Fatalf("%d records in %v", len(recs), time.Since(start))
+	}
+}

@@ -178,10 +178,8 @@ func predMatch(p *Pred, vs []val) bool {
 				return true
 			}
 		case OpIn:
-			for i := range p.vals {
-				if equal(p, i, v) {
-					return true
-				}
+			if p.inMatch(v) {
+				return true
 			}
 		case OpContains:
 			if v.kind != mask.Object && strings.Contains(evalString(v.text), p.needle) {
@@ -277,4 +275,46 @@ func parseNumber(s string) (*big.Rat, bool) {
 		}
 	}
 	return new(big.Rat).SetString(s)
+}
+
+// inSet is an in predicate's values, precomputed once: a leaf is parsed at
+// most once and looked up, never compared value by value (numbers in a
+// long array would cost leaves × values parses).
+type inSet struct {
+	nums    map[string]bool // canonical exact values of the numeric ones
+	text    map[string]bool // every value's text
+	nonNums map[string]bool // the text of the non-numeric ones
+}
+
+func (p *Pred) inSet() *inSet {
+	if p.in != nil {
+		return p.in
+	}
+	s := &inSet{nums: map[string]bool{}, text: map[string]bool{}, nonNums: map[string]bool{}}
+	for i, v := range p.vals {
+		s.text[v] = true
+		if p.nums[i] != nil {
+			s.nums[p.nums[i].RatString()] = true
+		} else {
+			s.nonNums[v] = true
+		}
+	}
+	p.in = s
+	return s
+}
+
+// inMatch is equal(p, i, v) for some i: a number leaf by its exact value
+// against the numeric values and by text against the others, any other
+// leaf by text.
+func (p *Pred) inMatch(v val) bool {
+	if v.kind == mask.Object {
+		return false
+	}
+	s := p.inSet()
+	if v.kind == mask.Number && len(s.nums) > 0 {
+		if n, ok := parseNumber(v.text); ok {
+			return s.nums[n.RatString()] || s.nonNums[v.text]
+		}
+	}
+	return s.text[v.text]
 }

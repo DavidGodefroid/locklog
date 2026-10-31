@@ -190,6 +190,11 @@ func (e *Engine) Ref(ref string) (source.RawRef, string, error) {
 	if st.PolicyFP != e.o.PolicyFP() {
 		return source.RawRef{}, "", &Error{Code: EPolicyChanged, Message: "the policy changed since this reference was made"}
 	}
+	// A ref of another pseudonym epoch would show its record under the
+	// new epoch's pseudonyms, linking old and new ones.
+	if st.Epoch != e.o.Masker.Epoch() {
+		return source.RawRef{}, "", &Error{Code: EStale, Message: "the pseudonym epoch changed since this reference was made: search again"}
+	}
 	return source.RawRef{Source: st.Source, Stream: st.Stream, Offset: st.Offset, Length: st.Length}, st.Digest, nil
 }
 
@@ -444,6 +449,17 @@ func (e *Engine) run(ctx context.Context, plan source.Byteplan, chunk, gran int,
 			// counted (see prefilter.go).
 			if recs[i].Failed() && !filtered {
 				failures++
+			}
+			// Evaluation is bounded by the group's hard deadline
+			// too: predicates on large records (numbers in long
+			// arrays) can cost more than masking. The call is
+			// refused whole (visit's effects are the call's own:
+			// a cached page or partial count is left as it was).
+			if i%64 == 0 && (ctx.Err() != nil || time.Now().After(deadline.Add(e.o.Limits.Deadline/2))) {
+				if ctx.Err() != nil {
+					return chunk, gran, sc, failures, &Error{Code: ESource, Message: "cancelled"}
+				}
+				return chunk, gran, sc, failures, &Error{Code: EOverBudget, Message: "evaluating the predicates on this data did not finish in time: use fewer or simpler predicates, or narrow the range"}
 			}
 			visit(raws[i], recs[i])
 		}
