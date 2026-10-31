@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <img src="site/assets/demo.svg" alt="Claude Code asks when the PDF errors started on a staging profile. locklog_count shows the step at 14:02, locklog_patterns finds the new pattern with the email and the IP already pseudonymised, and locklog_trace follows order 4812: all free and masked. The agent then asks locklog_unmask for the email. The locklog console, in its own account and container, shows the read-pii approval screen with the masked record and the span marked; the human answers n. The agent gets denied and carries on without the address; the audit records every call with pseudonyms only." width="900">
+  <img src="site/assets/demo.svg" alt="Claude Code asks when the PDF errors started on a staging profile. locklog_count shows the step at 14:02, locklog_patterns finds the new pattern with the email and the IP masked, and locklog_trace follows order 4812: all free and masked. The agent then asks locklog_unmask for the email. The locklog console, in its own account and container, shows the read-pii approval screen with the masked record and the span marked; the human answers n. The agent gets denied and carries on without the address; the audit records every call with pseudonyms only." width="900">
 </p>
 
 <p align="center">
@@ -84,8 +84,9 @@ with its own credentials, sends all of it to the model provider.
   per hour. A call over a budget is refused before it touches data, and
   `locklog_scan` asks you once for the whole plan.
 - **Your sources.** Files (globs, rotation, gzip, zstd), journald (a pure-Go
-  reader), Docker container logs, and Loki in v0.1.0; Elasticsearch and
-  OpenSearch in v0.3.0.
+  reader), Docker container logs, and Loki in v0.1.0 (Loki once
+  [#97](https://github.com/DavidGodefroid/locklog/pull/97) lands);
+  Elasticsearch and OpenSearch in v0.3.0.
 - **Read-only.** Read-only mounts, a read-only root filesystem, an allowlist
   of backend endpoints, no Docker socket in any locklog container, no write
   path to any backend.
@@ -294,7 +295,8 @@ launcher's and the image's versions.
 ## Status
 
 Pre-release, in active development: see the [CHANGELOG](CHANGELOG.md).
-v0.1.0 ships files, journald, Docker and Loki with the standalone console.
+v0.1.0 is planned to ship files, journald, Docker and Loki (with #97) with
+the standalone console.
 v0.2.0 adds the hub (`lock up`, `lock approve`), and v0.3.0 adds
 Elasticsearch, OpenSearch and the masked export.
 
