@@ -229,7 +229,10 @@ type jobAgent struct {
 	s       *suite
 	calls   int
 	waits   int
+	retries int
 	prompts int
+	// deadline ends the retries and waits.
+	deadline time.Time
 	// backfill is set while the index backfill runs: an over-budget
 	// count of the part not yet indexed is retried, as the refusal says.
 	backfill bool
@@ -243,7 +246,6 @@ type jobAgent struct {
 // scripted agent stops there and the gate fails).
 func (a *jobAgent) ask(c agentCall) []json.RawMessage {
 	a.t.Helper()
-	deadline := time.Now().Add(incidentGate)
 	for {
 		start := time.Now()
 		r := a.s.run(c)
@@ -252,10 +254,18 @@ func (a *jobAgent) ask(c agentCall) []json.RawMessage {
 		if r.refusal == nil {
 			return r.pages
 		}
-		if r.refusal.Code == EOverBudget && a.backfill && strings.Contains(r.refusal.Message, "once more is indexed") && time.Now().Before(deadline) {
-			a.waits++
-			time.Sleep(time.Second)
-			continue
+		if time.Now().Before(a.deadline) {
+			switch {
+			case r.refusal.Code == EOverBudget && a.backfill && strings.Contains(r.refusal.Message, "once more is indexed"):
+				a.waits++
+				time.Sleep(time.Second)
+				continue
+			case r.refusal.Code == ESource && strings.HasSuffix(r.refusal.Message, "try again"):
+				// The first granule ran past the deadline (a slowed
+				// host): the cost model has recalibrated.
+				a.retries++
+				continue
+			}
 		}
 		if r.refusal.Code == EOverBudget {
 			a.prompts++
@@ -354,12 +364,11 @@ func (a *jobAgent) job1(from, to time.Time, srcs []string) {
 }
 
 // runJob runs job 1 on s and applies the gates: at most maxPrompts
-// approval prompts, the answer within incidentGate. With cold, the index
-// backfill runs at full speed from the start, as at a console's first
-// start.
-func runJob(t *testing.T, s *suite, cold bool, maxPrompts int, from, to time.Time, srcs []string) time.Duration {
-	a := &jobAgent{t: t, s: s, backfill: cold}
+// approval prompts, the answer within gate. With cold, the index backfill
+// runs at full speed from the start, as at a console's first start.
+func runJob(t *testing.T, s *suite, cold bool, maxPrompts int, gate time.Duration, from, to time.Time, srcs []string) time.Duration {
 	start := time.Now()
+	a := &jobAgent{t: t, s: s, backfill: cold, deadline: start.Add(gate)}
 	if cold {
 		ctx, cancel := context.WithCancel(context.Background())
 		var wg sync.WaitGroup
@@ -376,12 +385,12 @@ func runJob(t *testing.T, s *suite, cold bool, maxPrompts int, from, to time.Tim
 	for _, l := range a.log {
 		t.Log(l)
 	}
-	t.Logf("job 1: %d calls, %d waits for the backfill, %d prompts, %v", a.calls, a.waits, a.prompts, took.Round(time.Millisecond))
+	t.Logf("job 1: %d calls, %d waits for the backfill, %d retries, %d prompts, %v (gate %v)", a.calls, a.waits, a.retries, a.prompts, took.Round(time.Millisecond), gate.Round(time.Second))
 	if a.prompts > maxPrompts {
 		t.Errorf("%d approval prompts, want at most %d", a.prompts, maxPrompts)
 	}
-	if took > incidentGate {
-		t.Errorf("answered in %v, gate %v", took, incidentGate)
+	if took > gate {
+		t.Errorf("answered in %v, gate %v", took, gate)
 	}
 	return took
 }
@@ -404,7 +413,7 @@ func TestIncidentOrder4812(t *testing.T) {
 	}
 	s := newSuite(t, recs, suiteConfig{Structured: mask.StructuredRedactUnknown, Workers: 2, Index: true,
 		Files: map[string][]string{srcNginx: nginx}, NoAgentMeta: true})
-	runJob(t, s, false, 0, end.Add(-day+time.Minute), end, []string{srcNginx, srcApp, srcJournal, srcDocker})
+	runJob(t, s, false, 0, incidentGate, end.Add(-day+time.Minute), end, []string{srcNginx, srcApp, srcJournal, srcDocker})
 }
 
 // parseSize reads "1GiB", "512MiB" or a byte count.
@@ -426,12 +435,18 @@ func parseSize(t testing.TB, s string) int64 {
 // day) and journald (a quarter of it) history; job 1 warm and cold, idle
 // and under a CPU hog; no prompt (the count is served from the index,
 // the text calls cover the narrowed hour within the free budget).
+//
+// The gates (R6-P1: "each with its expected prompts and time"): warm,
+// the answer within incidentGate; cold, within incidentGate plus the
+// backfill's time, 1.5 times the index build the warm variant measured
+// on the same data and host load (the count of 7 days cannot be answered
+// before the index holds them, or a scan approval).
 func TestIncidentVolume(t *testing.T) {
 	perDay := int64(16 << 20)
 	if v := os.Getenv("LOCKLOG_INCIDENT_VOLUME"); v != "" {
 		perDay = parseSize(t, v)
-	} else if testing.Short() {
-		t.Skip("volume incident: skipped with -short")
+	} else {
+		heavySuite(t)
 	}
 	const days = 7
 	end := suiteNow
@@ -453,28 +468,36 @@ func TestIncidentVolume(t *testing.T) {
 	t.Logf("generated %.2f GiB in %v", float64(size)/(1<<30), time.Since(start).Round(time.Millisecond))
 	from := end.Add(-days*24*time.Hour + time.Minute)
 	srcs := []string{srcNginx, srcJournal}
+	build := map[bool]time.Duration{} // by hog
 	for _, tc := range []struct {
 		name      string
 		cold, hog bool
 	}{
 		{"warm", false, false},
-		{"cold", true, false},
 		{"warm, host slowed 3x", false, true},
+		{"cold", true, false},
 		{"cold, host slowed 3x", true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newSuite(t, nil, suiteConfig{Structured: mask.StructuredRedactUnknown, Workers: 2,
 				Files: map[string][]string{srcNginx: nginx}, JournalRoot: jroot, NoAgentMeta: true})
-			if !tc.cold {
-				start := time.Now()
-				s.indexAll()
-				t.Logf("index built in %v", time.Since(start).Round(time.Millisecond))
-			}
 			if tc.hog {
 				defer cpuHog()()
 			}
-			runJob(t, s, tc.cold, 0, from, end, srcs)
+			gate := incidentGate
+			if tc.cold {
+				b, ok := build[tc.hog]
+				if !ok {
+					t.Skip("no warm build time measured")
+				}
+				gate += b * 3 / 2
+			} else {
+				start := time.Now()
+				s.indexAll()
+				build[tc.hog] = time.Since(start)
+				t.Logf("index built in %v", build[tc.hog].Round(time.Millisecond))
+			}
+			runJob(t, s, tc.cold, 0, gate, from, end, srcs)
 		})
 	}
 }
-

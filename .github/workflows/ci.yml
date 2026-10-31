@@ -161,15 +161,16 @@ jobs:
           sudo LOCKLOG_JOURNALD_IT=1 ./journald.test -test.run '^TestLiveJournal$' -test.v | tee it.log
           grep -q -- '--- PASS: TestLiveJournal' it.log
 
-  # The full leak suite (every canary kind in every encoding written into
-  # every query position) and the latency cases of the oracle suite
+  # The heavy LL-16 suites, on every pull request: the leak suite with every
+  # canary kind in every encoding written into every query position, the
+  # oracle, the equivalence suites, and the latency cases of the oracle
   # (repeated, interleaved runs on production and non-production defaults,
-  # idle and under a CPU hog, compared statistically); the test job runs the
-  # leak suite's subset and never the timing cases.
+  # idle and under a CPU hog, compared statistically). The test job runs
+  # the quick suites (injection, the agent-rule leak case, incident (a)).
   suites:
-    name: suites (full leak, timing)
+    name: suites (leak, oracle, equivalence, latency)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       CGO_ENABLED: "0"
     steps:
@@ -180,18 +181,19 @@ jobs:
         with:
           go-version: "1.26.x"
           check-latest: true
-      - name: full leak suite and oracle latency
+      - name: suites
         shell: bash
         run: |
           set -o pipefail
-          GOMAXPROCS=2 LOCKLOG_SUITE_FULL=1 LOCKLOG_SUITE_TIMING=1 go test -count=1 -timeout 25m -v \
-            -run '^(TestSuiteLeak|TestSuiteOracleLatency)$' ./internal/engine/ 2>&1 |
+          GOMAXPROCS=2 LOCKLOG_SUITES=1 LOCKLOG_SUITE_FULL=1 LOCKLOG_SUITE_TIMING=1 go test -count=1 -timeout 40m -v \
+            -run '^TestSuite' ./internal/engine/ 2>&1 |
             grep -v -E '^=== (RUN|PAUSE|CONT)|: [0-9]+ pages in |: scanned in ' | tee suites.log
 
   # Local incident (b) at realistic volume (R6-P1): 7 days x 1 GiB/day of
   # nginx and journald (a quarter of that: the journal history imported by
   # systemd-journal-remote in export format with past timestamps); job 1
-  # warm and cold, idle and with the host slowed 3x; <= 3 prompts, < 5 min.
+  # warm and cold, idle and with the host slowed 3x; no prompt (<= 3); warm
+  # within 5 min, cold within 5 min plus the backfill (1.5x the warm build).
   incidents:
     name: incidents (local, realistic volume)
     runs-on: ubuntu-latest
@@ -212,8 +214,12 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          df -h "${RUNNER_TEMP}"
-          TMPDIR="${RUNNER_TEMP}" GOMAXPROCS=2 LOCKLOG_INCIDENT_VOLUME=1GiB \
+          # About 12 GiB of data: the runner's larger temporary disk when
+          # there is one.
+          dir="${RUNNER_TEMP}"
+          if [ -d /mnt ] && sudo mkdir -p /mnt/incidents && sudo chown "$(id -u):$(id -g)" /mnt/incidents; then dir=/mnt/incidents; fi
+          df -h "$dir"
+          TMPDIR="$dir" GOMAXPROCS=2 LOCKLOG_INCIDENT_VOLUME=1GiB \
             LOCKLOG_JOURNAL_REMOTE=/usr/lib/systemd/systemd-journal-remote \
             go test -count=1 -timeout 85m -v -run '^(TestIncidentOrder4812|TestIncidentVolume)$' ./internal/engine/ 2>&1 |
             grep -v -E '^=== (RUN|PAUSE|CONT)' | tee incidents.log

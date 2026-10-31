@@ -53,6 +53,16 @@ const (
 	clfMark = "{CLF}"
 )
 
+// heavySuite skips a suite that takes minutes unless LOCKLOG_SUITES=1 (the
+// CI suites job runs them on every pull request; the test job runs the
+// quick ones).
+func heavySuite(t testing.TB) {
+	t.Helper()
+	if os.Getenv("LOCKLOG_SUITES") != "1" {
+		t.Skip("heavy suite: set LOCKLOG_SUITES=1 (run by the CI suites job)")
+	}
+}
+
 // suiteSources are every source of the fixture.
 func suiteSources() []string { return append(slices.Clone(suiteFileFormats), srcJournal, srcDocker) }
 

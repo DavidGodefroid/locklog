@@ -36,6 +36,7 @@ func equivalenceCalls() []agentCall {
 // same records, counts and patterns, the same stopping points, cursor plan
 // positions and scanned work, on every source and method.
 func TestSuiteEquivalencePrefilter(t *testing.T) {
+	heavySuite(t)
 	recs := equivalenceCorpus(t)
 	ep, err := pii.NewEpoch(suiteBase)
 	if err != nil {
@@ -101,6 +102,7 @@ func answer(t testing.TB, e *Engine, pages []json.RawMessage) string {
 // without an index; the indexed fixture does serve its counts from the
 // index.
 func TestSuiteEquivalenceIndex(t *testing.T) {
+	heavySuite(t)
 	recs := equivalenceCorpus(t)
 	ep, err := pii.NewEpoch(suiteBase)
 	if err != nil {

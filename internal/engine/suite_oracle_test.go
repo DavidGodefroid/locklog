@@ -122,6 +122,7 @@ func oracleCalls() []agentCall {
 // positions, the same scanned work and covered_until, and the same number
 // of distinct pseudonyms of each kind.
 func TestSuiteOracle(t *testing.T) {
+	heavySuite(t)
 	for _, tc := range []struct {
 		name    string
 		sameLen bool

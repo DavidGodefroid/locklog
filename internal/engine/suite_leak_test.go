@@ -231,6 +231,7 @@ func (l *leakScanner) report(label string) {
 // every agent method and option, every continuation page and every
 // refusal is scanned: no form of any canary reaches the agent.
 func TestSuiteLeak(t *testing.T) {
+	heavySuite(t)
 	recs := leakCorpus(16)
 	total := 0
 	for _, rs := range recs {
