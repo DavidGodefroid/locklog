@@ -51,6 +51,11 @@ const (
 	RecordsCeiling    = 1000
 	OutputCeiling     = 1 * MiB
 	PIIRulesCeiling   = 500
+	// Rolling budgets: ceilings no profile can go past either.
+	BytesPerHourCeiling = 1 * TiB
+	RateCeiling         = 6000
+	LookupsCeiling      = 1000
+	PIIAddsCeiling      = 100
 	DefaultRotation   = 7 * Day
 	DefaultMaxAge     = 30 * Day
 	MinRotation       = time.Hour

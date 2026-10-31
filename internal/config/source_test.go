@@ -79,6 +79,33 @@ func quote(s string) string {
 	return `"` + strings.ReplaceAll(strings.ReplaceAll(s, `\`, `\\`), `"`, `\"`) + `"`
 }
 
+func TestMessageFieldsNotTrusted(t *testing.T) {
+	for _, f := range []string{"msg", "message", "log", "Message", "attrs.msg", "error", "stack_trace"} {
+		wantErr(t, src(`kind = "file"`+"\n"+`paths = ["/var/log/a"]`+"\n"+`trusted = ["`+f+`"]`), "message text")
+	}
+	wantErr(t, src(`kind = "docker"`+"\n"+`containers = ["a"]`+"\n"+`trusted = ["log"]`), "message text")
+}
+
+func TestErrorsDoNotEchoValues(t *testing.T) {
+	const secret = "glsa_SuperSecretToken123"
+	for _, key := range []string{"credentials", "auth", "tls"} {
+		body := lokiOK
+		if key == "auth" {
+			body = strings.Replace(lokiOK, `auth = "bearer"`, "", 1)
+		}
+		_, err := parse(t, src(body+key+` = "`+secret+`"`))
+		if err == nil || strings.Contains(err.Error(), secret) {
+			t.Errorf("%s: error %v echoes the value", key, err)
+		}
+	}
+	for _, key := range []string{"structured", "text", "unmask", "lookup"} {
+		_, err := parse(t, fileSrc+"[profiles.staging]\n"+key+` = "`+secret+`"`+"\n")
+		if err == nil || strings.Contains(err.Error(), secret) {
+			t.Errorf("%s: error %v echoes the value", key, err)
+		}
+	}
+}
+
 func TestJournaldSource(t *testing.T) {
 	p := mustParse(t, src(`kind = "journald"
 units = ["nginx.service", "shop-*.service"]
@@ -93,8 +120,15 @@ allow = ["MY_REQUEST_ID"]`))["staging"]
 			wantErr(t, src(`kind = "journald"`+"\n"+key+` = ["`+f+`"]`), "can never be served")
 		}
 	}
-	wantErr(t, src(`kind = "journald"`+"\n"+`allow = ["MESSAGE"]`), "always served as masked text")
-	wantErr(t, src(`kind = "journald"`+"\n"+`trusted = ["MESSAGE"]`), "always served as masked text")
+	for _, f := range []string{"MESSAGE", "SYSLOG_RAW"} {
+		for _, key := range []string{"allow", "trusted"} {
+			wantErr(t, src(`kind = "journald"`+"\n"+key+` = ["`+f+`"]`), "holds the message text")
+		}
+	}
+	for _, u := range []string{"user*", "*@1000.service", "u?er@1000.service", "*"} {
+		wantErr(t, src(`kind = "journald"`+"\n"+`units = ["`+u+`"]`), "need user_journals = true")
+	}
+	wantErr(t, src(`kind = "journald"`+"\n"+`units = ["a\\x2d.service"]`), "invalid unit name")
 	wantErr(t, src(`kind = "journald"`+"\n"+`trusted = ["lower"]`), "invalid journald field name")
 	wantErr(t, src(`kind = "journald"`+"\n"+`allow = ["_PID"]`), "always served; remove it")
 	mustParse(t, src(`kind = "journald"`+"\n"+`trusted = ["MY_SERVICE_VERSION"]`))
@@ -172,6 +206,10 @@ org_id = "tenant-1"`))["staging"]
 		{lokiOK + `tls_cert = "/c.pem"`, "go together"},
 		{lokiOK + `trusted_labels = ["email"]`, "looks like personal data"},
 		{lokiOK + `org_id = "a b"`, "invalid tenant id"},
+		{lokiOK + `org_id = "a|b"`, "no '|' federation"},
+		{strings.Replace(lokiOK, `auth = "bearer"`, `auth = "basic"`, 1) + `user = "admin:hunter2"`, "user: a login name without"},
+		{strings.Replace(lokiOK, `selector = { app = "api" }`, `selector = { app = "a\"b" }`, 1), "without quotes, backslashes"},
+		{strings.Replace(lokiOK, `selector = { app = "api" }`, `selector = { app = "a\\b" }`, 1), "without quotes, backslashes"},
 		{strings.Replace(lokiOK, "https://loki.example.com", "http://loki.example.com", 1), "plain http://"},
 		{strings.Replace(lokiOK, "https://loki.example.com", "http://loki.example.com", 1) + `tls = "verify-full"`, "needs an https:// URL"},
 	} {

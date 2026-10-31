@@ -30,7 +30,57 @@ trusted_labels = ["app"]
 
 func policyOf(t *testing.T, extra string, network string, roots ...string) Policy {
 	t.Helper()
-	return NewPolicy(mustParse(t, basePolicy+extra)["pp"], network, roots)
+	return mustPolicy(t, mustParse(t, basePolicy+extra)["pp"], network, roots)
+}
+
+func mustPolicy(t *testing.T, p Profile, network string, roots []string) Policy {
+	t.Helper()
+	pol, err := NewPolicy(p, network, roots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pol
+}
+
+func TestNewPolicyEnvironment(t *testing.T) {
+	p := mustParse(t, basePolicy)["pp"]
+	a := mustPolicy(t, p, "", []string{"/opt/x/", "/opt/x"})
+	b := mustPolicy(t, p, "", []string{"/opt/x"})
+	if a.Fingerprint() != b.Fingerprint() || len(b.Diff(a)) != 0 {
+		t.Errorf("/opt/x/ and /opt/x differ: %+v", b.Diff(a))
+	}
+	for _, tt := range []struct {
+		net   string
+		roots []string
+	}{{"host", nil}, {"bridge", nil}, {"none", nil}, {"a b", nil}, {"-x", nil}, {"", []string{"rel"}}, {"", []string{"/"}}, {"", []string{"/a,b"}}, {"", []string{"/a=b"}}} {
+		if _, err := NewPolicy(p, tt.net, tt.roots); err == nil {
+			t.Errorf("NewPolicy(%q, %q) accepted", tt.net, tt.roots)
+		}
+	}
+}
+
+func TestPolicyJSONRoundTrip(t *testing.T) {
+	a := policyOf(t, "", "net", "/srv/logs")
+	b, err := json.Marshal(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var c Policy
+	if err := json.Unmarshal(b, &c); err != nil {
+		t.Fatal(err)
+	}
+	if c.Fingerprint() != a.Fingerprint() || len(c.Diff(a)) != 0 {
+		t.Errorf("round trip changed the policy: %+v", c.Diff(a))
+	}
+}
+
+func TestDiffKindChange(t *testing.T) {
+	a := policyOf(t, "", "")
+	c := edited(t, "[profiles.pp.sources.api]\nkind = \"docker\"\ncontainers = [\"shop-api-1\"]",
+		"[profiles.pp.sources.api]\nkind = \"loki\"\nurl = \"https://l.example.com\"\nselector = { app = \"x\" }\nauth = \"bearer\"")
+	assertChange(t, c.Diff(a), "sources.api.kind", true)
+	assertChange(t, c.Diff(a), "sources.api.remote", true)
+	assertChange(t, a.Diff(c), "sources.api.containers", true)
 }
 
 func TestDiffNoChange(t *testing.T) {
@@ -119,7 +169,7 @@ func edited(t *testing.T, old, new string) Policy {
 	if !strings.Contains(basePolicy, old) {
 		t.Fatalf("base has no %q", old)
 	}
-	return NewPolicy(mustParse(t, strings.Replace(basePolicy, old, new, 1))["pp"], "", nil)
+	return mustPolicy(t, mustParse(t, strings.Replace(basePolicy, old, new, 1))["pp"], "", nil)
 }
 
 func TestDiffSources(t *testing.T) {
@@ -174,7 +224,7 @@ func TestLooseningKeysAreDiffed(t *testing.T) {
 	a := policyOf(t, "[profiles.pp]\nproduction = true\nunmask = \"never\"\nlookup = \"approved\"\n", "")
 	// Each loosening alone (production off cannot stay with prefilter on
 	// production, so production goes off first).
-	c := NewPolicy(mustParse(t, strings.Replace(basePolicy, `units = ["nginx.service"]`, "units = [\"nginx.service\"]\nallow = [\"REQ_ID\"]", 1)+
+	c := mustPolicy(t, mustParse(t, strings.Replace(basePolicy, `units = ["nginx.service"]`, "units = [\"nginx.service\"]\nallow = [\"REQ_ID\"]", 1)+
 		"[profiles.pp]\nprefilter = true\nuser_journals = true\nunmask = \"approved\"\nlookup = \"free\"\nstructured = \"redact-unknown\"\n")["pp"], "net", []string{"/srv/x"})
 	d := c.Diff(a)
 	for k, field := range want {

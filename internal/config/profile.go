@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
-	"strings"
 	"time"
 
 	kconfig "github.com/DavidGodefroid/lockkit/config"
@@ -217,25 +216,25 @@ func buildProfile(name string, r rawProfile, detectorsSet bool) (Profile, error)
 		p.Structured = DefaultStructured(prod)
 	}
 	if p.Structured != StructuredRedactUnknown && p.Structured != StructuredDetect {
-		return Profile{}, errf("unknown structured mode %q (want redact-unknown or detect)", p.Structured)
+		return Profile{}, errf("unknown structured mode (want redact-unknown or detect)")
 	}
 	if p.Text == "" {
 		p.Text = TextDetect
 	}
 	if p.Text != TextDetect && p.Text != TextTemplate {
-		return Profile{}, errf("unknown text mode %q (want detect or template)", p.Text)
+		return Profile{}, errf("unknown text mode (want detect or template)")
 	}
 	if p.Unmask == "" {
 		p.Unmask = DefaultUnmask(prod)
 	}
 	if p.Unmask != UnmaskNever && p.Unmask != UnmaskApproved {
-		return Profile{}, errf("unknown unmask mode %q (want never or approved)", p.Unmask)
+		return Profile{}, errf("unknown unmask mode (want never or approved)")
 	}
 	if p.Lookup == "" {
 		p.Lookup = LookupFree
 	}
 	if p.Lookup != LookupFree && p.Lookup != LookupApproved {
-		return Profile{}, errf("unknown lookup mode %q (want free or approved)", p.Lookup)
+		return Profile{}, errf("unknown lookup mode (want free or approved)")
 	}
 	if prod && p.Prefilter {
 		return Profile{}, errf("prefilter = true is refused on a production profile: with it, latency reveals how many records hold a clear substring")
@@ -317,7 +316,7 @@ func buildProfile(name string, r rawProfile, detectorsSet bool) (Profile, error)
 		if err != nil {
 			return Profile{}, errf("%v", err)
 		}
-		if s.Kind == KindJournald && !p.UserJournals && slices.ContainsFunc(s.Units, func(u string) bool { return strings.HasPrefix(u, "user@") }) {
+		if s.Kind == KindJournald && !p.UserJournals && slices.ContainsFunc(s.Units, func(u string) bool { return canMatchPrefix(u, "user@") }) {
 			return Profile{}, errf("source %q: units of user sessions (user@...) need user_journals = true", sn)
 		}
 		p.Sources = append(p.Sources, s)
@@ -352,7 +351,7 @@ func buildLimits(r rawLimits, production bool) (Limits, error) {
 			key, val string
 			ceiling  int64
 			dst      *int64
-		}{{"max_bytes", b.raw.MaxBytes, BytesCeiling, &b.dst.MaxBytes}, {"bytes_per_hour", b.raw.BytesPerHour, 0, &b.dst.BytesPerHour}} {
+		}{{"max_bytes", b.raw.MaxBytes, BytesCeiling, &b.dst.MaxBytes}, {"bytes_per_hour", b.raw.BytesPerHour, BytesPerHourCeiling, &b.dst.BytesPerHour}} {
 			if f.val == "" {
 				continue
 			}
@@ -375,6 +374,9 @@ func buildLimits(r rawLimits, production bool) (Limits, error) {
 		}{{"metric_queries_per_hour", b.raw.MetricQueriesPerHour, &b.dst.MetricQueriesPerHour}, {"requests_per_minute", b.raw.RequestsPerMinute, &b.dst.RequestsPerMinute}} {
 			if f.val < 0 {
 				return Limits{}, fmt.Errorf("limits.%s.%s must be positive", b.name, f.key)
+			}
+			if f.val > RateCeiling {
+				return Limits{}, fmt.Errorf("limits.%s.%s (%d) is above its ceiling %d", b.name, f.key, f.val, RateCeiling)
 			}
 			if f.val > 0 {
 				*f.dst = f.val
@@ -400,9 +402,9 @@ func buildLimits(r rawLimits, production bool) (Limits, error) {
 		dst          *int
 	}{
 		{"max_records", r.MaxRecords, RecordsCeiling, &l.MaxRecords},
-		{"lookups_per_hour", r.LookupsPerHour, 0, &l.LookupsPerHour},
-		{"lookups_per_hour_per_uid", r.LookupsPerHourPerUID, 0, &l.LookupsPerHourPerUID},
-		{"pii_adds_per_hour", r.PIIAddsPerHour, 0, &l.PIIAddsPerHour},
+		{"lookups_per_hour", r.LookupsPerHour, LookupsCeiling, &l.LookupsPerHour},
+		{"lookups_per_hour_per_uid", r.LookupsPerHourPerUID, LookupsCeiling, &l.LookupsPerHourPerUID},
+		{"pii_adds_per_hour", r.PIIAddsPerHour, PIIAddsCeiling, &l.PIIAddsPerHour},
 		{"pii_rules_max", r.PIIRulesMax, PIIRulesCeiling, &l.PIIRulesMax},
 	} {
 		switch {
@@ -415,6 +417,10 @@ func buildLimits(r rawLimits, production bool) (Limits, error) {
 		}
 	}
 	if l.LookupsPerHourPerUID > l.LookupsPerHour {
+		if r.LookupsPerHourPerUID > 0 {
+			return Limits{}, fmt.Errorf("limits.lookups_per_hour_per_uid (%d) is above limits.lookups_per_hour (%d)", l.LookupsPerHourPerUID, l.LookupsPerHour)
+		}
+		// The default per-uid cap never exceeds an explicit console cap.
 		l.LookupsPerHourPerUID = l.LookupsPerHour
 	}
 	return l, nil

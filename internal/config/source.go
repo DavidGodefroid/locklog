@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"unicode"
 
 	kconfig "github.com/DavidGodefroid/lockkit/config"
 	"github.com/DavidGodefroid/lockkit/pii"
@@ -138,10 +139,10 @@ var (
 	sourceNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,47}$`)
 	fieldNameRe  = regexp.MustCompile(`^[A-Za-z_@][A-Za-z0-9_.@-]{0,127}$`)
 	journalRe    = regexp.MustCompile(`^[A-Z0-9_]{1,64}$`)
-	unitRe       = regexp.MustCompile(`^[A-Za-z0-9@._:*?\\-]{1,255}$`)
+	unitRe       = regexp.MustCompile(`^[A-Za-z0-9@._:*?-]{1,255}$`)
 	containerRe  = regexp.MustCompile(`^[A-Za-z0-9*?][A-Za-z0-9_.*?-]{0,127}$`)
 	labelRe      = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`)
-	orgIDRe      = regexp.MustCompile(`^[A-Za-z0-9_.!*'()|-]{1,150}$`)
+	orgIDRe      = regexp.MustCompile(`^[A-Za-z0-9_.!*'()-]{1,150}$`)
 )
 
 // ConsolePrefix starts the name of every locklog console container. A
@@ -205,6 +206,18 @@ func neverAllowed(f string) bool {
 	return strings.HasSuffix(f, "CMDLINE") || strings.HasSuffix(f, "_EXE") || f == "EXE"
 }
 
+// messageFields are the names parsers give the message text of a line
+// (JSON, logfmt, docker-json, cri, syslog): never trusted.
+var messageFields = []string{"msg", "message", "log", "line", "text", "body", "content", "error", "err", "exception", "stack", "stacktrace", "stack_trace"}
+
+func messageField(f string) bool {
+	lf := strings.ToLower(f)
+	if i := strings.LastIndexByte(lf, '.'); i >= 0 {
+		lf = lf[i+1:]
+	}
+	return slices.Contains(messageFields, lf) || lf == "syslog_raw"
+}
+
 // checkJournaldField validates a journald field name an allow or trusted
 // list names.
 func checkJournaldField(key, f string) error {
@@ -213,8 +226,8 @@ func checkJournaldField(key, f string) error {
 		return fmt.Errorf("%s: invalid journald field name %q (upper-case letters, digits and '_')", key, f)
 	case neverAllowed(f):
 		return fmt.Errorf("%s: %s can never be served (core dumps, command lines, executables, audit records and OBJECT_ fields stay dropped)", key, f)
-	case f == "MESSAGE":
-		return fmt.Errorf("%s: MESSAGE is always served as masked text; it cannot be listed", key)
+	case f == "MESSAGE" || f == "SYSLOG_RAW":
+		return fmt.Errorf("%s: %s holds the message text, always served masked; it cannot be listed", key, f)
 	}
 	return nil
 }
@@ -250,6 +263,9 @@ func buildSource(name string, r rawSource, production bool) (Source, error) {
 		}
 		if !fieldNameRe.MatchString(f) {
 			return Source{}, errf("trusted: invalid field name %q", f)
+		}
+		if messageField(f) {
+			return Source{}, errf("trusted: %s is the message text of a parsed line, always served masked; it cannot be trusted", f)
 		}
 		if pii.LooksPersonal(f) || pii.LooksQuasi(f) {
 			return Source{}, errf("trusted: %q looks like personal data and cannot be trusted (its values would reach the agent in clear)", f)
@@ -400,6 +416,9 @@ func buildRemote(r rawSource, production bool, errf func(string, ...any) error) 
 		Base: kconfig.Base{User: r.User, Credentials: r.Credentials, VaultPath: r.VaultPath,
 			TLS: r.TLS, TLSCA: r.TLSCA, TLSCert: r.TLSCert, TLSKey: r.TLSKey},
 	}
+	if strings.ContainsAny(rem.User, ":@") || strings.IndexFunc(rem.User, unicode.IsSpace) >= 0 {
+		return nil, errf("user: a login name without ':', '@' or spaces (the console asks for the secret)")
+	}
 	if rem.URL == "" {
 		return nil, errf("url is required")
 	}
@@ -421,8 +440,8 @@ func buildRemote(r rawSource, production bool, errf func(string, ...any) error) 
 		if !labelRe.MatchString(k) {
 			return nil, errf("selector: invalid label name %q", k)
 		}
-		if v == "" || strings.IndexFunc(v, kconfig.UnsafeRune) >= 0 || len(v) > 1024 {
-			return nil, errf("selector: label %s needs a non-empty value without control characters", k)
+		if v == "" || strings.IndexFunc(v, kconfig.UnsafeRune) >= 0 || strings.ContainsAny(v, "\"\\`") || len(v) > 1024 {
+			return nil, errf("selector: label %s needs a non-empty value without quotes, backslashes or control characters", k)
 		}
 		rem.Selector[k] = v
 	}
@@ -438,7 +457,7 @@ func buildRemote(r rawSource, production bool, errf func(string, ...any) error) 
 		}
 	}
 	if rem.OrgID != "" && !orgIDRe.MatchString(rem.OrgID) {
-		return nil, errf("org_id: invalid tenant id")
+		return nil, errf("org_id: invalid tenant id (one tenant: letters, digits and _.!*'()-; no '|' federation)")
 	}
 
 	if rem.Auth == "" {
@@ -469,7 +488,7 @@ func buildRemote(r rawSource, production bool, errf func(string, ...any) error) 
 			return nil, errf("auth = \"mtls\" needs tls_cert and tls_key")
 		}
 	default:
-		return nil, errf("unknown auth %q (want none, basic, bearer or mtls)", rem.Auth)
+		return nil, errf("unknown auth mode (want none, basic, bearer or mtls)")
 	}
 	needsSecret := rem.Auth == AuthBasic || rem.Auth == AuthBearer
 	switch rem.Credentials {
@@ -489,7 +508,7 @@ func buildRemote(r rawSource, production bool, errf func(string, ...any) error) 
 			return nil, errf("credentials = \"vault\" needs vault_path, such as \"secret/data/loki-reader\", without spaces and not starting with '-' or '/'")
 		}
 	default:
-		return nil, errf("unknown credentials mode %q (want ask or vault; the console runs in a container without a keychain)", rem.Credentials)
+		return nil, errf("unknown credentials mode (want ask or vault; the console runs in a container without a keychain, and never reads a secret from a config file)")
 	}
 	if rem.Credentials != kconfig.CredentialsVault && rem.VaultPath != "" {
 		return nil, errf("vault_path is only used with credentials = \"vault\"")
@@ -506,13 +525,13 @@ func buildRemote(r rawSource, production bool, errf func(string, ...any) error) 
 		}
 	}
 	if kconfig.TLSRank(rem.TLS) < 0 {
-		return nil, errf("unknown tls mode %q (want disable, require, verify-ca or verify-full)", rem.TLS)
+		return nil, errf("unknown tls mode (want disable, require, verify-ca or verify-full)")
 	}
 	switch {
 	case tls && rem.TLS == kconfig.TLSDisable:
 		return nil, errf("tls = \"disable\" with an https:// URL")
 	case !tls && rem.TLS != kconfig.TLSDisable:
-		return nil, errf("tls = %q needs an https:// URL", rem.TLS)
+		return nil, errf("tls = \"%s\" needs an https:// URL", rem.TLS)
 	case tls && rem.TLS == kconfig.TLSPrefer:
 		return nil, errf("tls = \"prefer\" does not apply to https://; use require, verify-ca or verify-full")
 	case !tls && (rem.TLSCA != "" || rem.TLSCert != ""):

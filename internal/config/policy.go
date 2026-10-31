@@ -3,6 +3,8 @@ package config
 import (
 	"fmt"
 	"maps"
+	"path"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -29,9 +31,23 @@ var _ kconfig.Policy = Policy{}
 
 // NewPolicy builds the canonical policy of p started with network and
 // extraRoots.
-func NewPolicy(p Profile, network string, extraRoots []string) Policy {
-	return Canonical(Policy{Profile: p, Network: network, ExtraRoots: extraRoots})
+func NewPolicy(p Profile, network string, extraRoots []string) (Policy, error) {
+	if network != "" && !networkRe.MatchString(network) {
+		return Policy{}, fmt.Errorf("LOCKLOG_NETWORK: invalid Docker network name")
+	}
+	switch network {
+	case "host", "bridge", "none":
+		return Policy{}, fmt.Errorf("LOCKLOG_NETWORK: name a network of your own, not %s", network)
+	}
+	for _, r := range extraRoots {
+		if !path.IsAbs(r) || path.Clean(r) == "/" || strings.IndexFunc(r, kconfig.UnsafeRune) >= 0 || strings.ContainsAny(r, ",=:\"'`\\\n") {
+			return Policy{}, fmt.Errorf("LOCKLOG_EXTRA_ROOTS: %q is not an absolute directory other than /, without the characters a mount cannot carry", r)
+		}
+	}
+	return Canonical(Policy{Profile: p, Network: network, ExtraRoots: extraRoots}), nil
 }
+
+var networkRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
 
 // Canonical sorts and de-duplicates the lists of p: its JSON is the
 // fingerprinted form.
@@ -61,7 +77,11 @@ func Canonical(p Policy) Policy {
 	slices.SortFunc(srcs, func(a, b Source) int { return strings.Compare(a.Name, b.Name) })
 	pr.Sources = srcs
 	p.Profile = pr
-	p.ExtraRoots = kconfig.SortedSet(p.ExtraRoots)
+	roots := make([]string, len(p.ExtraRoots))
+	for i, r := range p.ExtraRoots {
+		roots[i] = path.Clean(r)
+	}
+	p.ExtraRoots = kconfig.SortedSet(roots)
 	return p
 }
 
