@@ -9,8 +9,11 @@ import (
 
 // Agent methods served by the engine (IPC log.*).
 const (
-	MethodSearch = "log.search"
-	MethodCount  = "log.count"
+	MethodSearch  = "log.search"
+	MethodCount   = "log.count"
+	MethodContext = "log.context"
+	MethodTrace   = "log.trace"
+	MethodTail    = "log.tail"
 )
 
 // Handle decodes the params of an agent method and runs it. A refusal is
@@ -42,6 +45,24 @@ func (e *Engine) Handle(ctx context.Context, method string, params json.RawMessa
 			return nil, r, nil
 		}
 		res, err = e.Count(ctx, q)
+	case MethodContext:
+		var q ContextQuery
+		if r := decode(&q); r != nil {
+			return nil, r, nil
+		}
+		res, err = e.Context(ctx, q)
+	case MethodTrace:
+		var q TraceQuery
+		if r := decode(&q); r != nil {
+			return nil, r, nil
+		}
+		res, err = e.Trace(ctx, q)
+	case MethodTail:
+		var q TailQuery
+		if r := decode(&q); r != nil {
+			return nil, r, nil
+		}
+		res, err = e.Tail(ctx, q)
 	default:
 		return nil, refuse(EBadQuery, "", "unknown method"), nil
 	}

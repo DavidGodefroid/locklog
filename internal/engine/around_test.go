@@ -1,0 +1,411 @@
+//go:build unix
+
+package engine
+
+import (
+	"crypto/rand"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/DavidGodefroid/locklog/internal/mask"
+)
+
+// rec decodes one output record.
+func rec(t *testing.T, r json.RawMessage) map[string]any {
+	t.Helper()
+	var m map[string]any
+	if err := json.Unmarshal(r, &m); err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
+func firstRef(t *testing.T, f *fixture, mod func(*Query)) (string, map[string]any) {
+	t.Helper()
+	res, err := f.eng.Search(ctx, q(func(q *Query) { q.Limit = 1; mod(q) }))
+	if err != nil || len(res.Records) != 1 {
+		t.Fatalf("%v %d", err, len(res.Records))
+	}
+	m := rec(t, res.Records[0])
+	return m["ref"].(string), m
+}
+
+func TestContext(t *testing.T) {
+	canary := "canary@example.org"
+	f := newFixture(t, genLog(t0, 1000, canary), nil)
+	ref, hit := firstRef(t, f, func(q *Query) { q.Text = "(order 525)" })
+	res, err := f.eng.Context(ctx, ContextQuery{Ref: ref, Before: 3, After: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Records) != 8 || res.Target != 3 || !res.Complete || res.Epoch == "" {
+		t.Fatalf("%d records, target %d, complete %v", len(res.Records), res.Target, res.Complete)
+	}
+	for i, r := range res.Records {
+		m := rec(t, r)
+		if want := fmt.Sprintf("(order %d)", 522+i); !strings.Contains(m["msg"].(string), want) {
+			t.Fatalf("record %d: %v, want %s", i, m["msg"], want)
+		}
+		if strings.Contains(string(r), "@example") {
+			t.Fatalf("clear value: %s", r)
+		}
+		if m["ref"] == nil {
+			t.Fatal("no ref")
+		}
+	}
+	if rec(t, res.Records[3])["msg"] != hit["msg"] {
+		t.Fatal("target differs from the search's record")
+	}
+	if res.Scanned.Records != 8 || res.Scanned.Granules != 1 || res.Scanned.Bytes != 1<<20 {
+		t.Fatalf("scanned %+v", res.Scanned)
+	}
+	if strings.Join(res.Masking.Kinds, ",") != "email" {
+		t.Fatalf("kinds %v", res.Masking.Kinds)
+	}
+	// A context ref continues: the context of a context record.
+	res2, err := f.eng.Context(ctx, ContextQuery{Ref: rec(t, res.Records[0])["ref"].(string), After: 1})
+	if err != nil || len(res2.Records) != 2 || res2.Target != 0 {
+		t.Fatalf("%v %+v", err, res2)
+	}
+	// The first record of the stream: nothing before it.
+	ref0, _ := firstRef(t, f, func(q *Query) { q.Text = "(order 0)" })
+	res, err = f.eng.Context(ctx, ContextQuery{Ref: ref0, Before: 5, After: 0})
+	if err != nil || len(res.Records) != 1 || res.Target != 0 {
+		t.Fatalf("%v %+v", err, res)
+	}
+	// Projection.
+	res, err = f.eng.Context(ctx, ContextQuery{Ref: ref, Before: 1, Fields: []string{"level"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m := rec(t, res.Records[0]); m["msg"] != nil || m["fields"].(map[string]any)["level"] == nil {
+		t.Fatalf("projection %s", res.Records[0])
+	}
+}
+
+func TestContextRefusals(t *testing.T) {
+	f := newFixture(t, genLog(t0, 1000, "c@example.org"), nil)
+	ref, _ := firstRef(t, f, func(q *Query) { q.Text = "(order 10)" })
+	for _, tc := range []struct {
+		name string
+		cq   ContextQuery
+		code string
+	}{
+		{"before", ContextQuery{Ref: ref, Before: 51}, EBadQuery},
+		{"after", ContextQuery{Ref: ref, After: -1}, EBadQuery},
+		{"tampered", ContextQuery{Ref: ref[:len(ref)-2] + "AA"}, EStale},
+		{"empty", ContextQuery{}, EStale},
+		{"cursor as ref", ContextQuery{Ref: "Lc1." + strings.SplitN(ref, ".", 2)[1]}, EStale},
+		{"masked field", ContextQuery{Ref: ref, Fields: []string{"user.email"}}, EUnknownField},
+	} {
+		if _, err := f.eng.Context(ctx, tc.cq); code(err) != tc.code {
+			t.Errorf("%s: %v, want %s", tc.name, err, tc.code)
+		}
+	}
+	// A ref of another console (another K_ref).
+	k := make([]byte, 32)
+	rand.Read(k)
+	other, _ := NewSealer(k)
+	forged, _ := other.Seal("Lr1", refState{Source: "app", Stream: "x", Offset: 0, Length: 10, Epoch: f.masker.Epoch(), PolicyFP: f.fp})
+	if _, err := f.eng.Context(ctx, ContextQuery{Ref: forged}); code(err) != EStale {
+		t.Fatalf("foreign ref: %v", err)
+	}
+	// The policy changed.
+	f.fp = "fp2"
+	if _, err := f.eng.Context(ctx, ContextQuery{Ref: ref}); code(err) != EPolicyChanged {
+		t.Fatalf("policy change: %v", err)
+	}
+	f.fp = "fp1"
+	// The stream was rewritten: same length, other record.
+	path := filepath.Join(f.root, "logs", "app.log")
+	b, _ := os.ReadFile(path)
+	b2 := []byte(strings.Replace(string(b), "(order 10)", "(order 9X)", 1))
+	if err := os.WriteFile(path, b2, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.eng.Context(ctx, ContextQuery{Ref: ref}); code(err) != EStale {
+		t.Fatalf("rewritten stream: %v", err)
+	}
+}
+
+// TestContextOutputCap: past the output cap, the records farthest from
+// the target are dropped.
+func TestContextOutputCap(t *testing.T) {
+	f := newFixture(t, genLog(t0, 1000, "c@example.org"), func(o *Options) { o.Limits.MaxOutput = 2048 })
+	ref, _ := firstRef(t, f, func(q *Query) { q.Text = "(order 500)" })
+	res, err := f.eng.Context(ctx, ContextQuery{Ref: ref, Before: 50, After: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Complete || len(res.Records) >= 101 || len(res.Records) < 3 {
+		t.Fatalf("%d records, complete %v", len(res.Records), res.Complete)
+	}
+	if !strings.Contains(rec(t, res.Records[res.Target])["msg"].(string), "(order 500)") {
+		t.Fatal("target lost")
+	}
+	if d := len(res.Records) - 1 - 2*res.Target; d < -1 || d > 1 {
+		t.Fatalf("not centred: target %d of %d", res.Target, len(res.Records))
+	}
+}
+
+var orderRe = regexp.MustCompile(`\(order (\d+)\)`)
+
+func TestTrace(t *testing.T) {
+	canary := "canary@example.org"
+	f := newFixture(t, genLog(t0, 30000, canary), oneGranulePerCall)
+	tok := strings.TrimSpace(f.masker.Text(canary))
+	if !strings.HasPrefix(tok, mask.Open) {
+		t.Fatal(tok)
+	}
+	all := func(tq TraceQuery) []json.RawMessage {
+		var out []json.RawMessage
+		for i := 0; ; i++ {
+			res, err := f.eng.Trace(ctx, tq)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, res.Records...)
+			if res.Complete {
+				return out
+			}
+			tq.Cursor = res.Cursor
+			if i > 100 {
+				t.Fatal("never completes")
+			}
+		}
+	}
+	// By pseudonym: every record carrying it, and only those.
+	got := all(TraceQuery{ID: tok, From: day.From, To: day.To, Limit: 200})
+	if len(got) != 600 {
+		t.Fatalf("%d records, want 600", len(got))
+	}
+	for _, r := range got {
+		if !strings.Contains(string(r), tok) || strings.Contains(string(r), canary) {
+			t.Fatalf("record %s", r)
+		}
+	}
+	// By a clear id: a whole word only (125, not 1250 nor 12500).
+	got = all(TraceQuery{ID: "125", From: day.From, To: day.To})
+	if len(got) != 1 || orderRe.FindStringSubmatch(rec(t, got[0])["msg"].(string))[1] != "125" {
+		t.Fatalf("%d records", len(got))
+	}
+	// A trusted value equal to the id (status 500).
+	got = all(TraceQuery{ID: "500", From: day.From, To: t0.Add(time.Hour)})
+	for _, r := range got {
+		m := rec(t, r)
+		if m["fields"].(map[string]any)["status"] != float64(500) && !strings.Contains(m["msg"].(string), "(order 500)") {
+			t.Fatalf("record %s", r)
+		}
+	}
+	if len(got) != 900+1 {
+		t.Fatalf("%d records", len(got))
+	}
+	// One call's page is in time order.
+	res, err := f.eng.Trace(ctx, TraceQuery{ID: tok, From: day.From, To: day.To, Limit: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var last string
+	for _, r := range res.Records {
+		ts := rec(t, r)["ts"].(string)
+		if ts < last {
+			t.Fatal("not in time order")
+		}
+		last = ts
+	}
+}
+
+func TestTraceRefusals(t *testing.T) {
+	f := newFixture(t, genLog(t0, 30000, "c@example.org"), oneGranulePerCall)
+	for _, tc := range []struct {
+		id, code string
+	}{
+		{"someone@example.com", EPIIInQuery},
+		{"", EBadQuery},
+		{" 125", EBadQuery},
+		{"a⟦b", EBadQuery},
+		{strings.Repeat("x", 300), EBadQuery},
+	} {
+		if _, err := f.eng.Trace(ctx, TraceQuery{ID: tc.id, From: day.From, To: day.To}); code(err) != tc.code {
+			t.Errorf("%q: %v, want %s", tc.id, err, tc.code)
+		}
+	}
+	// A trace cursor never continues a search, nor another trace.
+	res, err := f.eng.Trace(ctx, TraceQuery{ID: "125", From: day.From, To: day.To})
+	if err != nil || res.Complete {
+		t.Fatalf("%v %v", err, res.Complete)
+	}
+	if _, err := f.eng.Search(ctx, q(func(q *Query) { q.Cursor = res.Cursor })); code(err) != EStale {
+		t.Fatalf("search with a trace cursor: %v", err)
+	}
+	if _, err := f.eng.Trace(ctx, TraceQuery{ID: "126", From: day.From, To: day.To, Cursor: res.Cursor}); code(err) != EStale {
+		t.Fatalf("trace with another trace's cursor: %v", err)
+	}
+	// Over the range budget.
+	if _, err := f.eng.Trace(ctx, TraceQuery{ID: "125", From: day.From, To: day.From.Add(8 * 24 * time.Hour)}); code(err) != EOverBudget {
+		t.Fatalf("range: %v", err)
+	}
+}
+
+// TestTraceNoOracle: a clear id never matches a masked value, wherever it
+// sits (inside a placeholder or as a masked leaf).
+func TestTraceNoOracle(t *testing.T) {
+	content := `{"time":"2026-10-30T12:00:01Z","user":{"name":"zorglub"},"msg":"hello zorglub42"}` + "\n" +
+		`{"time":"2026-10-30T12:00:02Z","msg":"login from 10.1.2.3 ok"}` + "\n"
+	f := newFixture(t, content, nil)
+	for _, id := range []string{"zorglub", "10.1.2.3", "10", "ok"} {
+		res, err := f.eng.Trace(ctx, TraceQuery{ID: id, From: day.From, To: day.To})
+		if err != nil && code(err) != EPIIInQuery {
+			t.Fatal(err)
+		}
+		if err == nil {
+			for _, r := range res.Records {
+				if containsWord(evalString(string(r)), id) {
+					continue // the id is shown in clear: no oracle
+				}
+				t.Fatalf("%q matched a masked value: %s", id, r)
+			}
+		}
+	}
+	// A word inside a placeholder never matches: the e-mail's local part
+	// and domain.
+	g := newFixture(t, genLog(t0, 100, "zorglub@example.org"), nil)
+	for _, id := range []string{"zorglub", "example", "org", "user1"} {
+		res, err := g.eng.Trace(ctx, TraceQuery{ID: id, From: day.From, To: day.To})
+		if err != nil || len(res.Records) != 0 {
+			t.Fatalf("%q: %v %d", id, err, len(res.Records))
+		}
+	}
+	// "ok" is shown in clear: it matches.
+	res, err := f.eng.Trace(ctx, TraceQuery{ID: "ok", From: day.From, To: day.To})
+	if err != nil || len(res.Records) != 1 {
+		t.Fatalf("%v %d", err, len(res.Records))
+	}
+}
+
+func appendLines(t *testing.T, path string, lines ...string) {
+	t.Helper()
+	fh, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fh.Close()
+	for _, l := range lines {
+		fh.WriteString(l + "\n")
+	}
+}
+
+func liveLine(i int, user string) string {
+	return fmt.Sprintf("time=%s level=error status=502 msg=\"live %d for %s\"", time.Now().UTC().Format(time.RFC3339Nano), i, user)
+}
+
+func TestTail(t *testing.T) {
+	f := newFixture(t, genLog(time.Now().Add(-time.Hour), 100, "c@example.org"), func(o *Options) { o.TailPoll = 100 * time.Millisecond })
+	path := filepath.Join(f.root, "logs", "app.log")
+	go func() {
+		time.Sleep(400 * time.Millisecond)
+		appendLines(t, path, liveLine(1, "a@example.com"), liveLine(2, "b@example.com"))
+		time.Sleep(400 * time.Millisecond)
+		appendLines(t, path, liveLine(3, "a@example.com"))
+	}()
+	start := time.Now()
+	res, err := f.eng.Tail(ctx, TailQuery{Duration: "2s", Where: []Pred{{Field: "level", Op: "=", Value: raw("error")}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if took := time.Since(start); took < 2*time.Second || took > 5*time.Second {
+		t.Fatalf("took %s", took)
+	}
+	if len(res.Records) != 3 || !res.Complete {
+		t.Fatalf("%d records, complete %v", len(res.Records), res.Complete)
+	}
+	for i, r := range res.Records {
+		m := rec(t, r)
+		if !strings.Contains(m["msg"].(string), fmt.Sprintf("live %d ", i+1)) || strings.Contains(string(r), "@example") {
+			t.Fatalf("record %d: %s", i, r)
+		}
+	}
+	if res.Scanned.Granules == 0 {
+		t.Fatal("no work reported")
+	}
+}
+
+func TestTailStopsAtMax(t *testing.T) {
+	f := newFixture(t, "", func(o *Options) { o.TailPoll = 50 * time.Millisecond })
+	path := filepath.Join(f.root, "logs", "app.log")
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		appendLines(t, path, liveLine(1, "x"), liveLine(2, "x"), liveLine(3, "x"))
+	}()
+	start := time.Now()
+	res, err := f.eng.Tail(ctx, TailQuery{Duration: "10s", Max: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if time.Since(start) > 5*time.Second || len(res.Records) != 2 || res.Complete {
+		t.Fatalf("%s, %d records, complete %v", time.Since(start), len(res.Records), res.Complete)
+	}
+}
+
+func TestTailRefusals(t *testing.T) {
+	f := newFixture(t, "", nil)
+	for _, tc := range []TailQuery{
+		{Duration: "51s"}, {Duration: "-1s"}, {Duration: "soon"}, {Max: 201}, {Max: -1},
+		{Text: "someone@example.com"},
+	} {
+		if _, err := f.eng.Tail(ctx, tc); code(err) != EBadQuery && code(err) != EPIIInQuery {
+			t.Errorf("%+v: %v", tc, err)
+		}
+	}
+	if _, err := f.eng.Tail(ctx, TailQuery{Text: "someone@example.com"}); code(err) != EPIIInQuery {
+		t.Fatalf("pii: %v", err)
+	}
+}
+
+func TestHandleAround(t *testing.T) {
+	f := newFixture(t, genLog(t0, 100, "c@example.org"), nil)
+	ref, _ := firstRef(t, f, func(q *Query) { q.Text = "(order 50)" })
+	p, _ := json.Marshal(ContextQuery{Ref: ref, Before: 1, After: 1})
+	res, r, err := f.eng.Handle(ctx, MethodContext, p)
+	if err != nil || r != nil || len(res.(ContextResult).Records) != 3 {
+		t.Fatalf("%v %v %+v", err, r, res)
+	}
+	res, r, err = f.eng.Handle(ctx, MethodTrace, json.RawMessage(`{"id":"50","from":"2026-10-30T12:00:00Z","to":"2026-10-30T13:00:00Z"}`))
+	if err != nil || r != nil || len(res.(SearchResult).Records) != 1 {
+		t.Fatalf("%v %v %+v", err, r, res)
+	}
+	if _, r, _ := f.eng.Handle(ctx, MethodTail, json.RawMessage(`{"duration":"1m"}`)); r == nil || r.Code != EBadQuery {
+		t.Fatalf("tail: %v", r)
+	}
+	if _, r, _ := f.eng.Handle(ctx, MethodContext, json.RawMessage(`{"ref":"x","nope":1}`)); r == nil || r.Code != EBadQuery {
+		t.Fatalf("unknown field: %v", r)
+	}
+}
+
+// TestNoDigestInAroundResults: refs of context, trace and tail results are
+// opaque; no digest or policy fingerprint is on the socket (#26).
+func TestNoDigestInAroundResults(t *testing.T) {
+	f := newFixture(t, genLog(t0, 100, "c@example.org"), nil)
+	f.fp = "POLICYFINGERPRINT"
+	ref, _ := firstRef(t, f, func(q *Query) { q.Text = "(order 50)" })
+	_, digest, err := f.eng.Ref(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cres, _ := f.eng.Context(ctx, ContextQuery{Ref: ref, Before: 2, After: 2})
+	tres, _ := f.eng.Trace(ctx, TraceQuery{ID: "50", From: day.From, To: day.To})
+	for _, v := range []any{cres, tres} {
+		out, _ := json.Marshal(v)
+		for _, s := range []string{"POLICYFINGERPRINT", digest, "app.log"} {
+			if strings.Contains(string(out), s) {
+				t.Fatalf("%q on the socket", s)
+			}
+		}
+	}
+}

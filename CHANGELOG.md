@@ -50,6 +50,12 @@ uses [Semantic Versioning](https://semver.org/).
   `person_name` and `phone_loose` are opt-in by naming them in a profile's
   `detectors`.
 
+- Engine read-around calls: `log.context` (the records around a ref, before
+  and after up to 50, the ref's record checked by its keyed digest),
+  `log.trace` (one clear id or pseudonym over a range, whole words of the
+  masked view only, with search's plans, budgets and cursors) and `log.tail`
+  (new records matching a filter for up to 50 s, at most 200).
+
 ### Fixed
 
 - The launcher chooses the non-recursive bind option from the Docker CLI
