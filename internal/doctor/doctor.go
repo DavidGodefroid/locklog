@@ -18,17 +18,18 @@ package doctor
 import (
 	"context"
 	"crypto/tls"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/DavidGodefroid/locklog/internal/config"
+	"github.com/DavidGodefroid/locklog/internal/egress"
 	"github.com/DavidGodefroid/locklog/internal/hostfacts"
 )
 
@@ -197,8 +198,8 @@ func Run(ctx context.Context, o Options) (Report, error) {
 			if s.Remote == nil {
 				continue
 			}
-			u, label := s.Remote.URL, n+"/"+s.Name
-			probes = append(probes, probe{label, func(ctx context.Context) Item { return backendItem(ctx, label, u, o.Timeout) }})
+			src, label := s, n+"/"+s.Name
+			probes = append(probes, probe{label, func(ctx context.Context) Item { return backendItem(ctx, label, src, o.Timeout) }})
 		}
 	}
 	for _, e := range o.Metadata {
@@ -279,18 +280,42 @@ func client(timeout time.Duration) *http.Client {
 	}
 }
 
-// maxProbeBody is the most of a body read to recognise the API; it is
-// never printed.
-const maxProbeBody = 4096
+// maxProbeBody is the most of a body read to recognise the API (a
+// mapping answer can be long); it is never printed.
+const maxProbeBody = 1 << 20
 
-// backendItem probes a Loki read without credentials: the label list.
-func backendItem(ctx context.Context, label, base string, timeout time.Duration) Item {
-	u, err := url.Parse(base)
+// probeAPI is the data read of a source kind without credentials: its
+// path, the API's name and how its data answer is recognised (the
+// console's production check, egress, reads the same).
+func probeAPI(s config.Source) (path, api string, recognize egress.Recognizer, err error) {
+	switch s.Kind {
+	case config.KindLoki:
+		return egress.LokiProbePath, "Loki", egress.LokiData, nil
+	case config.KindElastic, config.KindOpenSearch:
+		p, err := egress.ElasticProbePath(s.Remote.Indices)
+		api = "Elasticsearch"
+		if s.Kind == config.KindOpenSearch {
+			api = "OpenSearch"
+		}
+		return p, api, egress.ElasticData, err
+	}
+	return "", "", nil, fmt.Errorf("kind %s", s.Kind)
+}
+
+// backendItem probes a data read of a remote source without credentials:
+// Loki's label list, the mappings of an Elasticsearch / OpenSearch
+// source's indices.
+func backendItem(ctx context.Context, label string, s config.Source, timeout time.Duration) Item {
+	u, err := url.Parse(s.Remote.URL)
 	if err != nil {
 		return Item{Unknown: true, Text: "backend " + label + ": its url does not parse"}
 	}
-	u = u.JoinPath("loki", "api", "v1", "labels")
 	shown := u.Scheme + "://" + u.Host
+	path, api, recognize, err := probeAPI(s)
+	if err != nil {
+		return Item{Unknown: true, Text: "backend " + label + " (" + shown + "): no probe for this kind"}
+	}
+	u = u.JoinPath(strings.Split(strings.TrimPrefix(path, "/"), "/")...)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return Item{Unknown: true, Text: "backend " + label + ": " + shown}
@@ -300,15 +325,16 @@ func backendItem(ctx context.Context, label, base string, timeout time.Duration)
 		return Item{Text: "backend " + label + " (" + shown + "): not reachable from here"}
 	}
 	defer resp.Body.Close()
-	var body struct {
-		Status string `json:"status"`
-	}
-	recognised := resp.StatusCode == http.StatusOK &&
-		json.NewDecoder(io.LimitReader(resp.Body, maxProbeBody)).Decode(&body) == nil && body.Status == "success"
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxProbeBody+1))
+	recognised := resp.StatusCode == http.StatusOK && err == nil && len(body) <= maxProbeBody && recognize(body)
 	switch {
 	case recognised:
-		return Item{Finding: true, Text: fmt.Sprintf("backend %s (%s) answers a Loki read without credentials (status %d): the agent can read it directly", label, shown, resp.StatusCode),
-			Remedy: "put it behind authentication (locklog setup --loki-proxy for a Compose Loki), or out of the agent's network"}
+		remedy := "put it behind authentication (locklog setup --loki-proxy for a Compose Loki), or out of the agent's network"
+		if s.Kind != config.KindLoki {
+			remedy = "turn its security on (authentication for every read), or keep it out of the agent's network"
+		}
+		return Item{Finding: true, Text: fmt.Sprintf("backend %s (%s) answers %s read without credentials (status %d): the agent can read it directly", label, shown, article(api), resp.StatusCode),
+			Remedy: remedy}
 	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
 		return Item{Text: fmt.Sprintf("backend %s (%s) needs credentials (status %d)", label, shown, resp.StatusCode)}
 	case resp.StatusCode >= 200 && resp.StatusCode < 300:
@@ -316,6 +342,13 @@ func backendItem(ctx context.Context, label, base string, timeout time.Duration)
 			Remedy: "check what it serves without credentials; put it behind authentication"}
 	}
 	return Item{Text: fmt.Sprintf("backend %s (%s): status %d without credentials", label, shown, resp.StatusCode)}
+}
+
+func article(api string) string {
+	if strings.HasPrefix(api, "E") || strings.HasPrefix(api, "O") {
+		return "an " + api
+	}
+	return "a " + api
 }
 
 // metadataItem probes one cloud metadata credential path.

@@ -153,13 +153,50 @@ func TestDoctorUnknown(t *testing.T) {
 func TestBackendProbe(t *testing.T) {
 	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("<html>SECRET-VALUE-4242</html>")) }))
 	defer other.Close()
-	it := backendItem(context.Background(), "p/s", other.URL, 0)
+	lk := config.Source{Name: "s", Kind: config.KindLoki, Remote: &config.Remote{URL: other.URL}}
+	it := backendItem(context.Background(), "p/s", lk, 0)
 	if !it.Finding || !strings.Contains(it.Text, "API not recognised") || strings.Contains(it.Text, "SECRET") {
 		t.Errorf("item = %+v", it)
 	}
 	other.Close()
-	if it := backendItem(context.Background(), "p/s", other.URL, 0); it.Finding || !strings.Contains(it.Text, "not reachable") {
+	if it := backendItem(context.Background(), "p/s", lk, 0); it.Finding || !strings.Contains(it.Text, "not reachable") {
 		t.Errorf("closed: %+v", it)
+	}
+}
+
+// Elasticsearch and OpenSearch: the probe reads the mappings of the
+// source's indices without credentials.
+func TestBackendProbeElastic(t *testing.T) {
+	var paths []string
+	open := true
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			t.Errorf("a probe sent credentials: %v", r.Header)
+		}
+		paths = append(paths, r.URL.Path)
+		if !open {
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write([]byte(`{"error":"SECRET-VALUE-4242"}`))
+			return
+		}
+		w.Write([]byte(`{"logs-a":{"mappings":{"properties":{"user_email":{"type":"keyword"},"note":{"type":"text","meta":"SECRET-VALUE-4242"}}}}}`))
+	}))
+	defer srv.Close()
+	for _, kind := range []string{config.KindElastic, config.KindOpenSearch} {
+		paths = nil
+		open = true
+		src := config.Source{Name: "es", Kind: kind, Remote: &config.Remote{URL: srv.URL, Indices: []string{"logs-*", "audit"}}}
+		it := backendItem(context.Background(), "p/es", src, 0)
+		if !it.Finding || !strings.Contains(it.Text, "read without credentials") || strings.Contains(it.Text, "SECRET") || strings.Contains(it.Text, "user_email") {
+			t.Errorf("%s open: %+v", kind, it)
+		}
+		if len(paths) != 1 || paths[0] != "/audit,logs-*/_mapping" {
+			t.Errorf("%s probed %v", kind, paths)
+		}
+		open = false
+		if it := backendItem(context.Background(), "p/es", src, 0); it.Finding || !strings.Contains(it.Text, "needs credentials (status 401)") {
+			t.Errorf("%s closed: %+v", kind, it)
+		}
 	}
 }
 
