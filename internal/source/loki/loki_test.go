@@ -609,3 +609,56 @@ func TestBackendErrorsCarryNoBody(t *testing.T) {
 	}
 	_ = url.Values{}
 }
+
+// sameNanosecond is n entries at one nanosecond, then `later` entries
+// one second apart.
+func sameNanosecond(n, later int) []fakeEntry {
+	var out []fakeEntry
+	for i := 0; i < n; i++ {
+		out = append(out, fakeEntry{ts: t0.Add(time.Minute).UnixNano(), labels: map[string]string{"env": "prod", "app": "api", "pod": strconv.Itoa(i)},
+			line: fmt.Sprintf("tie %d", i)})
+	}
+	for i := 0; i < later; i++ {
+		out = append(out, fakeEntry{ts: t0.Add(time.Minute + time.Duration(i+1)*time.Second).UnixNano(), labels: map[string]string{"env": "prod", "app": "api"},
+			line: fmt.Sprintf("later %d", i)})
+	}
+	return out
+}
+
+func TestPagingNeverTruncatesSilently(t *testing.T) {
+	// More entries at one nanosecond than a page holds (Limit 7): an
+	// explicit error, never a partial answer.
+	s := newSource(t, &fakeLoki{entries: sameNanosecond(20, 5)}, nil)
+	plan, _ := s.Plan(ctx, source.Range{From: t0, To: t0.Add(time.Hour)}, source.Selector{})
+	n := 0
+	var err error
+	for _, c := range plan.Chunks {
+		it, _ := s.Scan(ctx, c)
+		for {
+			if _, err = it.Next(); err != nil {
+				break
+			}
+			n++
+		}
+		it.Close()
+	}
+	if errors.Is(err, io.EOF) || err == nil || !strings.Contains(err.Error(), "nanosecond") {
+		t.Fatalf("scan returned %d of 25 entries, err %v: want an explicit error", n, err)
+	}
+	if _, err := s.Reread(ctx, source.RawRef{Source: "loki", Stream: plan.Chunks[0].Stream, Offset: t0.Add(time.Minute).UnixNano(), Length: 15}); err == nil || errors.Is(err, source.ErrStale) {
+		t.Fatalf("reread at a crowded nanosecond: %v", err)
+	}
+	// Fewer than Limit at one nanosecond, starting a page: all of them.
+	for _, tc := range []struct{ tie, later int }{{6, 5}, {6, 20}, {1, 30}} {
+		s := newSource(t, &fakeLoki{entries: sameNanosecond(tc.tie, tc.later)}, nil)
+		if recs := scanAll(t, s, source.Range{From: t0, To: t0.Add(time.Hour)}, source.Selector{}); len(recs) != tc.tie+tc.later {
+			t.Fatalf("%d ties + %d: %d records", tc.tie, tc.later, len(recs))
+		}
+		// And when the ties fall in the middle of a page.
+		s = newSource(t, &fakeLoki{entries: append(sameNanosecond(tc.tie, tc.later), fakeEntry{ts: t0.Add(time.Second).UnixNano(),
+			labels: map[string]string{"env": "prod"}, line: "first"}, fakeEntry{ts: t0.Add(2 * time.Second).UnixNano(), labels: map[string]string{"env": "prod"}, line: "second"})}, nil)
+		if recs := scanAll(t, s, source.Range{From: t0, To: t0.Add(time.Hour)}, source.Selector{}); len(recs) != tc.tie+tc.later+2 {
+			t.Fatalf("2 + %d ties + %d: %d records", tc.tie, tc.later, len(recs))
+		}
+	}
+}

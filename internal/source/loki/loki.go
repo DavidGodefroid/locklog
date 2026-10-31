@@ -284,10 +284,16 @@ func sortEntries(es []entry) {
 	})
 }
 
+// errCrowded is returned when a page cannot move past one nanosecond: at
+// least Limit entries share it, and Loki pages by time only, so the rest of
+// them cannot be fetched. The slice fails rather than return part of it.
+var errCrowded = errors.New("at least a page of entries share one nanosecond: they cannot be paged completely")
+
 // fetchSlice returns every entry of [from, to) for query q, in order, and
 // the response bytes it fetched. Pages are cut by Limit; the next page
-// starts at the last timestamp seen, and entries already returned at that
-// timestamp are skipped.
+// starts at the last timestamp of the page, and the entries already
+// returned at that timestamp are skipped. A full page that brings nothing
+// new at one timestamp is an error (errCrowded), never a silent cut.
 func (s *Source) fetchSlice(ctx context.Context, q string, from, to int64) ([]entry, int64, error) {
 	var out []entry
 	var fetched int64
@@ -315,12 +321,21 @@ func (s *Source) fetchSlice(ctx context.Context, q string, from, to int64) ([]en
 		for i := len(out) - 1; i >= 0 && out[i].ts == start; i-- {
 			seen[out[i].key+"\x00"+out[i].line]++
 		}
+		// A page that is not full, or that reaches `to`, holds the rest
+		// of the slice (pages are cut in time order).
+		done := len(page) < s.o.Limit
 		n := 0
 		var last int64 = -1
 		for _, e := range page {
-			if e.ts < from || e.ts >= to {
+			if e.ts >= to {
+				done = true
 				continue
 			}
+			if e.ts < start {
+				continue
+			}
+			// Over every in-range entry of the page, new or not.
+			last = max(last, e.ts)
 			k := e.key + "\x00" + e.line
 			if e.ts == start && seen[k] > 0 {
 				seen[k]--
@@ -328,21 +343,17 @@ func (s *Source) fetchSlice(ctx context.Context, q string, from, to int64) ([]en
 			}
 			out = append(out, e)
 			n++
-			last = e.ts
 		}
-		if len(page) < s.o.Limit || last < 0 {
+		switch {
+		case done:
 			return out, fetched, nil
+		case last < 0:
+			// A full page with nothing in [start, to): not Loki's paging.
+			return nil, fetched, errResponse
+		case last == start && n == 0:
+			return nil, fetched, errCrowded
 		}
-		if last == start && n == 0 {
-			// A page made only of entries at one timestamp already
-			// seen: more than Limit entries share it. Move on.
-			start++
-		} else {
-			start = last
-		}
-		if start >= to {
-			return out, fetched, nil
-		}
+		start = last
 	}
 }
 
