@@ -1,0 +1,16 @@
+# locklog: the project's log sources. The console (`locklog console`) reads
+# this file and shows every change that loosens it before it applies.
+# `locklog setup` writes it from what it finds on this host.
+version = 1
+
+# [profiles.staging]
+# production = false
+#
+# [profiles.staging.sources.nginx]
+# kind = "file"
+# paths = ["/var/log/nginx/access.log*"]
+# format = "combined"
+#
+# [profiles.staging.sources.system]
+# kind = "journald"
+# units = ["nginx.service"]

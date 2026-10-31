@@ -276,26 +276,39 @@ func (p *Parser) attrs(frame []Member) []Member {
 	return append(slices.Clone(p.opts.StaticAttrs), frame...)
 }
 
-// filterFrameAttrs keeps, of a frame's "attrs" object, only the members
-// FrameAttrs names (string values only: Docker writes no other).
+// filterFrameAttrs keeps, of a frame's "attrs" objects, only the members
+// FrameAttrs names (string values only: Docker writes no other). Every
+// "attrs" member is filtered (a frame repeating the key must not carry an
+// unfiltered second one); they are merged into one, first value of a key
+// kept, at the place of the first, and dropped when nothing is left.
 func (p *Parser) filterFrameAttrs(frame []Member) []Member {
 	i := slices.IndexFunc(frame, func(m Member) bool { return m.Key == "attrs" })
 	if i < 0 {
 		return frame
 	}
-	out := slices.Clone(frame)
 	var kept []Member
-	if out[i].Value.Kind == KindObject {
-		for _, m := range out[i].Value.Members {
-			if m.Value.Kind == KindString && slices.Contains(p.opts.FrameAttrs, m.Key) && !slices.ContainsFunc(kept, func(k Member) bool { return k.Key == m.Key }) {
-				kept = append(kept, m)
+	out := make([]Member, 0, len(frame))
+	for j, m := range frame {
+		if m.Key != "attrs" {
+			out = append(out, m)
+			continue
+		}
+		if m.Value.Kind == KindObject {
+			for _, a := range m.Value.Members {
+				if a.Value.Kind == KindString && slices.Contains(p.opts.FrameAttrs, a.Key) && !slices.ContainsFunc(kept, func(k Member) bool { return k.Key == a.Key }) {
+					kept = append(kept, a)
+				}
 			}
 		}
+		if j == i {
+			out = append(out, Member{Key: "attrs"}) // placeholder, set below
+		}
 	}
+	at := slices.IndexFunc(out, func(m Member) bool { return m.Key == "attrs" })
 	if len(kept) == 0 {
-		return slices.Delete(out, i, i+1)
+		return slices.Delete(out, at, at+1)
 	}
-	out[i] = Member{Key: "attrs", Value: Value{Kind: KindObject, Members: kept}}
+	out[at] = Member{Key: "attrs", Value: Value{Kind: KindObject, Members: kept}}
 	return out
 }
 

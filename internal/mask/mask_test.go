@@ -938,3 +938,42 @@ func TestMaskKeepsInheritedTime(t *testing.T) {
 		t.Errorf("Time() = %v, %v; want %v, true", ts, ok, at)
 	}
 }
+
+// Frame attributes and payload fields share key names, never trust (#42):
+// a docker record's payload {"container": ...} is not the trusted
+// container attribute, and is redacted under redact-unknown.
+func TestAttrKeysTrustOnlyAttributes(t *testing.T) {
+	p, err := parse.New(parse.Options{Format: "docker-json",
+		StaticAttrs: []parse.Member{{Key: "container", Value: parse.Value{Kind: parse.KindString, Str: "shop-api-1"}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := p.NewReader(strings.NewReader(`{"log":"{\"container\":\"Jane Doe\",\"stream\":\"Jane Doe\",\"level\":\"error\"}\n","stream":"stdout","time":"2026-10-31T01:20:41Z"}`+"\n"), 0)
+	ev, err := r.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	trusted := []string{"container", "stream", "level"}
+	attrKeys := append(slices.Clone(parse.FrameKeys), "container")
+	m := newMasker(t, Options{Structured: StructuredRedactUnknown, Trusted: trusted, AttrKeys: attrKeys})
+	got := encode(t, m.Mask("web", ev))
+	if strings.Contains(got, "Jane") {
+		t.Fatalf("a payload field named like an attribute was trusted: %s", got)
+	}
+	if v, _ := m.Mask("web", ev).Lookup("container"); v.Text() != Redacted {
+		t.Errorf("payload container = %q, want %s", v.Text(), Redacted)
+	}
+	if v, _ := m.Mask("web", ev).Lookup("level"); v.Text() != "error" {
+		t.Errorf("trusted payload level = %q", v.Text())
+	}
+	if !strings.Contains(got, "shop-api-1") || !strings.Contains(got, "stdout") {
+		t.Errorf("the attributes are not shown: %s", got)
+	}
+	// Without AttrKeys the same trusted names do apply to the payload (a
+	// file source of a plain JSON format, whose fields they are): shown
+	// after the detectors, never redacted by redact-unknown.
+	plain := newMasker(t, Options{Structured: StructuredRedactUnknown, Trusted: trusted}).Mask("app", ev)
+	if v, _ := plain.Lookup("container"); v.Text() == Redacted || !strings.HasPrefix(v.Text(), "⟦person_name:") {
+		t.Errorf("trusted payload container without AttrKeys = %q", v.Text())
+	}
+}
