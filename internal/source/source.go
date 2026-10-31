@@ -184,7 +184,10 @@ type Iterator interface {
 
 // FieldInfo describes one field name a source has seen.
 type FieldInfo struct {
-	Name    string
+	Name string
+	// Label is set for a label of the source's frame (a Loki stream
+	// label, a docker container or stream), unset for a line field.
+	Label   bool
 	Trusted bool
 	// Values are the trusted field's distinct values (raw, masked by the
 	// caller), when the source knows them and they are few.

@@ -2,6 +2,7 @@ package parse
 
 import (
 	"io"
+	"reflect"
 	"strings"
 	"time"
 )
@@ -17,7 +18,10 @@ type Reader struct {
 	lr  *LineReader
 	end int64 // lines starting at or after end are left in lr; -1: none
 
-	peeks   []logical // lines read ahead, in order
+	peeks []logical // lines read ahead, in order
+	// held is a frame line read ahead that ended another stream's partial
+	// run: it is unwrapped (and may start its own run) on the next call.
+	held    *Line
 	pending *assembly
 	err     error
 
@@ -90,6 +94,8 @@ func (r *Reader) Offset() int64 {
 		return r.pending.offset
 	case len(r.peeks) > 0:
 		return r.peeks[0].Offset
+	case r.held != nil:
+		return r.held.Offset
 	}
 	return r.lr.Offset()
 }
@@ -157,13 +163,18 @@ func (r *Reader) nextLogical() (logical, error) {
 		r.peeks = r.peeks[1:]
 		return ln, nil
 	}
-	if r.err != nil {
-		return logical{}, r.err
-	}
-	l, err := r.lr.Next()
-	if err != nil {
-		r.err = err
-		return logical{}, err
+	var l Line
+	if r.held != nil {
+		l, r.held = *r.held, nil
+	} else {
+		if r.err != nil {
+			return logical{}, r.err
+		}
+		var err error
+		if l, err = r.lr.Next(); err != nil {
+			r.err = err
+			return logical{}, err
+		}
 	}
 	if r.end >= 0 && l.Offset >= r.end {
 		r.lr.Unread(l)
@@ -208,6 +219,12 @@ func (r *Reader) nextLogical() (logical, error) {
 			open = open || l2.Unterminated
 			break
 		}
+		if frameStream(next) != frameStream(fr) {
+			// Runtimes interleave stdout and stderr in one file: a
+			// frame of the other stream ends this run, never joins it.
+			r.held = &l2
+			break
+		}
 		next.Text = validText([]byte(next.Text))
 		out.Length += l2.Length
 		out.Truncated = out.Truncated || l2.Truncated
@@ -243,6 +260,9 @@ func (r *Reader) nextLogical() (logical, error) {
 func (r *Reader) continues(ln logical) bool {
 	if r.pending.format != nil {
 		return false
+	}
+	if f := r.pending.frame; f != nil && ln.frame != nil && !reflect.DeepEqual(f.Attrs, ln.frame.Attrs) {
+		return false // another stream (or container attrs): never one event
 	}
 	switch r.p.opts.Multiline {
 	case MultilineNone:
@@ -325,8 +345,10 @@ func (r *Reader) emit() Event {
 	if a.unterminated && r.hold < 0 {
 		r.hold = a.offset
 	}
+	ev.Attrs = r.p.attrs(nil)
 	if a.frame != nil {
-		ev.Attrs = a.frame.Attrs
+		ev.Framed = true
+		ev.Attrs = r.p.attrs(a.frame.Attrs)
 		if a.frame.HasTime {
 			ev.SetTime(a.frame.Time)
 		}
@@ -337,4 +359,10 @@ func (r *Reader) emit() Event {
 		ev.Time, ev.Inherited = r.lastTime, true
 	}
 	return ev
+}
+
+// frameStream is a frame's "stream" attribute ("" when it has none).
+func frameStream(fr Frame) string {
+	v, _ := Get(fr.Attrs, "stream")
+	return v.Str
 }

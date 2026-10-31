@@ -21,7 +21,8 @@ import (
 
 const (
 	// Version of the on-disk format; another version is rebuilt. 2:
-	// values are line fields only (1 fell back to frame attributes).
+	// line fields and labels (LabelKey) are separate namespaces (1 fell
+	// back from a field to a frame attribute).
 	Version = 2
 	// MaxDistinct is the most distinct values a field may have in one
 	// stream and stay indexed.
@@ -178,13 +179,43 @@ func sortedCounts(m map[string]*Count) []Count {
 	return out
 }
 
-// Values returns the record's values of fields, in order: the scalar text of
-// the field (dotted paths reach nested objects), Absent when missing or not
-// a scalar, Redacted when sensitive flags it.
-func Values(ev parse.Event, fields []string, sensitive func(field, value string) bool) []string {
-	out := make([]string, len(fields))
-	for i, f := range fields {
-		v, ok := Lookup(ev, f)
+// labelPrefix marks an indexed name as a label (a frame attribute): a
+// configured field name never holds a colon.
+const labelPrefix = "label:"
+
+// LabelKey is the indexed name of the label name: the index holds line
+// fields and labels side by side, each in its own namespace.
+func LabelKey(name string) string { return labelPrefix + name }
+
+// SplitKey returns the field or label an indexed name stands for.
+func SplitKey(key string) (name string, label bool) {
+	if n, ok := strings.CutPrefix(key, labelPrefix); ok {
+		return n, true
+	}
+	return key, false
+}
+
+// TermKey is the indexed name a field (label unset) or label stands for.
+func TermKey(name string, label bool) string {
+	if label {
+		return LabelKey(name)
+	}
+	return name
+}
+
+// Values returns the record's values of keys (line fields, and labels as
+// LabelKey), in order: the scalar text of the field or label (dotted paths
+// reach nested objects), Absent when missing or not a scalar, Redacted when
+// sensitive flags it.
+func Values(ev parse.Event, keys []string, sensitive func(field, value string) bool) []string {
+	out := make([]string, len(keys))
+	for i, k := range keys {
+		f, label := SplitKey(k)
+		look := Lookup
+		if label {
+			look = LookupAttr
+		}
+		v, ok := look(ev, f)
 		switch {
 		case !ok:
 			out[i] = Absent

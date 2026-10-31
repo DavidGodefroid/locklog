@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"testing"
 	"time"
 
@@ -276,5 +277,28 @@ func TestLookupNamespaces(t *testing.T) {
 	}
 	if v, _ := LookupAttr(ev, "env"); v != "label" {
 		t.Fatal(v)
+	}
+}
+
+// Values reads a label key (LabelKey) from the frame attributes only and a
+// field key from the line fields only: a payload field never stands for the
+// trusted container name or the runtime's stream, nor the reverse.
+func TestValuesNamespaces(t *testing.T) {
+	e := ev(t0, "container", "spoofed", "stream", "spoofed", "level", "warn")
+	e.Framed = true
+	e.Attrs = []parse.Member{{Key: "container", Value: parse.Value{Kind: parse.KindString, Str: "shop-api-1"}},
+		{Key: "attrs", Value: parse.Value{Kind: parse.KindObject,
+			Members: []parse.Member{{Key: "team", Value: parse.Value{Kind: parse.KindString, Str: "shop"}}}}}}
+	keys := []string{LabelKey("container"), "container", LabelKey("stream"), "stream", LabelKey("attrs.team"), LabelKey("attrs.other"), "level", LabelKey("level")}
+	got := Values(e, keys, nil)
+	want := []string{"shop-api-1", "spoofed", Absent, "spoofed", "shop", Absent, "warn", Absent}
+	if !slices.Equal(got, want) {
+		t.Fatalf("Values = %q, want %q", got, want)
+	}
+	if n, l := SplitKey(LabelKey("attrs.team")); n != "attrs.team" || !l {
+		t.Fatal(n, l)
+	}
+	if n, l := SplitKey("level"); n != "level" || l {
+		t.Fatal(n, l)
 	}
 }

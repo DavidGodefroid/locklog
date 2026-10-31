@@ -21,7 +21,8 @@ type launcherFixture struct {
 }
 
 var launcherTools = []string{"sh", "dirname", "mkdir", "id", "cat", "printf", "awk", "sha256sum", "shasum", "tar",
-	"gzip", "install", "mktemp", "rm", "uname", "sed", "tr", "tail", "grep", "stat", "cksum", "getconf", "nproc", "cut", "ls"}
+	"gzip", "install", "mktemp", "rm", "uname", "sed", "tr", "tail", "grep", "stat", "cksum", "getconf", "nproc", "cut", "ls",
+	"mv", "chmod", "date", "sleep", "mkfifo", "find", "rmdir"}
 
 func newLauncherFixture(t *testing.T) *launcherFixture {
 	t.Helper()
@@ -52,11 +53,51 @@ func newLauncherFixture(t *testing.T) *launcherFixture {
 		}
 	}
 	writeExec(t, filepath.Join(f.bin, "docker"), `#!/bin/sh
-for a in "$@"; do printf '%s\n' "$a"; done >> '`+f.calls+`'
-echo -- >> '`+f.calls+`'
+# One write per call: calls from the map loop run concurrently.
+rec=
+for a in "$@"; do rec="$rec$a
+"; done
+printf '%s--\n' "$rec" >> '`+f.calls+`'
 case "$1" in
-version) printf '%s\n' "${DOCKER_VERSION:-27.3.1}" ;;
-info) printf '%s\n' "${DOCKER_INFO:-[name=seccomp,profile=builtin]}" ;;
+version)
+	case "$3" in
+	*Client*) printf '%s\n' "${DOCKER_CLIENT_VERSION:-${DOCKER_VERSION:-27.3.1}}" ;;
+	*) printf '%s\n' "${DOCKER_VERSION:-27.3.1}" ;;
+	esac ;;
+info)
+	case "$3" in
+	*DockerRootDir*) printf '%s\n' "${DOCKER_ROOT_DIR:-/var/lib/docker}" ;;
+	*) printf '%s\n' "${DOCKER_INFO:-[name=seccomp,profile=builtin]}" ;;
+	esac ;;
+ps)
+	# PS_FAIL_AFTER=N: every call after the N-th fails.
+	if [ -n "${PS_FAIL_AFTER:-}" ]; then
+		echo x >> '`+filepath.Join(root, "ps.calls")+`'
+		[ "$(grep -c x '`+filepath.Join(root, "ps.calls")+`')" -le "$PS_FAIL_AFTER" ] || exit 1
+	fi
+	printf '%b' "${DOCKER_PS:-}" ;;
+inspect)
+	# docker inspect --type container --format F ID: the record in I_<ID>.
+	if [ "$2" = --type ]; then
+		# The template, byte for byte: anything else is a test failure.
+		if [ "$3 $4" != "container --format" ] || [ "$5" != "$WANT_INSPECT_FORMAT" ]; then
+			echo "docker stub: unexpected inspect arguments: $*" >&2
+			exit 3
+		fi
+		eval "rec=\${I_$6:-}"
+		[ -n "$rec" ] || exit 1
+		printf '%b\n' "$rec"
+	elif [ "$3" = '{{.State.Running}}' ] && [ -n "${CONSOLE_RUNNING_FILE:-}" ] && [ -e "$CONSOLE_RUNNING_FILE" ]; then
+		echo true
+	fi ;;
+events)
+	echo $$ > '`+filepath.Join(root, "events.pid")+`'
+	n=1
+	while [ -e '`+filepath.Join(root, "events.")+`'$n ]; do n=$((n + 1)); done
+	: > '`+filepath.Join(root, "events.")+`'$n
+	printf '%b' "${EVENTS_OUT:-}"
+	[ -z "${EVENTS_EXIT:-}" ] || exit 0
+	exec sleep 30 ;;
 volume) [ "$2" = inspect ] && exit "${VOLUME_MISSING:-0}" ;;
 run)
 	for a in "$@"; do
@@ -73,6 +114,20 @@ run)
 			exit 0 ;;
 		mounts) printf '%b' "${PLAN:-profile staging false\n}"; exit "${PLAN_RC:-0}" ;;
 		version) echo "locklog 9.9.9"; exit 0 ;;
+		console)
+			# Wait for a file the map loop writes, then exit as told.
+			trap 'echo term > "`+filepath.Join(root, "console.term")+`"; exit 143' TERM
+			if [ -n "${CONSOLE_WAIT:-}" ]; then
+				i=0
+				while [ $i -lt 100 ]; do
+					set -- $CONSOLE_WAIT
+					[ -e "$1" ] && break
+					sleep 0.1
+					i=$((i + 1))
+				done
+			fi
+			[ -z "${CONSOLE_AFTER:-}" ] || sleep "$CONSOLE_AFTER"
+			exit "${CONSOLE_RC:-0}" ;;
 		esac
 	done ;;
 esac
@@ -84,9 +139,15 @@ exit 0
 	}
 	f.script = filepath.Join(root, "locklog")
 	writeExec(t, f.script, string(launcher))
-	f.env = []string{"PATH=" + f.bin, "HOME=" + filepath.Join(root, "home"), "LOCKLOG_EXTRA_ROOTS=" + f.logs}
+	f.env = []string{"PATH=" + f.bin, "HOME=" + filepath.Join(root, "home"), "LOCKLOG_EXTRA_ROOTS=" + f.logs,
+		"WANT_INSPECT_FORMAT=" + inspectFormat}
 	return f
 }
+
+// inspectFormat is the launcher's docker inspect template for the map.
+const inspectFormat = `{{.Id}} {{if index .Config.Labels "locklog.console"}}1{{else}}0{{end}} {{.HostConfig.LogConfig.Type}} ` +
+	`{{with index .HostConfig.LogConfig.Config "max-file"}}{{.}}{{else}}-{{end}} ` +
+	`{{with index .HostConfig.LogConfig.Config "compress"}}{{.}}{{else}}-{{end}} {{.Name}}`
 
 func writeExec(t *testing.T, path, body string) {
 	t.Helper()
@@ -276,7 +337,14 @@ func TestLauncherConsoleRefusals(t *testing.T) {
 		{[]string{"PLAN=profile staging false\\nfile " + f.logs + "/app /etc/shadow\\n"}, "is not under"},
 		{[]string{"PLAN=profile staging false\\nfile " + f.logs + "/a,b " + f.logs + "/a,b/x\\n"}, "cannot carry"},
 		{[]string{"PLAN=profile staging false\\nfile " + f.logs + "/app\\n"}, "malformed line"},
-		{[]string{"PLAN=profile staging false\\ndocker x\\n"}, "unknown line"},
+		{[]string{"PLAN=profile staging false\\npodman x\\n"}, "unknown line"},
+		{[]string{"PLAN=profile staging false\\ndocker\\n"}, "malformed line"},
+		{[]string{"PLAN=profile staging false\\ndocker a b\\n"}, "malformed line"},
+		{[]string{"PLAN=profile staging false\\ndocker a/b\\n"}, "invalid container glob"},
+		{[]string{"PLAN=profile staging false\\ndocker -x\\n"}, "invalid container glob"},
+		{[]string{"PLAN=profile staging false\\ndocker x\\n", "DOCKER_ROOT_DIR=relative"}, "not an absolute path"},
+		{[]string{"PLAN=profile staging false\\ndocker x\\n", "DOCKER_ROOT_DIR=/var/lib/../docker"}, "not a clean path"},
+		{[]string{"PLAN=profile staging false\\ndocker x\\n", "DOCKER_ROOT_DIR=/var/lib/do,cker"}, "cannot carry"},
 		{[]string{"PLAN=nonsense\\n"}, "malformed header"},
 		{[]string{"PLAN=profile st\\033[2Jx false\\n"}, "malformed header"},
 		{[]string{"PLAN=profile staging false\\nfile " + f.logs + "/app " + f.logs + "/app/../../etc/passw*\\n"}, "not a clean path"},
