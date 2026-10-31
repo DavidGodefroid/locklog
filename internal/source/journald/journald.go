@@ -285,12 +285,11 @@ func (s *Source) open(ctx context.Context, stream string) (*os.File, *journal.Fi
 // granule is one plan granule of a file: entries [first, last] by index,
 // with their offsets.
 type granule struct {
-	index         int64
-	first, last   uint64 // entry offsets
-	n             int64
-	headRealtime  uint64
-	nextRealtime  uint64 // realtime of the next granule's first entry, 0 at the end
-	monotonicTime bool
+	index        int64
+	first, last  uint64 // entry offsets
+	n            int64
+	headRealtime uint64
+	nextRealtime uint64 // realtime of the next granule's first entry, 0 at the end
 }
 
 // granules lists the fixed granules of an open file. Reading them touches

@@ -22,8 +22,6 @@ type testEntry struct {
 	fields   []string // "NAME=value"
 }
 
-func align8(n int) int { return (n + 7) &^ 7 }
-
 func (t *testFile) obj(typ, flags uint8, body []byte) uint64 {
 	off := uint64(len(t.buf))
 	size := objectHeaderSize + len(body)
