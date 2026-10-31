@@ -607,3 +607,28 @@ func TestFileSourcesNeverCrossMounts(t *testing.T) {
 		}
 	}
 }
+
+// A container name a detector flags reaches the agent as a pseudonym: a
+// term holding a placeholder, and a flagged name, never prune a container
+// (the engine matches after masking).
+func TestSelectorKeepsPseudonymisedContainers(t *testing.T) {
+	e := newEnv(t)
+	a, b := id('a'), id('b')
+	e.write(a, a+"-json.log", frames("a", 1, t0))
+	e.write(b, b+"-json.log", frames("b", 1, t0))
+	e.writeMap(1, "locklog-map 1\nc "+a+" shop-a 1 0\nc "+b+" shop-jane 1 0\n")
+	s := e.source("shop-*")
+	s.opts.Sensitive = func(_, v string) bool { return v == "shop-jane" }
+	term := func(v string) source.Selector {
+		return source.Selector{Terms: []source.Term{{Field: ContainerField, Label: true, Op: "=", Values: []string{v}}}}
+	}
+	if got := messages(scanAll(t, s, term("⟦person:0123456789⟧"))); !slices.Equal(got, []string{"shop-a: a 0", "shop-jane: b 0"}) {
+		t.Errorf("placeholder term: %q", got)
+	}
+	if got := messages(scanAll(t, s, term("shop-a"))); !slices.Equal(got, []string{"shop-a: a 0", "shop-jane: b 0"}) {
+		t.Errorf("flagged name pruned: %q", got)
+	}
+	if got := messages(scanAll(t, s, term("shop-x"))); !slices.Equal(got, []string{"shop-jane: b 0"}) {
+		t.Errorf("unflagged name kept: %q", got)
+	}
+}

@@ -134,7 +134,7 @@ func newFixtureMask(t *testing.T, content string, mopt func(*mask.Options), opt 
 	f := &fixture{t: t, root: root, store: st, src: src, masker: m, fp: "fp1", scans: new(int)}
 	o := Options{
 		Sources: map[string]source.Source{"app": countingSource{src, f.scans}},
-		Trusted: func(s, fld string) bool { return fld == "level" || fld == "status" },
+		Trusted: func(s, fld string, label bool) bool { return !label && (fld == "level" || fld == "status") },
 		Masker:  m, Sealer: sealer,
 		Cost:       fixedCost(1), // fast: whole plans in one call
 		PolicyFP:   func() string { return f.fp },
@@ -1182,7 +1182,7 @@ func TestLabelsAndFieldsAreSeparate(t *testing.T) {
 	var sels []source.Selector
 	o := f.eng.o
 	o.Sources = map[string]source.Source{"loki": labelSource{recs: recs, sels: &sels}}
-	o.Trusted = func(_, name string) bool { return name == "env" }
+	o.Trusted = func(_, name string, label bool) bool { return label && name == "env" }
 	eng, err := New(o)
 	if err != nil {
 		t.Fatal(err)
@@ -1200,8 +1200,9 @@ func TestLabelsAndFieldsAreSeparate(t *testing.T) {
 	if n := search(Pred{Field: "env", Op: "=", Value: raw("f0")}); n != 30 {
 		t.Fatalf("field search: %d", n)
 	}
-	if sels[len(sels)-1].Terms[0].Label {
-		t.Fatal("a field predicate was pushed as a label term")
+	// Only the label env is trusted: the field env is not pushed at all.
+	if len(sels[len(sels)-1].Terms) != 0 {
+		t.Fatalf("an untrusted field predicate was pushed: %+v", sels[len(sels)-1].Terms)
 	}
 	count := func(cq CountQuery) ([]string, bool) {
 		res, err := eng.Count(ctx, cq)
@@ -1223,5 +1224,35 @@ func TestLabelsAndFieldsAreSeparate(t *testing.T) {
 	byField, indexed := count(CountQuery{Query: q(func(q *Query) { q.Where = []Pred{{Label: "env", Op: "=", Value: raw("l0")}} }), By: []string{"env"}})
 	if indexed || !slices.Equal(byField, []string{t0.Format(time.RFC3339) + " f0 10", t0.Format(time.RFC3339) + " f1 10"}) {
 		t.Fatalf("field count: %v (index %v)", byField, indexed)
+	}
+}
+
+// TestTrustedLabelDoesNotTrustField: a trusted label never makes the line
+// field of the same name trusted. A count by that field is not trusted-only,
+// so a record masking fails on is left out rather than counted by its raw,
+// untrusted value (which would reach the agent in clear).
+func TestTrustedLabelDoesNotTrustField(t *testing.T) {
+	content := "time=2026-10-30T12:00:00Z level=info env=customer-acme-1 msg=\"ok 1\"\n" +
+		"time=2026-10-30T12:00:01Z level=info env=customer-acme-2 msg=\"ok 2\"\n" +
+		"time=2026-10-30T12:00:02Z level=info env=customer-acme-0 msg=\"kaboom BOOM\"\n"
+	f := newFixtureMask(t, content, func(o *mask.Options) {
+		withBoom(o)
+		o.Structured = mask.StructuredRedactUnknown
+	}, func(o *Options) {
+		o.Trusted = func(_, name string, label bool) bool {
+			return label && name == "env" || !label && (name == "level" || name == "status")
+		}
+	})
+	res, err := f.eng.Count(ctx, CountQuery{Query: q(nil), By: []string{"env"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, g := range strip(res.Groups) {
+		if strings.Contains(g, "customer-acme") {
+			t.Fatalf("an untrusted field value reached the agent: %v", strip(res.Groups))
+		}
+	}
+	if res.MaskedFailures != 1 {
+		t.Fatalf("masked failures %d, want 1 (groups %v)", res.MaskedFailures, strip(res.Groups))
 	}
 }

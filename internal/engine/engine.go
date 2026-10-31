@@ -66,8 +66,10 @@ func DefaultLimits() Limits {
 // Options configure an Engine.
 type Options struct {
 	Sources map[string]source.Source
-	// Trusted reports a trusted field of a source.
-	Trusted func(src, field string) bool
+	// Trusted reports a trusted line field (label unset) or a trusted
+	// label (label set) of a source. They are separate namespaces: a
+	// trusted label never makes a line field of the same name trusted.
+	Trusted func(src, name string, label bool) bool
 	Masker  Masker
 	Sealer  *Sealer
 	Cost    *CostModel
