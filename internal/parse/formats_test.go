@@ -71,6 +71,11 @@ func TestSyslog3164(t *testing.T) {
 		// Tomorrow is still this year; two days ahead is last year.
 		{"Jan  3 08:00:00 web cron[1]: x", "x", "facility=<none> level=<none> host=web app=cron pid=1", time.Date(2026, 1, 3, 8, 0, 0, 0, time.UTC)},
 		{"Jan  4 08:00:00 web cron[1]: x", "x", "facility=<none> level=<none> host=web app=cron pid=1", time.Date(2025, 1, 4, 8, 0, 0, 0, time.UTC)},
+		{"2026-01-02T09:00:00+01:00 host app[1]: iso", "iso", "facility=<none> level=<none> host=host app=app pid=1", time.Date(2026, 1, 2, 8, 0, 0, 0, time.UTC)},
+		{"2026-01-02T09:00:00Z host app: z", "z", "facility=<none> level=<none> host=host app=app pid=<none>", time.Date(2026, 1, 2, 9, 0, 0, 0, time.UTC)},
+		{"Jan  2 09:00:00 host-1 error: level-named tag", "level-named tag", "facility=<none> level=<none> host=host-1 app=error pid=<none>", time.Date(2026, 1, 2, 9, 0, 0, 0, time.UTC)},
+		{"Jan  2 09:00:00 h /usr/lib/gdm3/gdm-x-session[1234]: x", "x", "facility=<none> level=<none> host=h app=/usr/lib/gdm3/gdm-x-session pid=1234", time.Date(2026, 1, 2, 9, 0, 0, 0, time.UTC)},
+		{"Jan  2 09:00:00 h (sd-pam)[1]: y", "y", "facility=<none> level=<none> host=h app=(sd-pam) pid=1", time.Date(2026, 1, 2, 9, 0, 0, 0, time.UTC)},
 		{"<34>Oct 11 22:14:15 host message without a tag", "message without a tag", "facility=auth level=critical host=host app=<none> pid=<none>", time.Date(2025, 10, 11, 22, 14, 15, 0, time.UTC)},
 		{"<189>Oct 11 22:14:15 router %SYS-5-CONFIG_I: Configured", "%SYS-5-CONFIG_I: Configured", "facility=local7 level=notice host=router app=<none> pid=<none>", time.Date(2025, 10, 11, 22, 14, 15, 0, time.UTC)},
 		{"<14>2026-01-02T09:00:00Z web app: pri makes it syslog", "pri makes it syslog", "facility=user level=info host=web app=app pid=<none>", time.Date(2026, 1, 2, 9, 0, 0, 0, time.UTC)},
@@ -290,6 +295,24 @@ func TestAutoKeepsTimestampedStackTraces(t *testing.T) {
 	in := "2026-10-31T02:41:55Z Unhandled exception: java.lang.NullPointerException\n\tat Foo.bar(Foo.java:1)\n\tat Main.main(Main.java:2)\n"
 	evs := readAll(t, mustParser(t, Options{}), in)
 	if len(evs) != 1 || evs[0].Format != "plain" || evs[0].Lines != 3 {
+		t.Fatalf("%+v", evs)
+	}
+}
+
+func TestMultilineNeverJoinsStreams(t *testing.T) {
+	in := "2026-10-31T02:41:55Z stdout F java.lang.X: y\n2026-10-31T02:41:55Z stderr F     at b\n2026-10-31T02:41:55Z stdout F     at c\n"
+	evs := readAll(t, mustParser(t, Options{Format: "cri"}), in)
+	if len(evs) != 3 {
+		t.Fatalf("%+v", evs)
+	}
+	for i, want := range []string{"stdout", "stderr", "stdout"} {
+		if s, _ := Get(evs[i].Attrs, "stream"); s.Str != want || evs[i].Lines != 1 {
+			t.Fatalf("event %d: %+v", i, evs[i])
+		}
+	}
+	// The same stream still joins its continuation lines.
+	in = "2026-10-31T02:41:55Z stderr F java.lang.X: y\n2026-10-31T02:41:55Z stderr F     at b\n"
+	if evs := readAll(t, mustParser(t, Options{Format: "cri"}), in); len(evs) != 1 || evs[0].Lines != 2 {
 		t.Fatalf("%+v", evs)
 	}
 }

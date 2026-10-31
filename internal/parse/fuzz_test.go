@@ -243,6 +243,7 @@ func fuzzFormat(f *testing.F, name string, framed bool) {
 	f.Fuzz(func(t *testing.T, in string) {
 		evs := fuzzRead(t, p, in)
 		checkEventsGaps(t, in, evs, !framed)
+		checkResume(t, p, in, evs)
 		for _, e := range evs {
 			if e.Format == "syslog" && !strings.HasSuffix(e.Raw, e.Message) {
 				t.Fatalf("syslog message %q is not the end of %q", e.Message, e.Raw)

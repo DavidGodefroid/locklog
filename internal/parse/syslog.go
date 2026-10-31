@@ -26,7 +26,8 @@ var (
 	syslog5424Re = regexp.MustCompile(`^<([0-9]{1,3})>([1-9][0-9]{0,2}) (\S+) (\S{1,255}) (\S{1,48}) (\S{1,128}) (\S{1,32}) ?`)
 	syslog3164Re = regexp.MustCompile(`^(?:<([0-9]{1,3})>)?(?:((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) [ 0-9][0-9] [0-9]{2}:[0-9]{2}:[0-9]{2})|([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,9})?(?:Z|[+-][0-9]{2}:[0-9]{2}))) ([^\s:\[\]]{1,255}) `)
 	// syslogTagRe is a 3164 tag: "app:", "app[1234]:".
-	syslogTagRe = regexp.MustCompile(`^([A-Za-z0-9_][A-Za-z0-9_./@-]{0,47})(?:\[([0-9]{1,10})\])?: ?`)
+	// The tag may be a path or a systemd helper: "/usr/lib/gdm3/gdm-x-session[1]:", "(sd-pam)[1]:".
+	syslogTagRe = regexp.MustCompile(`^([A-Za-z0-9_/(][A-Za-z0-9_./@()-]{0,63})(?:\[([0-9]{1,10})\])?: ?`)
 )
 
 // syslogNow is the clock that places a year-less 3164 timestamp.
@@ -45,7 +46,7 @@ func (syslogFormat) Detect(line string) bool {
 	if _, ok := decode5424(line); ok {
 		return true
 	}
-	_, ok, tagged := decode3164(line, nil)
+	_, ok, tagged := decode3164(line, nil, true)
 	return ok && tagged
 }
 
@@ -53,7 +54,7 @@ func (f syslogFormat) Decode(text string, o *Options) (Event, bool) {
 	if ev, ok := decode5424(text); ok {
 		return ev, true
 	}
-	ev, ok, _ := decode3164(text, o)
+	ev, ok, _ := decode3164(text, o, false)
 	return ev, ok
 }
 
@@ -174,27 +175,31 @@ func rsyslogTime(ts string) bool {
 	return strings.Contains(ts, ".") && !strings.HasSuffix(ts, "Z")
 }
 
-// decode3164 reports the event, whether the text is a 3164 header, and
-// whether that header has a tag.
 // sdNameByte is a byte of an SD-NAME: PRINTUSASCII except "=", " ", "]"
 // and '"'.
 func sdNameByte(c byte) bool {
 	return c > ' ' && c < 0x7f && c != '=' && c != ']' && c != '"'
 }
 
-func decode3164(text string, o *Options) (Event, bool, bool) {
+// decode3164 reports the event, whether the text is a 3164 header, and
+// whether that header has a tag. strict (auto detection) also refuses
+// the shapes of application lines: a level word as host or tag, and,
+// without a PRI, an RFC 3339 time that is not rsyslog's or a tag without
+// a pid.
+func decode3164(text string, o *Options, strict bool) (Event, bool, bool) {
 	m := syslog3164Re.FindStringSubmatchIndex(text)
 	if m == nil {
 		return Event{}, false, false
 	}
-	if m[2] < 0 && m[6] >= 0 && !rsyslogTime(text[m[6]:m[7]]) {
+	iso := m[2] < 0 && m[6] >= 0
+	if strict && iso && !rsyslogTime(text[m[6]:m[7]]) {
 		// "<RFC 3339 time> Starting server: x" is an application line
 		// (docker logs -t): without a PRI, only rsyslog's own shape
 		// (fractional seconds and a numeric offset) is syslog.
 		return Event{}, false, false
 	}
 	host := text[m[8]:m[9]]
-	if _, isLevel := levels[strings.ToLower(host)]; isLevel {
+	if _, isLevel := levels[strings.ToLower(host)]; strict && isLevel {
 		// "<time> ERROR db: x": an application line with a level, not
 		// a host.
 		return Event{}, false, false
@@ -224,8 +229,11 @@ func decode3164(text string, o *Options) (Event, bool, bool) {
 		t = nil // "crate::module:": a path, not a tag
 	}
 	if t != nil {
-		if _, isLevel := levels[strings.ToLower(rest[t[2]:t[3]])]; isLevel {
+		if _, isLevel := levels[strings.ToLower(rest[t[2]:t[3]])]; strict && isLevel {
 			return Event{}, false, false // "<time> api WARN: slow"
+		}
+		if strict && iso && t[4] < 0 {
+			return Event{}, false, false // "<time> main java.lang.X: boom"
 		}
 		fields = append(fields, strMember("app", rest[t[2]:t[3]]))
 		if t[4] >= 0 {

@@ -2,6 +2,7 @@ package parse
 
 import (
 	"io"
+	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -239,6 +240,9 @@ func (r *Reader) nextLogical() (logical, error) {
 func (r *Reader) continues(ln logical) bool {
 	if r.pending.format != nil {
 		return false
+	}
+	if f := r.pending.frame; f != nil && ln.frame != nil && !reflect.DeepEqual(f.Attrs, ln.frame.Attrs) {
+		return false // another stream (or container attrs): never one event
 	}
 	switch r.p.opts.Multiline {
 	case MultilineNone:
