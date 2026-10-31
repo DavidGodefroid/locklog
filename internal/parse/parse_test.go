@@ -338,7 +338,7 @@ func TestLineReaderTerminators(t *testing.T) {
 		}
 		got = append(got, l)
 	}
-	want := []Line{{Text: "a", Offset: 100, Length: 3}, {Text: "b", Offset: 103, Length: 2}, {Text: "", Offset: 105, Length: 1}, {Text: "c", Offset: 106, Length: 1}}
+	want := []Line{{Text: "a", Offset: 100, Length: 3}, {Text: "b", Offset: 103, Length: 2}, {Text: "", Offset: 105, Length: 1}, {Text: "c", Offset: 106, Length: 1, Unterminated: true}}
 	if len(got) != len(want) {
 		t.Fatalf("%+v", got)
 	}
@@ -484,5 +484,250 @@ func checkCoverageGaps(t testing.TB, in string, evs []Event, blankGaps bool) {
 	}
 	if tail := in[pos:]; blankGaps && strings.TrimSpace(tail) != "" {
 		t.Fatalf("non-blank tail %q", tail)
+	}
+}
+
+func TestCapsHoldWithInvalidUTF8(t *testing.T) {
+	bad := strings.Repeat("\xffa", MaxLineBytes/2)
+	p := mustParser(t, Options{})
+	for _, ev := range readAll(t, p, bad+"\n") {
+		if len(ev.Raw) > MaxEventBytes || !ev.Truncated {
+			t.Fatalf("reader: %d bytes, truncated %v", len(ev.Raw), ev.Truncated)
+		}
+	}
+	if ev := p.Line(bad); len(ev.Raw) > MaxEventBytes || !ev.Truncated {
+		t.Fatalf("Line: %d bytes", len(ev.Raw))
+	}
+	fp := mustParser(t, Options{Format: "testframe"})
+	in := "2026-10-30T14:00:00Z P " + bad + "\n2026-10-30T14:00:00Z F " + bad + "\n"
+	for _, ev := range readAll(t, fp, in) {
+		if len(ev.Raw) > MaxEventBytes {
+			t.Fatalf("framed: %d bytes", len(ev.Raw))
+		}
+	}
+}
+
+func TestLineCapsLines(t *testing.T) {
+	p := mustParser(t, Options{})
+	ev := p.Line(strings.Repeat("a\n", 2000))
+	if ev.Lines != MaxEventLines || !ev.Truncated {
+		t.Fatalf("lines %d", ev.Lines)
+	}
+}
+
+func TestOffsetHoldsUnterminatedTail(t *testing.T) {
+	p := mustParser(t, Options{})
+	in := "one\ntwo passw"
+	r := p.NewReader(strings.NewReader(in), 0)
+	a, _ := r.Next()
+	b, _ := r.Next()
+	if a.Unterminated || !b.Unterminated || b.Raw != "two passw" {
+		t.Fatalf("%+v %+v", a, b)
+	}
+	if _, err := r.Next(); !errors.Is(err, io.EOF) {
+		t.Fatal(err)
+	}
+	if r.Offset() != 4 {
+		t.Fatalf("offset %d, want the unterminated event's 4", r.Offset())
+	}
+}
+
+func TestResumeMidSplitIndent(t *testing.T) {
+	p := mustParser(t, Options{})
+	var b strings.Builder
+	b.WriteString("head\n")
+	for i := 0; i < MaxEventLines; i++ {
+		b.WriteString("\tat x\n")
+	}
+	b.WriteString("\t{\"a\":1}\n\tat y\n")
+	in := b.String()
+	all := readAll(t, p, in)
+	if len(all) != 2 || !all[1].Split || all[1].Format != "plain" {
+		t.Fatalf("%+v", all)
+	}
+	rest := readAll(t, p, in[all[1].Offset:])
+	if len(rest) != 1 || rest[0].Raw != all[1].Raw || rest[0].Format != "plain" || rest[0].Lines != all[1].Lines {
+		t.Fatalf("resumed %+v vs %+v", rest, all[1])
+	}
+}
+
+func TestPatternBlankWhenFullSplits(t *testing.T) {
+	p := mustParser(t, Options{Multiline: MultilinePattern, Start: `^START`})
+	var b strings.Builder
+	b.WriteString("START\n")
+	for i := 1; i < MaxEventLines; i++ {
+		b.WriteString("x\n")
+	}
+	b.WriteString("\n{\"cont\":\"v\"}\n")
+	evs := readAll(t, p, b.String())
+	if len(evs) != 2 || !evs[1].Split || evs[1].Format != "plain" {
+		t.Fatalf("%d %+v", len(evs), evs[len(evs)-1])
+	}
+}
+
+func TestFramedPlainKeepsPayloadTime(t *testing.T) {
+	p := mustParser(t, Options{Format: "testframe"})
+	evs := readAll(t, p, "2026-10-30T14:00:00Z F 2020-01-01T00:00:00Z secret here\n")
+	if len(evs) != 1 || evs[0].Message != "2020-01-01T00:00:00Z secret here" || evs[0].Time.Year() != 2026 {
+		t.Fatalf("%+v", evs)
+	}
+}
+
+type failAfter struct {
+	data string
+	done bool
+}
+
+func (f *failAfter) Read(b []byte) (int, error) {
+	if f.done {
+		return 0, errors.New("disk error")
+	}
+	f.done = true
+	return copy(b, f.data), nil
+}
+
+func TestReadErrorKeepsOffset(t *testing.T) {
+	lr := NewLineReader(&failAfter{data: "ok\npart"}, 0)
+	if l, err := lr.Next(); err != nil || l.Text != "ok" {
+		t.Fatal(l, err)
+	}
+	if _, err := lr.Next(); err == nil || errors.Is(err, io.EOF) {
+		t.Fatalf("want the read error, got %v", err)
+	}
+	if lr.Offset() != 3 {
+		t.Fatalf("offset %d, want 3", lr.Offset())
+	}
+}
+
+func TestPartialFrameAtEOFHeld(t *testing.T) {
+	p := mustParser(t, Options{Format: "testframe"})
+	r := p.NewReader(strings.NewReader("2026-10-30T14:00:00Z P {\"msg\":\"he\n"), 0)
+	ev, err := r.Next()
+	if err != nil || !ev.Unterminated {
+		t.Fatalf("%+v %v", ev, err)
+	}
+	r.Next()
+	if r.Offset() != 0 {
+		t.Fatalf("offset %d, want 0", r.Offset())
+	}
+}
+
+func TestResumeMidSplitPattern(t *testing.T) {
+	p := mustParser(t, Options{Multiline: MultilinePattern, Start: `^START`})
+	var b strings.Builder
+	b.WriteString("START\n")
+	for i := 1; i < MaxEventLines; i++ {
+		b.WriteString("x\n")
+	}
+	b.WriteString("{\"a\":1}\nmore\n")
+	in := b.String()
+	all := readAll(t, p, in)
+	if len(all) != 2 || !all[1].Split || all[1].Lines != 2 {
+		t.Fatalf("%+v", all)
+	}
+	rest := readAll(t, p, in[all[1].Offset:])
+	if len(rest) != 1 || rest[0].Raw != all[1].Raw || rest[0].Format != "plain" {
+		t.Fatalf("resumed %+v", rest)
+	}
+}
+
+func TestFramedJSONKeepsMemberOrder(t *testing.T) {
+	p := mustParser(t, Options{Format: "testframe"})
+	evs := readAll(t, p, "2026-10-30T14:00:00Z F {\"a\":1,\"ts\":\"2020-01-01T00:00:00Z\",\"b\":2}\n")
+	var keys []string
+	for _, m := range evs[0].Fields {
+		keys = append(keys, m.Key)
+	}
+	if strings.Join(keys, ",") != "a,ts,b" {
+		t.Fatalf("order %v", keys)
+	}
+}
+
+func TestUnterminatedBlankTailHeld(t *testing.T) {
+	p := mustParser(t, Options{})
+	r := p.NewReader(strings.NewReader("ERROR x\n   "), 0)
+	r.Next()
+	if _, err := r.Next(); !errors.Is(err, io.EOF) {
+		t.Fatal(err)
+	}
+	if r.Offset() != 8 {
+		t.Fatalf("offset %d, want 8", r.Offset())
+	}
+}
+
+func TestCapTextKeepsRuneCutByReader(t *testing.T) {
+	b := append([]byte(strings.Repeat("a", MaxLineBytes-1)), "é"...) // é straddles the cap
+	s, cut := capText(b, MaxLineBytes)
+	if !cut || strings.ContainsRune(s, '�') || len(s) != MaxLineBytes-1 {
+		t.Fatalf("cut=%v len=%d", cut, len(s))
+	}
+}
+
+func TestJSONOnlyJSONWhitespace(t *testing.T) {
+	p := mustParser(t, Options{Format: "json"})
+	for _, line := range []string{"\f{}", "\v{\"a\":1}", "{\"a\":1} "} {
+		if ev := p.Line(line); ev.Format == "json" {
+			t.Fatalf("%q decoded as json", line)
+		}
+	}
+	if ev := p.Line(" \t{\"a\":1} "); ev.Format != "json" {
+		t.Fatal("JSON whitespace refused")
+	}
+}
+
+// TestFrameCutAtEveryByte reads a growing framed stream cut at every byte,
+// then resumes at Offset on the full stream: prefix + resume equals a full
+// read.
+func TestFrameCutAtEveryByte(t *testing.T) {
+	p := mustParser(t, Options{Format: "testframe"})
+	full := "2026-10-30T14:00:00Z P {\"msg\":\"he\n2026-10-30T14:00:00Z F llo\"}\n2026-10-30T14:00:01Z F next\n"
+	want := readAll(t, p, full)
+	for cut := 0; cut <= len(full); cut++ {
+		r := p.NewReader(strings.NewReader(full[:cut]), 0)
+		var got []Event
+		for {
+			ev, err := r.Next()
+			if err != nil {
+				break
+			}
+			if !ev.Unterminated {
+				got = append(got, ev)
+			}
+		}
+		off := r.Offset()
+		// Keep only events before the resume point.
+		kept := got[:0]
+		for _, e := range got {
+			if e.Offset < off {
+				kept = append(kept, e)
+			}
+		}
+		rest := readAll(t, p, full[off:])
+		for i := range rest {
+			rest[i].Offset += off
+		}
+		all := append(kept, rest...)
+		if len(all) != len(want) {
+			t.Fatalf("cut %d: %d events, want %d", cut, len(all), len(want))
+		}
+		for i := range want {
+			if all[i].Offset != want[i].Offset || all[i].Raw != want[i].Raw || all[i].Format != want[i].Format {
+				t.Fatalf("cut %d: event %d %+v != %+v", cut, i, all[i], want[i])
+			}
+		}
+	}
+}
+
+func TestIndentedLineIsFreeText(t *testing.T) {
+	p := mustParser(t, Options{Format: "json"})
+	if ev := readAll(t, p, "  {\"a\":1}\n")[0]; ev.Format != "plain" || !ev.Fallback {
+		t.Fatalf("%+v", ev)
+	}
+}
+
+func TestExplicitLogfmtOnePair(t *testing.T) {
+	p := mustParser(t, Options{Format: "logfmt"})
+	if ev := p.Line("level=info"); ev.Format != "logfmt" || ev.Fallback {
+		t.Fatalf("%+v", ev)
 	}
 }

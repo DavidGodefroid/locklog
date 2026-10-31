@@ -16,6 +16,7 @@ var fuzzSeeds = []string{
 	`{"a":` + strings.Repeat("[", 70) + "\n",
 	"2026-10-30T14:00:00Z P part\n2026-10-30T14:00:00Z F end\n",
 	"[2026-10-30 14:02:11] [error] x\n  y\nCaused by: z\n",
+	"\f{}\n\v{\"a\":1}\n",
 }
 
 // checkEvents asserts the reader's invariants on any input: events ordered,
@@ -37,6 +38,7 @@ func checkEventsGaps(t *testing.T, in string, evs []Event, blankGaps bool) {
 			t.Fatal("invalid UTF-8 in event")
 		}
 		walk(t, e.Fields, 0)
+		walk(t, e.Attrs, 0)
 	}
 }
 
@@ -53,6 +55,9 @@ func walk(t *testing.T, ms []Member, depth int) {
 }
 
 func walkValue(t *testing.T, v Value, depth int) {
+	if !utf8.ValidString(v.Str) {
+		t.Fatalf("invalid UTF-8 in %s value", v.Kind)
+	}
 	switch v.Kind {
 	case KindObject:
 		walk(t, v.Members, depth)
@@ -68,7 +73,11 @@ func walkValue(t *testing.T, v Value, depth int) {
 }
 
 func fuzzRead(t *testing.T, p *Parser, in string) []Event {
-	r := p.NewReader(strings.NewReader(in), 0)
+	return fuzzReadAt(t, p, in, 0)
+}
+
+func fuzzReadAt(t *testing.T, p *Parser, in string, base int64) []Event {
+	r := p.NewReader(strings.NewReader(in), base)
 	var evs []Event
 	for {
 		ev, err := r.Next()
@@ -82,13 +91,53 @@ func fuzzRead(t *testing.T, p *Parser, in string) []Event {
 	}
 }
 
+// checkResume asserts that a reader resumed at an event's offset yields the
+// same event boundaries, text and formats from there on (Split and
+// inherited times aside). It checks the first, middle and last events.
+func checkResume(t *testing.T, p *Parser, in string, evs []Event) {
+	t.Helper()
+	if len(evs) == 0 {
+		return
+	}
+	for _, i := range []int{0, len(evs) / 2, len(evs) - 1} {
+		off := evs[i].Offset
+		got := fuzzReadAt(t, p, in[off:], off)
+		want := evs[i:]
+		if len(got) != len(want) {
+			t.Fatalf("resume at %d: %d events, want %d", off, len(got), len(want))
+		}
+		for j := range want {
+			g, w := got[j], want[j]
+			if g.Offset != w.Offset || g.Length != w.Length || g.Raw != w.Raw || g.Format != w.Format {
+				t.Fatalf("resume at %d: event %d differs: %+v vs %+v", off, j, g, w)
+			}
+		}
+	}
+}
+
 func FuzzParseAuto(f *testing.F) {
 	for _, s := range fuzzSeeds {
 		f.Add(s)
 	}
 	p := mustParser(f, Options{})
 	f.Fuzz(func(t *testing.T, in string) {
-		checkEvents(t, in, fuzzRead(t, p, in))
+		evs := fuzzRead(t, p, in)
+		checkEvents(t, in, evs)
+		checkResume(t, p, in, evs)
+	})
+}
+
+func FuzzParseLine(f *testing.F) {
+	for _, s := range fuzzSeeds {
+		f.Add(s)
+	}
+	p := mustParser(f, Options{})
+	f.Fuzz(func(t *testing.T, in string) {
+		ev := p.Line(in)
+		if len(ev.Raw) > MaxEventBytes || ev.Lines > MaxEventLines || !utf8.ValidString(ev.Raw) || !utf8.ValidString(ev.Message) {
+			t.Fatalf("Line: %d bytes, %d lines", len(ev.Raw), ev.Lines)
+		}
+		walk(t, ev.Fields, 0)
 	})
 }
 
@@ -126,9 +175,11 @@ func FuzzParseMultilinePattern(f *testing.F) {
 	for _, s := range fuzzSeeds {
 		f.Add(s)
 	}
-	p := mustParser(f, Options{Format: "plain", Multiline: MultilinePattern, Start: `^\[?\d{4}-`})
+	p := mustParser(f, Options{Multiline: MultilinePattern, Start: `^\[?\d{4}-`})
 	f.Fuzz(func(t *testing.T, in string) {
-		checkEvents(t, in, fuzzRead(t, p, in))
+		evs := fuzzRead(t, p, in)
+		checkEvents(t, in, evs)
+		checkResume(t, p, in, evs)
 	})
 }
 
@@ -138,8 +189,27 @@ func FuzzParseFramed(f *testing.F) {
 	}
 	p := mustParser(f, Options{Format: "testframe"})
 	f.Fuzz(func(t *testing.T, in string) {
-		// Frames with a blank payload are skipped like blank lines.
-		checkEventsGaps(t, in, fuzzRead(t, p, in), false)
+		evs := fuzzRead(t, p, in)
+		checkEventsGaps(t, in, evs, false)
+		// Gaps may hold only blank lines and frames with a blank payload.
+		var pos int64
+		gaps := []string{}
+		for _, e := range evs {
+			gaps = append(gaps, in[pos:e.Offset])
+			pos = e.Offset + e.Length
+		}
+		gaps = append(gaps, in[pos:])
+		for _, g := range gaps {
+			for _, l := range strings.Split(g, "\n") {
+				if strings.TrimSpace(l) == "" {
+					continue
+				}
+				fr, ok := testFramer{}.Unwrap(validText([]byte(strings.TrimSuffix(l, "\r"))), nil)
+				if !ok || strings.TrimSpace(fr.Text) != "" {
+					t.Fatalf("non-blank line skipped: %q", l)
+				}
+			}
+		}
 	})
 }
 

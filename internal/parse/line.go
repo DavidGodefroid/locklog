@@ -21,6 +21,9 @@ type Line struct {
 	Length int64
 	// Truncated is set when the line was longer than MaxLineBytes.
 	Truncated bool
+	// Unterminated is set for a final line without a terminator: on a
+	// stream that is still being written, the rest of it may follow.
+	Unterminated bool
 }
 
 // LineReader reads bounded lines. Its memory use is bounded by MaxLineBytes
@@ -46,7 +49,7 @@ func (lr *LineReader) Next() (Line, error) {
 	start := lr.off
 	lr.buf = lr.buf[:0]
 	var n int64
-	truncated := false
+	truncated, terminated := false, false
 	for {
 		frag, err := lr.r.ReadSlice('\n')
 		n += int64(len(frag))
@@ -63,6 +66,7 @@ func (lr *LineReader) Next() (Line, error) {
 			truncated = true
 		}
 		if err == nil {
+			terminated = true
 			break
 		}
 		if errors.Is(err, bufio.ErrBufferFull) {
@@ -74,18 +78,16 @@ func (lr *LineReader) Next() (Line, error) {
 			}
 			break
 		}
-		lr.off += n
+		// A read error: the offset stays at the start of the line, so
+		// a new reader resumed at Offset reads it whole.
 		return Line{}, err
 	}
 	lr.off += n
 	b := lr.buf
 	b = bytes.TrimSuffix(b, []byte("\n"))
 	b = bytes.TrimSuffix(b, []byte("\r"))
-	if len(b) > MaxLineBytes {
-		b = cutUTF8(b, MaxLineBytes)
-		truncated = true
-	}
-	return Line{Text: validText(b), Offset: start, Length: n, Truncated: truncated}, nil
+	text, cut := capText(b, MaxLineBytes)
+	return Line{Text: text, Offset: start, Length: n, Truncated: truncated || cut, Unterminated: !terminated}, nil
 }
 
 // cutUTF8 returns the longest prefix of b of at most n bytes that does not end
@@ -104,6 +106,23 @@ func cutUTF8(b []byte, n int) []byte {
 		}
 	}
 	return b
+}
+
+// capText replaces invalid UTF-8 by U+FFFD, then cuts the result at n bytes
+// on a rune boundary. Replacement comes first because it can grow the text
+// (one byte becomes three).
+func capText(b []byte, n int) (string, bool) {
+	cut := false
+	if len(b) > n {
+		// Cut the raw bytes on a rune boundary first, so that a valid
+		// rune cut by the reader does not become a U+FFFD.
+		b, cut = cutUTF8(b, n), true
+	}
+	s := validText(b)
+	if len(s) <= n {
+		return s, cut
+	}
+	return string(cutUTF8([]byte(s), n)), true
 }
 
 // validText converts b to a string with invalid UTF-8 replaced by U+FFFD.

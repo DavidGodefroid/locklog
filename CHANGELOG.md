@@ -20,3 +20,8 @@ uses [Semantic Versioning](https://semver.org/).
   agent account; `update`, `version`), `scripts/install.sh` (cosign-verified
   archive and image, root-owned launcher, snapshot release bases), and the
   release workflow (draft, signed images, anonymous pull, publish, pages).
+- Egress for remote sources: an HTTP client pinned to the configured host
+  and port (no proxy, no redirects, link-local addresses refused), the Loki
+  read-only allowlist checked segment by segment, response caps, the tls
+  modes, and the production check that refuses a backend answering a data
+  read without credentials.

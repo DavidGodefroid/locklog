@@ -93,7 +93,9 @@ func init() {
 const (
 	// MultilineIndent (default) joins a line that starts with a space or a
 	// tab, or with "Caused by:" / "Suppressed:", to the free-text event
-	// before it (stack traces). Structured events are never joined.
+	// before it (stack traces). Structured events are never joined, and a
+	// line that starts with a space or a tab is always free text (so that
+	// a reader resumed on it agrees with one that read through).
 	MultilineIndent = "indent"
 	// MultilineNone makes every line an event.
 	MultilineNone = "none"
@@ -183,7 +185,12 @@ func (p *Parser) structured(line string) Format {
 		if _, isPlain := p.format.(plainFormat); isPlain {
 			return nil
 		}
+		// An explicit format decodes any line it accepts (a one-pair
+		// logfmt line too), not only those "auto" would detect.
 		if p.format.Detect(line) {
+			return p.format
+		}
+		if _, ok := p.format.Decode(line, &p.opts); ok {
 			return p.format
 		}
 		return nil
@@ -221,16 +228,21 @@ func (p *Parser) decode(text string, f Format) Event {
 }
 
 // Line decodes one already-delimited record (a Loki entry, a journald
-// MESSAGE): no line splitting, no multiline assembly; text is cut at
-// MaxEventBytes and invalid UTF-8 replaced.
+// MESSAGE): no line splitting, no multiline assembly; invalid UTF-8 is
+// replaced, then the text is cut at MaxEventLines lines and MaxEventBytes
+// bytes, like an assembled event.
 func (p *Parser) Line(text string) Event {
-	truncated := false
 	length := int64(len(text))
-	if len(text) > MaxEventBytes {
-		text = string(cutUTF8([]byte(text), MaxEventBytes))
-		truncated = true
+	text, truncated := capText([]byte(text), MaxEventBytes)
+	if n := strings.Count(text, "\n"); n >= MaxEventLines {
+		i, cut := 0, 0
+		for k := 0; k < MaxEventLines; k++ {
+			j := strings.IndexByte(text[i:], '\n')
+			cut = i + j
+			i = cut + 1
+		}
+		text, truncated = text[:cut], true
 	}
-	text = validText([]byte(text))
 	ev := p.decode(text, p.structured(text))
 	ev.Raw = text
 	ev.Length = length
