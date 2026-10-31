@@ -68,3 +68,14 @@ func TestSetupThenDoctor(t *testing.T) {
 		t.Errorf("doctor production: exit %d\n%s", code, out.String())
 	}
 }
+
+// doctor --facts - reads the launcher's facts on its input.
+func TestDoctorFactsOnStdin(t *testing.T) {
+	t.Chdir(t.TempDir())
+	var out, errb bytes.Buffer
+	in := strings.NewReader(hostfacts.Header + "\neuid 0\ngroups root\nsudo absent\ndocker absent\n")
+	code := doctorCmd([]string{"--facts", "-"}, in, &out, &errb)
+	if code != 0 || !strings.Contains(out.String(), "euid 0: the agent runs as root") {
+		t.Errorf("exit %d\n%s%s", code, out.String(), errb.String())
+	}
+}

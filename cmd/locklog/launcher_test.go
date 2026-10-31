@@ -105,7 +105,8 @@ volume) [ "$2" = inspect ] && exit "${VOLUME_MISSING:-0}" ;;
 run)
 	for a in "$@"; do
 		case "$a" in
-		*:/run/locklog-facts:ro) cp "${a%%:*}" '`+filepath.Join(root, "facts.copy")+`' ;;
+		*:/run/locklog-facts:ro) cp "${a%%:*}" '`+filepath.Join(root, "facts.copy")+`'; stat -c %a "${a%%:*}" > '`+filepath.Join(root, "facts.mode")+`' ;;
+		doctor) cat > '`+filepath.Join(root, "facts.stdin")+`' ;;
 		locklog-run:/run/locklog) vol=run ;;
 		locklog-home:/home/locklog) vol=home ;;
 		esac
@@ -510,6 +511,12 @@ func TestLauncherSetupDoctor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if mode, _ := os.ReadFile(filepath.Join(f.root, "facts.mode")); strings.TrimSpace(string(mode)) != "600" {
+		t.Errorf("the facts file has mode %q, want 600", mode)
+	}
+	if !hasSeq(run, "-e", "LOCKLOG_HOST_HOME=") {
+		t.Errorf("setup run lacks LOCKLOG_HOST_HOME: %q", run)
+	}
 	fs, err := hostfacts.Parse(strings.NewReader(string(facts)))
 	if err != nil {
 		t.Fatalf("facts: %v\n%s", err, facts)
@@ -536,13 +543,45 @@ func TestLauncherSetupDoctor(t *testing.T) {
 	run = lastRun(t, calls)
 	confined(t, run)
 	for _, seq := range [][]string{{"--user", "agent"}, {"--network", "host"}, {"-v", f.project + ":" + f.project + ":ro"},
-		{"-w", filepath.Join(f.project, "sub")}, {"locklog", "doctor", "--facts", "/run/locklog-facts", "--profile", "x"}} {
+		{"-w", filepath.Join(f.project, "sub")}, {"locklog", "doctor", "--facts", "-", "--profile", "x"}} {
 		if !hasSeq(run, seq...) {
 			t.Errorf("doctor run lacks %q: %q", seq, run)
 		}
 	}
-	if slices.ContainsFunc(run, func(a string) bool { return strings.Contains(a, "locklog-run") }) {
-		t.Errorf("doctor has the socket volume: %q", run)
+	if slices.ContainsFunc(run, func(a string) bool { return strings.Contains(a, "locklog-run") || strings.Contains(a, "locklog-facts") }) {
+		t.Errorf("doctor has the socket volume or a facts mount: %q", run)
+	}
+	// The facts reach the agent account on its input, not in a file.
+	if in, err := os.ReadFile(filepath.Join(f.root, "facts.stdin")); err != nil || !strings.HasPrefix(string(in), hostfacts.Header+"\n") {
+		t.Errorf("doctor's input: %q %v", in, err)
+	}
+}
+
+// The home directory is never a project: setup refuses it, and the walk
+// from below it ignores a ~/.locklog/.
+func TestLauncherHomeIsNoProject(t *testing.T) {
+	f := newLauncherFixture(t)
+	home := filepath.Join(f.root, "home")
+	sub := filepath.Join(home, "work")
+	for _, d := range []string{filepath.Join(home, ".locklog"), sub} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	os.Chmod(home, 0o755)
+	out, _, err := f.run(t, home, nil, "setup", "--yes")
+	if err == nil || !strings.Contains(out, "not in your home directory") {
+		t.Errorf("setup in home: %v\n%s", err, out)
+	}
+	out, calls, err := f.run(t, sub, nil, "mcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "ignoring "+home+"/.locklog: your home directory is not a project") {
+		t.Errorf("no warning for ~/.locklog:\n%s", out)
+	}
+	if run := lastRun(t, calls); !hasSeq(run, "-v", sub+":"+sub+":ro") {
+		t.Errorf("the project is not the subdirectory: %q", run)
 	}
 }
 

@@ -112,9 +112,12 @@ uses [Semantic Versioning](https://semver.org/).
   root-owned `/etc/locklog/system.toml` from the image by digest, a
   non-root agent user without sudo in group 10050, the console account
   10051 kept only as the name the client checks the socket's owner
-  against, the run line, `--allowed-uids` for another uid, one
+  against, the run line with `--cap-drop ALL --security-opt
+  no-new-privileges`, `--allowed-uids` for another uid, one
   `locklog-run` volume = one trust domain); `--agent lea` says where lea
-  stands. `--loki-proxy SERVICE` wires `internal/authproxy` for a Compose
+  stands. The home directory is never a project: setup refuses it, and the
+  launcher's walk ignores a `~/.locklog/`. The facts file is 0600 (doctor,
+  which runs as the agent account, gets it on its input). `--loki-proxy SERVICE` wires `internal/authproxy` for a Compose
   Loki: Caddy gets only a bcrypt hash, the token is shown once on the
   terminal (and refused without one), the CA key is discarded, the files go
   to `~/.config/locklog/proxy/` (0700, outside the project), and only the
@@ -123,7 +126,8 @@ uses [Semantic Versioning](https://semver.org/).
   `DOCKER_HOST`, the groups `docker`, `adm` and `systemd-journal`, `sudo -n`,
   euid 0, a readable `/var/log/journal` or `/var/lib/docker`, cloud
   credential files, unauthenticated read probes of the configured backends
-  and of the clouds' metadata credential paths (a status code and whether
+  and of the clouds' metadata paths, none of which issues a token (Azure:
+  the instance document, "an identity may be available") (a status code and whether
   the API was recognised; never a response body), with a remedy for each
   finding; residuals: Landlock, containers with `IpcMode` shareable, swarm
   mode. On a production profile the findings are red and doctor exits 1.

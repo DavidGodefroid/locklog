@@ -48,7 +48,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "setup":
 		return setupCmd(args[1:], os.Stdin, stdout, stderr)
 	case "doctor":
-		return doctorCmd(args[1:], stdout, stderr)
+		return doctorCmd(args[1:], os.Stdin, stdout, stderr)
 	case "init":
 		return initCmd(args[1:], stdout, stderr)
 	case "console":

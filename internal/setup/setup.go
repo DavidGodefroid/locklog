@@ -30,6 +30,8 @@ const (
 type Options struct {
 	// Root is the project directory (absolute): .locklog/ is created in it.
 	Root string
+	// Home is the user's home directory, never a project ("" unknown).
+	Home string
 	// Facts are the host's.
 	Facts hostfacts.Facts
 	// Production is the answer when set; nil asks (an unanswered question
@@ -95,6 +97,9 @@ func Run(o Options) (Result, error) {
 	out := o.Out
 	if !filepath.IsAbs(o.Root) || filepath.Clean(o.Root) != o.Root {
 		return res, errors.New("setup: the project root must be an absolute, clean path")
+	}
+	if o.Home != "" && sameDir(o.Root, o.Home) {
+		return res, errors.New("setup: run it in a project directory, not in your home directory (a ~/.locklog/ would choose the logs of every directory below it)")
 	}
 	if err := checkRoot(o.Root); err != nil {
 		return res, err
@@ -454,4 +459,16 @@ func OnlyUnder(f hostfacts.Facts, dirs []string) hostfacts.Facts {
 	}
 	f.Logs, f.Journals, f.Containers = logs, nil, nil
 	return f
+}
+
+// sameDir reports whether a and b name the same directory, by their real
+// paths when they resolve.
+func sameDir(a, b string) bool {
+	if r, err := filepath.EvalSymlinks(a); err == nil {
+		a = r
+	}
+	if r, err := filepath.EvalSymlinks(b); err == nil {
+		b = r
+	}
+	return filepath.Clean(a) == filepath.Clean(b)
 }

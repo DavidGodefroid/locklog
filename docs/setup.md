@@ -47,7 +47,7 @@ agent's image: the locklog binary and the root-owned
 non-root `agent` user without sudo in `locklog-clients` (10050), and the
 `locklog` account (10051), which only names the socket's owner the client
 checks. Run the agent's container with
-`-v locklog-run:/run/locklog -v "$PWD:$PWD" -w "$PWD"`. An agent uid other
+`--cap-drop ALL --security-opt no-new-privileges -v locklog-run:/run/locklog -v "$PWD:$PWD" -w "$PWD"`. An agent uid other
 than 10052 needs `locklog console --allowed-uids <uid>`. Every agent that
 mounts one `locklog-run` volume reaches every console on it: one volume is
 one trust domain.

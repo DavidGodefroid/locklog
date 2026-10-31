@@ -17,16 +17,16 @@ import (
 // doctorCmd is `locklog doctor [--profile P]`: what the agent's account
 // can reach where it runs (advisory). Through the launcher, the account's
 // facts are the host's (--facts); the probes and Landlock are read here.
-func doctorCmd(args []string, stdout, stderr io.Writer) int {
+func doctorCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	profile := fs.String("profile", "", "check against one profile")
-	facts := fs.String("facts", "", "the host's facts (written by the launcher)")
+	facts := fs.String("facts", "", "the host's facts (written by the launcher; - for the input)")
 	if err := fs.Parse(args); err != nil || fs.NArg() > 0 {
 		fmt.Fprintln(stderr, "usage: locklog doctor [--profile P]")
 		return 2
 	}
-	f, err := loadFacts(*facts, os.Getenv)
+	f, err := loadFacts(*facts, stdin, os.Getenv)
 	if err != nil {
 		fmt.Fprintln(stderr, "locklog doctor:", err)
 		return 1

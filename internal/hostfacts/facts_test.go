@@ -66,7 +66,6 @@ func TestParseRefuses(t *testing.T) {
 		Header + "\neuid x\n",
 		Header + "\nsudo maybe\n",
 		Header + "\ndocker yes\n",
-		Header + "\ngroups ok bad;group\n",
 		Header + "\nreadable relative\n",
 		Header + "\nagent Claude\n",
 	} {
@@ -80,5 +79,17 @@ func TestUnknownEUID(t *testing.T) {
 	f, err := Parse(strings.NewReader(Header + "\n"))
 	if err != nil || f.EUID != -1 || f.Groups != nil || f.Sudo != "" || f.Docker != "" {
 		t.Errorf("empty facts = %+v, %v", f, err)
+	}
+}
+
+// A directory group's pieces ("domain users@corp.example") are skipped,
+// not an error.
+func TestParseDirectoryGroups(t *testing.T) {
+	f, err := Parse(strings.NewReader(Header + "\ngroups david domain users@corp.example docker bad;group\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(f.Groups, []string{"david", "domain", "docker"}) || !f.InGroup("docker") {
+		t.Errorf("groups = %v", f.Groups)
 	}
 }

@@ -162,3 +162,19 @@ func TestBackendProbe(t *testing.T) {
 		t.Errorf("closed: %+v", it)
 	}
 }
+
+// No metadata probe asks for a token (it would mint one on a VM with an
+// identity); Azure's answer reads as a possible identity.
+func TestMetadataEndpoints(t *testing.T) {
+	for _, e := range Metadata {
+		if strings.Contains(e.URL, "token") || strings.Contains(e.URL, "oauth2") {
+			t.Errorf("%s probes %s, which issues a token", e.Cloud, e.URL)
+		}
+	}
+	s := server(t, http.StatusOK)
+	it := metadataItem(context.Background(), Endpoint{Cloud: "Azure", Method: http.MethodGet, URL: s.URL,
+		Answers: Metadata[2].Answers}, 0)
+	if !it.Finding || !strings.Contains(it.Text, "an identity may be available") || strings.Contains(it.Text, "SECRET") {
+		t.Errorf("azure item = %+v", it)
+	}
+}

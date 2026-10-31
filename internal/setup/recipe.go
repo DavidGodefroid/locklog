@@ -81,9 +81,10 @@ USER %[2]s:%[3]s
 	fmt.Fprintf(w, `
 
 # 3. Run the agent's container with the socket volume and the project at its
-#    own path (the socket is named after the project's path):
+#    own path (the socket is named after the project's path), without
+#    capabilities or a way to gain privileges:
 
-  docker run --rm -it -v locklog-run:/run/locklog -v "$PWD:$PWD" -w "$PWD" your-agent-image
+  docker run --rm -it --cap-drop ALL --security-opt no-new-privileges -v locklog-run:/run/locklog -v "$PWD:$PWD" -w "$PWD" your-agent-image
 
 # In it, the agent's MCP server is `+"`locklog mcp`"+` (locklog init <agent> writes the
 # project's MCP entry). Every agent whose container mounts this locklog-run

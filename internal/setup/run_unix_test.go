@@ -12,10 +12,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/DavidGodefroid/locklog/internal/agentassets"
-	"github.com/DavidGodefroid/locklog/internal/authproxy"
 	"github.com/DavidGodefroid/locklog/internal/config"
 	"github.com/DavidGodefroid/locklog/internal/hostfacts"
 )
@@ -207,10 +207,24 @@ func TestRunRefuses(t *testing.T) {
 // are outside the project in a 0700 directory: nothing secret is under
 // the project, and nothing secret reaches setup's output.
 func TestRunLokiProxyLeak(t *testing.T) {
-	root, home := project(t)
-	prev := authproxy.TrustedRoot
-	authproxy.TrustedRoot = filepath.Dir(home)
-	t.Cleanup(func() { authproxy.TrustedRoot = prev })
+	// authproxy checks every ancestor of the proxy's directory, from /: the
+	// sticky /tmp of t.TempDir would be refused. The first of the checkout
+	// and the home directory whose ancestors pass is used instead.
+	tmp, err := os.MkdirTemp(safeBase(t), ".locklog-leak-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(tmp) })
+	if tmp, err = filepath.EvalSymlinks(tmp); err != nil {
+		t.Fatal(err)
+	}
+	root, home := filepath.Join(tmp, "project"), filepath.Join(tmp, "home")
+	for _, d := range []string{root, home} {
+		if err := os.Mkdir(d, 0o755); err != nil || os.Chmod(d, 0o755) != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("HOME", home)
 	base := filepath.Join(home, ".config", "locklog", "proxy")
 	var out, tty bytes.Buffer
 	res, err := Run(Options{Root: root, Facts: hostFacts(), Production: boolp(true), Yes: true, Agent: AgentContainer,
@@ -316,4 +330,59 @@ func TestRunLokiProxyLeak(t *testing.T) {
 	if _, err := Run(Options{Root: root, Facts: hostFacts(), Yes: true, LokiProxy: "loki", ProxyBase: base, Out: &bytes.Buffer{}, TTY: &bytes.Buffer{}}); err == nil {
 		t.Error("a second proxy run over an existing config was accepted")
 	}
+}
+
+// Your home directory is never a project, even of yours.
+func TestRunRefusesHome(t *testing.T) {
+	root, _ := project(t)
+	if _, err := Run(Options{Root: root, Home: root, Yes: true, Out: &bytes.Buffer{}}); err == nil || !strings.Contains(err.Error(), "home directory") {
+		t.Errorf("home as the project: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, ".locklog")); err == nil {
+		t.Error(".locklog/ was created in the home directory")
+	}
+	sub := filepath.Join(root, "proj")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Run(Options{Root: sub, Home: root, Yes: true, Out: &bytes.Buffer{}}); err != nil {
+		t.Errorf("a project under home: %v", err)
+	}
+}
+
+// safeBase is a directory whose every ancestor authproxy accepts: a real
+// directory, owned by root or this user, writable by no one else.
+func safeBase(t *testing.T) string {
+	t.Helper()
+	var cands []string
+	if wd, err := os.Getwd(); err == nil {
+		cands = append(cands, wd)
+	}
+	if h, err := os.UserHomeDir(); err == nil {
+		cands = append(cands, h)
+	}
+	for _, c := range cands {
+		r, err := filepath.EvalSymlinks(c)
+		if err != nil {
+			continue
+		}
+		ok := true
+		for p := r; ok; p = filepath.Dir(p) {
+			st, err := os.Lstat(p)
+			if err != nil {
+				ok = false
+				break
+			}
+			s, isUnix := st.Sys().(*syscall.Stat_t)
+			ok = st.IsDir() && isUnix && (s.Uid == 0 || int(s.Uid) == os.Geteuid()) && st.Mode().Perm()&0o022 == 0
+			if p == "/" {
+				break
+			}
+		}
+		if ok {
+			return r
+		}
+	}
+	t.Skipf("no directory among %v whose ancestors are all yours or root's and writable by no one else", cands)
+	return ""
 }

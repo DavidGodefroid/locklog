@@ -24,11 +24,14 @@ const setupUsage = `usage: locklog setup [--yes] [--production|--no-production] 
 const releaseRegistry = "ghcr.io/davidgodefroid/locklog"
 
 // loadFacts reads the launcher's facts file, or gathers the facts here.
-func loadFacts(path string, getenv func(string) string) (hostfacts.Facts, error) {
+func loadFacts(path string, stdin io.Reader, getenv func(string) string) (hostfacts.Facts, error) {
 	if path == "" {
 		roots := []string{"/var/log"}
 		roots = append(roots, strings.Fields(getenv("LOCKLOG_EXTRA_ROOTS"))...)
 		return hostfacts.Gather(hostfacts.Env{LogRoots: roots}), nil
+	}
+	if path == "-" {
+		return hostfacts.Parse(stdin)
 	}
 	f, err := os.Open(path)
 	if err != nil {
@@ -96,7 +99,11 @@ func setupCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 1
 	}
 	o.Root = filepath.Clean(cwd)
-	if o.Facts, err = loadFacts(*facts, os.Getenv); err != nil {
+	// The host's home through the launcher (in the image, HOME is not it).
+	if o.Home = os.Getenv("LOCKLOG_HOST_HOME"); o.Home == "" {
+		o.Home, _ = os.UserHomeDir()
+	}
+	if o.Facts, err = loadFacts(*facts, nil, os.Getenv); err != nil {
 		fmt.Fprintln(stderr, "locklog setup:", err)
 		return 1
 	}

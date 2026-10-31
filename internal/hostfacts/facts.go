@@ -128,11 +128,15 @@ func Parse(r io.Reader) (Facts, error) {
 			}
 			f.EUID = v
 		case "groups":
+			// id -Gn splits on spaces: a directory group with a space or
+			// an '@' (SSSD, AD: "domain users@corp.example") gives pieces
+			// that are no group name. They are skipped: none of them is a
+			// group doctor looks for.
+			f.Groups = []string{}
 			for _, g := range strings.Fields(rest) {
-				if !groupRe.MatchString(g) {
-					return f, bad()
+				if groupRe.MatchString(g) {
+					f.Groups = append(f.Groups, g)
 				}
-				f.Groups = append(f.Groups, g)
 			}
 		case "sudo":
 			if rest != SudoAbsent && rest != SudoPassword && rest != SudoNoPasswd {

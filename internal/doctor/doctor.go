@@ -62,22 +62,29 @@ func (r Report) Count() int {
 	return n
 }
 
-// Endpoint is a cloud metadata credential path probed without credentials.
+// Endpoint is a cloud metadata path probed without credentials. No probe
+// asks for a token: it would mint one.
 type Endpoint struct {
 	Cloud  string
 	Method string
 	URL    string
 	Header map[string]string
+	// Answers is the finding when it answers 200 (default: its
+	// credentials are handed out).
+	Answers string
 }
 
-// Metadata are the credential paths of the clouds' metadata services:
-// a 200 means this account can get the instance's credentials.
+// Metadata are the clouds' metadata paths: a 200 means this account can
+// list the instance's credentials (AWS, GCP), or reach the service that
+// hands out its identity's tokens (Azure: its instance document, which
+// issues nothing).
 var Metadata = []Endpoint{
 	{Cloud: "AWS", Method: http.MethodGet, URL: "http://169.254.169.254/latest/meta-data/iam/security-credentials/"},
 	{Cloud: "GCP", Method: http.MethodGet, URL: "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/",
 		Header: map[string]string{"Metadata-Flavor": "Google"}},
-	{Cloud: "Azure", Method: http.MethodGet, URL: "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fmanagement.azure.com%2F",
-		Header: map[string]string{"Metadata": "true"}},
+	{Cloud: "Azure", Method: http.MethodGet, URL: "http://169.254.169.254/metadata/instance?api-version=2021-02-01",
+		Header:  map[string]string{"Metadata": "true"},
+		Answers: "the Azure metadata service answers (status %d): an identity may be available to the agent (a managed identity's tokens come from it)"},
 }
 
 // Options of one doctor run.
@@ -326,7 +333,11 @@ func metadataItem(ctx context.Context, e Endpoint, timeout time.Duration) Item {
 	}
 	resp.Body.Close()
 	if resp.StatusCode == http.StatusOK {
-		return Item{Finding: true, Text: fmt.Sprintf("%s metadata credentials answer (status %d): the agent can take the instance's cloud identity", e.Cloud, resp.StatusCode),
+		text := fmt.Sprintf("%s metadata credentials answer (status %d): the agent can take the instance's cloud identity", e.Cloud, resp.StatusCode)
+		if e.Answers != "" {
+			text = fmt.Sprintf(e.Answers, resp.StatusCode)
+		}
+		return Item{Finding: true, Text: text,
 			Remedy: "block the metadata service for the agent (a firewall rule, IMDSv2 with hop limit 1, no instance identity) or run it where it is not reachable"}
 	}
 	return Item{Text: fmt.Sprintf("%s metadata credentials: status %d", e.Cloud, resp.StatusCode)}

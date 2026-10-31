@@ -24,9 +24,9 @@ func setup(t *testing.T) (Options, string) {
 	os.Chmod(base, 0o700) // t.TempDir follows the umask
 	// t.TempDir is under /tmp (sticky, world-writable): its own ancestors
 	// are not checked; base (0700, ours) and below are.
-	prev := TrustedRoot
-	TrustedRoot = base
-	t.Cleanup(func() { TrustedRoot = prev })
+	prev := trustedRoot
+	trustedRoot = base
+	t.Cleanup(func() { trustedRoot = prev })
 	project := filepath.Join(base, "project")
 	os.MkdirAll(filepath.Join(project, ".locklog"), 0o755)
 	return Options{Dir: filepath.Join(base, "state", "loki-proxy"), Project: project, Host: "loki-proxy", Upstream: "loki:3100"}, base
@@ -249,14 +249,14 @@ func TestProjectCheckResolvesBothSides(t *testing.T) {
 	os.MkdirAll(filepath.Join(real, "project"), 0o700)
 	alias := filepath.Join(base, "alias")
 	os.Symlink(real, alias)
-	TrustedRoot = filepath.Join(alias, "project")
+	trustedRoot = filepath.Join(alias, "project")
 	o := Options{Project: filepath.Join(real, "project"), Dir: filepath.Join(alias, "project", "proxy"), Host: "loki-proxy", Upstream: "loki:3100"}
 	if _, err := Generate(o); err == nil {
 		t.Fatal("a Dir inside the project through a symlink accepted")
 	}
 	// And the other way round: the project through the alias.
 	o = Options{Project: filepath.Join(alias, "project"), Dir: filepath.Join(real, "project", "proxy2"), Host: "loki-proxy", Upstream: "loki:3100"}
-	TrustedRoot = filepath.Join(real, "project")
+	trustedRoot = filepath.Join(real, "project")
 	if _, err := Generate(o); err == nil {
 		t.Fatal("a Dir inside the project given through a symlink accepted")
 	}

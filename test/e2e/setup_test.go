@@ -237,7 +237,7 @@ func TestOwnContainer(t *testing.T) {
 			t.Errorf("snippet lacks %q", want)
 		}
 	}
-	if !strings.Contains(out, `docker run --rm -it -v locklog-run:/run/locklog -v "$PWD:$PWD" -w "$PWD" your-agent-image`) ||
+	if !strings.Contains(out, `docker run --rm -it --cap-drop ALL --security-opt no-new-privileges -v locklog-run:/run/locklog -v "$PWD:$PWD" -w "$PWD" your-agent-image`) ||
 		!strings.Contains(out, "one locklog-run volume is one trust") {
 		t.Errorf("the run line or the trust domain is missing:\n%s", out)
 	}
@@ -270,7 +270,8 @@ func TestOwnContainer(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	e.startConsole(t, "--profile staging", [2]string{"Apply these changes? [y/N]", "y"})
-	cs := e.connect(t, ctx, []string{"docker", "run", "--rm", "-i", "--network", "none", "-v", "locklog-run:/run/locklog",
+	cs := e.connect(t, ctx, []string{"docker", "run", "--rm", "-i", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+		"--network", "none", "-v", "locklog-run:/run/locklog",
 		"-v", e.proj + ":" + e.proj, "-w", e.proj, tag, "locklog", "mcp"})
 	_, st := call(t, ctx, cs, "locklog_status", nil)
 	t.Logf("locklog_status from the agent's own container:\n%s", st)

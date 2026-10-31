@@ -245,6 +245,14 @@ if [ -n "${HOME:-}" ]; then home_dir="$(cd "$HOME" 2>/dev/null && pwd -P)" || ho
 d="$here"
 while :; do
 	[ "$d" = / ] && break
+	# Your home directory is never a project: a ~/.locklog/ would choose
+	# the logs of every directory below it.
+	if [ -n "$home_dir" ] && [ "$d" = "$home_dir" ]; then
+		if [ -e "$d/.locklog" ] || [ -L "$d/.locklog" ]; then
+			say "warning: ignoring $d/.locklog: your home directory is not a project (run locklog setup in a project directory)"
+		fi
+		break
+	fi
 	if [ -e "$d/.locklog" ] || [ -L "$d/.locklog" ]; then
 		if ! shared "$d" && trusted_config "$d"; then
 			project="$d"
@@ -255,7 +263,6 @@ while :; do
 		break
 	fi
 	shared "$d" && break
-	[ -n "$home_dir" ] && [ "$d" = "$home_dir" ] && break
 	d="$(dirname "$d")"
 done
 case "$here" in
@@ -1174,7 +1181,6 @@ write_facts() {
 			set +f
 		fi
 	} >"$1"
-	chmod 0644 "$1"
 }
 
 # setup ARGS: `locklog setup` in the image, as you (your uid and gid, so
@@ -1186,6 +1192,7 @@ setup() {
 	need_docker
 	project_mount
 	shared "$project" && die "$project is writable by someone else than you, or not yours: run setup in a project directory of your own"
+	[ -z "$home_dir" ] || [ "$project" != "$home_dir" ] || die "run locklog setup in a project directory, not in your home directory"
 	cfg_home=${XDG_CONFIG_HOME:-}
 	case "$cfg_home" in /*) ;; *) [ -n "${HOME:-}" ] || die "HOME is not set"; cfg_home=$HOME/.config ;; esac
 	proxy_dir=$cfg_home/locklog/proxy
@@ -1194,13 +1201,16 @@ setup() {
 	safe "$proxy_dir" || die "$proxy_dir holds a character a docker mount cannot carry"
 	trusted "$proxy_dir" || die "$proxy_dir is a link, has an ACL, or is owned or writable by someone else than you"
 	facts=$(mktemp) || die "mktemp failed"
+	chmod 0600 "$facts" || die "could not restrict $facts"
+	chmod 0600 "$facts" || die "could not restrict $facts"
+	chmod 0600 "$facts" || die "could not restrict $facts"
 	trap 'rm -f "$facts"' EXIT
 	trap 'exit 130' INT
 	trap 'exit 143' TERM
 	write_facts "$facts" logs
 	rc=0
 	docker run --rm "$tty" --user "$(id -u):$(id -g)" --log-driver none --network none $confined \
-		--pids-limit 64 --memory 256m -e "LOCKLOG_IMAGE_REF=$image" \
+		--pids-limit 64 --memory 256m -e "LOCKLOG_IMAGE_REF=$image" -e "LOCKLOG_HOST_HOME=$home_dir" \
 		-v "$project:$project" -v "$proxy_dir:$proxy_dir" -v "$facts:/run/locklog-facts:ro" -w "$project" \
 		"$image" setup --facts /run/locklog-facts --proxy-dir "$proxy_dir" "$@" || rc=$?
 	[ "$rc" -eq 0 ] || exit "$rc"
@@ -1214,21 +1224,25 @@ setup() {
 }
 
 # doctor ARGS: `locklog doctor` in the image as the agent account, with the
-# host's facts, the project read-only, and the host's network (its probes
+# host's facts on its input, the project read-only, and the host's network (its probes
 # see what an agent here reaches). Advisory: it never prints a response
 # body.
 doctor() {
 	need_docker
 	project_mount
 	facts=$(mktemp) || die "mktemp failed"
+	chmod 0600 "$facts" || die "could not restrict $facts"
+	chmod 0600 "$facts" || die "could not restrict $facts"
+	chmod 0600 "$facts" || die "could not restrict $facts"
 	trap 'rm -f "$facts"' EXIT
 	trap 'exit 130' INT
 	trap 'exit 143' TERM
 	write_facts "$facts"
 	rc=0
+	# The facts go on stdin: the agent account cannot read your 0600 file.
 	docker run --rm -i --user agent --log-driver none --network host $confined --pids-limit 64 --memory 256m \
-		-v "$project:$project:ro" -v "$facts:/run/locklog-facts:ro" -w "$workdir" \
-		"$image" doctor --facts /run/locklog-facts "$@" || rc=$?
+		-v "$project:$project:ro" -w "$workdir" \
+		"$image" doctor --facts - "$@" <"$facts" || rc=$?
 	exit "$rc"
 }
 
