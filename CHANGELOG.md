@@ -31,3 +31,8 @@ uses [Semantic Versioning](https://semver.org/).
   no network for a local-only profile), an audit record per call written
   before the answer leaves (fail closed; never a predicate or a value), and
   `--allowed-uids`.
+- The MCP server (`locklog mcp`): `locklog_status`, `locklog_sources`,
+  `locklog_search`, `locklog_count`, the PII rules and change requests, each
+  a thin adapter over the console; a host agent (the launcher's `mcp`) is
+  refused on production profiles, as the console's status reports them.
+  `locklog init <agent>` wires Claude Code, Codex, Cursor or Gemini CLI.
