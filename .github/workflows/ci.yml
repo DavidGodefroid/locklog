@@ -123,3 +123,116 @@ jobs:
         run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.1 ./...
       - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
+      - name: shellcheck (launcher, install.sh, hygiene)
+        run: shellcheck -S warning -s sh scripts/locklog scripts/install.sh scripts/hygiene.sh
+      - name: goreleaser check
+        uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
+        with:
+          distribution: goreleaser
+          version: v2.18.3
+          args: check
+
+  # main's scripts/install.sh is what locklog.dev serves: once a release
+  # exists, it changes only in a release pull request (title "release:"),
+  # so that it always matches the released logic. A convention the review
+  # holds, not a security control: anyone can title a pull request.
+  install-sh-rule:
+    name: install.sh changes only in release PRs
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: check
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ -z "$(git tag -l 'v[0-9]*')" ]; then
+            echo "::notice::no release yet: install.sh may change in any pull request"
+            exit 0
+          fi
+          if git diff --quiet "$BASE" HEAD -- scripts/install.sh; then exit 0; fi
+          case "$TITLE" in
+          release:*) echo "release pull request: install.sh may change" ;;
+          *) echo "::error::scripts/install.sh changes only in a release pull request (title starting with \"release:\")"; exit 1 ;;
+          esac
+
+  # The image: built here (never on a developer machine), its accounts,
+  # system file and socket directory checked, ALLOWED_UIDS refusals, and
+  # the launcher running commands in it.
+  docker:
+    name: docker image
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: docker build
+        run: docker build -t locklog .
+      - name: accounts, system file, socket directory
+        run: |
+          set -x
+          test "$(docker run --rm --entrypoint id locklog -u)" = 10052
+          test "$(docker run --rm --entrypoint id locklog -G)" = 10050
+          test "$(docker run --rm --user locklog --entrypoint id locklog -u)" = 10051
+          test "$(docker run --rm --entrypoint stat locklog -c '%u:%g:%a' /run/locklog)" = 10051:10050:2750
+          test "$(docker run --rm --entrypoint stat locklog -c '%u:%g:%a' /home/locklog)" = 10051:10051:700
+          docker run --rm --entrypoint cat locklog /etc/locklog/system.toml | grep -x 'client_group = "locklog-clients"'
+          if docker run --rm --entrypoint sh locklog -c 'ls /var/run/docker.sock' 2>/dev/null; then exit 1; fi
+          docker inspect locklog --format '{{index .Config.Labels "org.opencontainers.image.source"}}' | grep -x https://github.com/DavidGodefroid/locklog
+      - name: docker build with ALLOWED_UIDS
+        run: |
+          docker build --build-arg ALLOWED_UIDS=4242,4243 -t locklog-allowed .
+          docker run --rm --entrypoint cat locklog-allowed /etc/locklog/system.toml | grep -x 'allowed_uids = \[4242,4243\]'
+          for bad in '1,,2' '0' '1000,0' '10051' '007' '65534' 'a'; do
+            if docker build --build-arg ALLOWED_UIDS="$bad" . >/dev/null 2>&1; then echo "ALLOWED_UIDS=$bad accepted" >&2; exit 1; fi
+          done
+      - name: docker build --target vault
+        run: |
+          docker build --target vault -t locklog:vault .
+          docker run --rm --user locklog --entrypoint vault locklog:vault version
+      - name: the launcher runs commands in the image
+        run: |
+          set -x
+          sh scripts/locklog version | grep -x 'locklog launcher dev (image locklog)'
+          sh scripts/locklog version | grep -x 'locklog dev'
+          mkdir -p "$RUNNER_TEMP/proj/.locklog" && cd "$RUNNER_TEMP/proj"
+          printf '%s\n' 'version = 1' '[profiles.staging.sources.syslog]' 'kind = "file"' 'paths = ["/var/log/syslog*"]' \
+            '[profiles.staging.sources.sys]' 'kind = "journald"' > .locklog/config.toml
+          sh "$GITHUB_WORKSPACE/scripts/locklog" mounts | tee plan.txt
+          grep -x 'profile staging false' plan.txt
+          grep -x 'file /var/log /var/log/syslog\*' plan.txt
+          grep -x journald plan.txt
+
+  # install.sh of this commit against the latest published release: the
+  # signatures (checksums.txt and the images), the checksum, the launcher
+  # and its image. Before the first release there is nothing to install.
+  install-latest:
+    name: install.sh (latest release)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v2.6.1
+      - name: install.sh, locklog version
+        run: |
+          tag=$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/DavidGodefroid/locklog/releases/latest)
+          tag=${tag##*/}
+          case "$tag" in
+          v[0-9]*) ;;
+          *) echo "::notice::no published release yet: nothing to install"; exit 0 ;;
+          esac
+          sh scripts/install.sh
+          test "$(stat -c %u:%a /usr/local/bin/locklog)" = 0:755
+          grep -q '^image_digest=sha256:' /usr/local/bin/locklog
+          locklog version | tee version.txt
+          grep -q "^locklog launcher ${tag#v} (image ghcr.io/davidgodefroid/locklog@sha256:" version.txt
