@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <img src="site/assets/demo.svg" alt="Claude Code asks when the PDF errors started on a staging profile. locklog_count shows the step at 14:02, locklog_patterns finds the new pattern with the email and the IP already pseudonymised, and locklog_trace follows order 4812: all free and masked. The agent then asks locklog_unmask for the email. The locklog console, in its own account and container, shows the approval screen with the span highlighted; the human presses Ctrl-O to see the record in clear on their screen only, and answers n. The agent gets denied and carries on without the address; the audit records every call with pseudonyms only." width="900">
+  <img src="site/assets/demo.svg" alt="Claude Code asks when the PDF errors started on a staging profile. locklog_count shows the step at 14:02, locklog_patterns finds the new pattern with the email and the IP already pseudonymised, and locklog_trace follows order 4812: all free and masked. The agent then asks locklog_unmask for the email. The locklog console, in its own account and container, shows the read-pii approval screen with the masked record and the span marked; the human answers n. The agent gets denied and carries on without the address; the audit records every call with pseudonyms only." width="900">
 </p>
 
 <p align="center">
@@ -40,9 +40,9 @@ account and container, reads the logs. The agent asks over MCP and gets
 masked, bounded, typed answers: counts, patterns, traces, lines around a
 hit. Emails, IPs, card numbers, national ids and the other values locklog
 detects become **pseudonyms** (`⟦email:7F3KQ2M9ZD4X⟧`), and secrets become
-`⟦secret⟧`, before anything leaves the console. Reads are free. Seeing a
-value in clear is for you, at the console. Handing one to the agent waits
-for your approval and is off on production.
+`⟦secret⟧`, before anything leaves the console. Reads are free. Handing a
+clear value to the agent waits for your approval at the console and is off
+on production.
 
 > [!NOTE]
 > **Pre-release.** Built on [lockkit](https://github.com/DavidGodefroid/lockkit).
@@ -120,13 +120,12 @@ agent is the trial.
 On production the agent must not be able to read the logs, the Docker
 socket or the backends itself (precondition P1 below). Run it:
 
-- in **[lea](https://github.com/DavidGodefroid/lea)**: `lea init --locklog`
-  mounts the socket volume and the project read-only into the agent's
-  container (`locklog setup --agent lea` prints the console's
-  `--allowed-uids`); or
 - in **its own container**: `locklog setup --agent container` prints a
   tested Dockerfile snippet for your agent image and the `docker run` line.
-  The agent user must not have sudo.
+  The agent user must not have sudo. See [docs/setup.md](docs/setup.md).
+
+Support in [lea](https://github.com/DavidGodefroid/lea) is planned; no lea
+release supports it yet (`locklog setup --agent lea` says so).
 
 Your agent CLI's own login (Anthropic, OpenAI, Google) is yours to set up.
 
@@ -155,8 +154,9 @@ Your agent CLI's own login (Anthropic, OpenAI, Google) is yours to set up.
    matched.
 3. Every record of a planned chunk is **masked first**: secrets
    (`⟦secret⟧`, final), then your rules, personal field names, value
-   detectors (email, phone, IBAN, card, BE/FR/NL/US national ids, public IP,
-   person names) and the structured or text mode. Then the agent's
+   detectors (email, phone, IBAN, card, BE/FR/NL/US national ids, public IP;
+   person names and loose phone numbers opt-in) and the structured or text
+   mode. Then the agent's
    predicates run on the masked view.
 4. The answer leaves through `render` caps as JSON under an "untrusted
    content" header, with the pseudonym `epoch` and a sealed cursor to
@@ -165,14 +165,18 @@ Your agent CLI's own login (Anthropic, OpenAI, Google) is yours to set up.
 | Operation | Who decides |
 |---|---|
 | `status`, `sources`, `search`, `count`, `patterns`, `context`, `trace`, `tail` within budgets | free, audited |
-| `lookup` (clear value → pseudonym), `pii_list` / `pii_add` (agent masking rules, tighten only) | free, rate-limited, audited |
-| `locklog_scan` (beyond a budget, approved once for its whole plan) | you, at the console |
-| `locklog_unmask` (the clear value of exact spans, once) | you, on a terminal facade only; **off by default on production** |
+| `lookup` (clear value → pseudonym, detector kinds only) | free, rate-limited, audited; or approved each time with `lookup = "approved"` |
+| `pii_list` / `pii_add` (agent masking rules, tighten only) | free, capped, audited (served once the console's PII backend lands, [#64](https://github.com/DavidGodefroid/locklog/issues/64)) |
+| `locklog_scan` (beyond a budget, approved once for its whole plan; its cursor continues free for 30 minutes) | you, at the console |
+| `locklog_unmask` (the clear value of exact spans of one record, once) | you, at the console, never auto-approved; **off by default on production** |
 | `locklog_request_change` (any loosening) | you, at the console's `:review` |
 | write, delete, admin | does not exist |
 
-`:reveal <ref>` and Ctrl-O on an approval screen show you a record in clear
-on the console's terminal only, with secrets still redacted.
+The unmask screen shows the record **masked**, with the asked spans marked
+`» «`, the agent's reason and what a yes lets the agent link. Secrets are
+never unmasked. On a non-production profile, auto mode (Shift+Tab) can
+approve scans for you; unmasks and approved lookups always wait for you, and
+production stays in manual mode.
 
 ## Safety model
 
@@ -186,7 +190,8 @@ locklog enforces what it owns:
 - on production, backends with **authentication over TLS**, and a refusal
   when an endpoint answers a read without credentials;
 - the masking pipeline, the budgets, and approvals bound to the exact plan
-  (single use, `read-pii` only from a terminal facade).
+  (single use; an unmask re-reads the record and is refused if anything
+  moved since you approved it).
 
 Like the other Locks, it relies on three **preconditions** it does not
 enforce:
@@ -207,7 +212,8 @@ fails. It reports and never prints a response body. Details:
 
 locklog masks the values it **detects**. It does not detect:
 
-- names outside its gazetteer heuristics, usernames and logins in free
+- person names unless you enable the opt-in `person_name` detector (and
+  names outside its heuristics when you do), usernames and logins in free
   text, postal addresses;
 - private and loopback IPs (infrastructure; configurable), user agents and
   other quasi-identifiers;
@@ -236,7 +242,12 @@ logs), the `template` text mode, your own rules, and `lookup = "approved"`.
 | journald | v0.1.0 | pure-Go reader, field allowlist; core dumps, command lines and audit fields are never served |
 | Docker containers | v0.1.0 | `json-file` logs by container name glob; the `journald` driver through journald. Podman through journald |
 | Loki | v0.1.0 | trusted labels and structured metadata, server-side metric counts; text never sent to Loki |
-| Elasticsearch, OpenSearch | v0.3.0 | trusted keyword fields, `search_after` |
+| Elasticsearch, OpenSearch | v0.3.0 | trusted keyword fields, `search_after`, a read-only privilege check |
+
+The console opens Loki, Elasticsearch and OpenSearch sources from the
+profile once [#97](https://github.com/DavidGodefroid/locklog/pull/97) is
+merged; until then the console cannot open them
+(`unsupported source kind`).
 
 `docker compose up` deletes a recreated container's `json-file` logs: use
 the journald driver or Loki for history across deploys.

@@ -6,10 +6,9 @@ how, what it relies on, and what it does not do.
 
 ## What locklog protects
 
-1. **Clear values.** Nothing unmasked leaves the console. There are two
-   exceptions, both decided by a human: an approved unmask (the exact
-   spans, once, decided on a terminal facade) and a reveal on the human's
-   own screen. Secrets are never unmasked, revealed or pseudonymised.
+1. **Clear values.** Nothing unmasked leaves the console, except an unmask
+   a human approves at the console (the exact spans, once). Secrets are
+   never unmasked or pseudonymised.
 2. **Clear-text oracles.** The agent cannot learn whether a clear value it
    chooses occurs in the logs, except through the documented residuals
    below.
@@ -45,9 +44,9 @@ the pseudonym keys and decides what leaves.
 |---|---|---|
 | 1 | No locklog container has an engine socket | launcher; goldens |
 | 2 | The console shares only `locklog-run` with agents; the home volume, the map directory and the hub network never | launcher, `lock up`, lea's label check |
-| 3 | Nothing unmasked leaves the console except an approved unmask or a reveal on the human's screen; secrets never | masking pipeline, typed masked responses; canary harness |
+| 3 | Nothing unmasked leaves the console except an approved unmask; secrets never | masking pipeline, typed masked responses; canary harness |
 | 4 | Agent predicates see only the masked view; every record is masked before any predicate; no text is sent to a backend; plans, charges and stopping points depend on the plan, never on matches; agent rules only tighten | engine, oracle and equivalence suites |
-| 5 | Approved operations run only on a decision bound to the plan hash (exact spans for an unmask, the whole plan for a scan) and the policy fingerprint, once; `read-pii` only from `tty`, `deck` or `mobile` | lockkit plans and tickets, a facade check in the lock |
+| 5 | Approved operations run only on a decision bound to the plan hash (exact spans for an unmask, the whole plan for a scan) and the policy fingerprint, once; never auto-approved for `read-pii`. With the hub (v0.2.0), `read-pii` only from `tty`, `deck` or `mobile` | lockkit plans and tickets; the facade check lands with the hub |
 | 6 | No approve or reveal method on the agent socket | lockkit |
 | 7 | Hub unreachable ⇒ approvals wait; free reads continue with the local audit | hub client |
 | 8 | No hub auto-discovery | lockkit |
@@ -89,11 +88,14 @@ and never prints a response body. It looks at:
 - membership of the groups `docker`, `adm` and `systemd-journal`;
 - `sudo -n` and euid 0;
 - whether `/var/log/journal` and `/var/lib/docker` are readable;
-- unauthenticated reads of the configured backends and of host-published
-  Loki, Elasticsearch, OpenSearch and Grafana ports;
+- cloud credential files in the agent's account;
+- unauthenticated reads of the configured backends;
 - the cloud metadata credential paths.
 
-On a production profile, its findings are errors.
+Each finding prints a remedy. On a production profile its findings are
+errors and it exits 1. It also lists residuals: whether Landlock confines
+the console, containers with `IpcMode` shareable, and swarm mode. See
+[setup.md](setup.md).
 
 The **host-agent trial** (`locklog setup --agent host`) runs the MCP server
 as the image's `agent` account, launched from your own account. Your agent
@@ -113,15 +115,17 @@ Order, fixed, per record and per field:
 4. **Value detectors** on a detection view (folded, NFKC, without
    zero-width characters, with percent, JSON `\u` and HTML entities
    decoded): email, phone, IBAN, card, Belgian/French/Dutch/US national ids,
-   public IP, person names.
+   public IP; person names and loose phone numbers are opt-in (`detectors`)
+   for their false positives.
 5. **Structured mode** (`redact-unknown`, the production default, or
    `detect`) or **text mode** (`detect`, or `template`).
 
 A pseudonym is `⟦kind:ID⟧`: 12 Crockford base32 characters (60 bits) of an
 HMAC-SHA256 under a random per-epoch key. The key rotates every 7 days by
-default, the previous key is deleted 24 hours later, and the epoch is
-refused once it is older than 30 days. There is no pseudonym-to-value
-store. An unmask or a reveal re-reads the record by its sealed reference.
+default (`pseudonym_rotation`); a replaced key is deleted once it has been
+replaced for `pseudonym_max_age` (30 days by default), when the console
+opens the profile. There is no pseudonym-to-value store. An unmask re-reads
+the record by its sealed reference.
 
 Agent rules (`locklog_pii_add`) only tighten: they add masking and never
 remove it or change its kind. They are stored in the console's home volume,
@@ -131,7 +135,8 @@ never in the project's `.locklog/`.
 
 Values locklog does not detect:
 
-- names outside its gazetteer heuristics;
+- person names, unless the opt-in `person_name` detector is on (and names
+  outside its heuristics when it is);
 - usernames and logins in free text;
 - postal addresses;
 - private and loopback IPs;
@@ -181,7 +186,7 @@ agent does through locklog writes or unmasks without the human.
 | Data | Where | Kept |
 |---|---|---|
 | Audit (one chained line per call) | home volume | until you delete it. It holds pseudonyms, tool arguments and **the predicates the agent typed**: a personal value the agent typed in a form the detectors miss stays there |
-| Approved plans and tickets | home volume | until used or expired (an approved scan: 30 minutes) |
-| Result cache | console memory | ≤ 64 MiB, dropped on a policy change and at exit |
+| Plans and approved scans | console memory | until used or expired (an approved scan: 30 minutes); gone when the session ends |
+| Result cache | console memory | ≤ 64 MiB, gone when the session ends (a policy change, the console's exit) |
 | Local index | home volume | per file identity, rebuilt when a file changes; trusted field values masked at answer time |
-| Pseudonym keys | home volume | current epoch, plus the previous one for 24 h |
+| Pseudonym keys | home volume | the current epoch's key; a replaced key until it has been replaced for `pseudonym_max_age` (30 days by default), deleted when the console opens the profile |
