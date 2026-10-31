@@ -134,7 +134,7 @@ trusted fields.
 ### Query model
 
 ```json
-{ "sources": ["nginx", "system"], "from": "2026-10-30T13:00:00Z", "to": "2026-10-30T15:00:00Z",
+{ "sources": ["nginx"], "from": "2026-10-30T13:00:00Z", "to": "2026-10-30T15:00:00Z",
   "where": [ {"field": "status", "op": ">=", "value": 500},
              {"field": "user.email", "op": "=", "value": "⟦email:7F3KQ2M9ZD4X⟧"} ],
   "text": "upstream timed out", "limit": 100 }

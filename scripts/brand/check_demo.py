@@ -6,7 +6,8 @@ stay in step with the code.
 - it is at most 40 KB, parses as XML, has a <title>, an aria-label and a prefers-reduced-motion
   rule (the final frame, no motion);
 - every locklog_* tool it names is a tool the MCP server registers, and every pseudonym it shows
-  has the ⟦kind:ID⟧ shape (12 Crockford base32 characters) of a detector kind the code knows.
+  has the ⟦kind:ID⟧ shape (12 Crockford base32 characters, or ⟦kind:…⟧ as patterns shows it) of a
+  detector kind the code knows.
 
     python3 scripts/brand/check_demo.py
 """
@@ -52,7 +53,7 @@ for tool in sorted(set(re.findall(r"locklog_[a-z_]+", text))):
     if f'"{tool}"' not in code:
         errors.append(f"the demo shows {tool}, which no Go source under internal/ names as a tool")
 for kind, ident in re.findall(r"⟦([a-z_]+):([^⟧]*)⟧", text):
-    if not re.fullmatch(r"[0-9A-HJKMNP-TV-Z]{12}", ident):
+    if ident != "…" and not re.fullmatch(r"[0-9A-HJKMNP-TV-Z]{12}", ident):
         errors.append(f"pseudonym ⟦{kind}:{ident}⟧ does not have 12 Crockford base32 characters")
     if f'"{kind}"' not in code:
         errors.append(f"pseudonym kind {kind} is not a kind the code names")

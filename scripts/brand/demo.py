@@ -2,8 +2,8 @@
 """Generate site/assets/demo.svg: locklog's value in one looping image.
 
 Claude Code (left) investigates PDF errors on a staging profile. locklog_count shows the step at
-14:02, locklog_patterns the new pattern (the email and the IP already pseudonymised), and
-locklog_trace the order behind it: all free, all masked. The agent then asks locklog_unmask for
+14:02, locklog_patterns the new pattern (the email and the IP masked to their kinds), and
+locklog_trace the order behind it, with the email's pseudonym: all free, all masked. The agent then asks locklog_unmask for
 the email. The locklog console (right, its own account and container) shows the read-pii approval
 screen: the masked record with the exact span marked » «, the agent's reason and what revealing it
 lets the agent do. The human answers "n". The agent gets "denied by the human" and carries on
@@ -114,14 +114,14 @@ pane(AX, AY, AW, AH, "✻ Claude Code", "its own container · profile staging")
 ax, ay = AX + 16, AY + 52
 agent = [
     (0.3, [("> ", D), ("when did the PDF errors start on staging?", T)]),
-    (1.0, [("● ", G), ("locklog_count", T), ("(api, last 24h, by 1m, level=error)", S)]),
+    (1.0, [("● ", G), ("locklog_count", T), ("(api, last 12h, by 1m, level=error)", S)]),
     (1.8, [("  └ ", D), ("0/min until 14:01 · ", S), ("67/min from 14:02", Y)]),
     (2.6, [("● ", G), ("locklog_patterns", T), ("(api, 13:50-14:20, baseline 1h)", S)]),
-    (3.4, [("  └ ", D), ("new ×1,204: ", Y), ("render pdf for ", T), (EMAIL, TL)]),
-    (3.4, [("    ", D), ("from ", T), (IP, TL), (" failed: upstream timed out", T)]),
+    (3.4, [("  └ ", D), ("new ×1,204: ", Y), ("render pdf for ", T), ("⟦email:…⟧", TL)]),
+    (3.4, [("    ", D), ("from ", T), ("⟦ip:…⟧", TL), (" failed: upstream timed out", T)]),
     (4.2, [("● ", G), ("locklog_trace", T), ("(order_id 4812, 14:00-14:05)", S)]),
     (5.0, [("  └ ", D), ("14:02:11.180 nginx  GET /api/orders/4812/pdf 502", S)]),
-    (5.0, [("    ", D), ("14:02:11.204 api    render pdf … upstream timed out", S)]),
+    (5.0, [("    ", D), ("14:02:11.204 api    render pdf for ", S), (EMAIL, TL), (" …", S)]),
     (5.8, [("● ", G), ("locklog_unmask", T), ("(ref Lr1.QW3H…, ", S), (EMAIL, TL), (")", S)]),
 ]
 for i, (t, parts) in enumerate(agent):
@@ -268,7 +268,7 @@ for t0, t1, s in caps:
 
 label = ("locklog: Claude Code asks when the PDF errors started on a staging profile. locklog_count "
          "shows the step at 14:02, locklog_patterns finds the new pattern with the email and the IP "
-         "already pseudonymised, and locklog_trace follows order 4812: all free and masked. The agent "
+         "masked, and locklog_trace follows order 4812: all free and masked. The agent "
          "then asks locklog_unmask for the email. The locklog console, in its own account and "
          "container, shows the read-pii approval screen with the masked record and the span marked; "
          "the human answers n. The agent gets denied and "

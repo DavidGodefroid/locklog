@@ -24,7 +24,8 @@ how, what it relies on, and what it does not do.
    locklog launcher (root-owned /usr/local/bin/locklog)
      ├─ console  locklog-console-<n>  uid 10051, no capability, read-only root,
      │    --cpus min(2,nproc) --memory 1g --pids-limit 256 --log-driver none,
-     │    --allowed-uids …; read-only non-recursive binds of the approved roots
+     │    --allowed-uids … (not passed by the launcher yet: #102); read-only
+     │    non-recursive binds of the approved roots
      │    volume locklog-home  keys, index, audit, PII rules          (console only)
      │    volume locklog-run   socket dir 2750 locklog:locklog-clients (10051:10050), socket 0660
      │    network: none (local sources) | the backend's network | the hub's network (v0.2.0)
