@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
@@ -175,7 +176,8 @@ func TestOpenerConfinedWithoutVaultRefusesVault(t *testing.T) {
 	if _, err := op.confine(src("")); err != nil {
 		t.Fatal(err)
 	}
-	vaultAt = "/usr/local/bin/vault"
+	// Absolute on every build OS (vaultCLI grants absolute paths only).
+	vaultAt = filepath.Join(t.TempDir(), "vault")
 	if _, err := op.confine(src(kconfig.CredentialsVault)); err == nil || !strings.Contains(err.Error(), "restart the console") {
 		t.Errorf("vault after a ruleset without it: %v", err)
 	}
