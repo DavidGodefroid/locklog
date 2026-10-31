@@ -25,12 +25,12 @@ how, what it relies on, and what it does not do.
      ├─ console  locklog-console-<n>  uid 10051, no capability, read-only root,
      │    --cpus min(2,nproc) --memory 1g --pids-limit 256 --log-driver none,
      │    --allowed-uids …; read-only non-recursive binds of the approved roots
-     │    volume locklog-home  keys, index, plans, audit, PII rules   (console only)
+     │    volume locklog-home  keys, index, audit, PII rules          (console only)
      │    volume locklog-run   socket dir 2750 locklog:locklog-clients (10051:10050), socket 0660
-     │    network: none (local sources) | the backend's network | the hub's network
+     │    network: none (local sources) | the backend's network | the hub's network (v0.2.0)
      └─ map loop  docker events → names and ids of the approved container globs
 
- agent (not locklog's): a lea container, the user's own agent container
+ agent (not locklog's): the user's own agent container (a lea container: planned)
    (gid 10050, its uid in --allowed-uids when needed), or, for the trial,
    the host agent through `locklog mcp`
 ```
@@ -43,14 +43,14 @@ the pseudonym keys and decides what leaves.
 | # | Invariant | Mechanism |
 |---|---|---|
 | 1 | No locklog container has an engine socket | launcher; goldens |
-| 2 | The console shares only `locklog-run` with agents; the home volume, the map directory and the hub network never | launcher, `lock up`, lea's label check |
+| 2 | The console shares only `locklog-run` with agents; the home volume, the map directory and the hub network never | launcher; with the hub (v0.2.0) `lock up`; with lea (planned) its label check |
 | 3 | Nothing unmasked leaves the console except an approved unmask; secrets never | masking pipeline, typed masked responses; canary harness |
 | 4 | Agent predicates see only the masked view; every record is masked before any predicate; no text is sent to a backend; plans, charges and stopping points depend on the plan, never on matches; agent rules only tighten | engine, oracle and equivalence suites |
 | 5 | Approved operations run only on a decision bound to the plan hash (exact spans for an unmask, the whole plan for a scan) and the policy fingerprint, once; never auto-approved for `read-pii`. With the hub (v0.2.0), `read-pii` only from `tty`, `deck` or `mobile` | lockkit plans and tickets; the facade check lands with the hub |
 | 6 | No approve or reveal method on the agent socket | lockkit |
-| 7 | Hub unreachable ⇒ approvals wait; free reads continue with the local audit | hub client |
-| 8 | No hub auto-discovery | lockkit |
-| 9 | Only approved sources are opened; the policy is the approved copy; `.locklog/` is read-only for lea agents | approved store, mount plan, dev/inode checks |
+| 7 | With the hub (v0.2.0): hub unreachable ⇒ approvals wait; free reads continue with the local audit | hub client |
+| 8 | With the hub (v0.2.0): no hub auto-discovery | lockkit |
+| 9 | Only approved sources are opened; the policy is the approved copy; `.locklog/` is read-only for lea agents (lea placement planned) | approved store, mount plan, dev/inode checks |
 | 10 | Log content is untrusted text everywhere | JSON-escaped under an "untrusted" header, controls replaced; injection corpus |
 | 11 | Resources are bounded | plans, rolling budgets, a queue, container limits, decompression, response and journal DATA caps, a 64 MiB result cache |
 | 12 | Every call is audited, chained, without clear values | lockkit audit |

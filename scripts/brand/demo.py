@@ -115,7 +115,7 @@ ax, ay = AX + 16, AY + 52
 agent = [
     (0.3, [("> ", D), ("when did the PDF errors start on staging?", T)]),
     (1.0, [("● ", G), ("locklog_count", T), ("(api, last 24h, by 1m, level=error)", S)]),
-    (1.8, [("  └ ", D), ("0/min until 14:01 · ", S), ("418/min from 14:02", Y)]),
+    (1.8, [("  └ ", D), ("0/min until 14:01 · ", S), ("67/min from 14:02", Y)]),
     (2.6, [("● ", G), ("locklog_patterns", T), ("(api, 13:50-14:20, baseline 13:00)", S)]),
     (3.4, [("  └ ", D), ("new ×1,204: ", Y), ("render pdf for ", T), (EMAIL, TL)]),
     (3.4, [("    ", D), ("from ", T), (IP, TL), (" failed: upstream timed out", T)]),
@@ -148,7 +148,7 @@ CS = 11
 CHW = CS * 0.602  # one character is 0.602 em wide
 con = [
     [("$ ", D), ("locklog console", T)],
-    [("✓ ", G), ("profile ", T), ("staging", Y), (" · sources api, nginx, journal", T)],
+    [("✓ ", G), ("profile ", T), ("staging", Y), (" · sources api, nginx, system", T)],
     [("› ", C["accent"]), ("agent socket /run/locklog/locklog.sock", T)],
 ]
 for i, parts in enumerate(con):
@@ -160,7 +160,7 @@ for i, (t, tool, what) in enumerate(notes):
     body.append(spans(cx, cy + (3 + i) * LH, [("· ", D), (tool, S), (" " + what, D)], cls=show(t, 6.2), size=CS))
 screen = [
     [("╭─ ", V), ("STAGING", Y), (" · unmask · read-pii ", T), ("──────────────────────────────", V)],
-    [("│ ", V), ("uid 1000 · reason ", D), ('"contact the customer"', T)],
+    [("│ ", V), ("uid 10052 (agent) · reason ", D), ('"contact the customer"', T)],
     [("│ ", V), ("source: api · record: 2026-10-30T14:02:11.204Z", T)],
     [("│ ", V), ("reveal: ", T), (EMAIL, Y)],
     [("│ ", V), ("spans: 1 in this record (marked » «)", T)],
@@ -256,9 +256,9 @@ def jline(pairs):
 
 
 free = jline([("event", '"log.call"', T), ("profile", '"staging"', T), ("decision", '"ok"', G),
-              "…", ("peer_uid", "1000", T), "…", ("method", '"log.patterns"', T), ("sources", '["api"]', S)])
+              "…", ("peer_uid", "10052", T), "…", ("method", '"log.patterns"', T), ("sources", '["api"]', S)])
 denied = jline([("event", '"log.call"', T), ("profile", '"staging"', T), ("decision", '"denied"', R),
-                "…", ("peer_uid", "1000", T), "…", ("method", '"log.unmask"', T), ("sources", '["api"]', S)])
+                "…", ("peer_uid", "10052", T), "…", ("method", '"log.unmask"', T), ("sources", '["api"]', S)])
 body.append(spans(BX + 16, BY + 48, free, cls=show(3.6), size=10))
 body.append(spans(BX + 16, BY + 68, denied, cls=show(11.4), size=10))
 
