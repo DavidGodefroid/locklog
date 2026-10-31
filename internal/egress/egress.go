@@ -20,6 +20,7 @@
 package egress
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -421,6 +422,25 @@ func (c *Client) GetWith(ctx context.Context, path string, q url.Values, hdr map
 	return c.do(req)
 }
 
+// Send sends an allowed GET or POST with the source's credentials and a
+// JSON body (nil: none), and returns the capped body. A non-2xx status is
+// an error whose text never quotes either body.
+func (c *Client) Send(ctx context.Context, method, path string, q url.Values, body []byte) (Response, error) {
+	var rd io.Reader
+	if body != nil {
+		rd = bytes.NewReader(body)
+	}
+	req, err := c.request(ctx, method, path, q, rd)
+	if err != nil {
+		return Response{}, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	c.authorize(req)
+	return c.do(req)
+}
+
 func (c *Client) do(req *http.Request) (Response, error) {
 	return c.doWith(c.http, req)
 }
@@ -552,10 +572,16 @@ func LokiData(body []byte) bool {
 // CheckUnauthenticated is the production check of a Loki source: it
 // refuses the source when the probe reads data without credentials.
 func CheckUnauthenticated(ctx context.Context, c *Client, production bool) error {
+	return CheckUnauthenticatedAt(ctx, c, production, LokiProbePath, LokiData)
+}
+
+// CheckUnauthenticatedAt is the production check of a remote source whose
+// data endpoint is path and whose data answer recognize recognizes.
+func CheckUnauthenticatedAt(ctx context.Context, c *Client, production bool, path string, recognize Recognizer) error {
 	if !production {
 		return nil
 	}
-	open, err := c.Probe(ctx, LokiProbePath, LokiData)
+	open, err := c.Probe(ctx, path, recognize)
 	if err != nil {
 		return fmt.Errorf("egress: unauthenticated-read check: %w", err)
 	}
