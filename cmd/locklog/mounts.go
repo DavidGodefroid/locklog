@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 
@@ -85,6 +86,11 @@ func mounts(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "profile %s %t\n", p.Name, p.Production)
 	for _, l := range lines {
 		fmt.Fprintln(stdout, l.String())
+	}
+	// A remote source mounts nothing; the launcher needs LOCKLOG_NETWORK
+	// to reach it.
+	if slices.ContainsFunc(p.Sources, func(s config.Source) bool { return s.Remote != nil }) {
+		fmt.Fprintln(stdout, mountplan.RemoteLine)
 	}
 	return 0
 }

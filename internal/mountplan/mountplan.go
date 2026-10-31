@@ -11,6 +11,11 @@
 //	docker <glob>         an approved container name glob of a docker source: the
 //	                      launcher binds the containers root and maps the
 //	                      containers whose name matches
+//	remote                the profile reads a remote source (Loki,
+//	                      Elasticsearch, OpenSearch): nothing to bind, but the
+//	                      console needs the network LOCKLOG_NETWORK names
+//	                      (`locklog mounts` prints it last; Lines does not
+//	                      return it)
 //
 // No field holds a space, a comma, ';', ':', '=', a quote or a control character:
 // the config refuses such globs, and Lines refuses them again.
@@ -24,6 +29,9 @@ import (
 
 	"github.com/DavidGodefroid/locklog/internal/config"
 )
+
+// RemoteLine is the plan's line of a profile with a remote source.
+const RemoteLine = "remote"
 
 // Line is one entry of the plan.
 type Line struct {
