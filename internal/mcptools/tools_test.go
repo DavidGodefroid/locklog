@@ -3,6 +3,7 @@ package mcptools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -21,6 +22,7 @@ type fakeConn struct {
 	mu         sync.Mutex
 	calls      []string
 	production bool
+	status     []byte // replaces the status answer when set
 	err        error
 }
 
@@ -30,7 +32,10 @@ func (f *fakeConn) Call(_ context.Context, method string, params, result any) er
 	f.calls = append(f.calls, method+" "+string(raw))
 	f.mu.Unlock()
 	if method == ipc.MethodStatus {
-		b, _ := json.Marshal(map[string]any{"profile": "dev", "production": f.production})
+		b := []byte(fmt.Sprintf(`{"profile":"dev","production":%t,"sources":["zz-prod-nginx"],"session_ends_in_s":987654,"auto_approve":true,"epoch_id":9007199254740993}`, f.production))
+		if f.status != nil {
+			b = f.status
+		}
 		switch r := result.(type) {
 		case *json.RawMessage:
 			*r = b
@@ -43,7 +48,7 @@ func (f *fakeConn) Call(_ context.Context, method string, params, result any) er
 		return f.err
 	}
 	if r, ok := result.(*json.RawMessage); ok {
-		*r = json.RawMessage(`{"records":[{"msg":"render pdf for ⟦email:7F3KQ2M9ZD4X⟧ failed"}],"complete":true}`)
+		*r = json.RawMessage(`{"records":[{"msg":"render pdf for ⟦email:7F3KQ2M9ZD4X⟧ failed","order_id":9007199254740993,"retried":false,"user":null}],"complete":true}`)
 	}
 	return nil
 }
@@ -189,7 +194,7 @@ func TestHostAgentGuard(t *testing.T) {
 			t.Errorf("a host agent reached %q on production", m)
 		}
 	}
-	if res := call(t, cs, ToolStatus, nil); !strings.Contains(text(res), "refused to a host agent") {
+	if res := call(t, cs, ToolStatus, nil); !strings.Contains(text(res), string(CodeProductionHostAgent)) {
 		t.Errorf("status: %s", text(res))
 	}
 	// Non-production: served.
@@ -205,68 +210,165 @@ func TestHostAgentGuard(t *testing.T) {
 	}
 }
 
-// leaves lists the string and number values of a decoded JSON value.
-func leaves(v any, out *[]string) {
+// envelope are the keys of StatusOut that frame a profile's answer; the
+// text shows their values in prose, not as JSON pairs.
+var envelope = map[string]bool{"data": true, "profile": true, "start": true, "running": true, "status": true, "refused": true, "refusal": true}
+
+// scalar renders a decoded JSON leaf as JSON.
+func scalar(v any) string {
+	b, _ := json.Marshal(v)
+	return string(b)
+}
+
+// inText reports whether the text shows the pair key: v, compact or
+// indented; an integer the structured output holds as a decimal string
+// may show as a number.
+func inText(txt, key string, v any) bool {
+	vals := []string{scalar(v)}
+	if s, ok := v.(string); ok && s != "" && strings.Trim(s, "0123456789-") == "" {
+		vals = append(vals, s)
+	}
+	for _, val := range vals {
+		if strings.Contains(txt, `"`+key+`":`+val) || strings.Contains(txt, `"`+key+`": `+val) {
+			return true
+		}
+	}
+	return false
+}
+
+// checkPairs fails for every key/value pair (and array item) under v that
+// the text does not show. Envelope keys are containers or prose values.
+func checkPairs(t *testing.T, what, txt, key string, v any) {
+	t.Helper()
 	switch x := v.(type) {
 	case map[string]any:
-		for _, e := range x {
-			leaves(e, out)
+		for k, e := range x {
+			checkPairs(t, what, txt, k, e)
 		}
+		return
 	case []any:
 		for _, e := range x {
-			leaves(e, out)
+			checkPairs(t, what, txt, key, e)
 		}
-	case string:
-		*out = append(*out, x)
-	case float64:
-		b, _ := json.Marshal(x)
-		*out = append(*out, string(b))
+		return
+	}
+	switch {
+	case key == "running":
+		want := "No console runs"
+		if v == true {
+			want = "console running"
+		}
+		if !strings.Contains(txt, want) {
+			t.Errorf("%s: running=%v but the text lacks %q:\n%s", what, v, want, txt)
+		}
+	case envelope[key]:
+		if s, ok := v.(string); !ok || !strings.Contains(txt, s) {
+			t.Errorf("%s: %s=%v is not in the text:\n%s", what, key, v, txt)
+		}
+	case key == "":
+		if !strings.Contains(txt, scalar(v)) {
+			t.Errorf("%s: item %v is not in the text:\n%s", what, v, txt)
+		}
+	default:
+		// An array item under key shows as itself.
+		if !inText(txt, key, v) && !strings.Contains(txt, scalar(v)) {
+			t.Errorf("%s: structured %q: %s is not in the text:\n%s", what, key, scalar(v), txt)
+		}
 	}
 }
 
-// checkParity fails when the structured output holds a value the text
-// does not show.
+// checkParity fails when the structured output holds a key/value pair the
+// text does not show: booleans and null included.
 func checkParity(t *testing.T, what string, res *mcp.CallToolResult) {
 	t.Helper()
-	txt := text(res)
-	var vals []string
-	leaves(res.StructuredContent, &vals)
-	for _, v := range vals {
-		q, _ := json.Marshal(v)
-		if !strings.Contains(txt, v) && !strings.Contains(txt, string(q)) {
-			t.Errorf("%s: structured value %q is not in the text:\n%s", what, v, txt)
-		}
+	if res.StructuredContent == nil {
+		return
 	}
+	checkPairs(t, what, text(res), "", res.StructuredContent)
 }
 
-// A host agent asking the status of a production profile gets no status
-// fields, in the text or the structured output.
-func TestHostAgentStatusStructured(t *testing.T) {
-	o := withConn(&fakeConn{production: true})
-	o.HostAgent = true
-	res := call(t, connect(t, o), ToolStatus, nil)
+// statusData is the structured status output, profile by profile.
+func statusData(t *testing.T, res *mcp.CallToolResult) []map[string]any {
+	t.Helper()
 	b, _ := json.Marshal(res.StructuredContent)
 	var got struct {
 		Data []map[string]any `json:"data"`
 	}
-	if err := json.Unmarshal(b, &got); err != nil || len(got.Data) != 1 {
+	if err := json.Unmarshal(b, &got); err != nil {
 		t.Fatalf("structured = %s (%v)", b, err)
 	}
-	if _, ok := got.Data[0]["status"]; ok {
-		t.Errorf("a host agent got the production status: %s", b)
+	return got.Data
+}
+
+// A host agent asking the status of a production profile, or of one whose
+// status does not say, gets a structured refusal and no status, in the
+// text or the structured output.
+func TestHostAgentStatusStructured(t *testing.T) {
+	for _, c := range []*fakeConn{{production: true}, {status: []byte(`{"profile":"dev","sources":["zz-prod-nginx"]}`)}, {status: []byte(`[1,`)}} {
+		o := withConn(c)
+		o.HostAgent = true
+		res := call(t, connect(t, o), ToolStatus, nil)
+		d := statusData(t, res)
+		if len(d) != 1 {
+			t.Fatalf("data = %v", d)
+		}
+		if _, ok := d[0]["status"]; ok {
+			t.Errorf("a host agent got the status: %v", d[0])
+		}
+		r, _ := d[0]["refused"].(map[string]any)
+		if r["code"] != string(CodeProductionHostAgent) || r["retry"] != "ask_user" {
+			t.Errorf("refused = %v", d[0]["refused"])
+		}
+		for _, leak := range []string{"zz-prod-nginx", "987654", "auto_approve"} {
+			if strings.Contains(text(res), leak) {
+				t.Errorf("the text shows the status (%s): %s", leak, text(res))
+			}
+		}
+		checkParity(t, "status", res)
 	}
-	if got.Data[0]["refused"] != refusedProduction {
-		t.Errorf("no refusal marker: %s", b)
+}
+
+// The guard fails closed: a status that does not decode or does not say
+// production refuses every tool, structured, before any log method.
+func TestHostAgentGuardFailsClosed(t *testing.T) {
+	args := map[string]map[string]any{ToolPIIAdd: {"pattern": "x"}, ToolRequestChange: {"change": "y"}}
+	for _, st := range []string{`[1,`, `{"profile":"dev"}`, `{"production":"yes"}`} {
+		c := &fakeConn{status: []byte(st)}
+		o := withConn(c)
+		o.HostAgent = true
+		cs := connect(t, o)
+		for _, tool := range Names()[1:] {
+			res := call(t, cs, tool, args[tool])
+			b, _ := json.Marshal(res.StructuredContent)
+			if !res.IsError || !strings.Contains(string(b), `"code":"E_PRODUCTION_HOST_AGENT"`) || !strings.Contains(string(b), `"retry":"ask_user"`) {
+				t.Errorf("%s with status %s: %s %s", tool, st, text(res), b)
+			}
+		}
+		for _, m := range c.methods() {
+			if !strings.HasPrefix(m, ipc.MethodStatus) {
+				t.Errorf("status %s: a host agent reached %q", st, m)
+			}
+		}
 	}
-	if strings.Contains(text(res), `"production"`) || strings.Contains(text(res), `"profile":"dev"`) {
-		t.Errorf("the text shows the production status: %s", text(res))
+}
+
+// Large integers keep their digits: as a decimal string when beyond 2^53.
+func TestLargeIntegersExact(t *testing.T) {
+	cs := connect(t, withConn(&fakeConn{}))
+	res := call(t, cs, ToolSearch, map[string]any{"text": "x"})
+	b, _ := json.Marshal(res.StructuredContent)
+	if !strings.Contains(string(b), `"order_id":"9007199254740993"`) || !strings.Contains(text(res), "9007199254740993") {
+		t.Errorf("structured %s, text %s", b, text(res))
 	}
-	checkParity(t, "status", res)
+	res = call(t, cs, ToolStatus, nil)
+	if b, _ := json.Marshal(res.StructuredContent); !strings.Contains(string(b), `"epoch_id":"9007199254740993"`) {
+		t.Errorf("status structured %s", b)
+	}
 }
 
 // The structured output of every tool never carries more than its text:
-// served, refused by the console, refused to a host agent on production,
-// and a status without a console.
+// served, refused by the console, on production with and without a host
+// agent, and without a console.
 func TestStructuredParity(t *testing.T) {
 	args := map[string]map[string]any{ToolSearch: {"text": "x"}, ToolCount: {"text": "x"}, ToolPIIAdd: {"pattern": "x"}, ToolRequestChange: {"change": "y"}}
 	refused := &ipc.RPCError{Code: ipc.CodeRefused, Message: "over the budget", Data: &refusal.Info{Code: "E_OVER_BUDGET", Retry: refusal.RetryRewrite, Hint: "narrow the range", Span: &refusal.Span{Line: 1, Col: 7, Token: "regex"}}}
@@ -280,6 +382,7 @@ func TestStructuredParity(t *testing.T) {
 		{"console refusal", &fakeConn{err: refused}, false},
 		{"host agent production", &fakeConn{production: true}, true},
 		{"host agent non-production", &fakeConn{}, true},
+		{"host agent status without production", &fakeConn{status: []byte(`{"profile":"dev","sources":["zz-prod-nginx"]}`)}, true},
 	}
 	for _, tc := range cases {
 		o := withConn(tc.conn)
@@ -294,5 +397,77 @@ func TestStructuredParity(t *testing.T) {
 	cs := connect(t, o)
 	for _, tool := range Names() {
 		checkParity(t, "no console/"+tool, call(t, cs, tool, args[tool]))
+	}
+}
+
+// The input schemas bound what an agent may send.
+func TestInputSchemas(t *testing.T) {
+	cs := connect(t, withConn(&fakeConn{}))
+	res, err := cs.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	schemas := map[string]map[string]any{}
+	raw := map[string]string{}
+	for _, tl := range res.Tools {
+		b, _ := json.Marshal(tl.InputSchema)
+		raw[tl.Name] = string(b)
+		var m map[string]any
+		_ = json.Unmarshal(b, &m)
+		schemas[tl.Name] = m
+	}
+	prop := func(tool string, path ...string) map[string]any {
+		m := schemas[tool]
+		for _, p := range path {
+			m, _ = m[p].(map[string]any)
+		}
+		return m
+	}
+	ops := []any{"=", "!=", "in", "exists", "<", "<=", ">", ">=", "contains", "matches"}
+	if l := prop(ToolSearch, "properties", "limit"); l["minimum"] != float64(1) || l["maximum"] != float64(200) {
+		t.Errorf("search limit = %v", l)
+	}
+	for _, tool := range []string{ToolSearch, ToolCount} {
+		pred := prop(tool, "properties", "where", "items", "properties")
+		op, _ := pred["op"].(map[string]any)
+		val, _ := pred["value"].(map[string]any)
+		if e, _ := op["enum"].([]any); !slices.Equal(e, ops) || val["maxLength"] != float64(1024) {
+			t.Errorf("%s predicate = %v", tool, pred)
+		}
+		if r := prop(tool, "properties", "regex"); r["maxLength"] != float64(256) {
+			t.Errorf("%s regex = %v", tool, r)
+		}
+	}
+	for tool, f := range map[string]string{ToolPIIAdd: "pattern", ToolRequestChange: "change"} {
+		if p := prop(tool, "properties", f); p["minLength"] != float64(1) || p["maxLength"] == nil {
+			t.Errorf("%s %s = %v", tool, f, p)
+		}
+	}
+	for _, unused := range []string{"limit", "fields"} {
+		if _, ok := prop(ToolCount, "properties")[unused]; ok {
+			t.Errorf("count schema has %s", unused)
+		}
+	}
+	if _, ok := prop(ToolCount, "properties")["bucket"]; !ok {
+		t.Error("count schema lacks bucket")
+	}
+	for tool, r := range raw {
+		if strings.Contains(r, "locklog_lookup") {
+			t.Errorf("the %s schema names locklog_lookup", tool)
+		}
+	}
+	for _, bad := range []map[string]any{
+		{"limit": 0}, {"limit": 201},
+		{"where": []map[string]any{{"field": "a", "op": "~"}}},
+		{"where": []map[string]any{{"field": "a", "op": "=", "value": strings.Repeat("x", 1025)}}},
+	} {
+		if r, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: ToolSearch, Arguments: bad}); err == nil && !r.IsError {
+			t.Errorf("search accepted %v", bad)
+		}
+	}
+	for tool, bad := range map[string]map[string]any{ToolPIIAdd: {"pattern": ""}, ToolRequestChange: {"change": ""}, ToolCount: {"limit": 5}} {
+		if r, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: tool, Arguments: bad}); err == nil && !r.IsError {
+			t.Errorf("%s accepted %v", tool, bad)
+		}
 	}
 }

@@ -34,9 +34,13 @@ uses [Semantic Versioning](https://semver.org/).
 - The MCP server (`locklog mcp`): `locklog_status`, `locklog_sources`,
   `locklog_search`, `locklog_count`, the PII rules and change requests, each
   a thin adapter over the console; a host agent (the launcher's `mcp`) is
-  refused on production profiles, as the console's status reports them
-  (its status tool gives a refusal marker, never that profile's status;
-  every tool's structured output carries nothing its text does not).
+  refused on production profiles, as the console's status reports them,
+  with the structured refusal `E_PRODUCTION_HOST_AGENT` (and when the
+  status does not say: the guard fails closed). Its status tool never
+  shows that profile's status, and no tool's structured output carries
+  more than its text. Inputs are bounded by their schemas; integers
+  beyond 2^53 come back as decimal strings. The PII tools answer once
+  the console serves PII rules.
   `locklog init <agent>` wires Claude Code, Codex, Cursor or Gemini CLI;
   for Claude Code it merges the free tools (never an approved one such as
   `locklog_request_change`) into the project's `.claude/settings.local.json`
