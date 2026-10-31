@@ -647,11 +647,11 @@ func (e *Engine) run(ctx context.Context, fp **frozen, chunk, gran int, needles 
 		// the call only.
 		// Within a compressed chunk every group decompresses the
 		// stream from its start: it is not halved.
-		per := max(e.o.Cost.Budget(remaining)/factor, 1)
+		groupBytes := max(e.o.Cost.Budget(remaining)/factor, 1)
 		if callBytes > 0 && !compressed(c) {
-			per = min(per, max((callBytes-sc.Bytes)/2, 1))
+			groupBytes = min(groupBytes, max((callBytes-sc.Bytes)/2, 1))
 		}
-		groups := granuleGroups(c, gran, per)
+		groups := granuleGroups(c, gran, groupBytes)
 		if len(groups) == 0 {
 			chunk, gran = chunk+1, 0
 			continue
