@@ -55,6 +55,12 @@ const (
 	maxCompressed = MaxData + 64<<10
 	// maxEntryItems bounds the number of fields of one entry.
 	maxEntryItems = 1 << 14
+	// MaxEntryData bounds the decompressed bytes kept for one entry: the
+	// fields past it are reported as dropped.
+	MaxEntryData = 2 * MaxData
+	// lz4PrefixSource bounds the compressed bytes read to decode a field
+	// name from an LZ4 payload.
+	lz4PrefixSource = 64 << 10
 	// maxArrayObject bounds one ENTRY_ARRAY object (items × 8 bytes).
 	maxArrayObject = 64 << 20
 	// MaxNameBytes is the longest field name journald accepts.
@@ -243,7 +249,11 @@ type EntryHead struct {
 
 // Head reads the fixed part of the entry at off.
 func (f *File) Head(off uint64) (EntryHead, error) {
-	_, size, err := f.objectHeader(off, typeEntry, entryHeaderSize, entryHeaderSize+maxEntryItems*16)
+	itemSize := uint64(16)
+	if f.compact {
+		itemSize = 4
+	}
+	_, size, err := f.objectHeader(off, typeEntry, entryHeaderSize, entryHeaderSize+maxEntryItems*itemSize)
 	if err != nil {
 		return EntryHead{}, err
 	}
@@ -256,6 +266,21 @@ func (f *File) Head(off uint64) (EntryHead, error) {
 		XorHash: le.Uint64(b[56:]), Size: size}
 	copy(e.BootID[:], b[40:56])
 	return e, nil
+}
+
+// Realtime reads only the realtime (µs) of the entry at off: one small read.
+func (f *File) Realtime(off uint64) (uint64, error) {
+	if off%8 != 0 {
+		return 0, corrupt("unaligned object", off)
+	}
+	var b [32]byte
+	if err := f.read(b[:], off); err != nil {
+		return 0, err
+	}
+	if b[0] != typeEntry {
+		return 0, corrupt("unexpected object type", off)
+	}
+	return binary.LittleEndian.Uint64(b[24:]), nil
 }
 
 // Entry is one entry with the fields its reader kept.
@@ -290,6 +315,8 @@ func (f *File) Entry(off uint64, keep func(name string) bool) (*Entry, error) {
 		return nil, err
 	}
 	e := &Entry{EntryHead: h, Offset: off}
+	seen := map[uint64]bool{}
+	budget := MaxEntryData
 	step := uint64(16)
 	if f.compact {
 		step = 4
@@ -301,14 +328,19 @@ func (f *File) Entry(off uint64, keep func(name string) bool) (*Entry, error) {
 		} else {
 			p = binary.LittleEndian.Uint64(items[i:])
 		}
-		if p == 0 {
-			continue
+		if p == 0 || seen[p] {
+			continue // journald never lists one object twice: a hostile file
 		}
+		seen[p] = true
 		name, err := f.name(p)
 		if err != nil {
 			return nil, err
 		}
 		if !keep(name) {
+			continue
+		}
+		if budget <= 0 {
+			e.Dropped++
 			continue
 		}
 		v, err := f.value(p, len(name))
@@ -318,6 +350,10 @@ func (f *File) Entry(off uint64, keep func(name string) bool) (*Entry, error) {
 		}
 		if err != nil {
 			return nil, err
+		}
+		if budget -= len(v); budget < 0 {
+			e.Dropped++
+			continue
 		}
 		e.Fields = append(e.Fields, Field{Name: name, Value: v})
 	}
@@ -364,14 +400,16 @@ func (f *File) name(off uint64) (string, error) {
 		}
 		prefix = prefix[:k]
 	case objCompressedLZ4:
-		v, err := f.lz4(off+start, stored)
-		if errors.Is(err, errTooLarge) {
-			return "", corrupt("lz4 data size", off)
+		// Only the first bytes of the block are decoded: an LZ4 match
+		// only points backwards, so a prefix stands on its own.
+		if stored < 8 {
+			return "", corrupt("lz4 data", off)
 		}
-		if err != nil {
+		src := make([]byte, min(stored-8, lz4PrefixSource))
+		if err := f.read(src, off+start+8); err != nil {
 			return "", err
 		}
-		prefix = v[:min(len(v), MaxNameBytes+1)]
+		prefix = lz4Prefix(src, MaxNameBytes+1)
 	default:
 		return "", corrupt("data compression flags", off)
 	}
@@ -486,7 +524,7 @@ func (f *File) stream(flags uint8, off, n uint64) (io.Reader, error) {
 		}
 		return f.zd, nil
 	}
-	r, err := xz.NewReader(src)
+	r, err := xz.ReaderConfig{DictCap: MaxData + 64<<10}.NewReader(src)
 	if err != nil {
 		return nil, corrupt("xz data", off)
 	}
@@ -519,4 +557,61 @@ func (f *File) lz4(off, n uint64) ([]byte, error) {
 		return nil, corrupt("lz4 data", off)
 	}
 	return out, nil
+}
+
+// lz4Prefix decodes at most n bytes from the start of an LZ4 block. It
+// stops early (returning what it has) on a truncated or invalid block.
+func lz4Prefix(src []byte, n int) []byte {
+	out := make([]byte, 0, n)
+	i := 0
+	for i < len(src) && len(out) < n {
+		token := src[i]
+		i++
+		lit := int(token >> 4)
+		if lit == 15 {
+			for i < len(src) {
+				b := src[i]
+				i++
+				lit += int(b)
+				if lit > 1<<30 {
+					return out
+				}
+				if b != 255 {
+					break
+				}
+			}
+		}
+		take := min(lit, n-len(out), len(src)-i)
+		out = append(out, src[i:i+take]...)
+		if len(out) >= n || lit > len(src)-i {
+			return out
+		}
+		i += lit
+		if i+2 > len(src) {
+			return out // the last sequence has literals only
+		}
+		offset := int(src[i]) | int(src[i+1])<<8
+		i += 2
+		ml := int(token&15) + 4
+		if token&15 == 15 {
+			for i < len(src) {
+				b := src[i]
+				i++
+				ml += int(b)
+				if ml > 1<<30 {
+					return out
+				}
+				if b != 255 {
+					break
+				}
+			}
+		}
+		if offset == 0 || offset > len(out) {
+			return out
+		}
+		for k := 0; k < ml && len(out) < n; k++ {
+			out = append(out, out[len(out)-offset])
+		}
+	}
+	return out
 }

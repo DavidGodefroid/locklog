@@ -12,10 +12,15 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/pierrec/lz4/v4"
+
+	"github.com/DavidGodefroid/locklog/internal/source/journald/journal/journaltest"
 )
 
 // The fixtures in ../testdata were written by systemd itself (journald and
@@ -161,43 +166,94 @@ func TestFixturesMatchJournalctl(t *testing.T) {
 	}
 }
 
+var compressions = []string{"", "zstd", "lz4", "xz"}
+
+func build(compact bool, comp string, es ...journaltest.Entry) []byte {
+	return journaltest.Build(journaltest.Options{Compact: compact, Compress: comp}, es)
+}
+
 func TestKeepFiltersBeforeReading(t *testing.T) {
-	for _, z := range []bool{false, true} {
-		raw := buildJournal(true, z, []testEntry{{realtime: 1, fields: []string{"MESSAGE=hello", "COREDUMP_ENVIRON=SECRET=canary-env", "_CMDLINE=x --password=canary"}}})
+	big := "COREDUMP=" + strings.Repeat("canary-core ", 9000) // ~100 KiB
+	for _, comp := range compressions {
+		raw := build(true, comp, journaltest.Entry{Realtime: 1, Fields: []string{"MESSAGE=hello", "COREDUMP_ENVIRON=SECRET=canary-env", "_CMDLINE=x --password=canary", big}})
 		f, err := Open(bytes.NewReader(raw), int64(len(raw)))
 		if err != nil {
 			t.Fatal(err)
 		}
 		var seen []string
+		var e *Entry
 		err = f.EntryOffsets(func(_, off uint64) bool {
-			e, err := f.Entry(off, func(n string) bool { seen = append(seen, n); return n == "MESSAGE" })
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(e.Fields) != 1 || e.Fields[0].Name != "MESSAGE" || string(e.Fields[0].Value) != "hello" {
-				t.Fatalf("fields %+v", e.Fields)
-			}
-			return true
+			e, err = f.Entry(off, func(n string) bool { seen = append(seen, n); return n == "MESSAGE" })
+			return err == nil
 		})
 		if err != nil {
-			t.Fatal(err)
+			t.Fatalf("%s: %v", comp, err)
 		}
-		if strings.Join(seen, ",") != "MESSAGE,COREDUMP_ENVIRON,_CMDLINE" {
-			t.Fatalf("names %v", seen)
+		if e == nil || len(e.Fields) != 1 || e.Fields[0].Name != "MESSAGE" || string(e.Fields[0].Value) != "hello" {
+			t.Fatalf("%s: fields %+v", comp, e)
 		}
-		// Rejected values were never decoded: nothing of them is cached.
+		if strings.Join(sorted(seen), ",") != "COREDUMP,COREDUMP_ENVIRON,MESSAGE,_CMDLINE" {
+			t.Fatalf("%s: names %v", comp, seen)
+		}
 		for _, v := range f.data {
 			if bytes.Contains(v, []byte("canary")) {
-				t.Fatalf("a rejected field's value was read (zstd=%v)", z)
+				t.Fatalf("%s: a rejected field's value was read", comp)
 			}
 		}
 	}
 }
 
+// TestRefusedFieldNotDecompressed: reading the names of an entry costs the
+// same whether its refused core dump is 10 KiB or 900 KiB. ZSTD and XZ
+// decode only a prefix too, but their decoders allocate the frame's window
+// (bounded: 8 MiB for ZSTD, the dictionary cap for XZ), so they are held to
+// that bound instead.
+func TestRefusedFieldNotDecompressed(t *testing.T) {
+	cost := func(comp string, size int) uint64 {
+		raw := build(true, comp, journaltest.Entry{Realtime: 1, Fields: []string{"MESSAGE=hello", "COREDUMP=" + strings.Repeat("canary-core ", size/12)}})
+		f, err := Open(bytes.NewReader(raw), int64(len(raw)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		var ms0, ms1 runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&ms0)
+		f.EntryOffsets(func(_, off uint64) bool {
+			f.Entry(off, func(n string) bool { return n == "MESSAGE" })
+			return true
+		})
+		runtime.ReadMemStats(&ms1)
+		return ms1.TotalAlloc - ms0.TotalAlloc
+	}
+	for _, comp := range compressions {
+		small, large := cost(comp, 10<<10), cost(comp, 900<<10)
+		bound := uint64(64 << 10)
+		if comp == "zstd" || comp == "xz" {
+			bound = 2 * MaxData
+		}
+		if large > small+bound {
+			t.Errorf("%s: %d bytes allocated with a 900 KiB core dump, %d with 10 KiB", comp, large, small)
+		}
+	}
+}
+
+func sorted(s []string) []string {
+	out := append([]string(nil), s...)
+	for i := range out {
+		for j := i + 1; j < len(out); j++ {
+			if out[j] < out[i] {
+				out[i], out[j] = out[j], out[i]
+			}
+		}
+	}
+	return out
+}
+
 func TestOverCapDataDropped(t *testing.T) {
 	big := "MESSAGE=" + strings.Repeat("a", MaxData)
-	for _, z := range []bool{false, true} {
-		raw := buildJournal(false, z, []testEntry{{realtime: 1, fields: []string{big, "PRIORITY=3"}}})
+	for _, comp := range compressions {
+		raw := build(false, comp, journaltest.Entry{Realtime: 1, Fields: []string{big, "PRIORITY=3"}})
 		f, err := Open(bytes.NewReader(raw), int64(len(raw)))
 		if err != nil {
 			t.Fatal(err)
@@ -205,35 +261,98 @@ func TestOverCapDataDropped(t *testing.T) {
 		f.EntryOffsets(func(_, off uint64) bool {
 			e, err := f.Entry(off, keepAll)
 			if err != nil {
-				t.Fatal(err)
+				t.Fatalf("%s: %v", comp, err)
 			}
 			if e.Dropped != 1 || len(e.Fields) != 1 || e.Fields[0].Name != "PRIORITY" {
-				t.Fatalf("zstd=%v: dropped %d fields %d", z, e.Dropped, len(e.Fields))
+				t.Fatalf("%s: dropped %d fields %d", comp, e.Dropped, len(e.Fields))
 			}
 			return true
 		})
 	}
 }
 
-func TestDeclaredSizeCheckedBeforeAllocation(t *testing.T) {
-	// An LZ4 object declaring a 4 GiB payload is refused from its prefix.
-	raw := buildJournal(true, false, []testEntry{{realtime: 1, fields: []string{"MESSAGE=xxxxxxxxxxxxxxxx"}}})
-	f, err := Open(bytes.NewReader(raw), int64(len(raw)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var data uint64
+func TestLZ4DeclaredSizeCheckedBeforeAllocation(t *testing.T) {
+	// An LZ4 payload declaring 4 GiB: the name still reads from the
+	// block's prefix, the value is refused from the size prefix alone,
+	// and the entry keeps its other fields.
+	raw := build(true, "lz4", journaltest.Entry{Realtime: 1, Fields: []string{"COREDUMP=xxxxxxxxxxxxxxxx", "MESSAGE=hello"}})
+	f, _ := Open(bytes.NewReader(raw), int64(len(raw)))
+	var core uint64
 	for off := range f.dataOffsets(t) {
-		data = off
+		if n, _ := f.name(off); n == "COREDUMP" {
+			core = off
+		}
 	}
-	raw[data+1] = objCompressedLZ4
-	putU64(raw[data+72:], 4<<30)
+	putU64(raw[core+72:], 4<<30)
 	f, _ = Open(bytes.NewReader(raw), int64(len(raw)))
-	if _, err := f.name(data); !errors.Is(err, ErrCorrupt) {
-		t.Fatalf("name: %v", err)
+	if n, err := f.name(core); err != nil || n != "COREDUMP" {
+		t.Fatalf("name: %q %v", n, err)
 	}
-	if _, err := f.value(data, 7); !errors.Is(err, errTooLarge) {
+	if _, err := f.value(core, len("COREDUMP")); !errors.Is(err, errTooLarge) {
 		t.Fatalf("value: %v", err)
+	}
+	f.EntryOffsets(func(_, off uint64) bool {
+		e, err := f.Entry(off, keepAll)
+		if err != nil || e.Dropped != 1 || len(e.Fields) != 1 || e.Fields[0].Name != "MESSAGE" {
+			t.Fatalf("entry: %+v %v", e, err)
+		}
+		return true
+	})
+}
+
+func TestEntryDataBudget(t *testing.T) {
+	// One large allowed object listed many times: read once, and an
+	// entry never keeps more than MaxEntryData.
+	big := "MESSAGE=" + strings.Repeat("m", MaxData-100)
+	raw := build(true, "zstd", journaltest.Entry{Realtime: 1, Fields: []string{big, "A_1=" + strings.Repeat("a", MaxData-100), "A_2=" + strings.Repeat("b", MaxData-100), "PRIORITY=3"}})
+	f, _ := Open(bytes.NewReader(raw), int64(len(raw)))
+	var off0 uint64
+	f.EntryOffsets(func(_, off uint64) bool { off0 = off; return false })
+	// Point every item at the MESSAGE object.
+	h, _ := f.Head(off0)
+	items := raw[off0+entryHeaderSize : off0+h.Size]
+	first := append([]byte(nil), items[:4]...)
+	for i := 0; i+4 <= len(items); i += 4 {
+		copy(items[i:], first)
+	}
+	f, _ = Open(bytes.NewReader(raw), int64(len(raw)))
+	e, err := f.Entry(off0, keepAll)
+	if err != nil || len(e.Fields) != 1 {
+		t.Fatalf("repeated object: %d fields, %v", len(e.Fields), err)
+	}
+	raw = build(true, "zstd", journaltest.Entry{Realtime: 1, Fields: []string{big, "A_1=" + strings.Repeat("a", MaxData-100), "A_2=" + strings.Repeat("b", MaxData-100)}})
+	f, _ = Open(bytes.NewReader(raw), int64(len(raw)))
+	f.EntryOffsets(func(_, off uint64) bool {
+		e, err := f.Entry(off, keepAll)
+		if err != nil {
+			t.Fatal(err)
+		}
+		total := 0
+		for _, fl := range e.Fields {
+			total += len(fl.Value)
+		}
+		if total > MaxEntryData || e.Dropped == 0 {
+			t.Fatalf("entry kept %d bytes, dropped %d", total, e.Dropped)
+		}
+		return true
+	})
+}
+
+func TestLZ4Prefix(t *testing.T) {
+	for _, p := range []string{"MESSAGE=hello", "MESSAGE=" + strings.Repeat("ab", 500), strings.Repeat("Z", 70)} {
+		out := make([]byte, lz4.CompressBlockBound(len(p)))
+		n, _ := lz4.CompressBlock([]byte(p), out, nil)
+		if n == 0 {
+			continue
+		}
+		got := lz4Prefix(out[:n], 65)
+		want := p[:min(65, len(p))]
+		if string(got) != want {
+			t.Fatalf("prefix %q, want %q", got, want)
+		}
+	}
+	for _, junk := range [][]byte{nil, {0xff}, {0xf0, 255, 255}, {0x1f, 'a', 9, 0}} {
+		lz4Prefix(junk, 65) // never panics
 	}
 }
 
@@ -243,7 +362,7 @@ func putU64(b []byte, v uint64) {
 	}
 }
 
-// dataOffsets lists the DATA objects of a file built by buildJournal.
+// dataOffsets lists the DATA objects of a compact file.
 func (f *File) dataOffsets(t *testing.T) map[uint64]bool {
 	out := map[uint64]bool{}
 	f.EntryOffsets(func(_, off uint64) bool {
@@ -275,15 +394,15 @@ func readAll(raw []byte) (n int) {
 }
 
 func seeds() [][]byte {
-	es := []testEntry{
-		{realtime: 10, fields: []string{"MESSAGE=one", "PRIORITY=3", "_SYSTEMD_UNIT=api.service"}},
-		{realtime: 20, fields: []string{"MESSAGE=two\nlines", "PRIORITY=6", "COREDUMP=\x00\x01\x02"}},
-		{realtime: 30, fields: []string{"MESSAGE=" + strings.Repeat("z", 700), "PRIORITY=6"}},
+	es := []journaltest.Entry{
+		{Realtime: 10, Fields: []string{"MESSAGE=one", "PRIORITY=3", "_SYSTEMD_UNIT=api.service"}},
+		{Realtime: 20, Fields: []string{"MESSAGE=two\nlines", "PRIORITY=6", "COREDUMP=\x00\x01\x02"}},
+		{Realtime: 30, Fields: []string{"MESSAGE=" + strings.Repeat("z", 700), "PRIORITY=6"}},
 	}
 	var out [][]byte
 	for _, c := range []bool{false, true} {
-		for _, z := range []bool{false, true} {
-			out = append(out, buildJournal(c, z, es))
+		for _, comp := range compressions {
+			out = append(out, journaltest.Build(journaltest.Options{Compact: c, Compress: comp, PerArray: 2}, es))
 		}
 	}
 	return out

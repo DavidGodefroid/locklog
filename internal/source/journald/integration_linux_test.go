@@ -46,7 +46,7 @@ func TestLiveJournal(t *testing.T) {
 	if ref == nil {
 		t.Fatal("journalctl never showed the entry")
 	}
-	// A non-root writer's entries go to its user journal.
+	// Run without root, a writer's entries go to its user journal.
 	s := newSource(t, Options{Roots: []string{"/var/log/journal", "/run/log/journal"}, UserJournals: true})
 	now := time.Now()
 	recs := scanAll(t, s, source.Range{From: now.Add(-10 * time.Minute), To: now.Add(time.Minute)})
@@ -58,6 +58,18 @@ func TestLiveJournal(t *testing.T) {
 	}
 	if found == nil {
 		t.Fatalf("the source did not find the entry among %d records", len(recs))
+	}
+	if msg, _ := ref["MESSAGE"].(string); found.Event.Raw != msg {
+		t.Fatalf("MESSAGE %q, journalctl %q", found.Event.Raw, msg)
+	}
+	served := map[string]bool{}
+	for _, m := range found.Event.Fields {
+		served[m.Key] = true
+	}
+	for k, v := range ref {
+		if _, text := v.(string); text && s.fields[k] && !served[k] {
+			t.Fatalf("%s: journalctl shows it, the source does not", k)
+		}
 	}
 	for _, m := range found.Event.Fields {
 		if journalName(m.Key) && ref[m.Key] != m.Value.Str {

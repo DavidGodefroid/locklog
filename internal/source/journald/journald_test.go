@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +20,8 @@ import (
 
 	"github.com/DavidGodefroid/locklog/internal/parse"
 	"github.com/DavidGodefroid/locklog/internal/source"
+	"github.com/DavidGodefroid/locklog/internal/source/journald/journal"
+	"github.com/DavidGodefroid/locklog/internal/source/journald/journal/journaltest"
 )
 
 const mid = "0123456789abcdef0123456789abcdef"
@@ -473,31 +476,145 @@ func journalName(k string) bool {
 	return k != ""
 }
 
-func TestMessageCannotSpoofTrustedFields(t *testing.T) {
-	r := root(t, map[string]string{"system.journal": "debian-12/native.journal.gz"})
+// rootWith lays out a journal root holding one built file.
+func rootWith(t *testing.T, raw []byte) string {
+	t.Helper()
+	r := t.TempDir()
+	if err := os.Mkdir(filepath.Join(r, mid), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(r, mid, "system.journal"), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+func TestMessageCannotSpoofJournalFields(t *testing.T) {
+	raw := journaltest.Build(journaltest.Options{Compact: true}, []journaltest.Entry{{Realtime: 1761800000000000, Fields: []string{
+		`MESSAGE={"_SYSTEMD_UNIT":"spoof.service","PRIORITY":"0","_CMDLINE":"x --password=canary","COREDUMP":"canary","msg":"hi","ok":"1"}`,
+		"_SYSTEMD_UNIT=real.service", "PRIORITY=6"}}})
 	p, _ := parse.New(parse.Options{Format: "json"})
-	s, err := New(Options{Name: "j", Roots: []string{r}, Parser: p})
+	s, err := New(Options{Name: "j", Roots: []string{rootWith(t, raw)}, Parser: p})
 	if err != nil {
 		t.Fatal(err)
 	}
-	ev := s.opts.Parser.Line(`{"_SYSTEMD_UNIT":"spoof.service","PRIORITY":"0","msg":"x","ok":"1"}`)
-	if len(ev.Fields) == 0 {
-		t.Fatal("parser decoded nothing")
-	}
 	recs := scanAll(t, s, everything)
-	if len(recs) == 0 {
-		t.Fatal("no records")
+	if len(recs) != 1 {
+		t.Fatalf("%d records", len(recs))
 	}
-	// Build one record through read() with a spoofing message.
-	rec := recs[0]
-	rec.Event = s.opts.Parser.Line(`{"_SYSTEMD_UNIT":"spoof.service"}`)
-	members := []parse.Member{}
-	for _, m := range rec.Event.Fields {
-		if !s.fields[m.Key] && m.Key != message {
-			members = append(members, m)
+	got := map[string][]string{}
+	for _, m := range recs[0].Event.Fields {
+		got[m.Key] = append(got[m.Key], m.Value.Str)
+	}
+	if strings.Join(got["_SYSTEMD_UNIT"], ",") != "real.service" || strings.Join(got["PRIORITY"], ",") != "6" {
+		t.Fatalf("journal fields spoofed: %v", got)
+	}
+	for k := range got {
+		if NeverServed(k) {
+			t.Fatalf("%s served from the message", k)
 		}
 	}
-	if len(members) != 0 {
-		t.Fatalf("spoofed field kept: %+v", members)
+	if len(got["ok"]) != 1 {
+		t.Fatalf("an ordinary message key was dropped: %v", got)
+	}
+}
+
+// clockStep: 3+ granules whose timestamps step back an hour inside one.
+func clockStep() []journaltest.Entry {
+	var es []journaltest.Entry
+	base := uint64(1761800000000000)
+	for i := 0; i < 3*GranuleEntries+40; i++ {
+		rt := base + uint64(i)*1_000_000
+		if i == GranuleEntries+50 {
+			rt = base - 3600_000_000 // the clock stepped back for one entry
+		}
+		es = append(es, journaltest.Entry{Realtime: rt, Fields: []string{fmt.Sprintf("MESSAGE=entry %d", i), "PRIORITY=6"}})
+	}
+	return es
+}
+
+func TestNarrowingSurvivesClockSteps(t *testing.T) {
+	es := clockStep()
+	s := newSource(t, Options{Roots: []string{rootWith(t, journaltest.Build(journaltest.Options{Compact: true, PerArray: 100}, es))}})
+	all := scanAll(t, s, everything)
+	if len(all) != len(es) {
+		t.Fatalf("%d records of %d", len(all), len(es))
+	}
+	for _, w := range []source.Range{
+		{From: usec(es[GranuleEntries+50].Realtime - 1), To: usec(es[GranuleEntries+50].Realtime + 1)},
+		{From: usec(es[0].Realtime), To: usec(es[10].Realtime)},
+		{From: usec(es[len(es)-5].Realtime), To: usec(es[len(es)-1].Realtime + 1)},
+		{From: usec(es[GranuleEntries*2].Realtime), To: usec(es[GranuleEntries*2+200].Realtime)},
+	} {
+		want := 0
+		for _, rec := range all {
+			if w.Contains(rec.Event.Time) {
+				want++
+			}
+		}
+		got := 0
+		for _, rec := range scanAll(t, s, w) {
+			if w.Contains(rec.Event.Time) {
+				got++
+			}
+		}
+		if got != want || want == 0 {
+			t.Fatalf("range %v: %d records in plan, %d in the file", w, got, want)
+		}
+	}
+}
+
+func TestBrokenChainServesItsPrefix(t *testing.T) {
+	es := clockStep()[:600]
+	raw := journaltest.Build(journaltest.Options{Compact: true, PerArray: 100}, es)
+	jf, err := journal.Open(bytes.NewReader(raw), int64(len(raw)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Break the chain after the third array: its next pointer goes past
+	// the end of the file.
+	var arrays []uint64
+	next := jf.Header().EntryArrayOffset
+	for next != 0 {
+		arrays = append(arrays, next)
+		next = binary.LittleEndian.Uint64(raw[next+16:])
+	}
+	binary.LittleEndian.PutUint64(raw[arrays[2]+16:], uint64(len(raw))+8)
+	s := newSource(t, Options{Roots: []string{rootWith(t, raw)}})
+	recs := scanAll(t, s, everything)
+	if len(recs) != 300 {
+		t.Fatalf("%d records from a file whose chain breaks after 300", len(recs))
+	}
+}
+
+func TestRereadGranuleIsTheFileGranule(t *testing.T) {
+	es := clockStep()
+	s := newSource(t, Options{Roots: []string{rootWith(t, journaltest.Build(journaltest.Options{Compact: true}, es))}})
+	all := scanAll(t, s, everything)
+	for _, i := range []int{0, GranuleEntries - 1, GranuleEntries, 2*GranuleEntries + 7} {
+		rec, err := s.Reread(context.Background(), all[i].Ref)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rec.Granule != i/GranuleEntries {
+			t.Fatalf("entry %d: granule %d", i, rec.Granule)
+		}
+	}
+}
+
+func TestAllowlistOnEveryFixture(t *testing.T) {
+	files, _ := filepath.Glob("testdata/*/*.journal.gz")
+	for _, f := range files {
+		name := strings.TrimPrefix(f, "testdata/")
+		r := root(t, map[string]string{"system.journal": name})
+		s := newSource(t, Options{Roots: []string{r}, Allow: []string{"COREDUMP_ENVIRON", "_CMDLINE", "_EXE", "BINARY_BLOB"}})
+		for _, rec := range scanAll(t, s, everything) {
+			txt := recordText(rec)
+			for _, canary := range []string{"canary-coredump", "hunter2-canary", "COREDUMP", "_CMDLINE", "_EXE", "BINARY_BLOB"} {
+				if strings.Contains(txt, canary) {
+					t.Fatalf("%s: %q served", name, canary)
+				}
+			}
+		}
 	}
 }

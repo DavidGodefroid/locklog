@@ -89,6 +89,7 @@ type Source struct {
 	mu      sync.Mutex
 	catalog []fileInfo
 	catTime time.Time
+	grans   map[string]fileGranules
 }
 
 type dirEntry struct {
@@ -136,7 +137,7 @@ func New(opts Options) (*Source, error) {
 			fields[f] = true
 		}
 	}
-	return &Source{opts: opts, fields: fields, trusted: trusted}, nil
+	return &Source{opts: opts, fields: fields, trusted: trusted, grans: map[string]fileGranules{}}, nil
 }
 
 // Name returns the source name.
@@ -282,49 +283,76 @@ func (s *Source) open(ctx context.Context, stream string) (*os.File, *journal.Fi
 	return nil, nil, source.ErrNotFound
 }
 
-// granule is one plan granule of a file: entries [first, last] by index,
-// with their offsets.
+// granule is one plan granule of a file: GranuleEntries consecutive
+// entries, with the offset of its first entry and the true time bounds of
+// all its entries.
 type granule struct {
-	index        int64
-	first, last  uint64 // entry offsets
-	n            int64
-	headRealtime uint64
-	nextRealtime uint64 // realtime of the next granule's first entry, 0 at the end
+	index    int64
+	first    uint64 // offset of its first entry
+	n        int64
+	min, max uint64 // realtime bounds of its entries (µs)
 }
 
-// granules lists the fixed granules of an open file. Reading them touches
-// only entry-array objects and entry headers.
-func granules(jf *journal.File) ([]granule, bool, error) {
+// fileGranules are the granules of one file, cached by stream and size.
+type fileGranules struct {
+	size int64
+	gs   []granule
+	// complete is false when the entry-array chain broke: gs is the
+	// readable prefix.
+	complete bool
+}
+
+// granules lists the fixed granules of an open file. It reads entry
+// arrays and each entry's timestamp (no field). A broken chain (a dirty
+// or still-written file) yields its readable prefix.
+func granules(jf *journal.File) ([]granule, bool) {
 	var out []granule
-	var prevRT uint64
-	ordered := true
 	err := jf.EntryOffsets(func(i, off uint64) bool {
-		g := int64(i / GranuleEntries)
-		if i%GranuleEntries == 0 {
-			h, err := jf.Head(off)
-			if err != nil {
-				return false
-			}
-			if h.Realtime < prevRT {
-				ordered = false
-			}
-			prevRT = h.Realtime
-			if n := len(out); n > 0 {
-				out[n-1].nextRealtime = h.Realtime
-			}
-			out = append(out, granule{index: g, first: off, headRealtime: h.Realtime})
+		rt, err := jf.Realtime(off)
+		if err != nil {
+			return false
 		}
-		out[len(out)-1].last = off
-		out[len(out)-1].n++
+		if i%GranuleEntries == 0 {
+			out = append(out, granule{index: int64(i / GranuleEntries), first: off, min: rt, max: rt})
+		}
+		g := &out[len(out)-1]
+		g.n++
+		g.min, g.max = min(g.min, rt), max(g.max, rt)
 		return true
 	})
-	return out, ordered, err
+	if err != nil {
+		return out, false
+	}
+	// A stop on an unreadable entry also leaves a prefix: a complete
+	// file has every entry the arrays list.
+	n := int64(0)
+	for _, g := range out {
+		n += g.n
+	}
+	return out, uint64(n) == jf.Header().NEntries || jf.Header().State != 0
 }
 
-// Plan returns, per file, one chunk of the consecutive granules that may
-// hold entries of r. A file's time bounds come from its header and its
-// granules' first entries; a file whose granule timestamps go backwards
-// (clock changes) is never narrowed below the file.
+func (s *Source) granulesOf(fi fileInfo, jf *journal.File, size int64) fileGranules {
+	s.mu.Lock()
+	c, ok := s.grans[fi.stream]
+	s.mu.Unlock()
+	if ok && c.size == size {
+		return c
+	}
+	gs, complete := granules(jf)
+	c = fileGranules{size: size, gs: gs, complete: complete}
+	s.mu.Lock()
+	if len(s.grans) > 4096 {
+		clear(s.grans)
+	}
+	s.grans[fi.stream] = c
+	s.mu.Unlock()
+	return c
+}
+
+// Plan returns, per file, one chunk per run of consecutive granules that
+// may hold entries of r, judged on each granule's true time bounds (every
+// entry's timestamp), so clock steps inside a file never drop an entry.
 func (s *Source) Plan(ctx context.Context, r source.Range, _ source.Selector) (source.Byteplan, error) {
 	files, err := s.files(ctx)
 	if err != nil {
@@ -339,20 +367,11 @@ func (s *Source) Plan(ctx context.Context, r source.Range, _ source.Selector) (s
 		if err != nil {
 			continue
 		}
-		gs, ordered, err := granules(jf)
-		h := jf.Header()
+		fg := s.granulesOf(fi, jf, size)
 		jf.Close()
 		f.Close()
-		if err != nil || len(gs) == 0 {
-			continue
-		}
-		if ordered && h.HeadRealtime != 0 && h.TailRealtime != 0 &&
-			!r.Overlaps(usec(h.HeadRealtime), usec(h.TailRealtime)) {
-			continue
-		}
 		var run []source.Granule
-		var runStart uint64
-		var runEnd uint64
+		var runStart, runEnd uint64
 		flush := func() {
 			if len(run) == 0 {
 				return
@@ -361,8 +380,8 @@ func (s *Source) Plan(ctx context.Context, r source.Range, _ source.Selector) (s
 				Version: fi.stream, Granules: run, Bytes: int64(runEnd - runStart)})
 			run = nil
 		}
-		for i, g := range gs {
-			if ordered && !granuleMayHold(g, r) {
+		for i, g := range fg.gs {
+			if !r.Overlaps(usec(g.min), usec(g.max)) {
 				flush()
 				continue
 			}
@@ -372,8 +391,8 @@ func (s *Source) Plan(ctx context.Context, r source.Range, _ source.Selector) (s
 			// A granule costs the bytes from its first entry to the next
 			// granule's (entries and the data objects written with
 			// them): a function of the file, not of any query.
-			if i+1 < len(gs) {
-				runEnd = gs[i+1].first
+			if i+1 < len(fg.gs) {
+				runEnd = fg.gs[i+1].first
 			} else {
 				runEnd = uint64(size)
 			}
@@ -382,18 +401,6 @@ func (s *Source) Plan(ctx context.Context, r source.Range, _ source.Selector) (s
 		flush()
 	}
 	return plan, nil
-}
-
-// granuleMayHold: entries of granule g lie in [headRealtime, nextRealtime]
-// when the file's granules are ordered (the last granule is open-ended).
-func granuleMayHold(g granule, r source.Range) bool {
-	if !usec(g.headRealtime).Before(r.To) {
-		return false
-	}
-	if g.nextRealtime != 0 && usec(g.nextRealtime).Before(r.From) {
-		return false
-	}
-	return true
 }
 
 func usec(us uint64) time.Time { return time.UnixMicro(int64(us)).UTC() }
@@ -419,7 +426,9 @@ func (s *Source) Scan(ctx context.Context, c source.Chunk) (source.Iterator, err
 		}
 		return true
 	})
-	if err == nil && int64(len(offs)) != end-start {
+	if int64(len(offs)) == end-start {
+		err = nil // a chain broken past the chunk (a dirty file's tail) is fine
+	} else if err == nil {
 		err = source.ErrStale
 	}
 	if err != nil {
@@ -511,7 +520,7 @@ func (s *Source) read(jf *journal.File, stream string, off uint64) (source.RawRe
 	// message key named like a served journal field (a JSON message with
 	// "_SYSTEMD_UNIT") would pass for the trusted one: it is dropped.
 	for _, m := range ev.Fields {
-		if !s.fields[m.Key] && m.Key != message {
+		if !s.fields[m.Key] && m.Key != message && !NeverServed(m.Key) {
 			members = append(members, m)
 		}
 	}
@@ -588,7 +597,7 @@ func (s *Source) Reread(ctx context.Context, ref source.RawRef) (source.RawRecor
 		return source.RawRecord{}, source.ErrStale
 	}
 	rec.Ref = ref
-	rec.Granule = int(idx % GranuleEntries) // its granule in a chunk of one
+	rec.Granule = int(idx / GranuleEntries) // the file's granule index, as the file source
 	return rec, nil
 }
 
@@ -628,21 +637,23 @@ func (s *Source) Around(ctx context.Context, ref source.RawRef, before, after in
 		// Units not served may sit between: keep up to 4× after
 		// beyond ref.
 		return at < 0 || len(offs)-at <= 4*after+1
-	}); err != nil {
+	}); err != nil && at < 0 {
 		return nil, source.ErrStale
 	}
 	if at < 0 {
 		return nil, source.ErrStale
 	}
+	// Units not served may sit between: look at most 4× before + 1
+	// entries back, as forward.
 	var back []source.RawRecord
-	for i := at - 1; i >= 0 && len(back) < before; i-- {
+	for i := at - 1; i >= 0 && len(back) < before && at-i <= 4*before+1; i-- {
 		if rec, ok, _, err := s.read(jf, ref.Stream, offs[i]); err == nil && ok {
 			back = append(back, rec)
 		}
 	}
 	slices.Reverse(back)
-	self, ok, _, err := s.read(jf, ref.Stream, offs[at])
-	if err != nil || !ok {
+	self, ok, n, err := s.read(jf, ref.Stream, offs[at])
+	if err != nil || !ok || n != ref.Length {
 		return nil, source.ErrStale
 	}
 	out := append(back, self)

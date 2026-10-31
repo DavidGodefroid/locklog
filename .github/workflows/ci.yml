@@ -122,7 +122,8 @@ jobs:
       - name: journald
         run: |
           go test -c -o journald.test ./internal/source/journald/
-          sudo LOCKLOG_JOURNALD_IT=1 ./journald.test -test.run TestLiveJournal -test.v
+          sudo LOCKLOG_JOURNALD_IT=1 ./journald.test -test.run '^TestLiveJournal$' -test.v | tee it.log
+          grep -q -- '--- PASS: TestLiveJournal' it.log
 
   # One required check name ("lint") for every static check; later pull
   # requests add steps here (goreleaser check, install.sh rules, ...).
