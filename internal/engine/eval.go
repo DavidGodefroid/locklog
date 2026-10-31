@@ -2,6 +2,7 @@ package engine
 
 import (
 	"math/big"
+	"strconv"
 	"strings"
 
 	"github.com/DavidGodefroid/locklog/internal/mask"
@@ -61,72 +62,51 @@ func lookup(rec mask.Record, p *Pred) []val {
 	return leaves(rec.Fields(), p.Field)
 }
 
-// leaves collects every value at a dotted shown path.
+// leaves collects every value at a dotted shown path, under every reading
+// of its dots (nested objects, a key holding dots at any level, as docker's
+// attrs "com.docker.compose.service"), arrays crossed: the same readings as
+// the local index (index.Value), so that index and scan agree.
 func leaves(fields []mask.Field, path string) []val {
-	parts := splitShown(path)
 	var out []val
-	var walk func(fs []mask.Field, parts []string)
-	var down func(v mask.Value, parts []string)
-	walk = func(fs []mask.Field, parts []string) {
-		for _, f := range fs {
-			if f.Name() == parts[0] {
-				down(f.Value(), parts[1:])
-			}
-		}
-	}
-	down = func(v mask.Value, parts []string) {
-		switch {
-		case len(parts) == 0:
-			if v.Kind() == mask.Array {
-				for _, it := range v.Items() {
-					down(it, parts)
-				}
-				return
-			}
-			if v.Kind() != mask.Object {
-				out = append(out, val{kind: v.Kind(), text: v.Text()})
-			} else {
-				out = append(out, val{kind: mask.Object})
-			}
-		case v.Kind() == mask.Object:
-			walk(v.Members(), parts)
-		case v.Kind() == mask.Array:
+	var walk func(fs []mask.Field, rest string)
+	var down func(v mask.Value, rest string)
+	var leaf func(v mask.Value)
+	leaf = func(v mask.Value) {
+		switch v.Kind() {
+		case mask.Array:
 			for _, it := range v.Items() {
-				down(it, parts)
+				leaf(it)
+			}
+		case mask.Object:
+			out = append(out, val{kind: mask.Object})
+		default:
+			out = append(out, val{kind: v.Kind(), text: v.Text()})
+		}
+	}
+	walk = func(fs []mask.Field, rest string) {
+		for _, f := range fs {
+			switch n := f.Name(); {
+			case n == rest:
+				leaf(f.Value())
+			case strings.HasPrefix(rest, n+"."):
+				down(f.Value(), rest[len(n)+1:])
 			}
 		}
 	}
-	if len(parts) > 0 {
-		walk(fields, parts)
-		// A clear dotted name stored as one key ("http.status").
-		if len(parts) > 1 {
-			walk(fields, []string{path})
+	down = func(v mask.Value, rest string) {
+		switch v.Kind() {
+		case mask.Object:
+			walk(v.Members(), rest)
+		case mask.Array:
+			for _, it := range v.Items() {
+				down(it, rest)
+			}
 		}
+	}
+	if path != "" {
+		walk(fields, path)
 	}
 	return out
-}
-
-// splitShown splits a shown path at the dots outside placeholders.
-func splitShown(p string) []string {
-	var out []string
-	depth, start := 0, 0
-	for i := 0; i < len(p); {
-		switch {
-		case strings.HasPrefix(p[i:], mask.Open):
-			depth++
-			i += len(mask.Open)
-		case strings.HasPrefix(p[i:], mask.Close):
-			depth--
-			i += len(mask.Close)
-		case p[i] == '.' && depth == 0:
-			out = append(out, p[start:i])
-			i++
-			start = i
-		default:
-			i++
-		}
-	}
-	return append(out, p[start:])
 }
 
 // match evaluates the query's predicates, text and regex on a masked record.
@@ -243,7 +223,7 @@ func equal(p *Pred, i int, v val) bool {
 		return false
 	}
 	if p.nums[i] != nil && v.kind == mask.Number {
-		if n, ok := new(big.Rat).SetString(v.text); ok {
+		if n, ok := parseNumber(v.text); ok {
 			return n.Cmp(p.nums[i]) == 0
 		}
 	}
@@ -258,7 +238,7 @@ func compare(p *Pred, v val) (int, bool) {
 	}
 	t := v.text
 	if p.nums[0] != nil {
-		n, ok := new(big.Rat).SetString(t)
+		n, ok := parseNumber(t)
 		if !ok {
 			return 0, false
 		}
@@ -268,4 +248,27 @@ func compare(p *Pred, v val) (int, bool) {
 		return 0, false
 	}
 	return strings.Compare(t, p.vals[0]), true
+}
+
+// Number literal bounds: big.Rat's cost grows with the exponent (1e999999
+// takes milliseconds), and log content chooses it.
+const (
+	maxNumberLen      = 400
+	maxNumberExponent = 400
+)
+
+// parseNumber returns the exact value of a number literal within the
+// bounds; a literal beyond them is not a number to compare (equality falls
+// back to its text).
+func parseNumber(s string) (*big.Rat, bool) {
+	if len(s) > maxNumberLen {
+		return nil, false
+	}
+	if i := strings.IndexAny(s, "eE"); i >= 0 {
+		e, err := strconv.Atoi(s[i+1:])
+		if err != nil || e > maxNumberExponent || e < -maxNumberExponent {
+			return nil, false
+		}
+	}
+	return new(big.Rat).SetString(s)
 }

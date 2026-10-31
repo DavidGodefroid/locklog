@@ -310,6 +310,16 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 			}
 		}
 		if !a.indexed {
+			// Scanned, not answered by the sources' counts: a remote
+			// source's range applies (its bytes are unknown before
+			// the fetch, so admission cannot bound a longer range).
+			for _, s := range q.Sources {
+				if _, ok := e.o.Sources[s]; ok && e.remote(s) && q.To.Sub(q.From) > e.o.Limits.RemoteRange {
+					return CountResult{}, &Error{Code: EOverBudget, Span: "to",
+						Message:  fmt.Sprintf("this count is scanned, and a remote source's range is at most %s: narrow the range, or count by trusted labels only on whole-minute buckets", e.o.Limits.RemoteRange),
+						Estimate: &Estimate{Range: q.To.Sub(q.From)}}
+				}
+			}
 			p, err := e.planQuery(ctx, &q.Query, e.o.Limits.RemoteBytes, e.o.Limits.LocalBytes)
 			if err != nil {
 				return CountResult{}, err

@@ -1337,3 +1337,97 @@ func (f *fixture) indexAll() {
 		}
 	}
 }
+
+// TestDottedKeysReadAlike: the scan (leaves) and the index (index.Value)
+// read a dotted path the same way, a key holding dots at any level
+// included (docker's attrs "com.docker.compose.service").
+func TestDottedKeysReadAlike(t *testing.T) {
+	f := newFixture(t, "x\n", nil)
+	p, _ := parse.New(parse.Options{})
+	str := func(s string) parse.Value { return parse.Value{Kind: parse.KindString, Str: s} }
+	obj := func(ms ...parse.Member) parse.Value { return parse.Value{Kind: parse.KindObject, Members: ms} }
+	ev := p.Line(`{"k8s.app":{"name":"web"},"a":{"b.c":{"d":"x"}},"level":"info","msg":"m"}`)
+	ev.Attrs = []parse.Member{{Key: "attrs", Value: obj(parse.Member{Key: "com.docker.compose.service", Value: str("shop")})}}
+	rec := f.masker.Mask("app", ev)
+	for _, c := range []struct {
+		path  string
+		label bool
+		want  string
+	}{
+		{"k8s.app.name", false, "web"},
+		{"a.b.c.d", false, "x"},
+		{"level", false, "info"},
+		{"attrs.com.docker.compose.service", true, "shop"},
+		{"attrs.com.docker", true, index.Absent},
+	} {
+		fs := rec.Fields()
+		if c.label {
+			fs = rec.Attrs()
+		}
+		got := leaves(fs, c.path)
+		iv := index.Value(ev, index.TermKey(c.path, c.label))
+		if iv != c.want {
+			t.Errorf("%s: index %q, want %q", c.path, iv, c.want)
+		}
+		if c.want == index.Absent {
+			if len(got) != 0 {
+				t.Errorf("%s: scan %v, want none", c.path, got)
+			}
+			continue
+		}
+		if len(got) != 1 || got[0].text != c.want {
+			t.Errorf("%s: scan %v, want %q", c.path, got, c.want)
+		}
+	}
+}
+
+// TestScannedCountKeepsRemoteRange: a trusted-only count on a remote source
+// with counts that is scanned instead (a bucket off whole minutes, a query
+// its counts cannot answer) keeps the remote range.
+func TestScannedCountKeepsRemoteRange(t *testing.T) {
+	f := newFixture(t, "x\n", nil)
+	var sels []source.Selector
+	o := f.eng.o
+	o.Sources = map[string]source.Source{"loki": labelSource{sels: &sels}}
+	o.Trusted = func(_, name string, label bool) bool { return label && name == "env" }
+	o.Now = func() time.Time { return t0.Add(30 * 24 * time.Hour) }
+	eng, err := New(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	long := Query{From: t0, To: t0.Add(20 * 24 * time.Hour)}
+	if _, err := eng.Count(ctx, CountQuery{Query: long, ByLabels: []string{"env"}}); err != nil {
+		t.Fatalf("served by the source's counts: %v", err)
+	}
+	for _, cq := range []CountQuery{
+		{Query: long, ByLabels: []string{"env"}, Bucket: "30m30s"},
+		{Query: long, By: []string{"env"}},
+	} {
+		_, err := eng.Count(ctx, cq)
+		var e *Error
+		if !errors.As(err, &e) || e.Code != EOverBudget {
+			t.Fatalf("%+v: a scanned 20-day remote count: %v", cq, err)
+		}
+	}
+}
+
+// TestHugeExponentsAreNotNumbers: a number literal beyond the bounds is not
+// parsed (its cost grows with the exponent, and log content chooses it).
+func TestHugeExponentsAreNotNumbers(t *testing.T) {
+	if _, ok := parseNumber("1e999999"); ok {
+		t.Fatal("1e999999 parsed")
+	}
+	if n, ok := parseNumber("2.5e3"); !ok || n.FloatString(0) != "2500" {
+		t.Fatal(n, ok)
+	}
+	var b strings.Builder
+	for i := 0; i < 200; i++ {
+		fmt.Fprintf(&b, "{\"time\":\"2026-10-30T12:%02d:%02dZ\",\"n\":1e999999,\"msg\":\"m\"}\n", i/60, i%60)
+	}
+	f := newFixture(t, b.String(), nil)
+	start := time.Now()
+	recs, _ := allRecords(t, f.eng, q(func(q *Query) { q.Where = []Pred{{Field: "n", Op: "=", Value: raw(200)}} }))
+	if len(recs) != 0 || time.Since(start) > 2*time.Second {
+		t.Fatalf("%d records in %v", len(recs), time.Since(start))
+	}
+}
