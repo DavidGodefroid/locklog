@@ -69,8 +69,8 @@ const (
 	// MaxNameBytes is the longest field name journald accepts.
 	MaxNameBytes = 64
 
-	cacheMax      = 4096
-	cachePayload  = 512
+	cacheMax     = 4096
+	cachePayload = 512
 	// bigCacheBytes bounds the larger decoded values kept per file, so an
 	// object many entries share is decoded once.
 	bigCacheBytes = 8 << 20
