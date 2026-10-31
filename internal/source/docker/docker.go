@@ -464,6 +464,25 @@ func (s *Source) Reread(ctx context.Context, ref source.RawRef) (source.RawRecor
 	return s.wrapRecord(c, r), nil
 }
 
+// AroundMeasured is Around, also returning the bytes the inner file source
+// processed (source.AroundMeter).
+func (s *Source) AroundMeasured(ctx context.Context, ref source.RawRef, before, after int) ([]source.RawRecord, int64, error) {
+	c, inner, err := s.byStream(ref.Stream)
+	if err != nil {
+		return nil, 0, err
+	}
+	iref := ref
+	iref.Stream = inner
+	rs, n, err := c.src.AroundMeasured(ctx, iref, before, after)
+	if err != nil {
+		return nil, n, err
+	}
+	for i := range rs {
+		rs[i] = s.wrapRecord(c, rs[i])
+	}
+	return rs, n, nil
+}
+
 // Around returns the records around ref, from its stream.
 func (s *Source) Around(ctx context.Context, ref source.RawRef, before, after int) ([]source.RawRecord, error) {
 	c, inner, err := s.byStream(ref.Stream)

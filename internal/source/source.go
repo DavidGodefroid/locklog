@@ -234,6 +234,14 @@ type Source interface {
 	Around(ctx context.Context, ref RawRef, before, after int) ([]RawRecord, error)
 }
 
+// AroundMeter is implemented by a source whose Around may process more
+// than the records it returns (reading back granules, decompressing a
+// stream from its start): AroundMeasured also returns the bytes processed,
+// which the engine reports and charges.
+type AroundMeter interface {
+	AroundMeasured(ctx context.Context, ref RawRef, before, after int) ([]RawRecord, int64, error)
+}
+
 // Splitter is implemented by a source whose granules of unknown bytes
 // (remote time slices, Granule.Bytes 0) can be cut into narrower ones: the
 // engine splits a slice holding more than one call's byte budget, so that

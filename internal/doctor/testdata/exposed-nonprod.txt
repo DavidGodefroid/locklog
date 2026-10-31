@@ -1,0 +1,35 @@
+locklog doctor: what the agent's account can reach here (advisory: a check, not a boundary)
+
+  warn  the Docker engine answers the agent's account (DOCKER_HOST is set): it can start a container that reads every log and the console's volumes
+        remedy: run the agent where the Docker socket and DOCKER_HOST are out of reach (not in the docker group, no socket mounted), or in a container of its own (locklog setup --agent container)
+  warn  group docker: the agent's account is a member; the docker group is root on this host: it starts a container that reads every log
+        remedy: take the agent's account out of the docker group (sudo gpasswd -d $USER docker), or run the agent in a container of its own (locklog setup --agent container)
+  warn  group adm: the agent's account is a member; the adm group reads /var/log
+        remedy: take the agent's account out of adm (sudo gpasswd -d $USER adm): the console reads the logs for it
+  warn  group systemd-journal: the agent's account is a member; the systemd-journal group reads the whole journal
+        remedy: take the agent's account out of systemd-journal (sudo gpasswd -d $USER systemd-journal)
+  warn  sudo -n true succeeds: the agent can become root without a password
+        remedy: remove the NOPASSWD rule (or the sudo timestamp) of the agent's account, or run the agent in an account without sudo
+  warn  euid 0: the agent runs as root, which reads everything the console guards
+        remedy: run the agent in an unprivileged account
+  warn  /var/log/journal is readable by the agent's account
+        remedy: remove the account's access to /var/log/journal (its group or an ACL): only the console should read it
+  warn  /var/lib/docker is readable by the agent's account
+        remedy: remove the account's access to /var/lib/docker (its group or an ACL): only the console should read it
+  warn  cloud credentials file ~/.aws/credentials is present: the agent can use them to read logs at the provider
+        remedy: keep cloud credentials out of the agent's account (another account, or short-lived credentials the agent cannot reach)
+  warn  backend main/lokia (http://HOST) answers a Loki read without credentials (status 200): the agent can read it directly
+        remedy: put it behind authentication (locklog setup --loki-proxy for a Compose Loki), or out of the agent's network
+  ok    backend main/lokib (http://HOST) needs credentials (status 401)
+  warn  AWS metadata credentials answer (status 200): the agent can take the instance's cloud identity
+        remedy: block the metadata service for the agent (a firewall rule, IMDSv2 with hop limit 1, no instance identity) or run it where it is not reachable
+
+residuals (the console's own guards; warnings, whatever the profile):
+  warn  Landlock is unavailable (ENOSYS): a docker source relies on the mounts alone
+        remedy: a kernel with Landlock (5.13 or later, lsm=landlock), not disabled by the container runtime's seccomp profile
+  warn  container shm-1 runs with IpcMode shareable: its /dev/shm mount can appear in the console's bound containers root
+        remedy: use --ipc private (the default) unless another container joins it; Landlock guards the console against it
+  warn  swarm mode is active: services' secrets are mounted under the containers root
+        remedy: keep docker sources off a swarm node, or leave the swarm (docker swarm leave)
+
+11 findings (no production profile: warnings)
