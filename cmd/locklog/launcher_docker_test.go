@@ -18,6 +18,8 @@ import (
 
 func cid(c byte) string { return strings.Repeat(string(c), 64) }
 
+func hid(s string) string { return strings.Repeat(s, 64/len(s)) }
+
 // dockerEnv is a host with containers: the stubbed engine's answers, a
 // containers root you can stat, and a runtime directory for the map.
 func dockerEnv(t *testing.T, f *launcherFixture) (env []string, root, xdg string) {
@@ -34,7 +36,8 @@ func dockerEnv(t *testing.T, f *launcherFixture) (env []string, root, xdg string
 	// The engine: `docker ps -q` ids (one listed twice), and one inspect
 	// record per id: "<id> <label 0|1> <driver> <max-file|-> <compress|-> /<name>".
 	ps := []string{cid('a'), cid('b'), cid('c'), cid('d'), cid('e'), cid('f'), "abc", strings.ToUpper(cid('9')),
-		cid('7'), cid('8'), cid('6'), cid('1'), cid('2'), cid('3'), cid('4'), cid('5'), cid('0'), cid('0')}
+		cid('7'), cid('8'), cid('6'), cid('1'), cid('2'), cid('3'), cid('4'), cid('5'), cid('0'), cid('0'),
+		hid("ab"), hid("ac"), hid("ad"), hid("ae")}
 	rec := map[byte]string{
 		'a': "0 json-file 3 true /shop-a",
 		'b': "0 local - - /shop-b",                                             // not json-file: skipped
@@ -54,6 +57,14 @@ func dockerEnv(t *testing.T, f *launcherFixture) (env []string, root, xdg string
 	}
 	env = []string{"PLAN=profile staging false\\ndocker shop-*\\ndocker api-1\\n", "DOCKER_ROOT_DIR=" + dr,
 		"XDG_RUNTIME_DIR=" + xdg, "DOCKER_PS=" + strings.Join(ps, "\\n") + "\\n"}
+	for h, r := range map[string]string{
+		"ab": "0 json-file 3\\nc " + cid('9') + " shop-forged2 3 1 - /shop-nl", // a newline in a log option
+		"ac": "0 json-file 3\\t1 - /shop-tab",                                  // a tab in a log option
+		"ad": "0 json-file - - /shop-twin",                                     // one name, two ids
+		"ae": "0 json-file - - /shop-twin",
+	} {
+		env = append(env, "I_"+hid(h)+"="+hid(h)+" "+r)
+	}
 	for c, r := range rec {
 		id := cid(c)
 		if c == '5' {
@@ -79,6 +90,10 @@ var wantMap = []string{
 	"x " + cid('4'),
 	"x " + cid('5'),
 	"x " + cid('6'),
+	"x " + hid("ab"),
+	"x " + hid("ac"),
+	"x " + hid("ad"),
+	"x " + hid("ae"),
 	"x " + cid('e'),
 	"x " + cid('f'),
 }
@@ -163,7 +178,7 @@ func TestLauncherConsoleDocker(t *testing.T) {
 		t.Errorf("the containers root's dev:inode is not passed: %q", run)
 	}
 	if !strings.Contains(out, "bind "+root+" (read-only, non-recursive; the Docker containers root, group 0 for it only)") ||
-		!strings.Contains(out, "containers map "+dir+" at /run/locklog-map (read-only): 4 mapped, 9 console containers excluded, 6 skipped") {
+		!strings.Contains(out, "containers map "+dir+" at /run/locklog-map (read-only): 4 mapped, 13 console containers excluded, 8 skipped") {
 		t.Errorf("plan text:\n%s", out)
 	}
 	// The map: approved globs only, console containers excluded by label and
@@ -177,7 +192,8 @@ func TestLauncherConsoleDocker(t *testing.T) {
 	}
 	// No record parsed from a hostile name, label or log option.
 	for _, l := range ls {
-		if strings.Contains(l, "forged") || strings.Contains(l, cid('9')) || strings.Contains(l, "shop-y") || strings.Contains(l, "shop-dup") {
+		if strings.Contains(l, "forged") || strings.Contains(l, cid('9')) || strings.Contains(l, "shop-y") || strings.Contains(l, "shop-dup") ||
+			strings.Contains(l, "shop-twin") || strings.Contains(l, "shop-tab") || strings.Contains(l, "shop-nl") {
 			t.Errorf("injected entry: %q", l)
 		}
 	}
@@ -308,7 +324,7 @@ func TestLauncherRefresh(t *testing.T) {
 			t.Fatalf("refresh: %v\n%s", err, out)
 		}
 		if !strings.Contains(out, "containers map v"+strconv.Itoa(v)+" of locklog-console-") ||
-			!strings.Contains(out, ": 4 mapped, 9 console containers excluded, 6 skipped") {
+			!strings.Contains(out, ": 4 mapped, 13 console containers excluded, 8 skipped") {
 			t.Errorf("refresh output:\n%s", out)
 		}
 		for _, c := range calls {
@@ -323,6 +339,16 @@ func TestLauncherRefresh(t *testing.T) {
 	vs, ls := mapVersions(t, mapDir(t, base))
 	if !slices.Equal(vs, []int{2, 3}) || !slices.Equal(ls, wantMap) {
 		t.Errorf("versions %v (want the last two), map\n%s", vs, strings.Join(ls, "\n"))
+	}
+	// A temporary file a killed writer left is removed.
+	if err := os.WriteFile(filepath.Join(mapDir(t, base), ".map.tmp.stale"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, _, err := f.run(t, f.project, env, "refresh"); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if vs, _ := mapVersions(t, mapDir(t, base)); !slices.Equal(vs, []int{3, 4}) {
+		t.Errorf("versions %v", vs)
 	}
 	// Without a runtime directory: under ~/.local/state.
 	home := filepath.Join(f.root, "home")
@@ -345,7 +371,7 @@ func TestLauncherRefresh(t *testing.T) {
 	if err == nil || !strings.Contains(out, "could not write the containers map") {
 		t.Errorf("failing docker ps: %v\n%s", err, out)
 	}
-	if vs, _ := mapVersions(t, mapDir(t, base)); !slices.Equal(vs, []int{2, 3}) {
+	if vs, _ := mapVersions(t, mapDir(t, base)); !slices.Equal(vs, []int{3, 4}) {
 		t.Errorf("versions after a failure: %v", vs)
 	}
 }
@@ -401,5 +427,94 @@ func TestLauncherConsoleDockerAlone(t *testing.T) {
 	}
 	if ds, _ := filepath.Glob(filepath.Join(xdg, "locklog", "map", "*", "map.v*")); len(ds) > 0 {
 		t.Errorf("a map was written: %q", ds)
+	}
+}
+
+// startConsole starts the launcher's console in the background (its output
+// to a file, so that nothing waits on a pipe) and waits for docker events.
+func startConsole(t *testing.T, f *launcherFixture, env []string) *exec.Cmd {
+	t.Helper()
+	_ = os.Remove(f.calls)
+	out, err := os.Create(filepath.Join(f.root, "console.out"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { out.Close() })
+	cmd := exec.Command(filepath.Join(f.bin, "sh"), f.script, "console")
+	cmd.Dir = f.project
+	cmd.Env = append(slices.Clone(f.env), env...)
+	cmd.Stdout, cmd.Stderr = out, out
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 100; i++ {
+		if _, err := os.Stat(filepath.Join(f.root, "events.pid")); err == nil {
+			return cmd
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	cmd.Process.Kill()
+	b, _ := os.ReadFile(filepath.Join(f.root, "console.out"))
+	t.Fatalf("docker events never started:\n%s", b)
+	return nil
+}
+
+// eventsGone waits for the stubbed docker events to be gone.
+func eventsGone(t *testing.T, f *launcherFixture) {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(f.root, "events.pid"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, _ := strconv.Atoi(strings.TrimSpace(string(b)))
+	for i := 0; i < 100; i++ {
+		if syscall.Kill(pid, 0) != nil {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	syscall.Kill(pid, syscall.SIGKILL)
+	t.Error("docker events still runs after the console is gone")
+}
+
+// The console replaces the launcher: a signal to the launcher's pid reaches
+// the console; when that pid is gone, killed or not, the loop ends.
+func TestLauncherConsoleSignals(t *testing.T) {
+	consoleHost(t)
+	for _, sig := range []syscall.Signal{syscall.SIGTERM, syscall.SIGKILL} {
+		t.Run(sig.String(), func(t *testing.T) {
+			f := newLauncherFixture(t)
+			env, _, _ := dockerEnv(t, f)
+			// The console stub waits for a file that never comes (10 s).
+			cmd := startConsole(t, f, append(env, "CONSOLE_WAIT="+filepath.Join(f.root, "never")))
+			start := time.Now()
+			if err := cmd.Process.Signal(sig); err != nil {
+				t.Fatal(err)
+			}
+			cmd.Wait()
+			if d := time.Since(start); d > 5*time.Second {
+				t.Errorf("the console took %v to end", d)
+			}
+			_, err := os.Stat(filepath.Join(f.root, "console.term"))
+			if sig == syscall.SIGTERM && err != nil {
+				t.Error("TERM did not reach the console")
+			}
+			eventsGone(t, f)
+		})
+	}
+}
+
+// A burst of events costs one rewrite, not one per event.
+func TestLauncherMapLoopCoalesces(t *testing.T) {
+	consoleHost(t)
+	f := newLauncherFixture(t)
+	env, _, xdg := dockerEnv(t, f)
+	base := filepath.Join(xdg, "locklog", "map")
+	env = append(env, "EVENTS_OUT="+strings.Repeat("create\\n", 200), "CONSOLE_WAIT="+filepath.Join(base, "*", "map.v2"), "CONSOLE_AFTER=2")
+	if out, _, err := f.run(t, f.project, env, "console"); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if vs, _ := mapVersions(t, mapDir(t, base)); vs[len(vs)-1] > 3 {
+		t.Errorf("200 events gave versions %v", vs)
 	}
 }

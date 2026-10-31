@@ -524,6 +524,9 @@ write_map() {
 	if [ ! -d "$map_dir" ]; then
 		{ mkdir -p "$map_dir" && chmod 0755 "$map_dir"; } || return 1
 	fi
+	set +f
+	# Temporary files a killed writer left behind.
+	rm -f "$map_dir"/.map.tmp.*
 	ids=$(docker ps -a -q --no-trunc) || return 1
 	cs=
 	xs=
@@ -609,6 +612,27 @@ EOF
 		map_c=$((map_c + 1))
 	done
 	set +f
+	# A name given to two ids in one snapshot (the engine forbids it):
+	# both ids are excluded, neither is mapped.
+	dupnames=$(printf '%s' "$cs" | awk '{ n[$3]++ } END { for (k in n) if (n[k] > 1) print k }')
+	if [ -n "$dupnames" ]; then
+		kept=
+		while IFS=' ' read -r _ cid cname mf cmp; do
+			[ -n "${cid:-}" ] || continue
+			if printf '%s\n' "$dupnames" | grep -Fqx -- "$cname"; then
+				xs="${xs}x $cid
+"
+				map_x=$((map_x + 1))
+				map_c=$((map_c - 1))
+			else
+				kept="${kept}c $cid $cname $mf $cmp
+"
+			fi
+		done <<EOF
+$cs
+EOF
+		cs=$kept
+	fi
 	n=0
 	for f in "$map_dir"/map.v*; do
 		v=${f##*/map.v}
@@ -617,7 +641,7 @@ EOF
 		[ "$v" -le "$n" ] || n=$v
 	done
 	n=$((n + 1))
-	tmp="$map_dir/.map.tmp.$$"
+	tmp=$(mktemp "$map_dir/.map.tmp.XXXXXX") || return 1
 	if ! { printf 'locklog-map 1\n%s%s' "$cs" "$xs" >"$tmp" && chmod 0644 "$tmp" && mv -f "$tmp" "$map_dir/map.v$n"; }; then
 		rm -f "$tmp"
 		return 1
@@ -631,44 +655,69 @@ EOF
 	map_version=$n
 }
 
-# map_loop SINCE: rewrite the map on every container create, rename and
-# destroy from SINCE (seconds since the epoch) on, until killed (TERM).
-# When docker events exits it is restarted, from the time it exited, and
-# the map rewritten then.
+# map_loop SINCE PID: keep the map current while the process PID (the
+# console's docker run, which replaced the launcher) lives: every container
+# create, rename and destroy from SINCE (seconds since the epoch) on marks
+# the map dirty, and one rewrite a second at most drains the mark (a burst
+# of events costs one rewrite). When docker events exits it is restarted,
+# from the time it exited, and the map rewritten then. Once PID is gone,
+# docker events and the reader are killed and the fifo removed, also when
+# the launcher itself was killed. Failures are reported on stderr.
 map_loop() {
 	since=$1
+	ppid=$2
 	ev_pid=
 	rd_pid=
-	fifo_dir=$(mktemp -d) || exit 1
+	fifo_dir=$(mktemp -d) || {
+		say "warning: mktemp failed: the containers map will not follow container changes (locklog refresh rewrites it)"
+		exit 1
+	}
 	fifo="$fifo_dir/events"
-	mkfifo -m 0600 "$fifo" || exit 1
-	trap 'kill $ev_pid $rd_pid 2>/dev/null; rm -rf "$fifo_dir"; exit 0' TERM
-	while :; do
-		docker events --since "$since" --filter type=container --filter event=create \
-			--filter event=rename --filter event=destroy --format '{{.Action}}' >"$fifo" 2>/dev/null &
-		ev_pid=$!
-		{
-			while IFS= read -r _; do
-				write_map >/dev/null 2>&1 || :
-			done
-		} <"$fifo" &
-		rd_pid=$!
-		wait "$ev_pid" || :
-		wait "$rd_pid" || :
+	dirty="$fifo_dir/dirty"
+	if ! mkfifo -m 0600 "$fifo"; then
+		say "warning: mkfifo failed: the containers map will not follow container changes (locklog refresh rewrites it)"
+		rm -rf "$fifo_dir"
+		exit 1
+	fi
+	trap loop_end TERM
+	while kill -0 "$ppid" 2>/dev/null; do
+		# The reader and docker events are started from subshells that
+		# exit at once: they are not this shell's children, so kill -0
+		# tells when they are gone (no zombie). The reader opens the fifo
+		# first, with its output already away from the substitution.
+		rd_pid=$({
+			while IFS= read -r _; do : >"$dirty"; done
+		} >/dev/null <"$fifo" &
+			echo $!)
+		ev_pid=$(docker events --since "$since" --filter type=container --filter event=create \
+			--filter event=rename --filter event=destroy --format '{{.Action}}' 2>/dev/null >"$fifo" &
+			echo $!)
+		while kill -0 "$ev_pid" 2>/dev/null; do
+			kill -0 "$ppid" 2>/dev/null || loop_end
+			flush_map
+			sleep 1
+		done
+		kill -0 "$ppid" 2>/dev/null || loop_end
 		since=$(date +%s)
-		sleep 1 &
-		wait $! || :
-		write_map >/dev/null 2>&1 || :
+		say "warning: docker events stopped; restarting it and rewriting the containers map"
+		sleep 1
+		rm -f "$dirty"
+		write_map || say "warning: could not rewrite the containers map (docker ps, docker inspect)"
 	done
+	loop_end
 }
 
-loop_pid=
+# flush_map: rewrite the map once when events marked it dirty.
+flush_map() {
+	[ -e "$dirty" ] || return 0
+	rm -f "$dirty"
+	write_map || say "warning: could not rewrite the containers map (docker ps, docker inspect)"
+}
 
-stop_loop() {
-	[ -n "$loop_pid" ] || return 0
-	kill "$loop_pid" 2>/dev/null || :
-	wait "$loop_pid" 2>/dev/null || :
-	loop_pid=
+loop_end() {
+	kill $ev_pid $rd_pid 2>/dev/null || :
+	rm -rf "$fifo_dir"
+	exit 0
 }
 
 # ensure_volume NAME DIR OWNER: the named volume NAME exists, created from
@@ -940,17 +989,12 @@ EOF
 	set +f
 	[ -n "$docker_globs" ] || exec docker "$@"
 
-	# With a docker source, the map loop runs beside the console and stops
-	# with it; the console's exit status is the launcher's.
-	map_loop "$t0" &
-	loop_pid=$!
-	trap stop_loop EXIT
-	trap 'exit 129' HUP
-	trap 'exit 130' INT
-	trap 'exit 143' TERM
-	rc=0
-	docker "$@" || rc=$?
-	exit "$rc"
+	# With a docker source, the map loop runs beside the console, watching
+	# this pid: docker run replaces the launcher as on the plain path, so
+	# signals, the terminal and the exit status are the console's, and the
+	# loop ends with it (also when this process is killed).
+	map_loop "$t0" "$$" &
+	exec docker "$@"
 }
 
 # refresh ARGS: rewrite the containers map of this project's console once,
