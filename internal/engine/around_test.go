@@ -308,6 +308,14 @@ func appendLines(t *testing.T, path string, lines ...string) {
 	}
 }
 
+// nextSecond waits for the next whole second: a tail is new from its
+// start's second, so records written before it in the same second are new
+// to the next tail.
+func nextSecond() {
+	now := time.Now()
+	time.Sleep(now.Truncate(time.Second).Add(time.Second).Sub(now))
+}
+
 func liveLine(i int, user string) string {
 	return fmt.Sprintf("time=%s level=error status=502 msg=\"live %d for %s\"", time.Now().UTC().Format(time.RFC3339Nano), i, user)
 }
@@ -377,6 +385,7 @@ func TestTailNewByTime(t *testing.T) {
 	if len(res.Records) != 1 || !res.Complete || !strings.Contains(string(res.Records[0]), "live 1 ") {
 		t.Fatalf("%s, complete %v", res.Records, res.Complete)
 	}
+	nextSecond()
 	go func() {
 		time.Sleep(200 * time.Millisecond)
 		appendLines(t, path, `no time at all here`, liveLine(2, "x"))
@@ -408,6 +417,7 @@ func TestTailPartialLine(t *testing.T) {
 		t.Fatalf("%s, complete %v", res.Records, res.Complete)
 	}
 	// Still unterminated at the end: left out, incomplete.
+	nextSecond()
 	go func() {
 		time.Sleep(200 * time.Millisecond)
 		fh, _ := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
@@ -452,6 +462,72 @@ func TestTailRotation(t *testing.T) {
 	}
 	if len(res.Records) != 2 || !strings.Contains(string(res.Records[0]), "live 1 ") || !strings.Contains(string(res.Records[1]), "live 2 ") {
 		t.Fatalf("%d records: %s", len(res.Records), res.Records)
+	}
+}
+
+// TestTailIdenticalLines: identical records of one stream (same text, same
+// time) are distinct records: each is returned.
+func TestTailIdenticalLines(t *testing.T) {
+	f := newFixture(t, genLog(time.Now().Add(-time.Hour), 5, "c@example.org"), func(o *Options) { o.TailPoll = 50 * time.Millisecond })
+	path := filepath.Join(f.root, "logs", "app.log")
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		l := liveLine(1, "x")
+		appendLines(t, path, l, l)
+		time.Sleep(200 * time.Millisecond)
+		appendLines(t, path, l)
+	}()
+	res, err := f.eng.Tail(ctx, TailQuery{Duration: "1s"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Records) != 3 || !res.Complete {
+		t.Fatalf("%d records, complete %v: %s", len(res.Records), res.Complete, res.Records)
+	}
+}
+
+// TestTailHeldAtGranuleEnd: a poll that sees a stream ending exactly on a
+// granule's end holds its last record; that record is still returned once
+// later records follow it.
+func TestTailHeldAtGranuleEnd(t *testing.T) {
+	f := newFixture(t, genLog(time.Now().Add(-time.Hour), 5, "c@example.org"), func(o *Options) { o.TailPoll = 50 * time.Millisecond })
+	path := filepath.Join(f.root, "logs", "app.log")
+	for _, short := range []int64{0, 100} {
+		st, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		target := (st.Size()/source.GranuleBytes+1)*source.GranuleBytes - short
+		go func() {
+			time.Sleep(200 * time.Millisecond)
+			// Old records up to the live one, which ends exactly at
+			// target.
+			l := liveLine(1, "x")
+			old := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)
+			base := fmt.Sprintf("time=%s level=info msg=\"", old)
+			var lines []string
+			for n := target - st.Size() - int64(len(l)) - 1; n > 0; {
+				ln := int64(453) // with its newline: 454
+				if n <= 900 {
+					ln = n - 1
+				}
+				lines = append(lines, base+strings.Repeat("p", int(ln)-len(base)-1)+"\"")
+				n -= ln + 1
+			}
+			appendLines(t, path, append(lines, l)...)
+			time.Sleep(300 * time.Millisecond)
+			appendLines(t, path, liveLine(2, "x"), liveLine(3, "x"))
+		}()
+		res, err := f.eng.Tail(ctx, TailQuery{Duration: "1s"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st2, _ := os.Stat(path); short == 0 && st2.Size() <= target {
+			t.Fatalf("size %d", st2.Size())
+		}
+		if len(res.Records) != 3 || !res.Complete || !strings.Contains(string(res.Records[0]), "live 1 ") {
+			t.Fatalf("short %d: %d records, complete %v", short, len(res.Records), res.Complete)
+		}
 	}
 }
 

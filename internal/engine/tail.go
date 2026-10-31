@@ -160,7 +160,9 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 	}
 	frontier := map[streamKey]pos{} // local: the last record evaluated
 	seenRemote := map[rkey]bool{}   // remote: the records evaluated
-	returned := map[string]bool{}   // records returned, by keyed digest and time
+	// The streams each returned record (by keyed digest and time) was
+	// read from.
+	returned := map[string]map[streamKey]bool{}
 	var found []match
 	heldAll := map[streamKey]*held{} // each local stream's held record
 	res := TailResult{Epoch: e.o.Masker.Epoch(), Records: []json.RawMessage{}, Masking: Masking{Kinds: []string{}}}
@@ -189,15 +191,26 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 			return
 		}
 		d := e.RecordDigest(raw.Event.Raw) + "|" + t.Format(time.RFC3339Nano)
-		if returned[d] || slices.ContainsFunc(*out, func(m match) bool { return m.digest == d }) {
-			return // a copy of a record already returned (a rotation)
+		k := keyOf(raw.Ref)
+		// A copy of a record already returned from another stream (a
+		// rotation) is not returned again. Identical records of one
+		// stream are distinct records (each position is evaluated
+		// once).
+		other := func(sk streamKey) bool { return sk != k }
+		for sk := range returned[d] {
+			if other(sk) {
+				return
+			}
+		}
+		if slices.ContainsFunc(*out, func(m match) bool { return m.digest == d && other(m.stream) }) {
+			return
 		}
 		o, oerr := e.outRecord(raw, rec, q.Fields)
 		if oerr != nil {
 			outFailed = true // never a silently missing match
 			return
 		}
-		*out = append(*out, match{ts: t, timed: true, out: o, kinds: rec.Kinds(), digest: d})
+		*out = append(*out, match{ts: t, timed: true, out: o, kinds: rec.Kinds(), digest: d, stream: k})
 		// Bounded memory: keep the earliest that can be returned.
 		if len(*out) > 2*q.Limit {
 			sortMatches(*out, "asc")
@@ -241,11 +254,29 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 				delete(heldAll, k)
 			}
 		}
-		// Prune what was there or already scanned whole.
+		// Prune what was there or already scanned whole. When a stream
+		// grew, the granule of its held record is read again, so that
+		// the record is evaluated once a later one follows it: the
+		// stream may have ended exactly on that granule's end at the
+		// last poll.
+		bound := map[streamKey]int64{}
+		for _, c := range plan.Chunks {
+			k := streamKey{c.Source, c.Stream}
+			if d, ok := done[k]; ok && !e.remote(c.Source) && c.End() > d && c.End() != math.MaxInt64 {
+				bound[k] = d
+				if h := heldAll[k]; h != nil {
+					bound[k] = min(d, h.raw.Ref.Offset)
+				}
+			}
+		}
 		var pruned source.Byteplan
 		var bytesLocal, bytesRemote int64
 		for _, c := range plan.Chunks {
-			if d, ok := done[streamKey{c.Source, c.Stream}]; ok && !e.remote(c.Source) && c.End() != math.MaxInt64 {
+			k := streamKey{c.Source, c.Stream}
+			if d, ok := done[k]; ok && !e.remote(c.Source) && c.End() != math.MaxInt64 {
+				if b, grew := bound[k]; grew {
+					d = b
+				}
 				gs := slices.DeleteFunc(slices.Clone(c.Granules), func(g source.Granule) bool { return g.End <= d })
 				if len(gs) == 0 {
 					continue
@@ -343,7 +374,10 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 			frontier[k] = p
 		}
 		for _, m := range pollFound {
-			returned[m.digest] = true
+			if returned[m.digest] == nil {
+				returned[m.digest] = map[streamKey]bool{}
+			}
+			returned[m.digest][m.stream] = true
 		}
 		found = append(found, pollFound...)
 		for k, h := range pollHeld {

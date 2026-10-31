@@ -851,8 +851,10 @@ type match struct {
 	timed bool
 	out   json.RawMessage
 	kinds []string
-	// digest identifies a tailed record (keyed digest and time).
+	// digest identifies a tailed record (keyed digest and time), and
+	// stream the stream it was read from.
 	digest string
+	stream [2]string
 }
 
 // Search runs a search (locklog_search).
