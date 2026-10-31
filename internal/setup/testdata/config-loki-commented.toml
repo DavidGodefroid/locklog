@@ -1,0 +1,44 @@
+# locklog: the project's log sources, written by `locklog setup` from what
+# it found on this host. Nothing here is read until the console shows it to
+# you: `locklog console` reviews the profile, and every later change that
+# loosens it, before any log is opened. Remove what the agent should not see.
+version = 1
+
+[profiles.prod]
+production = true
+
+[profiles.prod.sources.syslog]
+kind = "file"
+paths = ["/var/log/syslog*"]
+
+[profiles.prod.sources.nginx-access]
+kind = "file"
+paths = ["/var/log/nginx/access.log*"]
+
+# Every unit; list the ones to serve with units = ["nginx.service"].
+[profiles.prod.sources.journal]
+kind = "journald"
+
+# The running containers. A docker source runs in a console of its own:
+# locklog console --profile prod-docker
+[profiles.prod-docker]
+production = true
+
+[profiles.prod-docker.sources.containers]
+kind = "docker"
+containers = ["api", "web"]
+
+# The Compose Loki, behind the authenticating proxy setup generated (its
+# files are outside the project). The console reaches it on the Compose
+# network: LOCKLOG_NETWORK=shop_default locklog console --profile prod-loki
+# Uncomment it once it names the streams to serve: selector = { app = "api" }.
+# [profiles.prod-loki]
+# production = true
+#
+# [profiles.prod-loki.sources.loki]
+# kind = "loki"
+# url = "https://locklog-loki-proxy:3101"
+# auth = "basic"
+# user = "locklog"
+# credentials = "ask"
+# tls_ca = "/p/.locklog/locklog-loki-proxy-ca.crt"
