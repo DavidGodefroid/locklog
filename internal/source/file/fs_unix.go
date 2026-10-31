@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"strings"
+	"syscall"
 
 	"golang.org/x/sys/unix"
 )
@@ -59,6 +60,19 @@ type entry struct {
 	name string
 	dir  bool
 	reg  bool
+}
+
+// lstat types the entry name without following it.
+func (d *dir) lstat(name string) (entry, error) {
+	if err := validName(name); err != nil {
+		return entry{}, err
+	}
+	var st unix.Stat_t
+	if err := unix.Fstatat(d.fd, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return entry{}, err
+	}
+	t := st.Mode & unix.S_IFMT
+	return entry{name: name, dir: t == unix.S_IFDIR, reg: t == unix.S_IFREG}, nil
 }
 
 // list returns the directory's entries.
@@ -113,6 +127,11 @@ func regular(fd int, path string) (*os.File, error) {
 // beneath root, without following any symbolic link and without leaving
 // root.
 func openBeneath(root, rel string) (*os.File, error) {
+	for _, p := range strings.Split(rel, "/") {
+		if err := validName(p); err != nil {
+			return nil, err
+		}
+	}
 	if f, err, ok := openat2Beneath(root, rel); ok {
 		return f, err
 	}
@@ -137,4 +156,13 @@ func walkOpen(root, rel string) (*os.File, error) {
 	}
 	defer d.close()
 	return d.open(parts[len(parts)-1])
+}
+
+// devIno returns the device and inode of a file.
+func devIno(fi os.FileInfo) (uint64, uint64, error) {
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, 0, errors.New("no device and inode")
+	}
+	return uint64(st.Dev), uint64(st.Ino), nil //nolint:unconvert // int32 on darwin
 }
