@@ -1000,7 +1000,10 @@ func TestTailTruncateRegrow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n := int64(len(res.Records)); n != 1+wrote.Load() || !res.Complete {
+	// The truncated stream is gone: what it held after its last read
+	// cannot be known, so the tail is not complete; what was written
+	// after is returned.
+	if n := int64(len(res.Records)); n != 1+wrote.Load() || res.Complete {
 		t.Fatalf("got %d of %d, complete=%v", n, 1+wrote.Load(), res.Complete)
 	}
 }
@@ -1024,16 +1027,13 @@ func TestTailIdenticalAcrossCopy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var s []string
-	for _, r := range res.Records {
-		s = append(s, string(r))
-	}
 	if len(res.Records) != 4 || !res.Complete {
-		t.Fatalf("want 4 got %d complete=%v", len(res.Records), res.Complete)
+		t.Fatalf("want 4 got %d complete=%v: %s", len(res.Records), res.Complete, res.Records)
 	}
 }
 
-// waits until we are early in a second so two writes 200ms apart share it.
+// nextSecondHalf waits until early in a second, so that two writes 200 ms
+// apart share it.
 func nextSecondHalf() {
 	now := time.Now()
 	if now.Sub(now.Truncate(time.Second)) > 300*time.Millisecond {
@@ -1064,12 +1064,8 @@ func TestTailDoubleCopytruncate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var s []string
-	for _, r := range res.Records {
-		s = append(s, string(r))
-	}
 	if len(res.Records) != 4 || !res.Complete {
-		t.Fatalf("want 4 got %d complete=%v", len(res.Records), res.Complete)
+		t.Fatalf("want 4 got %d complete=%v: %s", len(res.Records), res.Complete, res.Records)
 	}
 }
 
@@ -1111,6 +1107,135 @@ func TestTailSlowLastPoll(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(res.Records) != 2 || !res.Complete {
+		t.Fatalf("%d records, complete %v", len(res.Records), res.Complete)
+	}
+}
+
+func globEngine(t *testing.T, glob string) (*Engine, string) {
+	f := newFixture(t, genLog(time.Now().Add(-time.Hour), 50, "c@example.org"), func(o *Options) { o.TailPoll = 50 * time.Millisecond })
+	p, _ := parse.New(parse.Options{})
+	src, err := file.New(file.Options{Name: "app", Paths: []string{f.root + glob}, Roots: []string{f.root}, Parser: p,
+		Trusted: []string{"level", "status"}, Index: f.store, Sensitive: func(fl, v string) bool { return f.masker.TrustedValue("app", fl, v) != v }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := f.eng.o
+	o.Sources = map[string]source.Source{"app": src}
+	eng, err := New(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return eng, filepath.Join(f.root, "logs")
+}
+
+// TestTailNewFileCopytruncate: a file created during the tail with one line,
+// then copytruncated: the line is returned once.
+func TestTailNewFileCopytruncate(t *testing.T) {
+	eng, dir := globEngine(t, "/logs/*.log*")
+	path := filepath.Join(dir, "svc.log")
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		os.WriteFile(path, []byte(liveLine(1, "x")+"\n"), 0o644)
+		time.Sleep(400 * time.Millisecond)
+		b, _ := os.ReadFile(path)
+		os.WriteFile(path+".1", b, 0o644)
+		os.Truncate(path, 0)
+	}()
+	res, err := eng.Tail(ctx, TailQuery{Duration: "1500ms"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Records) != 1 || !res.Complete {
+		t.Fatalf("want 1 got %d complete=%v", len(res.Records), res.Complete)
+	}
+}
+
+// TestTailOneLineCopytruncate: one new line, then copytruncate: returned once.
+func TestTailOneLineCopytruncate(t *testing.T) {
+	eng, dir := globEngine(t, "/logs/app.log*")
+	path := filepath.Join(dir, "app.log")
+	nextSecond()
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		appendLines(t, path, liveLine(1, "x"))
+		time.Sleep(400 * time.Millisecond)
+		b, _ := os.ReadFile(path)
+		os.WriteFile(path+".1", b, 0o644)
+		os.Truncate(path, 0)
+	}()
+	res, err := eng.Tail(ctx, TailQuery{Duration: "1500ms"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Records) != 1 || !res.Complete {
+		t.Fatalf("want 1 got %d complete=%v", len(res.Records), res.Complete)
+	}
+}
+
+// TestTailGranuleEndCopytruncate: app.log ends exactly on a granule end at
+// the start; one line appended, then copytruncate: returned once.
+func TestTailGranuleEndCopytruncate(t *testing.T) {
+	eng, dir := globEngine(t, "/logs/app.log*")
+	path := filepath.Join(dir, "app.log")
+	st, _ := os.Stat(path)
+	target := (st.Size()/source.GranuleBytes + 1) * source.GranuleBytes
+	old := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)
+	base := "time=" + old + " level=info msg=\""
+	var lines []string
+	for n := target - st.Size(); n > 0; {
+		ln := int64(453)
+		if n <= 900 {
+			ln = n - 1
+		}
+		lines = append(lines, base+strings.Repeat("p", int(ln)-len(base)-1)+"\"")
+		n -= ln + 1
+	}
+	appendLines(t, path, lines...)
+	st2, _ := os.Stat(path)
+	if st2.Size() != target {
+		t.Fatalf("size %d want %d", st2.Size(), target)
+	}
+	// Indexed, as a running console would have it.
+	eng.Search(ctx, Query{Limit: 1})
+	nextSecond()
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		appendLines(t, path, liveLine(1, "x"))
+		time.Sleep(400 * time.Millisecond)
+		b, _ := os.ReadFile(path)
+		os.WriteFile(path+".1", b, 0o644)
+		os.Truncate(path, 0)
+	}()
+	res, err := eng.Tail(ctx, TailQuery{Duration: "1500ms"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Records) != 1 || !res.Complete {
+		t.Fatalf("want 1 got %d complete=%v", len(res.Records), res.Complete)
+	}
+}
+
+// TestTailRenameAway: a file that only the source path matches is renamed away (create rotation) after
+// a line was appended since the last poll.
+func TestTailRenameAway(t *testing.T) {
+	eng, dir := globEngine(t, "/logs/app.log")
+	path := filepath.Join(dir, "app.log")
+	nextSecond()
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		appendLines(t, path, liveLine(1, "x"))
+		time.Sleep(300 * time.Millisecond)
+		appendLines(t, path, liveLine(2, "x"))
+		os.Rename(path, path+".1")
+		os.WriteFile(path, nil, 0o644)
+	}()
+	res, err := eng.Tail(ctx, TailQuery{Duration: "1500ms"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// live 2 was in the stream renamed away: the tail may have missed
+	// it, and says so.
+	if len(res.Records) < 1 || res.Complete {
 		t.Fatalf("%d records, complete %v", len(res.Records), res.Complete)
 	}
 }

@@ -1,0 +1,14 @@
+# locklog: the project's log sources, written by `locklog setup` from what
+# it found on this host. Nothing here is read until the console shows it to
+# you: `locklog console` reviews the profile, and every later change that
+# loosens it, before any log is opened. Remove what the agent should not see.
+version = 1
+
+# No log file or journal was found here. Add a source, e.g.:
+#
+# [profiles.staging]
+# production = false
+#
+# [profiles.staging.sources.app]
+# kind = "file"
+# paths = ["/var/log/app/app.log*"]

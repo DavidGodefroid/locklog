@@ -85,8 +85,10 @@ type held struct {
 // told apart by their position, and a copy of a stream made during the tail
 // (copytruncate) is recognised by a record of the original at the same
 // offset with the same keyed digest, so the records it shares with the
-// original are not returned again. The duration ends with a poll planned
-// after it.
+// original are not returned again. A stream a poll planned that a later
+// poll no longer plans (renamed out of the paths, deleted, truncated) and
+// that no copy holds makes the tail incomplete: it may have grown after its
+// last read. The duration ends with a poll planned after it.
 //
 // Work follows the new data: a plan of every local stream at the start (no
 // record read) gives each stream's end in its granules, and a poll scans
@@ -187,6 +189,10 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 	}
 	anchor := map[streamKey][]anchorRec{}
 	link := map[streamKey]streamKey{}
+	// planned are the local streams a completed poll planned (they held
+	// records from the start on, or were not indexed yet): a later poll
+	// plans them again unless they are gone.
+	planned := map[streamKey]bool{}
 	type rkey struct {
 		k streamKey
 		p pos
@@ -372,13 +378,14 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 						}
 						// Its records up to S's frontier were S's.
 						pollLink[k] = sk
-						f := frontier[sk]
-						pollFound = slices.DeleteFunc(pollFound, func(m match) bool { return m.stream == k && m.off <= f.off })
-						if h := pollHeld[k]; h != nil && !(pos{h.raw.Ref.Offset, h.raw.Ref.Length}).after(f) {
-							delete(pollHeld, k)
-						}
-						if pf, ok := pollFrontier[k]; !ok || f.after(pf) {
-							pollFrontier[k] = f
+						if f, ok := frontier[sk]; ok {
+							pollFound = slices.DeleteFunc(pollFound, func(m match) bool { return m.stream == k && m.off <= f.off })
+							if h := pollHeld[k]; h != nil && !(pos{h.raw.Ref.Offset, h.raw.Ref.Length}).after(f) {
+								delete(pollHeld, k)
+							}
+							if pf, ok := pollFrontier[k]; !ok || f.after(pf) {
+								pollFrontier[k] = f
+							}
 						}
 						break search
 					}
@@ -457,19 +464,36 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 		for k, p := range pollFrontier {
 			frontier[k] = p
 		}
-		for k, a := range pollAnchor {
-			as := append(anchor[k], a)
-			anchor[k] = as[max(0, len(as)-maxTailAnchors):]
-		}
 		for k, sk := range pollLink {
 			link[k] = sk
 		}
 		found = append(found, pollFound...)
 		for k, h := range pollHeld {
 			heldAll[k] = h
+			// A held record anchors copies too: a stream copied
+			// before any of its records was evaluated.
+			hp := pos{h.raw.Ref.Offset, h.raw.Ref.Length}
+			pollAnchor[k] = anchorRec{hp, e.RecordDigest(h.raw.Event.Raw)}
+		}
+		for k, a := range pollAnchor {
+			as := append(anchor[k], a)
+			anchor[k] = as[max(0, len(as)-maxTailAnchors):]
+		}
+		// A stream planned before and gone now (renamed out of the
+		// paths, deleted, truncated) may have grown after its last
+		// read: unless a copy holds it, the tail may miss records.
+		originals := map[streamKey]bool{}
+		for _, sk := range link {
+			originals[sk] = true
+		}
+		for k := range known {
+			if !present[k] && !originals[k] && planned[k] {
+				covered = false
+			}
 		}
 		for k := range present {
 			known[k] = true
+			planned[k] = true
 		}
 		// The held record of an original that is no longer planned
 		// is its copy's to evaluate.

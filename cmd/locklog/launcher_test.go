@@ -8,8 +8,11 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/DavidGodefroid/locklog/internal/hostfacts"
 )
 
 // launcherFixture runs scripts/locklog, the host launcher, with a fake
@@ -22,7 +25,7 @@ type launcherFixture struct {
 
 var launcherTools = []string{"sh", "dirname", "mkdir", "id", "cat", "printf", "awk", "sha256sum", "shasum", "tar",
 	"gzip", "install", "mktemp", "rm", "uname", "sed", "tr", "tail", "grep", "stat", "cksum", "getconf", "nproc", "cut", "ls",
-	"mv", "chmod", "date", "sleep", "mkfifo", "find", "rmdir"}
+	"mv", "chmod", "date", "sleep", "mkfifo", "find", "rmdir", "cp", "pwd"}
 
 func newLauncherFixture(t *testing.T) *launcherFixture {
 	t.Helper()
@@ -102,6 +105,8 @@ volume) [ "$2" = inspect ] && exit "${VOLUME_MISSING:-0}" ;;
 run)
 	for a in "$@"; do
 		case "$a" in
+		*:/run/locklog-facts:ro) cp "${a%%:*}" '`+filepath.Join(root, "facts.copy")+`'; ls -l "${a%%:*}" | cut -c1-10 > '`+filepath.Join(root, "facts.mode")+`' ;;
+		doctor) cat > '`+filepath.Join(root, "facts.stdin")+`' ;;
 		locklog-run:/run/locklog) vol=run ;;
 		locklog-home:/home/locklog) vol=home ;;
 		esac
@@ -470,6 +475,113 @@ func TestLauncherMCP(t *testing.T) {
 	}
 	if slices.Contains(run, "-it") || slices.ContainsFunc(run, func(a string) bool { return strings.Contains(a, "locklog-home") }) {
 		t.Errorf("mcp has a terminal or the home volume: %q", run)
+	}
+}
+
+// setup runs in the image as you, with the project writable, the facts of
+// this host and the proxies' directory (0700, outside the project); no
+// network. doctor runs as the agent account with the host's network and
+// the project read-only. Neither gets a volume of the console's.
+func TestLauncherSetupDoctor(t *testing.T) {
+	f := newLauncherFixture(t)
+	writeExec(t, filepath.Join(f.bin, "claude"), "#!/bin/sh\n")
+	_, calls, err := f.run(t, f.project, []string{"DOCKER_PS=web nginx:1 web shop shop_default\\n"}, "setup", "--yes", "--no-production", "--agent", "host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	noEngineSocket(t, calls)
+	run := lastRun(t, calls)
+	confined(t, run)
+	me := strconv.Itoa(os.Getuid()) + ":" + strconv.Itoa(os.Getgid())
+	proxy := filepath.Join(f.root, "home", ".config", "locklog", "proxy")
+	for _, seq := range [][]string{{"--user", me}, {"--network", "none"}, {"--log-driver", "none"}, {"-v", f.project + ":" + f.project},
+		{"-v", proxy + ":" + proxy}, {"-w", f.project}, {"-e", "LOCKLOG_IMAGE_REF=locklog"},
+		{"locklog", "setup", "--facts", "/run/locklog-facts", "--proxy-dir", proxy, "--yes", "--no-production", "--agent", "host"}} {
+		if !hasSeq(run, seq...) {
+			t.Errorf("setup run lacks %q: %q", seq, run)
+		}
+	}
+	if slices.ContainsFunc(run, func(a string) bool { return strings.Contains(a, "locklog-run") || strings.Contains(a, "locklog-home") }) {
+		t.Errorf("setup has a console volume: %q", run)
+	}
+	if st, err := os.Stat(proxy); err != nil || st.Mode().Perm() != 0o700 {
+		t.Errorf("proxy dir: %v %v", st, err)
+	}
+	facts, err := os.ReadFile(filepath.Join(f.root, "facts.copy"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode, _ := os.ReadFile(filepath.Join(f.root, "facts.mode")); strings.TrimSpace(string(mode)) != "-rw-------" {
+		t.Errorf("the facts file has mode %q, want -rw------- (0600)", mode)
+	}
+	if !hasSeq(run, "-e", "LOCKLOG_HOST_HOME=") {
+		t.Errorf("setup run lacks LOCKLOG_HOST_HOME: %q", run)
+	}
+	fs, err := hostfacts.Parse(strings.NewReader(string(facts)))
+	if err != nil {
+		t.Fatalf("facts: %v\n%s", err, facts)
+	}
+	if fs.EUID != os.Geteuid() || fs.Sudo != hostfacts.SudoAbsent || fs.Docker != hostfacts.DockerReachable ||
+		!slices.Contains(fs.Agents, "claude") || len(fs.Containers) != 1 || fs.Containers[0].Project != "shop" ||
+		!slices.Contains(fs.Logs, filepath.Join(f.logs, "app", "app.log")) {
+		t.Errorf("facts = %+v\n%s", fs, facts)
+	}
+
+	// An untrusted .locklog/ after the run fails setup.
+	if err := os.Chmod(filepath.Join(f.project, ".locklog"), 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if out, _, err := f.run(t, f.project, nil, "setup", "--yes"); err == nil || !strings.Contains(out, "fix it before locklog console") {
+		t.Errorf("untrusted .locklog accepted: %v\n%s", err, out)
+	}
+	os.Chmod(filepath.Join(f.project, ".locklog"), 0o755)
+
+	_, calls, err = f.run(t, filepath.Join(f.project, "sub"), nil, "doctor", "--profile", "x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run = lastRun(t, calls)
+	confined(t, run)
+	for _, seq := range [][]string{{"--user", "agent"}, {"--network", "host"}, {"-v", f.project + ":" + f.project + ":ro"},
+		{"-w", filepath.Join(f.project, "sub")}, {"locklog", "doctor", "--facts", "-", "--profile", "x"}} {
+		if !hasSeq(run, seq...) {
+			t.Errorf("doctor run lacks %q: %q", seq, run)
+		}
+	}
+	if slices.ContainsFunc(run, func(a string) bool { return strings.Contains(a, "locklog-run") || strings.Contains(a, "locklog-facts") }) {
+		t.Errorf("doctor has the socket volume or a facts mount: %q", run)
+	}
+	// The facts reach the agent account on its input, not in a file.
+	if in, err := os.ReadFile(filepath.Join(f.root, "facts.stdin")); err != nil || !strings.HasPrefix(string(in), hostfacts.Header+"\n") {
+		t.Errorf("doctor's input: %q %v", in, err)
+	}
+}
+
+// The home directory is never a project: setup refuses it, and the walk
+// from below it ignores a ~/.locklog/.
+func TestLauncherHomeIsNoProject(t *testing.T) {
+	f := newLauncherFixture(t)
+	home := filepath.Join(f.root, "home")
+	sub := filepath.Join(home, "work")
+	for _, d := range []string{filepath.Join(home, ".locklog"), sub} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	os.Chmod(home, 0o755)
+	out, _, err := f.run(t, home, nil, "setup", "--yes")
+	if err == nil || !strings.Contains(out, "not in your home directory") {
+		t.Errorf("setup in home: %v\n%s", err, out)
+	}
+	out, calls, err := f.run(t, sub, nil, "mcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "ignoring "+home+"/.locklog: your home directory is not a project") {
+		t.Errorf("no warning for ~/.locklog:\n%s", out)
+	}
+	if run := lastRun(t, calls); !hasSeq(run, "-v", sub+":"+sub+":ro") {
+		t.Errorf("the project is not the subdirectory: %q", run)
 	}
 }
 

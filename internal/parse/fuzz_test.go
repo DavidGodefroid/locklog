@@ -3,6 +3,7 @@ package parse
 import (
 	"errors"
 	"io"
+	"slices"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -282,6 +283,24 @@ func FuzzSyslogAndCombinedDecode(f *testing.F) {
 			if (combinedFormat{}).Detect(line) != ok {
 				t.Fatal("Detect and Decode disagree")
 			}
+		}
+	})
+}
+
+// FuzzCombinedMatch holds the hand-written matcher equal to the expression
+// it replaces, on any text.
+func FuzzCombinedMatch(f *testing.F) {
+	for _, s := range formatSeeds {
+		f.Add(strings.SplitN(s, "\n", 2)[0])
+	}
+	for _, s := range combinedMatchSeeds {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, text string) {
+		want := combinedRe.FindStringSubmatchIndex(text)
+		got := combinedMatch(text)
+		if !slices.Equal(got, want) {
+			t.Fatalf("%q:\n got %v\nwant %v", text, got, want)
 		}
 	})
 }
