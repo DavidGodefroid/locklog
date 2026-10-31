@@ -228,7 +228,7 @@ func (s *Source) IndexCounts(ctx context.Context, q CountQuery) (CountResult, er
 	for _, c := range plan.Chunks {
 		fi, err := s.lookup(ctx, c.Stream)
 		if err != nil {
-			return CountResult{}, err
+			return CountResult{}, stale(err) // vanished since the plan
 		}
 		fields, isize, gs := s.streamIndex(fi)
 		size := streamSize(fi, isize)

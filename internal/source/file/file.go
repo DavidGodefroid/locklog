@@ -803,7 +803,11 @@ func (s *Source) Describe(ctx context.Context) (source.Schema, error) {
 	return sch, nil
 }
 
-// ClaimMargin is the timestamp disorder the coverage claim allows for:
+// ClaimMargin is the timestamp disorder the coverage claim allows for. The
+// claim also assumes no record is stamped later than its file's mtime plus
+// five minutes (zone-less local times read as UTC on a host ahead of UTC,
+// or a clock running ahead, break that assumption: accepted limitation).
+//
 // indexed_from is that much after (and indexed_until that much before) the
 // nearest record the index may lack, rounded to whole minutes.
 const ClaimMargin = time.Minute
