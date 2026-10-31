@@ -44,10 +44,12 @@ func ClaudeAllow() []string {
 	return out
 }
 
-// Wiring wires the agents to locklog. A project init of Claude Code also
+// wiring wires the agents to locklog. A project init of Claude Code also
 // merges ClaudeAllow into the project's .claude/settings.local.json (the
-// personal file; the shared .claude/settings.json is never written).
-var Wiring = agentwire.Wiring{Product: product.P, Assets: agentwire.Assets{
+// personal file; the shared .claude/settings.json is never written). It is
+// unexported: a user-scope init goes through InitUser, which never writes
+// the allow list.
+var wiring = agentwire.Wiring{Product: product.P, Assets: agentwire.Assets{
 	MCPCommand:         []string{"locklog", "mcp"},
 	Skill:              Skill,
 	Instructions:       Instructions,
@@ -86,7 +88,7 @@ func InitProject(cwd, agent string) (InitResult, error) {
 	if claude {
 		before = allowEntries(filepath.Join(root, filepath.FromSlash(localSettings)))
 	}
-	res, err := Wiring.Init(root, agent)
+	res, err := wiring.Init(root, agent)
 	out := InitResult{Result: res}
 	if err != nil || !claude {
 		return out, err
@@ -101,6 +103,23 @@ func InitProject(cwd, agent string) (InitResult, error) {
 			" (personal settings, with the allow list above): add it to .gitignore, or it may be committed")
 	}
 	return out, nil
+}
+
+// userWiring is wiring without the allow list: at user scope it would
+// apply to every project, so that a foreign project's .mcp.json with a
+// server named "locklog" would get its tools allowed.
+func userWiring() agentwire.Wiring {
+	w := wiring
+	w.Assets.ClaudeAllow = nil
+	w.Assets.ClaudeAllowProject = false
+	return w
+}
+
+// InitUser wires agent for the account (the skill and the user MCP
+// server), never with an allow list: that is written only at project
+// scope, by InitProject.
+func InitUser(e agentwire.Env, agent string) (agentwire.Result, error) {
+	return userWiring().InitUser(e, agent)
 }
 
 // allowEntries reads permissions.allow of a Claude Code settings file

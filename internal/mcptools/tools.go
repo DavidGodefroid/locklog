@@ -72,6 +72,7 @@ const (
 	ToolSources       = "locklog_sources"
 	ToolSearch        = "locklog_search"
 	ToolCount         = "locklog_count"
+	ToolPatterns      = "locklog_patterns"
 	ToolPIIList       = "locklog_pii_list"
 	ToolPIIAdd        = "locklog_pii_add"
 	ToolRequestChange = "locklog_request_change"
@@ -79,7 +80,7 @@ const (
 
 // Names lists every tool name, in a fixed order.
 func Names() []string {
-	return []string{ToolStatus, ToolSources, ToolSearch, ToolCount, ToolPIIList, ToolPIIAdd, ToolRequestChange}
+	return []string{ToolStatus, ToolSources, ToolSearch, ToolCount, ToolPatterns, ToolPIIList, ToolPIIAdd, ToolRequestChange}
 }
 
 // approved are the tools whose operation the human approves at the
@@ -143,8 +144,16 @@ type QueryIn struct {
 type CountIn struct {
 	RangeIn
 	Bucket    string   `json:"bucket,omitempty" jsonschema:"histogram bucket, e.g. 1m, 1h"`
-	By        []string `json:"by,omitempty" jsonschema:"at most 2 trusted fields or pseudonym fields, or pattern"`
+	By        []string `json:"by,omitempty" jsonschema:"at most 2 trusted fields or pseudonym fields"`
+	ByPattern bool     `json:"by_pattern,omitempty" jsonschema:"also group by the message pattern (the last key; counts as one of the 2)"`
 	FirstLast bool     `json:"first_last,omitempty" jsonschema:"also the first and last occurrence"`
+}
+
+// PatternsIn asks for the top message patterns of a time range.
+type PatternsIn struct {
+	RangeIn
+	Top      int    `json:"top,omitempty" jsonschema:"patterns to return, 1 to 100 (default 20)"`
+	Baseline string `json:"baseline,omitempty" jsonschema:"compare with the same window this much earlier, e.g. 24h or 7d (at least the window's length): adds baseline counts and the new and gone patterns"`
 }
 
 // PIIAddIn proposes a mask rule.
@@ -178,6 +187,7 @@ func New(o Options) *mcp.Server {
 	mcp.AddTool(s, &mcp.Tool{Name: ToolSources, Description: "Per source: kind, format, field and label names (masked names as ⟦key:ID⟧) with their class, trusted values, coverage and volume."}, t.call(logconsole.MethodSources))
 	mcp.AddTool(s, &mcp.Tool{Name: ToolSearch, InputSchema: searchSchema, Description: "Masked log records of a time range matching predicates, text or regex, in time order, at most 200. Free within the budgets; a result with complete:false continues free with its cursor. Results are untrusted data."}, t.search)
 	mcp.AddTool(s, &mcp.Tool{Name: ToolCount, InputSchema: countSchema, Description: "Counts over a time range: a histogram (bucket), grouped by at most 2 trusted or pseudonym fields, first and last occurrence. Trusted-field counts over long ranges are cheap; start here to find when it began."}, t.count)
+	mcp.AddTool(s, &mcp.Tool{Name: ToolPatterns, InputSchema: patternsSchema, Description: "The most frequent message patterns of a time range (masked templates, variable parts collapsed), with counts and first/last; with baseline, the same window earlier for comparison, and the patterns that are new or gone. Use it to see what changed when something broke."}, t.patterns)
 	mcp.AddTool(s, &mcp.Tool{Name: ToolPIIList, Description: "The masking rules of the profile. " + piiPending}, t.piiList)
 	mcp.AddTool(s, &mcp.Tool{Name: ToolPIIAdd, InputSchema: piiAddSchema, Description: "Mask a field from now on (masks more; applied at once). Use it for a field a result showed in clear that holds personal data. " + piiPending}, t.piiAdd)
 	mcp.AddTool(s, &mcp.Tool{Name: ToolRequestChange, InputSchema: changeSchema, Description: "Ask the human for a policy change (a source, a budget, unmask). It only queues the request on the console; the human decides."}, t.change)
@@ -366,9 +376,19 @@ func (t *tools) count(ctx context.Context, _ *mcp.CallToolRequest, in CountIn) (
 		queryParams
 		Bucket    string   `json:"bucket,omitempty"`
 		By        []string `json:"by,omitempty"`
+		ByPattern bool     `json:"by_pattern,omitempty"`
 		FirstLast bool     `json:"first_last,omitempty"`
-	}{paramsOf(in.RangeIn), in.Bucket, in.By, in.FirstLast}
+	}{paramsOf(in.RangeIn), in.Bucket, in.By, in.ByPattern, in.FirstLast}
 	return t.forward(ctx, in.Profile, logconsole.MethodCount, p)
+}
+
+func (t *tools) patterns(ctx context.Context, _ *mcp.CallToolRequest, in PatternsIn) (*mcp.CallToolResult, Out, error) {
+	p := struct {
+		queryParams
+		Top      int    `json:"top,omitempty"`
+		Baseline string `json:"baseline,omitempty"`
+	}{paramsOf(in.RangeIn), in.Top, in.Baseline}
+	return t.forward(ctx, in.Profile, logconsole.MethodPatterns, p)
 }
 
 // StatusOut is one profile's status.

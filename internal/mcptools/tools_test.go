@@ -123,7 +123,7 @@ func TestToolList(t *testing.T) {
 // Only locklog_request_change is approved among this PR's tools; the
 // free list is what an agent may call without a prompt.
 func TestFreeNames(t *testing.T) {
-	want := []string{ToolStatus, ToolSources, ToolSearch, ToolCount, ToolPIIList, ToolPIIAdd}
+	want := []string{ToolStatus, ToolSources, ToolSearch, ToolCount, ToolPatterns, ToolPIIList, ToolPIIAdd}
 	if got := FreeNames(); !slices.Equal(got, want) {
 		t.Errorf("FreeNames = %v, want %v", got, want)
 	}
@@ -166,6 +166,56 @@ func TestSearchForwards(t *testing.T) {
 	if calls := c.methods(); !strings.HasPrefix(calls[2], logconsole.MethodSources) {
 		t.Errorf("sources call = %q", calls[2])
 	}
+	call(t, cs, ToolCount, map[string]any{"by_pattern": true})
+	if calls := c.methods(); !strings.Contains(calls[3], `"by_pattern":true`) || !strings.HasPrefix(calls[3], logconsole.MethodCount) {
+		t.Errorf("count by pattern call = %q", calls[3])
+	}
+}
+
+// locklog_patterns forwards its range, top and baseline to log.patterns,
+// without the profile.
+func TestPatternsForwards(t *testing.T) {
+	c := &fakeConn{}
+	cs := connect(t, withConn(c))
+	res := call(t, cs, ToolPatterns, map[string]any{"profile": "dev", "sources": []string{"nginx"}, "last": "1h", "top": 10, "baseline": "24h"})
+	if res.IsError {
+		t.Fatalf("patterns: %s", text(res))
+	}
+	if !strings.Contains(text(res), "untrusted") {
+		t.Errorf("patterns text: %s", text(res))
+	}
+	calls := c.methods()
+	if len(calls) != 1 || !strings.HasPrefix(calls[0], logconsole.MethodPatterns+" ") {
+		t.Fatalf("calls = %q", calls)
+	}
+	var p map[string]any
+	_ = json.Unmarshal([]byte(strings.TrimPrefix(calls[0], logconsole.MethodPatterns+" ")), &p)
+	if p["top"] != float64(10) || p["baseline"] != "24h" || p["last"] != "1h" || p["profile"] != nil {
+		t.Errorf("params = %v", p)
+	}
+	// The schema bounds top (the console checks it again).
+	if res := call(t, cs, ToolPatterns, map[string]any{"top": 1000}); !res.IsError {
+		t.Errorf("top 1000 accepted: %s", text(res))
+	}
+	if len(c.methods()) != 1 {
+		t.Errorf("an out-of-schema call reached the console: %q", c.methods())
+	}
+}
+
+// locklog_pii_add only tightens the masking: free, and served on a
+// production profile to an agent that is not a host agent (lea, its own
+// container). The console audits it and shows it in its status (#64).
+func TestPIIAddServedOnProductionForNonHostAgents(t *testing.T) {
+	c := &fakeConn{production: true}
+	cs := connect(t, withConn(c))
+	if !Free(ToolPIIAdd) {
+		t.Fatal("locklog_pii_add is not free")
+	}
+	call(t, cs, ToolPIIAdd, map[string]any{"pattern": "customer_name"})
+	calls := c.methods()
+	if len(calls) != 1 || !strings.HasPrefix(calls[0], ipc.MethodPIIAdd+" ") || !strings.Contains(calls[0], "customer_name") {
+		t.Errorf("calls = %q", calls)
+	}
 }
 
 func TestRefusalIsStructured(t *testing.T) {
@@ -183,7 +233,7 @@ func TestHostAgentGuard(t *testing.T) {
 	o.HostAgent = true
 	cs := connect(t, o)
 	args := map[string]map[string]any{ToolPIIAdd: {"pattern": "x"}, ToolRequestChange: {"change": "y"}}
-	for _, tool := range []string{ToolSearch, ToolCount, ToolSources, ToolPIIList, ToolPIIAdd, ToolRequestChange} {
+	for _, tool := range []string{ToolSearch, ToolCount, ToolPatterns, ToolSources, ToolPIIList, ToolPIIAdd, ToolRequestChange} {
 		res := call(t, cs, tool, args[tool])
 		if !res.IsError || !strings.Contains(text(res), "non-production trial") {
 			t.Errorf("%s on production from a host agent: %s", tool, text(res))
@@ -427,7 +477,13 @@ func TestInputSchemas(t *testing.T) {
 	if l := prop(ToolSearch, "properties", "limit"); l["minimum"] != float64(1) || l["maximum"] != float64(200) {
 		t.Errorf("search limit = %v", l)
 	}
-	for _, tool := range []string{ToolSearch, ToolCount} {
+	if tp := prop(ToolPatterns, "properties", "top"); tp["minimum"] != float64(1) || tp["maximum"] != float64(100) {
+		t.Errorf("patterns top = %v", tp)
+	}
+	if b := prop(ToolPatterns, "properties", "baseline"); b["maxLength"] == nil {
+		t.Errorf("patterns baseline = %v", b)
+	}
+	for _, tool := range []string{ToolSearch, ToolCount, ToolPatterns} {
 		pred := prop(tool, "properties", "where", "items", "properties")
 		op, _ := pred["op"].(map[string]any)
 		val, _ := pred["value"].(map[string]any)

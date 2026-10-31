@@ -9,11 +9,13 @@ var Ops = []any{"=", "!=", "in", "exists", "<", "<=", ">", ">=", "contains", "ma
 
 // Input bounds the schemas state (the console checks them again).
 const (
-	maxLimit   = 200
-	maxValue   = 1024 // a predicate value, in characters
-	maxPattern = 256  // a PII rule pattern
-	maxChange  = 2000 // a change request
-	maxRegex   = 256
+	maxLimit    = 200
+	maxValue    = 1024 // a predicate value, in characters
+	maxPattern  = 256  // a PII rule pattern
+	maxChange   = 2000 // a change request
+	maxRegex    = 256
+	maxTop      = 100 // engine.MaxTop
+	maxDuration = 16  // a duration such as 24h or 7d
 )
 
 var (
@@ -21,7 +23,12 @@ var (
 		tuneRange(s)
 		s.Properties["limit"].Minimum, s.Properties["limit"].Maximum = ptr(1.0), ptr(float64(maxLimit))
 	})
-	countSchema  = inputSchema[CountIn](tuneRange)
+	countSchema    = inputSchema[CountIn](tuneRange)
+	patternsSchema = inputSchema[PatternsIn](func(s *jsonschema.Schema) {
+		tuneRange(s)
+		s.Properties["top"].Minimum, s.Properties["top"].Maximum = ptr(1.0), ptr(float64(maxTop))
+		s.Properties["baseline"].MaxLength = ptr(maxDuration)
+	})
 	piiAddSchema = inputSchema[PIIAddIn](func(s *jsonschema.Schema) {
 		s.Properties["pattern"].MinLength, s.Properties["pattern"].MaxLength = ptr(1), ptr(maxPattern)
 	})

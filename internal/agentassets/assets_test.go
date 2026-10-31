@@ -87,7 +87,7 @@ func TestClaudeAllow(t *testing.T) {
 	if slices.Contains(allow, "mcp__locklog__"+mcptools.ToolRequestChange) {
 		t.Error("the approved locklog_request_change is allowed")
 	}
-	if !slices.Equal(Wiring.Assets.ClaudeAllow, allow) || !Wiring.Assets.ClaudeAllowProject {
+	if !slices.Equal(wiring.Assets.ClaudeAllow, allow) || !wiring.Assets.ClaudeAllowProject {
 		t.Error("the wiring does not merge ClaudeAllow at project scope")
 	}
 }
@@ -305,5 +305,35 @@ func TestGitIgnoresReal(t *testing.T) {
 	}
 	if _, known := gitIgnores(t.TempDir(), ".claude/settings.local.json"); known {
 		t.Error("outside a work tree: known")
+	}
+}
+
+// A user-scope init never writes an allow list: not in the user's
+// settings.json, whatever the project.
+func TestInitUserWritesNoAllowList(t *testing.T) {
+	home := t.TempDir()
+	var ran [][]string
+	e := agentwire.Env{
+		Home:     home,
+		Getenv:   func(string) string { return "" },
+		LookPath: func(name string) (string, error) { return "/usr/bin/" + name, nil },
+		Run: func(name string, args ...string) ([]byte, error) {
+			ran = append(ran, append([]string{name}, args...))
+			return nil, nil
+		},
+	}
+	if _, err := InitUser(e, "claude"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".claude", "skills", "locklog", "SKILL.md")); err != nil {
+		t.Errorf("skill not written: %v", err)
+	}
+	if data, err := os.ReadFile(filepath.Join(home, ".claude", "settings.json")); err == nil {
+		if strings.Contains(string(data), "allow") || strings.Contains(string(data), "mcp__locklog__") {
+			t.Errorf("user settings.json got an allow list: %s", data)
+		}
+	}
+	if len(userWiring().Assets.ClaudeAllow) != 0 || len(wiring.Assets.ClaudeAllow) == 0 {
+		t.Error("the user wiring carries the allow list, or the project one lost it")
 	}
 }

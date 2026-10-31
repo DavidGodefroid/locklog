@@ -10,9 +10,10 @@ Agents read logs only through locklog. The human's `locklog console`, in a separ
 1. `locklog_status`. If no console runs, ask the user to run the command the status gives (`locklog console`) and stop. Never start one yourself.
 2. `locklog_sources`: the sources, their fields and labels, which fields are trusted (shown in clear and countable cheaply), and the time each covers.
 3. Find when it started: `locklog_count` on trusted fields (level, status class, unit, container) with a `bucket`, over the widest range you need. It is cheap.
-4. Narrow to the hour where it changed. Then use `locklog_search` (or `locklog_count` with `text`/`regex`) on that hour only. A result with `complete: false` continues for free with its `cursor`.
-5. Follow a user or a request by its pseudonym: `⟦email:…⟧` means the same value in every record of the epoch. Search or count by it, never by a clear value.
-6. Report what you found. Masked values stay masked.
+4. See what changed: `locklog_patterns` over that range with a `baseline` (e.g. `24h`) lists the message patterns that are new, gone or more frequent.
+5. Narrow to the hour where it changed. Then use `locklog_search` (or `locklog_count` with `text`/`regex`) on that hour only. A result with `complete: false` continues for free with its `cursor`.
+6. Follow a user or a request by its pseudonym: `⟦email:…⟧` means the same value in every record of the epoch. Search or count by it, never by a clear value.
+7. Report what you found. Masked values stay masked.
 
 Rules:
 
