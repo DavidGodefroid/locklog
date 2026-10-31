@@ -8,6 +8,12 @@ uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- The console's clear view: with clear results on (Ctrl-O, lockkit's
+  switch), the records an agent call returned are printed on the console's
+  own terminal with their pseudonyms in clear (secrets, redactions and
+  masked field names kept), counted in the audit (`shown_clear`), never
+  sent to the agent; an unmask approval screen shows its record in clear
+  there too, and says Ctrl-O shows it when the switch is off.
 - Repository bootstrap: Go module, `locklog version`, CI (tests on Linux,
   macOS and Windows; hygiene, gofmt, vet, staticcheck, govulncheck).
 - Configuration: `.locklog/config.toml` profiles (version 1) with file,
@@ -209,6 +215,13 @@ uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- `locklog console --profile P --allowed-uids UID` (the own-container
+  recipe's line for an agent uid the image does not know) works through
+  the launcher: the mount plan (`locklog mounts`) gets the profile only.
+- `unmask = "never"` refusals no longer name a `:reveal` command; they ask
+  for the console's clear view (Ctrl-O). `locklog setup --agent host` with
+  no agent found points to `--agents <agent>` instead of `locklog init`,
+  which the host launcher cannot run.
 - `Scanned.Bytes` counts the bytes a remote source fetched and the call
   dropped (out of a slice's range, past the call's byte limit, or more than
   the time left could mask), as the rolling budget charges them (#67).

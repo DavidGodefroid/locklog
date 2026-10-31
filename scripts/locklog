@@ -997,6 +997,24 @@ check_project() {
 # .locklog/ (as the agent account, no network) and checked here, on the
 # host: its header and its lines.
 read_plan() {
+	# locklog mounts takes only the profile: the console's own flags
+	# (--allowed-uids) are not passed to it.
+	rp_profile=
+	while [ $# -gt 0 ]; do
+		case "$1" in
+		--profile)
+			[ $# -ge 2 ] || die "--profile needs a profile name"
+			rp_profile=$2
+			shift ;;
+		--profile=*) rp_profile=${1#--profile=} ;;
+		esac
+		shift
+	done
+	if [ -n "$rp_profile" ]; then
+		set -- --profile "$rp_profile"
+	else
+		set --
+	fi
 	planned=$(docker run --rm --network none --user agent --log-driver none $confined --pids-limit 64 --memory 256m \
 		-v "$ll_dir:$ll_dir:ro" -w "$project" "$image" mounts "$@") ||
 		die "could not read the mount plan of the profile (locklog mounts)"

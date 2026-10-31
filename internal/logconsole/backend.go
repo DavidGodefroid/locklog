@@ -75,6 +75,28 @@ func WithApprove(ctx context.Context, a Approve) context.Context {
 	return context.WithValue(ctx, approveKey{}, a)
 }
 
+type showResultsKey struct{}
+
+// WithShowResults attaches the console's clear-results switch (Ctrl-O) to
+// ctx: an approval screen then shows its record in clear, on the console.
+func WithShowResults(ctx context.Context, on bool) context.Context {
+	return context.WithValue(ctx, showResultsKey{}, on)
+}
+
+// ShowResultsFrom reports the clear-results switch of the call.
+func ShowResultsFrom(ctx context.Context) bool {
+	on, _ := ctx.Value(showResultsKey{}).(bool)
+	return on
+}
+
+// Revealer is implemented by an engine that can show the records of a
+// result in clear on the console's terminal (the clear view, Ctrl-O):
+// one line per record, secrets and redactions kept. The lines are never
+// part of an answer to the agent.
+type Revealer interface {
+	Reveal(ctx context.Context, result any) []string
+}
+
 // ApproveFrom returns the call's approver, or nil.
 func ApproveFrom(ctx context.Context) Approve {
 	a, _ := ctx.Value(approveKey{}).(Approve)
@@ -456,7 +478,22 @@ func (b *Backend) handler(method string) console.Handler {
 		}
 		cctx, cancel := ls.callContext(ctx)
 		cctx = WithApprove(cctx, func(ctx context.Context, s console.Screen) console.Approval { return env.Approve(ctx, req.ID, s) })
+		cctx = WithShowResults(cctx, env.ShowResults())
 		result, refused, err := ls.engine.Handle(cctx, method, params, c)
+		// The clear view: with results on (Ctrl-O), the records the
+		// agent gets masked are shown here in clear, on this terminal
+		// only, and the audit counts them.
+		if err == nil && refused == nil && env.ShowResults() {
+			if rv, ok := ls.engine.(Revealer); ok {
+				if lines := rv.Reveal(cctx, result); len(lines) > 0 {
+					env.Println(fmt.Sprintf("%s: %d records in clear (results on, Ctrl-O; the agent got them masked)", method, len(lines)))
+					for _, l := range lines {
+						env.Println("  " + env.Safe(l))
+					}
+					rec.ShownClear = len(lines)
+				}
+			}
+		}
 		cancel()
 		var resp ipc.Response
 		var declined *Declined

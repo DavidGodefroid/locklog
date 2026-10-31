@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/DavidGodefroid/locklog/internal/hostfacts"
+	"github.com/DavidGodefroid/locklog/internal/setup"
 )
 
 // launcherFixture runs scripts/locklog, the host launcher, with a fake
@@ -117,7 +118,20 @@ run)
 			[ "$vol" = run ] && printf '%s\n' "${RUN_OWNER:-10051:10050:2750}"
 			[ "$vol" = home ] && printf '%s\n' "${HOME_OWNER:-10051:10051:700}"
 			exit 0 ;;
-		mounts) printf '%b' "${PLAN:-profile staging false\n}"; exit "${PLAN_RC:-0}" ;;
+		mounts)
+			# As locklog mounts: --profile only.
+			seen= prev=
+			for b in "$@"; do
+				if [ -n "$seen" ]; then
+					case "$b" in
+					--profile|--profile=*) ;;
+					*) [ "$prev" = --profile ] || { echo "unexpected argument $b" >&2; exit 2; } ;;
+					esac
+				fi
+				[ "$b" = mounts ] && seen=1
+				prev=$b
+			done
+			printf '%b' "${PLAN:-profile staging false\n}"; exit "${PLAN_RC:-0}" ;;
 		version) echo "locklog 9.9.9"; exit 0 ;;
 		console)
 			# Wait for a file the map loop writes, then exit as told.
@@ -251,7 +265,7 @@ func TestLauncherConsole(t *testing.T) {
 	}
 	ll := filepath.Join(f.project, ".locklog")
 	if planCall == nil || !hasSeq(planCall, "--user", "agent") || !hasSeq(planCall, "--network", "none") ||
-		!hasSeq(planCall, "-v", ll+":"+ll+":ro") || !hasSeq(planCall, "locklog", "mounts", "--profile", "staging", "--allowed-uids", "1000") {
+		!hasSeq(planCall, "-v", ll+":"+ll+":ro") || !slices.Equal(planCall[len(planCall)-4:], []string{"locklog", "mounts", "--profile", "staging"}) {
 		t.Errorf("mount plan call = %q", planCall)
 	}
 	run := lastRun(t, calls)
@@ -750,5 +764,33 @@ func TestLauncherProjectRoot(t *testing.T) {
 		if err == nil || !strings.Contains(out, "not from /") || len(calls) > 0 {
 			t.Errorf("%s from /: %v %q %s", cmd, err, calls, out)
 		}
+	}
+}
+
+// TestLauncherRecipeConsoleLine: the console line the own-container recipe
+// prints for an agent uid the image does not know (--allowed-uids) runs
+// through the launcher: the mount plan gets the profile only, the console
+// gets --allowed-uids.
+func TestLauncherRecipeConsoleLine(t *testing.T) {
+	consoleHost(t)
+	var b strings.Builder
+	setup.ContainerRecipe(&b, setup.RecipeOptions{Image: "ghcr.io/davidgodefroid/locklog:test", AgentUID: 1000, Profile: "staging"})
+	var line []string
+	for _, l := range strings.Split(b.String(), "\n") {
+		if f := strings.Fields(l); len(f) > 1 && f[0] == "locklog" && f[1] == "console" {
+			line = f[1:]
+		}
+	}
+	if !slices.Contains(line, "--allowed-uids") {
+		t.Fatalf("recipe console line %q", line)
+	}
+	f := newLauncherFixture(t)
+	out, calls, err := f.run(t, f.project, []string{plan(f)}, line...)
+	if err != nil {
+		t.Fatalf("%q: %v\n%s", line, err, out)
+	}
+	run := lastRun(t, calls)
+	if !hasSeq(run, append([]string{"locklog"}, line...)...) {
+		t.Errorf("console run %q lacks %q", run, line)
 	}
 }

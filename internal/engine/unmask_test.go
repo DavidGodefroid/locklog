@@ -56,6 +56,11 @@ func TestUnmask(t *testing.T) {
 	if !strings.Contains(body, "»"+toks[0]+"«") || strings.Contains(body, canary) {
 		t.Fatalf("screen body %q", body)
 	}
+	// The clear view, for the console's terminal only: the record with
+	// the canary in clear.
+	if len(ap.Clear) != 1 || !strings.Contains(ap.Clear[0], canary) || strings.Contains(ap.Clear[0], toks[0]) {
+		t.Fatalf("clear view %q", ap.Clear)
+	}
 	if strings.Contains(ap.Note, "bob@example.net") || !strings.Contains(ap.Note, "⟦email:") {
 		t.Fatalf("reason not masked: %q", ap.Note)
 	}

@@ -440,6 +440,22 @@ func TestSessionValueTools(t *testing.T) {
 	if len(screens) != 1 || !screens[0].NeverAuto || !screens[0].Red || screens[0].Header != "unmask · read-pii" {
 		t.Fatalf("screens %+v", screens)
 	}
+	// Results off: the screen says Ctrl-O shows the record in clear and
+	// shows it masked only. Results on: the record in clear, on the screen.
+	if body := strings.Join(screens[0].Body, "\n"); strings.Contains(body, "jane.doe@example.com") || !strings.Contains(body, "Ctrl-O") {
+		t.Fatalf("screen without results: %q", body)
+	}
+	if _, _, err := s.Handle(logconsole.WithShowResults(ctx, true), logconsole.MethodUnmask, json.RawMessage(um), logconsole.Caller{UID: 1000, PID: 7}); err != nil {
+		t.Fatal(err)
+	}
+	if body := strings.Join(screens[1].Body, "\n"); !strings.Contains(body, "jane.doe@example.com") {
+		t.Fatalf("screen with results: %q", body)
+	}
+	// The clear view of a result: its records in clear, for the console.
+	lines := s.Reveal(context.Background(), sr)
+	if len(lines) != len(sr.Records) || !strings.Contains(strings.Join(lines, "\n"), "jane.doe@example.com") {
+		t.Fatalf("reveal %q", lines)
+	}
 	// A denial is the console's answer, passed back as is.
 	deny := logconsole.WithApprove(context.Background(), func(context.Context, console.Screen) console.Approval {
 		return console.Approval{Refusal: console.ErrResp(0, 1, "no")}
@@ -454,7 +470,8 @@ func TestSessionValueTools(t *testing.T) {
 		return strings.Replace(fileProfile(logs), "structured = \"redact-unknown\"", "structured = \"redact-unknown\"\nunmask = \"never\"", 1)
 	}, appLog)
 	s2 := open(t, g.options(nil))
-	if _, rf, _ := s2.Handle(ctx, logconsole.MethodUnmask, json.RawMessage(um), logconsole.Caller{}); rf == nil || rf.Info.Code != engine.EUnmaskNever {
+	if _, rf, _ := s2.Handle(ctx, logconsole.MethodUnmask, json.RawMessage(um), logconsole.Caller{}); rf == nil || rf.Info.Code != engine.EUnmaskNever ||
+		strings.Contains(rf.Message+rf.Info.Hint, ":reveal") || !strings.Contains(rf.Info.Hint, "Ctrl-O") {
 		t.Fatalf("never: %+v", rf)
 	}
 }

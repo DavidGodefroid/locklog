@@ -114,7 +114,10 @@ type Session struct {
 	once    sync.Once
 }
 
-var _ logconsole.Engine = (*Session)(nil)
+var (
+	_ logconsole.Engine   = (*Session)(nil)
+	_ logconsole.Revealer = (*Session)(nil)
+)
 
 // Open opens the engine of o.Policy.
 func Open(ctx context.Context, o Options) (_ *Session, err error) {
@@ -588,7 +591,18 @@ func (s *Session) approver(ctx context.Context) engine.Approver {
 		return nil
 	}
 	return func(ctx context.Context, a engine.Approval) error {
-		r := ap(ctx, console.Screen{Header: a.Header, Note: a.Note, Body: a.Body, Warnings: a.Warnings, Production: s.prod,
+		body := a.Body
+		if len(a.Clear) > 0 {
+			// The clear view is for this terminal only (never the
+			// agent, never a hub's masked screen).
+			if logconsole.ShowResultsFrom(ctx) {
+				body = append(slices.Clone(body), "in clear (results on, Ctrl-O; shown here only, the agent does not get it):")
+				body = append(body, a.Clear...)
+			} else {
+				body = append(slices.Clone(body), "turn clear results on (Ctrl-O) to see this record in clear here (never sent to the agent)")
+			}
+		}
+		r := ap(ctx, console.Screen{Header: a.Header, Note: a.Note, Body: body, Warnings: a.Warnings, Production: s.prod,
 			NeverAuto: a.NeverAuto, Red: a.Class == "read-pii"})
 		if r.Approved {
 			return nil
@@ -621,7 +635,7 @@ var hints = map[string]string{
 	engine.EStale:         "run the query again",
 	engine.EPIIInQuery:    "address personal values by their pseudonym (⟦kind:ID⟧) as the records show them",
 	engine.EUnknownField:  "use a field name the records or log.sources show",
-	engine.EUnmaskNever:   "ask the human to read the record at the console (:reveal), or to set unmask = \"approved\"",
+	engine.EUnmaskNever:   "ask the human to read the record at the console, with clear results on (Ctrl-O), or to set unmask = \"approved\"",
 }
 
 // refusalOf is the console's form of an engine refusal. Its text holds no
@@ -742,4 +756,48 @@ func (s *Session) describe(ctx context.Context) Sources {
 		out.Sources = append(out.Sources, info)
 	}
 	return out
+}
+
+// Reveal implements logconsole.Revealer: the records of an agent call's
+// result (search, trace, context, tail, an approved scan's page), in clear
+// for the console's terminal. Results without records show nothing.
+func (s *Session) Reveal(ctx context.Context, result any) []string {
+	b, err := json.Marshal(result)
+	if err != nil {
+		return nil
+	}
+	var v any
+	if json.Unmarshal(b, &v) != nil {
+		return nil
+	}
+	var refs []string
+	collectRefs(v, &refs)
+	if len(refs) == 0 {
+		return nil
+	}
+	return s.eng.ClearRecords(ctx, refs)
+}
+
+// collectRefs appends the ref of every record under a "records" array.
+func collectRefs(v any, refs *[]string) {
+	switch x := v.(type) {
+	case map[string]any:
+		for k, e := range x {
+			if recs, ok := e.([]any); ok && k == "records" {
+				for _, r := range recs {
+					if m, ok := r.(map[string]any); ok {
+						if ref, ok := m["ref"].(string); ok {
+							*refs = append(*refs, ref)
+						}
+					}
+				}
+				continue
+			}
+			collectRefs(e, refs)
+		}
+	case []any:
+		for _, e := range x {
+			collectRefs(e, refs)
+		}
+	}
 }
