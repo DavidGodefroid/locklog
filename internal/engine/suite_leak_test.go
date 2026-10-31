@@ -579,8 +579,8 @@ func TestSuiteAgentRuleNamesNothing(t *testing.T) {
 					t.Fatalf("order shown after its rule: %.400s", p)
 				}
 			}
-			// A rule's name cannot be read back from the masker either:
-			// a fresh masker over the same PII directory applies it.
+			// The rules persist as digests: the PII directory reopens
+			// with every rule (their names are not stored to read back).
 			ag, err := mask.OpenAgentRules(s.piiDir)
 			if err != nil || ag.Len() != map[string]int{mask.StructuredDetect: 4, mask.StructuredRedactUnknown: 2}[mode] {
 				t.Fatalf("reopened: %v %v", ag.Len(), err)

@@ -227,6 +227,9 @@ type jobAgent struct {
 	prompts int
 	// deadline ends the retries and waits.
 	deadline time.Time
+	// underLoad marks the variants #88 is known to affect (cold: the
+	// backfill's load; the CPU hog): only there do its refusals skip.
+	underLoad bool
 	// backfill is set while the index backfill runs: an over-budget
 	// count of the part not yet indexed is retried, as the refusal says.
 	backfill bool
@@ -265,8 +268,8 @@ func (a *jobAgent) ask(c agentCall) []json.RawMessage {
 			// The skill turns this into a scan request: an approval
 			// prompt, which locklog_scan (LL-19) will serve.
 			a.prompts++
-			if strings.HasPrefix(r.refusal.Message, "a log stream holds more data than one call can process") ||
-				strings.HasPrefix(r.refusal.Message, "evaluating the predicates on this data did not finish in time") {
+			if a.underLoad && (strings.HasPrefix(r.refusal.Message, "a log stream holds more data than one call can process") ||
+				strings.HasPrefix(r.refusal.Message, "evaluating the predicates on this data did not finish in time")) {
 				// A known engine gap (#88): under load (the backfill,
 				// the CPU hog) a call's first local granule exceeds
 				// what the cost model can mask or evaluate before the
@@ -375,9 +378,14 @@ func (a *jobAgent) job1(from, to time.Time, srcs []string) {
 // runJob runs job 1 on s and applies the gates: at most maxPrompts
 // approval prompts, the answer within gate. With cold, the index backfill
 // runs at full speed from the start, as at a console's first start.
-func runJob(t *testing.T, s *suite, cold bool, maxPrompts int, gate time.Duration, from, to time.Time, srcs []string) time.Duration {
+//
+// prompts counts the over-budget refusals the skill would turn into a scan
+// request; until locklog_scan (LL-19) a prompt ends the job (a skip under
+// load for #88, a failure otherwise), so with maxPrompts 0 the check below
+// is the strict "no prompt" gate.
+func runJob(t *testing.T, s *suite, cold, hog bool, maxPrompts int, gate time.Duration, from, to time.Time, srcs []string) time.Duration {
 	start := time.Now()
-	a := &jobAgent{t: t, s: s, backfill: cold, deadline: start.Add(gate)}
+	a := &jobAgent{t: t, s: s, backfill: cold, underLoad: cold || hog, deadline: start.Add(gate)}
 	if cold {
 		ctx, cancel := context.WithCancel(context.Background())
 		var wg sync.WaitGroup
@@ -426,7 +434,7 @@ func TestIncidentOrder4812(t *testing.T) {
 	}
 	s := newSuite(t, recs, suiteConfig{Structured: mask.StructuredRedactUnknown, Workers: 2, Index: true,
 		Files: map[string][]string{srcNginx: nginx}, NoAgentMeta: true})
-	runJob(t, s, false, 0, incidentGate, end.Add(-day+time.Minute), end, []string{srcNginx, srcApp, srcJournal, srcDocker})
+	runJob(t, s, false, false, 0, incidentGate, end.Add(-day+time.Minute), end, []string{srcNginx, srcApp, srcJournal, srcDocker})
 }
 
 // parseSize reads "1GiB", "512MiB" or a byte count.
@@ -512,7 +520,7 @@ func TestIncidentVolume(t *testing.T) {
 			}
 			// No prompt (§9.1 allows 3): the count is served from the
 			// index, the text calls cover the narrowed hour.
-			runJob(t, s, tc.cold, 0, gate, from, end, srcs)
+			runJob(t, s, tc.cold, tc.hog, 0, gate, from, end, srcs)
 		})
 	}
 }
