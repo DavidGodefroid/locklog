@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -167,6 +168,7 @@ func plan(f *launcherFixture) string {
 }
 
 func TestLauncherConsole(t *testing.T) {
+	consoleHost(t)
 	f := newLauncherFixture(t)
 	out, calls, err := f.run(t, filepath.Join(f.project, "sub"), []string{plan(f)}, "console", "--profile", "staging", "--allowed-uids", "1000")
 	if err != nil {
@@ -231,6 +233,7 @@ func TestLauncherConsole(t *testing.T) {
 }
 
 func TestLauncherConsoleEngines(t *testing.T) {
+	consoleHost(t)
 	f := newLauncherFixture(t)
 	dir := filepath.Join(f.logs, "app")
 	_, calls, err := f.run(t, f.project, []string{plan(f), "DOCKER_VERSION=24.0.7"}, "console")
@@ -257,6 +260,7 @@ func TestLauncherConsoleEngines(t *testing.T) {
 }
 
 func TestLauncherConsoleRefusals(t *testing.T) {
+	consoleHost(t)
 	f := newLauncherFixture(t)
 	if err := os.Symlink(filepath.Join(f.logs, "app"), filepath.Join(f.logs, "link")); err != nil {
 		t.Fatal(err)
@@ -303,6 +307,7 @@ func TestLauncherConsoleRefusals(t *testing.T) {
 }
 
 func TestLauncherConsoleNetwork(t *testing.T) {
+	consoleHost(t)
 	f := newLauncherFixture(t)
 	_, calls, err := f.run(t, f.project, []string{plan(f), "LOCKLOG_NETWORK=shop_default"}, "console")
 	if err != nil {
@@ -315,6 +320,7 @@ func TestLauncherConsoleNetwork(t *testing.T) {
 }
 
 func TestLauncherConsoleJournald(t *testing.T) {
+	consoleHost(t)
 	journals := []string{}
 	for _, j := range []string{"/var/log/journal", "/run/log/journal"} {
 		if fi, err := os.Lstat(j); err == nil && fi.IsDir() {
@@ -345,6 +351,31 @@ func TestLauncherConsoleJournald(t *testing.T) {
 			if run[i+1] == "0" {
 				t.Errorf("gid 0 added: %q", run)
 			}
+		}
+	}
+}
+
+// consoleHost skips a test of local sources where the launcher refuses
+// them: with Docker Desktop on macOS the logs live in its VM.
+func consoleHost(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "darwin" {
+		t.Skip("local log sources are refused on macOS (TestLauncherConsoleDarwin)")
+	}
+}
+
+func TestLauncherConsoleDarwin(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS only")
+	}
+	f := newLauncherFixture(t)
+	out, calls, err := f.run(t, f.project, []string{plan(f)}, "console")
+	if err == nil || !strings.Contains(out, "not supported with Docker Desktop on macOS") {
+		t.Errorf("console with local sources on macOS: %v\n%s", err, out)
+	}
+	for _, c := range calls {
+		if slices.Contains(c, "console") {
+			t.Errorf("the console started: %q", c)
 		}
 	}
 }
