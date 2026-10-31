@@ -227,6 +227,12 @@ func (w *walk) value(v parse.Value, name, clearPath, shownPath string, trusted b
 	}
 	switch v.Kind {
 	case parse.KindNull:
+		rule, ok := w.m.o.Rules.human(w.source, clearPath)
+		am, aok := w.m.o.Rules.agent(w.source, clearPath)
+		if ok && rule.Mode == ModeRedact || aok && am == ModeRedact || inh.agentMode == ModeRedact {
+			w.kinds["redacted"] = true
+			return Value{kind: String, text: Redacted}
+		}
 		if !trusted && w.m.o.Structured == StructuredRedactUnknown && !w.m.o.Rules.allowed(w.source, clearPath) {
 			w.kinds["redacted"] = true
 			return Value{kind: String, text: Redacted}
@@ -326,6 +332,7 @@ func (w *walk) message(s, key string) string {
 		}
 		if secrets := w.find(w.m.o.Secrets, t); len(secrets) > 0 {
 			w.kinds["secret"] = true
+			w.secretPaths = append(w.secretPaths, key)
 			t = replace(t, secrets, func(string, pii.Match) string { return Secret })
 		}
 		return w.whole(t, kind).text
@@ -337,6 +344,9 @@ func (w *walk) message(s, key string) string {
 func (w *walk) detected(k parse.Kind, s string, hadSecret bool) Value {
 	ms := w.values(s)
 	if len(ms) == 0 && !hadSecret {
+		if (k == parse.KindBool || k == parse.KindNumber) && !validLiteral(k, s) {
+			return Value{kind: String, text: outputSafe(s)} // never written raw
+		}
 		return Value{kind: kindOf(k), text: outputSafeScalar(k, s)}
 	}
 	return Value{kind: String, text: outputSafe(w.pseudonymise(s, ms))}

@@ -241,9 +241,15 @@ field = "route"
 
 func TestRulesChangeClassification(t *testing.T) {
 	base := Rules{Mask: []Rule{{Field: "a", Mode: ModeRedact}}, Allow: []Rule{{Field: "r", Mode: ModeAllow}}}
-	tighter := Rules{Mask: []Rule{{Field: "a", Mode: ModeRedact}, {Field: "b", Mode: ModePseudonym}}}
+	tighter := Rules{Mask: []Rule{{Field: "a", Mode: ModeRedact}, {Field: "b", Mode: ModeRedact}}}
 	if l := Change(base, tighter); len(l) != 0 {
 		t.Errorf("tightening classified as loosening: %v", l)
+	}
+	// A new pseudonym can turn ⟦redacted⟧ (redact-unknown) into a
+	// linkable pseudonym: the human reviews it.
+	pseudo := Rules{Mask: []Rule{{Field: "a", Mode: ModeRedact}, {Field: "b", Mode: ModePseudonym, Kind: "email"}}, Allow: base.Allow}
+	if l := Change(base, pseudo); len(l) != 1 {
+		t.Errorf("an added pseudonym rule: loosenings = %v, want 1", l)
 	}
 	looser := Rules{Allow: []Rule{{Field: "r", Mode: ModeAllow}, {Field: "x", Mode: ModeAllow}}}
 	if l := Change(base, looser); len(l) != 2 {
@@ -624,5 +630,21 @@ func TestMessageKeyRulesAndInheritedStrength(t *testing.T) {
 	}
 	if out := encode(t, m.Mask("api", event(t, line))); strings.Contains(out, "Bobby") {
 		t.Errorf("an agent rule on msg is ignored: %s", out)
+	}
+}
+
+// A number or bool that is not a valid literal (cut past DetectLimit, or
+// built by hand) is a string: never written raw into the JSON.
+func TestInvalidLiteralIsAString(t *testing.T) {
+	m := newMasker(t, Options{Structured: StructuredDetect, Trusted: []string{"t"}})
+	for _, line := range []string{`{"n":` + strings.Repeat("7", 70000) + `}`, `{"t":` + strings.Repeat("7", 70000) + `}`} {
+		if _, err := json.Marshal(m.Mask("api", event(t, line))); err != nil {
+			t.Errorf("a long number breaks the record's JSON: %v", err)
+		}
+	}
+	ev := parse.Event{Fields: []parse.Member{{Key: "n", Value: parse.Value{Kind: parse.KindNumber, Str: `1,"x":2`}}}}
+	out := encode(t, m.Mask("api", ev))
+	if strings.Contains(out, `"x":2`) {
+		t.Errorf("a bad number literal forged a field: %s", out)
 	}
 }

@@ -353,9 +353,10 @@ func (r *Rules) Fingerprint() string {
 
 // Change classifies a change of the project rules (design §4.4 rule 7):
 // the loosenings, which go to the human's review; a change without any
-// only tightens and may apply at once.
+// only tightens and may apply at once. A new pseudonym rule is a
+// loosening: under redact-unknown it turns ⟦redacted⟧ into a linkable
+// pseudonym (and, with a detector kind, opens lookup).
 func Change(old, new Rules) (loosenings []string) {
-	strength := map[string]int{ModeAllow: 0, ModePseudonym: 1, ModeRedact: 2}
 	key := func(r Rule) string { return strings.Join(r.Sources, ",") + "\x00" + r.Field }
 	before := map[string]Rule{}
 	for _, m := range append(slices.Clone(old.Mask), old.Allow...) {
@@ -386,9 +387,10 @@ func Change(old, new Rules) (loosenings []string) {
 			loosenings = append(loosenings, "adds: "+m.text())
 			continue
 		}
-		// A new mask rule on a field another rule masked more strongly
-		// changes nothing (the strongest wins); otherwise it tightens.
-		_ = strength
+		if m.Mode == ModePseudonym {
+			loosenings = append(loosenings, "adds: "+m.text())
+		}
+		// A new redact rule only tightens.
 	}
 	slices.Sort(loosenings)
 	return loosenings
