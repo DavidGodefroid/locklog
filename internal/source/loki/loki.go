@@ -668,11 +668,12 @@ type vectorResponse struct {
 // [b+bucket-1ms, b+bucket); a point anywhere else (a grid that is not the
 // one asked for) makes the count not served (source.ErrNotIndexable).
 //
-// Also not served: a count by an untrusted label or by structured metadata,
-// a term on anything but a trusted stream label or with an empty value, a bucket that is
-// not whole seconds or that cuts the range into more than 11000 points, and
-// a bucketed range whose ends are not multiples of the bucket since the
-// epoch.
+// Not served either (source.ErrNotIndexable): a count by anything but a
+// trusted stream label (structured metadata included); a term on anything
+// but a trusted stream label, or with no value or an empty one; an empty
+// range; a bucket under a second, not whole seconds, not dividing the
+// range, or cutting it into more than 11000 points; and a bucketed range
+// whose ends are not multiples of the bucket since the epoch.
 func (s *Source) IndexCounts(ctx context.Context, q source.CountQuery) (source.CountResult, error) {
 	for _, b := range q.By {
 		if !s.trustedLabel(b) || !nameRe.MatchString(b) {
