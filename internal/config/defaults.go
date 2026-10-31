@@ -104,9 +104,13 @@ type Limits struct {
 // DefaultLimits returns the limits of a profile that sets none.
 func DefaultLimits(production bool) Limits {
 	l := Limits{
-		Local: Budgets{Range: 7 * Day, CountRange: 30 * Day, MaxBytes: 4 * GiB, BytesPerHour: 40 * GiB},
-		Remote: Budgets{Range: 24 * time.Hour, CountRange: 30 * Day, MaxBytes: 2 * GiB, BytesPerHour: 20 * GiB,
-			MetricQueriesPerHour: 120, RequestsPerMinute: 240},
+		// Per-call admission: 512 MiB (docs/performance.md, spikes S3/S4).
+		// Masking runs at about 1 MB/s/core, so the 30 s deadline stops a
+		// call long before and it continues free with its cursor. Remote
+		// bytes are decompressed response bytes.
+		Local: Budgets{Range: 7 * Day, CountRange: 30 * Day, MaxBytes: 512 * MiB, BytesPerHour: 40 * GiB},
+		Remote: Budgets{Range: 24 * time.Hour, CountRange: 30 * Day, MaxBytes: 512 * MiB, BytesPerHour: 20 * GiB,
+			MetricQueriesPerHour: 120, RequestsPerMinute: 600},
 		MaxRecords:           200,
 		MaxOutputBytes:       64 * KiB,
 		LookupsPerHour:       50,
@@ -117,7 +121,9 @@ func DefaultLimits(production bool) Limits {
 	if production {
 		l.Remote.BytesPerHour = 10 * GiB
 		l.Remote.MetricQueriesPerHour = 60
-		l.Remote.RequestsPerMinute = 60
+		// 240/min still fetches about 2.7 MB/s of log lines, above masking
+		// speed; 60/min would throttle below it.
+		l.Remote.RequestsPerMinute = 240
 		l.LookupsPerHour = 10
 	}
 	return l
