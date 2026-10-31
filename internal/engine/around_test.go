@@ -550,6 +550,9 @@ func TestTailIdenticalLines(t *testing.T) {
 // granule's end holds its last record; that record is still returned once
 // later records follow it.
 func TestTailHeldAtGranuleEnd(t *testing.T) {
+	if raceEnabled {
+		t.Skip("timing: the race detector slows masking several fold")
+	}
 	f := newFixture(t, genLog(time.Now().Add(-time.Hour), 5, "c@example.org"), func(o *Options) { o.TailPoll = 50 * time.Millisecond })
 	path := filepath.Join(f.root, "logs", "app.log")
 	for _, short := range []int64{0, 100} {
@@ -873,6 +876,9 @@ func TestTraceAcrossSources(t *testing.T) {
 // TestContextEpochAndWork: a ref of another pseudonym epoch is refused; the
 // work of a context call counts the granules read back.
 func TestContextEpochAndWork(t *testing.T) {
+	if raceEnabled {
+		t.Skip("timing: the race detector slows masking several fold")
+	}
 	f := newFixture(t, genLog(t0, 30000, "c@example.org"), nil)
 	old := f.eng.seal("Lr1", refState{Source: "app", Stream: "x", Offset: 0, Length: 10, Epoch: "older", PolicyFP: f.fp})
 	if _, err := f.eng.Context(ctx, ContextQuery{Ref: old}); code(err) != EStale {
