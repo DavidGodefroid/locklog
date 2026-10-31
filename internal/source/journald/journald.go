@@ -438,7 +438,15 @@ func (s *Source) Scan(ctx context.Context, c source.Chunk) (source.Iterator, err
 	}
 	var offs []uint64
 	start, end := c.Start(), c.End()
+	var cerr error
+	// The walk runs from the file's first entry (a granule late in the
+	// file walks all before it): cancellable.
 	err = jf.EntryOffsets(func(i, off uint64) bool {
+		if i%4096 == 0 {
+			if cerr = ctx.Err(); cerr != nil {
+				return false
+			}
+		}
 		if int64(i) >= end {
 			return false
 		}
@@ -447,6 +455,11 @@ func (s *Source) Scan(ctx context.Context, c source.Chunk) (source.Iterator, err
 		}
 		return true
 	})
+	if cerr != nil {
+		jf.Close()
+		f.Close()
+		return nil, cerr
+	}
 	if int64(len(offs)) == end-start {
 		err = nil // a chain broken past the chunk (a dirty file's tail) is fine
 	} else if err == nil {

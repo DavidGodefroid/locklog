@@ -1993,32 +1993,38 @@ func TestUnknownGranuleBytesStillGrouped(t *testing.T) {
 // so records can hold far more bytes than the stream processes: a call
 // buffers at most its budget of record bytes, then refuses.
 func TestDedupRecordsBounded(t *testing.T) {
-	big := "MESSAGE=" + strings.Repeat("stack frame at service.handler(line 42) ", 5000) // ~200 KB
-	var es []journaltest.Entry
-	base := uint64(t0.Add(time.Hour).UnixMicro())
-	for i := 0; i < 2048; i++ {
-		es = append(es, journaltest.Entry{Realtime: base + uint64(i)*1000, Fields: []string{big, "PRIORITY=3"}})
-	}
-	root := t.TempDir()
-	const mid = "0123456789abcdef0123456789abcdef"
-	os.Mkdir(filepath.Join(root, mid), 0o755)
-	if err := os.WriteFile(filepath.Join(root, mid, "system.journal"), journaltest.Build(journaltest.Options{Compact: true, PerArray: 100}, es), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	p, _ := parse.New(parse.Options{Format: "plain"})
-	js, err := journald.New(journald.Options{Name: "journal", Roots: []string{root}, Parser: p})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var processed int64
-	f := newFixture(t, genLog(t0, 10, "c@example.org"), func(o *Options) {
-		o.Sources["journal"] = processedSource{js, &processed}
-		o.Limits.LocalBytes = 4 << 20
-	})
-	start := time.Now()
-	_, err = f.eng.Search(ctx, q(func(q *Query) { q.Sources = []string{"journal"}; q.Text = "frame" }))
-	if code(err) != EOverBudget || time.Since(start) > 10*time.Second {
-		t.Fatalf("search: %v after %v", err, time.Since(start))
+	frames := strings.Repeat("stack frame at service.handler(line 42) ", 5000) // ~200 KB
+	for name, fields := range map[string][]string{
+		"message":       {"MESSAGE=" + frames, "PRIORITY=3"},
+		"trusted field": {"MESSAGE=frame x", "CODE_FUNC=" + frames, "PRIORITY=3"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var es []journaltest.Entry
+			base := uint64(t0.Add(time.Hour).UnixMicro())
+			for i := 0; i < 2048; i++ {
+				es = append(es, journaltest.Entry{Realtime: base + uint64(i)*1000, Fields: fields})
+			}
+			root := t.TempDir()
+			const mid = "0123456789abcdef0123456789abcdef"
+			os.Mkdir(filepath.Join(root, mid), 0o755)
+			if err := os.WriteFile(filepath.Join(root, mid, "system.journal"), journaltest.Build(journaltest.Options{Compact: true, PerArray: 100}, es), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			p, _ := parse.New(parse.Options{Format: "plain"})
+			js, err := journald.New(journald.Options{Name: "journal", Roots: []string{root}, Parser: p})
+			if err != nil {
+				t.Fatal(err)
+			}
+			f := newFixture(t, genLog(t0, 10, "c@example.org"), func(o *Options) {
+				o.Sources["journal"] = js
+				o.Limits.LocalBytes = 4 << 20
+			})
+			start := time.Now()
+			_, err = f.eng.Search(ctx, q(func(q *Query) { q.Sources = []string{"journal"}; q.Text = "frame" }))
+			if code(err) != EOverBudget || time.Since(start) > 10*time.Second {
+				t.Fatalf("search: %v after %v", err, time.Since(start))
+			}
+		})
 	}
 }
 

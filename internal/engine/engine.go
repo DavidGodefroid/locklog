@@ -635,6 +635,32 @@ func estimated(gs []source.Granule) bool {
 	return slices.ContainsFunc(gs, func(g source.Granule) bool { return g.Bytes == 0 })
 }
 
+// maskBytes is what masking an event costs, in bytes: its text, or its
+// message and every key and value of its fields and attributes when more
+// (a journald entry's fields are not in its text, and its source serves a
+// value shared by many entries at no read cost).
+func maskBytes(ev parse.Event) int64 {
+	n := int64(len(ev.Message))
+	var walk func(v parse.Value)
+	walk = func(v parse.Value) {
+		n += int64(len(v.Str))
+		for _, m := range v.Members {
+			n += int64(len(m.Key))
+			walk(m.Value)
+		}
+		for _, it := range v.Items {
+			walk(it)
+		}
+	}
+	for _, ms := range [][]parse.Member{ev.Fields, ev.Attrs} {
+		for _, m := range ms {
+			n += int64(len(m.Key))
+			walk(m.Value)
+		}
+	}
+	return max(n, int64(len(ev.Raw)))
+}
+
 // errFetchCap stops a fetch past its byte limit.
 var errFetchCap = errors.New("engine: group past its byte limit")
 
@@ -671,7 +697,7 @@ func (e *Engine) fetch(ctx context.Context, c source.Chunk, needles []string, li
 			return nil, total, it.Processed(), recBytes, errFetchCap
 		}
 		total++
-		if recBytes += int64(len(raw.Event.Raw)); recLimit > 0 && recBytes > recLimit {
+		if recBytes += maskBytes(raw.Event); recLimit > 0 && recBytes > recLimit {
 			return nil, total, it.Processed(), recBytes, errFetchCap
 		}
 		if e.o.Prefilter && len(needles) > 0 && !prefilterPass(raw.Event, needles) {
@@ -870,7 +896,7 @@ func (e *Engine) Search(ctx context.Context, q Query) (_ SearchResult, retErr er
 		var sc Scanned
 		var err *Error
 		var found []match
-		size, over := matchesSize(pending), false
+		size, over, outFailed := matchesSize(pending), false, false
 		chunk, gran, sc, failures, err = e.run(ctx, f.plan, chunk, gran, needles, e.callBytes(q.Sources), q.evalFactor(), func(raw source.RawRecord, rec mask.Record, b *budget) {
 			// Granules hold records around the range: keep the
 			// range's (and the untimed ones).
@@ -882,6 +908,7 @@ func (e *Engine) Search(ctx context.Context, q Query) (_ SearchResult, retErr er
 			}
 			out, oerr := e.outRecord(raw, rec, q.Fields)
 			if oerr != nil {
+				outFailed = true // never a silently missing match
 				return
 			}
 			if over {
@@ -900,6 +927,9 @@ func (e *Engine) Search(ctx context.Context, q Query) (_ SearchResult, retErr er
 		}
 		if over {
 			return SearchResult{}, tooMany
+		}
+		if outFailed {
+			return SearchResult{}, &Error{Code: ESource, Message: "a matching record could not be rendered; try again"}
 		}
 		sortMatches(found, q.Order)
 		pending = append(pending, found...)
