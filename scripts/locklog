@@ -65,23 +65,6 @@ if [ -z "$image" ]; then
 	fi
 fi
 
-# The project root: the nearest directory up from here that holds .locklog/.
-here="$(pwd -P)"
-project="$here"
-d="$here"
-while :; do
-	if [ -d "$d/.locklog" ]; then
-		project="$d"
-		break
-	fi
-	[ "$d" = / ] && break
-	d="$(dirname "$d")"
-done
-case "$here" in
-"$project" | "$project"/*) workdir=$here ;;
-*) workdir=$project ;;
-esac
-
 tty=-i
 if [ -t 0 ] && [ -t 1 ]; then tty=-it; fi
 
@@ -113,7 +96,7 @@ if [ "$(uname -s)" = Darwin ]; then
 	devino() { stat -f '%d:%i' "$1"; }
 	fgid() { stat -f '%g' "$1"; }
 	fgroup() { stat -f '%Sg' "$1"; }
-	fmode() { stat -f '%Lp' "$1"; }
+	fmode() { stat -f '%Mp%Lp' "$1"; }
 else
 	devino() { stat -c '%d:%i' "$1"; }
 	fgid() { stat -c '%g' "$1"; }
@@ -145,6 +128,72 @@ group_allowed() {
 	esac
 	return 1
 }
+
+# fowner PATH: the numeric owner of PATH.
+if [ "$(uname -s)" = Darwin ]; then
+	fowner() { stat -f '%u' "$1"; }
+else
+	fowner() { stat -c '%u' "$1"; }
+fi
+
+# perm PATH: sets special (setuid/setgid/sticky digit), g and o (the
+# group's and the others' digits) from the octal mode of PATH.
+perm() {
+	m=$(fmode "$1")
+	special=0
+	[ ${#m} -ge 4 ] && special=${m%???}
+	l=${m#"${m%???}"}
+	g=$(printf '%s' "$l" | cut -c2)
+	o=$(printf '%s' "$l" | cut -c3)
+}
+
+# trusted PATH: PATH is not a symbolic link, is owned by you or root, and
+# no one else can write it.
+trusted() {
+	[ -e "$1" ] && [ ! -L "$1" ] || return 1
+	ow=$(fowner "$1")
+	[ "$ow" = "$(id -u)" ] || [ "$ow" = 0 ] || return 1
+	perm "$1"
+	[ $((g & 2)) -eq 0 ] && [ $((o & 2)) -eq 0 ]
+}
+
+# shared DIR: DIR is writable by others than its owner, or sticky (/tmp):
+# anyone could have created a .locklog/ in it.
+shared() {
+	perm "$1"
+	[ $((special & 1)) -ne 0 ] || [ $((g & 2)) -ne 0 ] || [ $((o & 2)) -ne 0 ]
+}
+
+# The project root: the nearest directory up from here that holds a
+# .locklog/ you own (or root does) and no one else can write, with its
+# config.toml likewise. The walk never goes above your home directory (when
+# here is in it), never past a directory others can write or a sticky one
+# (/tmp), and never takes / itself: a .locklog/ someone else planted there
+# would choose the logs the console serves.
+here="$(pwd -P)"
+project="$here"
+home_dir=
+[ -n "${HOME:-}" ] && home_dir="$(cd "$HOME" 2>/dev/null && pwd -P)" || true
+d="$here"
+while :; do
+	[ "$d" = / ] && break
+	shared "$d" && break
+	if [ -e "$d/.locklog" ] || [ -L "$d/.locklog" ]; then
+		if [ -d "$d/.locklog" ] && trusted "$d/.locklog" &&
+			{ [ ! -e "$d/.locklog/config.toml" ] && [ ! -L "$d/.locklog/config.toml" ] || trusted "$d/.locklog/config.toml"; }; then
+			project="$d"
+		else
+			say "warning: ignoring $d/.locklog: a symbolic link, or owned or writable by someone else than you"
+		fi
+		break
+	fi
+	[ -n "$home_dir" ] && [ "$d" = "$home_dir" ] && break
+	d="$(dirname "$d")"
+done
+case "$here" in
+"$project" | "$project"/*) workdir=$here ;;
+*) workdir=$project ;;
+esac
 
 # The roots log directories may be bound from.
 roots="/var/log /run/log/journal"
@@ -391,6 +440,7 @@ update() {
 
 # The project is mounted read-only at its own path in every container.
 project_mount() {
+	[ "$project" != / ] || die "run locklog from a project directory, not from /"
 	safe "$project" || die "$project holds a character a docker mount cannot carry: move or rename it"
 	safe "$workdir" || die "$workdir holds a character a docker mount cannot carry: move or rename it"
 }

@@ -416,3 +416,98 @@ func TestLauncherReleaseImage(t *testing.T) {
 		}
 	}
 }
+
+func TestLauncherProjectRoot(t *testing.T) {
+	f := newLauncherFixture(t)
+	mk := func(p string, mode os.FileMode) string {
+		t.Helper()
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(p, mode); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	// projectOf runs a default command from dir and returns the -w the
+	// launcher chose (the project, or dir itself).
+	projectOf := func(dir string, env ...string) (string, string) {
+		t.Helper()
+		out, calls, err := f.run(t, dir, env, "status")
+		if err != nil {
+			t.Fatalf("status from %s: %v\n%s", dir, err, out)
+		}
+		run := lastRun(t, calls)
+		for i, a := range run {
+			if a == "-v" && strings.HasSuffix(run[i+1], ":ro") && !strings.HasPrefix(run[i+1], "locklog-") {
+				return strings.SplitN(run[i+1], ":", 2)[0], out
+			}
+		}
+		t.Fatalf("no project mount: %q", run)
+		return "", ""
+	}
+	// The nearest trusted .locklog wins.
+	if p, _ := projectOf(filepath.Join(f.project, "sub")); p != f.project {
+		t.Errorf("project = %s, want %s", p, f.project)
+	}
+	// A .locklog in a sticky, world-writable directory (as /tmp) is never
+	// taken, and the walk stops there.
+	tmpLike := mk(filepath.Join(f.root, "tmp"), 0o1777)
+	mk(filepath.Join(tmpLike, ".locklog"), 0o755)
+	sub := mk(filepath.Join(tmpLike, "work"), 0o755)
+	if p, _ := projectOf(sub); p != sub {
+		t.Errorf("planted .locklog in a sticky dir taken: %s", p)
+	}
+	// The same for a group-writable parent.
+	gw := mk(filepath.Join(f.root, "gw"), 0o775)
+	mk(filepath.Join(gw, ".locklog"), 0o755)
+	gsub := mk(filepath.Join(gw, "work"), 0o755)
+	if p, _ := projectOf(gsub); p != gsub {
+		t.Errorf("planted .locklog in a group-writable dir taken: %s", p)
+	}
+	// A group-writable .locklog, a writable config.toml, a symbolic link:
+	// ignored with a warning.
+	for _, tt := range []struct {
+		name  string
+		setup func(dir string)
+	}{
+		{"group-writable .locklog", func(dir string) { mk(filepath.Join(dir, ".locklog"), 0o775) }},
+		{"world-writable config.toml", func(dir string) {
+			mk(filepath.Join(dir, ".locklog"), 0o755)
+			if err := os.WriteFile(filepath.Join(dir, ".locklog", "config.toml"), []byte("version = 1\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(filepath.Join(dir, ".locklog", "config.toml"), 0o666); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"symbolic link", func(dir string) {
+			if err := os.Symlink(filepath.Join(f.project, ".locklog"), filepath.Join(dir, ".locklog")); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		dir := mk(filepath.Join(f.root, "case-"+strings.ReplaceAll(tt.name, " ", "-")), 0o755)
+		tt.setup(dir)
+		work := mk(filepath.Join(dir, "work"), 0o755)
+		p, out := projectOf(work)
+		if p != work || !strings.Contains(out, "warning: ignoring "+dir+"/.locklog") {
+			t.Errorf("%s: project %s, out %s", tt.name, p, out)
+		}
+	}
+	// The walk stops at $HOME: a .locklog above it is not taken.
+	above := mk(filepath.Join(f.root, "above"), 0o755)
+	mk(filepath.Join(above, ".locklog"), 0o755)
+	home := mk(filepath.Join(above, "home"), 0o755)
+	work := mk(filepath.Join(home, "work"), 0o755)
+	if p, _ := projectOf(work, "HOME="+home); p != work {
+		t.Errorf(".locklog above $HOME taken: %s", p)
+	}
+	// From the root directory, / is never the project.
+	for _, cmd := range []string{"console", "mcp", "status"} {
+		out, calls, err := f.run(t, "/", nil, cmd)
+		if err == nil || !strings.Contains(out, "not from /") || len(calls) > 0 {
+			t.Errorf("%s from /: %v %q %s", cmd, err, calls, out)
+		}
+	}
+}
