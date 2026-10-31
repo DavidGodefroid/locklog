@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -469,6 +470,11 @@ func (s *suite) runPages(c agentCall, max int) callResult {
 			return out
 		}
 		if st.Cursor == "" {
+			if c.method == MethodContext || c.method == MethodTail {
+				// No continuation: incomplete means the output cap
+				// (context) or an early stop (tail).
+				return out
+			}
 			s.t.Fatalf("%s: an incomplete page without a cursor", c.name)
 		}
 		params["cursor"] = st.Cursor
@@ -540,6 +546,69 @@ func suiteCalls() []agentCall {
 		pq("patterns", func(p *PatternsQuery) { p.Top = MaxTop }),
 		pq("patterns text", func(p *PatternsQuery) { p.Text = "for"; p.Top = 10 }),
 		pq("patterns baseline", func(p *PatternsQuery) { p.Top = 50; p.Baseline = "24h" }),
+	}
+}
+
+// refCalls are the calls LL-14 adds that start from what the agent read:
+// log.context around records of pages (the first, middle and last record,
+// with and without a projection), log.trace by the first pseudonym those
+// records show and by a clear id, and a short log.tail. The records are
+// picked by position, so fixtures with the same layout get corresponding
+// calls.
+func refCalls(t testing.TB, pages []json.RawMessage, clearID string) []agentCall {
+	t.Helper()
+	var recs []json.RawMessage
+	for _, p := range pages {
+		var r struct {
+			Records []json.RawMessage `json:"records"`
+		}
+		json.Unmarshal(p, &r)
+		recs = append(recs, r.Records...)
+	}
+	var out []agentCall
+	if len(recs) == 0 {
+		return out
+	}
+	for _, i := range []int{0, len(recs) / 2, len(recs) - 1} {
+		var r struct {
+			Ref string `json:"ref"`
+		}
+		json.Unmarshal(recs[i], &r)
+		out = append(out,
+			agentCall{fmt.Sprintf("context %d", i), MethodContext, ContextQuery{Ref: r.Ref, Before: 5, After: 5}},
+			agentCall{fmt.Sprintf("context %d fields", i), MethodContext, ContextQuery{Ref: r.Ref, Before: 2, After: 2, Fields: []string{"level", "msg", "user", "detail"}}})
+	}
+	for _, r := range recs {
+		if m := anyToken.FindString(string(r)); m != "" {
+			out = append(out, agentCall{"trace pseudonym", MethodTrace, TraceQuery{ID: m, From: suiteFrom, To: suiteTo, Limit: 100}})
+			break
+		}
+	}
+	out = append(out,
+		agentCall{"trace clear id", MethodTrace, TraceQuery{ID: clearID, From: suiteFrom, To: suiteTo, Limit: 100}},
+		agentCall{"tail", MethodTail, TailQuery{Duration: "1s"}})
+	return out
+}
+
+// comparePairedRefCalls runs refCalls on two fixtures of the same layout,
+// each from its own pages of base, and reports the first difference of
+// each pair (normalised as normalizePages does).
+func comparePairedRefCalls(t *testing.T, sa, sb *suite, base agentCall, clearID, what string) {
+	t.Helper()
+	ca := refCalls(t, sa.mustRun(base), clearID)
+	cb := refCalls(t, sb.mustRun(base), clearID)
+	if len(ca) != len(cb) || len(ca) < 8 {
+		t.Fatalf("%d vs %d ref calls", len(ca), len(cb))
+	}
+	for i := range ca {
+		x, nx := normalizePages(t, sa.eng, sa.mustRun(ca[i]))
+		y, ny := normalizePages(t, sb.eng, sb.mustRun(cb[i]))
+		if d := firstDiff(x, y); d != "" {
+			t.Errorf("%s: %s changes the answer: %s", ca[i].name, what, d)
+		}
+		if !maps.Equal(nx, ny) {
+			t.Errorf("%s: distinct pseudonyms %v vs %v", ca[i].name, nx, ny)
+		}
 	}
 }
 

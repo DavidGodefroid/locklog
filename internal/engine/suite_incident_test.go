@@ -6,7 +6,8 @@ package engine
 // way the skill teaches it — (1) a trusted-field count over the whole
 // range, served from the local index, to find when it started; (2)
 // patterns and a count with text over the narrowed hour, continued free;
-// (3) the records of the order (trace joins once LL-14 is merged). The
+// (3) the records of the order, its trace across the sources and the
+// context around one of them. The
 // gates are the number of approval prompts and the time to the answer.
 //
 //   - Incident (a), "order 4812": nginx access log (file, combined), the
@@ -358,7 +359,40 @@ func (a *jobAgent) job1(from, to time.Time, srcs []string) {
 			t.Errorf("step 3: no record of order 4812 from %s", src)
 		}
 	}
-	// TODO(LL-14): step 3 continues with log.trace from a record's ref.
+	// Step 3, continued: the order traced across the sources (LL-14), and
+	// the context around one of its records.
+	tq := TraceQuery{ID: "4812", From: incidentStart, To: hourTo, Sources: srcs, Limit: 200}
+	traced := map[string]bool{}
+	var ref string
+	for _, p := range a.ask(agentCall{"trace the order", MethodTrace, tq}) {
+		var sr SearchResult
+		json.Unmarshal(p, &sr)
+		for _, r := range sr.Records {
+			var h struct {
+				Source string `json:"source"`
+				Ref    string `json:"ref"`
+			}
+			json.Unmarshal(r, &h)
+			traced[h.Source] = true
+			if ref == "" {
+				ref = h.Ref
+			}
+		}
+	}
+	for _, src := range srcs {
+		if !traced[src] {
+			t.Errorf("step 3: the trace of order 4812 has no record from %s", src)
+		}
+	}
+	if ref == "" {
+		t.Fatal("step 3: the trace returned no record")
+	}
+	var around ContextResult
+	pages = a.ask(agentCall{"context of a traced record", MethodContext, ContextQuery{Ref: ref, Before: 5, After: 5}})
+	json.Unmarshal(pages[0], &around)
+	if len(around.Records) < 2 {
+		t.Errorf("step 3: context of %d records", len(around.Records))
+	}
 }
 
 // runJob runs job 1 on s and applies the gates: at most maxPrompts

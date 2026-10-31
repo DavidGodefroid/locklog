@@ -324,7 +324,9 @@ func TestSuiteLeak(t *testing.T) {
 			s := newSuite(t, recs, suiteConfig{Structured: mode, Workers: 2, Cost: oneGranuleCost()})
 			l := newLeakScanner(t, recs)
 			matched := 0
-			for _, c := range suiteCalls() {
+			calls := suiteCalls()
+			for k := 0; k < len(calls); k++ {
+				c := calls[k]
 				start := time.Now()
 				r := s.run(c)
 				t.Logf("%s: %d pages in %v", c.name, len(r.pages), time.Since(start))
@@ -343,6 +345,10 @@ func TestSuiteLeak(t *testing.T) {
 				t.Logf("%s: scanned in %v", c.name, time.Since(start))
 				if c.name == "search all" {
 					matched = l.nrecs
+					// LL-14's calls from what the agent read:
+					// context around records of every source, trace,
+					// tail.
+					calls = append(calls, refCalls(t, r.pages, "4812")...)
 				}
 			}
 			if matched != total {
@@ -441,6 +447,11 @@ func leakRefusals(t *testing.T, whole *suite, mode string, l *leakScanner, recs 
 			{"mistyped nested", MethodCount, json.RawMessage(`{"from":` + string(from) + `,"to":` + string(to) + `,"where":[{"field":"x","op":"=","value":1,` + jsonString(w) + `:[1]}]}`)},
 			{"malformed", MethodPatterns, json.RawMessage(`{"text":` + jsonString(w) + `,`)},
 			{"method", w, json.RawMessage(`{}`)},
+			{"context ref", MethodContext, ContextQuery{Ref: w}},
+			{"context field", MethodContext, json.RawMessage(`{"ref":"x","fields":[` + jsonString(w) + `]}`)},
+			{"trace id", MethodTrace, TraceQuery{ID: w, From: suiteFrom, To: suiteTo}},
+			{"trace source", MethodTrace, TraceQuery{ID: "4812", Sources: []string{w}, From: suiteFrom, To: suiteTo}},
+			{"tail where", MethodTail, TailQuery{Where: []Pred{{Field: w, Op: OpExists}}, Duration: "1s"}},
 		}
 		for _, call := range calls {
 			where := fmt.Sprintf("%s with %s %q", call.name, sample[i].Kind, w)

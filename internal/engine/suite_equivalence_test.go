@@ -56,6 +56,7 @@ func TestSuiteEquivalencePrefilter(t *testing.T) {
 			t.Errorf("%s: distinct pseudonyms %v vs %v", c.name, nx, ny)
 		}
 	}
+	comparePairedRefCalls(t, off, on, agentCall{"search", MethodSearch, suiteQuery(func(q *Query) { q.Limit = 60 })}, "1203", "the pre-filter")
 }
 
 // answer is what a call answers once run to completion, without how it
