@@ -11,7 +11,8 @@
 #              non-recursive; the socket and home volumes
 #   mcp        as the image's agent account (uid 10052): the MCP server of
 #              a host agent (the non-production trial; the server refuses
-#              production profiles), with the socket volume only
+#              production profiles), with the socket volume and the
+#              project (read-only)
 #   update     replace this launcher with a release's, then pull its image
 #   version    this launcher's and the image's versions
 #   anything else  as the agent account, with the socket volume
@@ -107,7 +108,7 @@ fi
 # bits PATH WHO WANT: whether the mode of PATH grants WANT (r, x or rx) to
 # WHO (g or o).
 bits() {
-	m=$(fmode "$1")
+	m=000$(fmode "$1")
 	m=${m#"${m%???}"} # the last three octal digits
 	case "$2" in
 	g) v=$(printf '%s' "$m" | cut -c2) ;;
@@ -139,29 +140,55 @@ fi
 # perm PATH: sets special (setuid/setgid/sticky digit), g and o (the
 # group's and the others' digits) from the octal mode of PATH.
 perm() {
-	m=$(fmode "$1")
-	special=0
-	[ ${#m} -ge 4 ] && special=${m%???}
+	m=000$(fmode "$1")
 	l=${m#"${m%???}"}
+	sp=${m%???}
+	special=${sp#"${sp%?}"}
 	g=$(printf '%s' "$l" | cut -c2)
 	o=$(printf '%s' "$l" | cut -c3)
 }
 
-# trusted PATH: PATH is not a symbolic link, is owned by you or root, and
-# no one else can write it.
+# has_acl PATH: PATH carries an access control list ("+" after the mode
+# in ls -ld): its mode bits do not say who can write it.
+has_acl() {
+	case "$(ls -ld "$1" 2>/dev/null | cut -c11)" in
+	+) return 0 ;;
+	esac
+	return 1
+}
+
+# mine PATH: PATH is owned by you or by root.
+mine() {
+	ow=$(fowner "$1")
+	[ "$ow" = "$(id -u)" ] || [ "$ow" = 0 ]
+}
+
+# trusted PATH: PATH is not a symbolic link, is owned by you or root, has
+# no ACL, and no one else can write it.
 trusted() {
 	[ -e "$1" ] && [ ! -L "$1" ] || return 1
-	ow=$(fowner "$1")
-	[ "$ow" = "$(id -u)" ] || [ "$ow" = 0 ] || return 1
+	mine "$1" || return 1
+	has_acl "$1" && return 1
 	perm "$1"
 	[ $((g & 2)) -eq 0 ] && [ $((o & 2)) -eq 0 ]
 }
 
-# shared DIR: DIR is writable by others than its owner, or sticky (/tmp):
-# anyone could have created a .locklog/ in it.
+# shared DIR: DIR is writable by others than its owner, sticky (/tmp),
+# owned by someone else than you or root, or under an ACL: someone else
+# could have created, or could replace, a .locklog/ in it.
 shared() {
+	mine "$1" || return 0
+	has_acl "$1" && return 0
 	perm "$1"
 	[ $((special & 1)) -ne 0 ] || [ $((g & 2)) -ne 0 ] || [ $((o & 2)) -ne 0 ]
+}
+
+# trusted_config DIR: DIR/.locklog is a trusted directory, and its
+# config.toml (when present) a trusted file.
+trusted_config() {
+	[ -d "$1/.locklog" ] && trusted "$1/.locklog" || return 1
+	[ ! -e "$1/.locklog/config.toml" ] && [ ! -L "$1/.locklog/config.toml" ] && return 0
+	[ -f "$1/.locklog/config.toml" ] && trusted "$1/.locklog/config.toml"
 }
 
 # The project root: the nearest directory up from here that holds a
@@ -170,23 +197,28 @@ shared() {
 # here is in it), never past a directory others can write or a sticky one
 # (/tmp), and never takes / itself: a .locklog/ someone else planted there
 # would choose the logs the console serves.
+#
+# project_trusted is set only when the walk accepted a .locklog/: console
+# refuses to start without it. Other commands run with this directory as
+# the project then (mounted read-only).
 here="$(pwd -P)"
 project="$here"
+project_trusted=
 home_dir=
-[ -n "${HOME:-}" ] && home_dir="$(cd "$HOME" 2>/dev/null && pwd -P)" || true
+if [ -n "${HOME:-}" ]; then home_dir="$(cd "$HOME" 2>/dev/null && pwd -P)" || home_dir=; fi
 d="$here"
 while :; do
 	[ "$d" = / ] && break
-	shared "$d" && break
 	if [ -e "$d/.locklog" ] || [ -L "$d/.locklog" ]; then
-		if [ -d "$d/.locklog" ] && trusted "$d/.locklog" &&
-			{ [ ! -e "$d/.locklog/config.toml" ] && [ ! -L "$d/.locklog/config.toml" ] || trusted "$d/.locklog/config.toml"; }; then
+		if ! shared "$d" && trusted_config "$d"; then
 			project="$d"
+			project_trusted=1
 		else
-			say "warning: ignoring $d/.locklog: a symbolic link, or owned or writable by someone else than you"
+			say "warning: ignoring $d/.locklog: it, its config.toml or $d is a link, has an ACL, or is owned or writable by someone else than you"
 		fi
 		break
 	fi
+	shared "$d" && break
 	[ -n "$home_dir" ] && [ "$d" = "$home_dir" ] && break
 	d="$(dirname "$d")"
 done
@@ -197,16 +229,20 @@ esac
 
 # The roots log directories may be bound from.
 roots="/var/log /run/log/journal"
+# Split on spaces, never globbed.
+set -f
 for r in ${LOCKLOG_EXTRA_ROOTS:-}; do
 	case "$r" in
 	/) die "LOCKLOG_EXTRA_ROOTS: / cannot be a log root" ;;
 	/*) ;;
 	*) die "LOCKLOG_EXTRA_ROOTS: $r is not an absolute path" ;;
 	esac
+	case "$r" in *[*?[]*) die "LOCKLOG_EXTRA_ROOTS: $r holds a glob character" ;; esac
 	safe "$r" || die "LOCKLOG_EXTRA_ROOTS: $r holds a character a mount cannot carry"
 	physical "$r" || die "LOCKLOG_EXTRA_ROOTS: $r is not a directory with no symbolic link on its path"
 	roots="$roots $r"
 done
+set +f
 
 under_root() {
 	for r in $roots; do
@@ -245,23 +281,33 @@ bind() {
 "
 }
 
-# reach DIR [FILE]: the gid the console needs to search DIR and read FILE
-# (and to list DIR), added when it is an allowed group; nothing when the
-# others' bits suffice; a warning otherwise.
+# reach DIR [FILE]: the gid the console needs to list DIR (no FILE), or to
+# search DIR and read FILE, added when it is an allowed group; nothing when
+# the others' bits suffice; a warning otherwise.
 reach() {
 	dir=$1
 	file=${2:-}
-	if bits "$dir" o rx && { [ -z "$file" ] || bits "$file" o r; }; then
+	if [ -z "$file" ]; then
+		bits "$dir" o rx && return 0
+		gn=$(fgroup "$dir")
+		if group_allowed "$gn" && bits "$dir" g rx; then
+			add_gid "$(fgid "$dir")"
+			return 0
+		fi
+		say "warning: the console cannot list $dir (group $gn is not one it may join: adm, systemd-journal)"
 		return 0
 	fi
-	target=${file:-$dir}
-	g=$(fgid "$target")
-	gn=$(fgroup "$target")
-	if group_allowed "$gn" && bits "$dir" g rx && { [ -z "$file" ] || bits "$file" g r; }; then
-		add_gid "$g"
+	bits "$dir" o x && bits "$file" o r && return 0
+	fg=$(fgid "$file")
+	gn=$(fgroup "$file")
+	# Through the file's group: it must also let that group search the
+	# directory, unless the others may.
+	if group_allowed "$gn" && bits "$file" g r &&
+		{ bits "$dir" o x || { [ "$(fgid "$dir")" = "$fg" ] && bits "$dir" g x; }; }; then
+		add_gid "$fg"
 		return 0
 	fi
-	say "warning: the console cannot read $target (group $gn is not one it may join: adm, systemd-journal)"
+	say "warning: the console cannot read $file (group $gn is not one it may join: adm, systemd-journal)"
 }
 
 # plan_line LINE: one line of `locklog mounts`.
@@ -278,6 +324,7 @@ plan_line() {
 		safe "$dir" && safe "$glob" || die "mount plan: $dir holds a character a mount cannot carry"
 		case "$dir" in /) die "mount plan: / cannot be bound" ;; /*) ;; *) die "mount plan: $dir is not absolute" ;; esac
 		case "$glob" in "$dir"/*) ;; *) die "mount plan: $glob is not under $dir" ;; esac
+		case "$glob/" in *//* | */./* | */../*) die "mount plan: $glob is not a clean path" ;; esac
 		physical "$dir" || die "mount plan: $dir is not a directory with no symbolic link on its path"
 		under_root "$dir" || die "mount plan: $dir is not under an allowed log root ($roots); a human can add one with LOCKLOG_EXTRA_ROOTS"
 		bind "$dir"
@@ -318,7 +365,7 @@ plan_line() {
 # someone else created with another owner is refused.
 ensure_volume() {
 	docker volume inspect "$1" >/dev/null 2>&1 || docker volume create "$1" >/dev/null
-	got=$(docker run --rm --network none --user 0 --entrypoint stat -v "$1:$2" "$image" -c '%u:%g:%a' "$2") ||
+	got=$(docker run --rm --network none --user 0 $confined --entrypoint stat -v "$1:$2" "$image" -c '%u:%g:%a' "$2") ||
 		die "could not check the owner of the $1 volume"
 	[ "$got" = "$3" ] ||
 		die "the $1 volume has owner and mode $got, not $3: it was not created by locklog; remove it (docker volume rm $1) and start again"
@@ -352,7 +399,11 @@ update() {
 		fetch() { curl -fsSL --proto '=https' -o "$2" "$1"; }
 		latest() { curl -fsSLI --proto '=https' -o /dev/null -w '%{url_effective}' "https://github.com/$repo/releases/latest"; }
 	elif command -v wget >/dev/null 2>&1; then
-		fetch() { wget -q -O "$2" "$1"; }
+		if wget --help 2>&1 | grep -q -- --https-only; then
+			fetch() { wget -q --https-only -O "$2" "$1"; }
+		else
+			fetch() { wget -q -O "$2" "$1"; }
+		fi
 		latest() { wget -q -S --spider "https://github.com/$repo/releases/latest" 2>&1 | sed -n 's/^ *[Ll]ocation: *//p' | tail -n 1 | tr -d '\r'; }
 	else
 		die "curl or wget is required"
@@ -432,6 +483,8 @@ update() {
 		image="$registry@$digest"
 		[ "${LOCKLOG_VAULT:-0}" = 1 ] && image="$registry@$vdigest"
 		[ -n "${LOCKLOG_IMAGE:-}" ] && say "LOCKLOG_IMAGE is set ($LOCKLOG_IMAGE): it still overrides $image"
+		rm -rf "$tmp"
+		trap - EXIT INT TERM
 	fi
 	need_docker
 	say "pulling $image"
@@ -451,8 +504,11 @@ confined="--cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /t
 console() {
 	need_docker
 	project_mount
-	[ -d "$project/.locklog" ] && [ ! -L "$project/.locklog" ] ||
-		die "no .locklog/ directory here or above: run locklog setup first"
+	[ -n "$project_trusted" ] ||
+		die "no trusted .locklog/ directory here or above (yours, not a link, writable by no one else): run locklog setup first"
+	# Again right before reading it: what the walk accepted.
+	shared "$project" && die "$project is writable by someone else than you"
+	trusted_config "$project" || die "$project/.locklog changed: it is no longer trusted"
 	ll_dir="$project/.locklog"
 	physical "$ll_dir" || die "$ll_dir is not a directory with no symbolic link on its path"
 
@@ -477,14 +533,12 @@ console() {
 
 	# The profile's mount plan, derived in the image from .locklog/ (as the
 	# agent account, no network) and checked here, on the host.
-	planned=$(docker run --rm --network none --user agent $confined \
+	planned=$(docker run --rm --network none --user agent --log-driver none $confined --pids-limit 64 --memory 256m \
 		-v "$ll_dir:$ll_dir:ro" -w "$project" "$image" mounts "$@") ||
 		die "could not read the mount plan of the profile (locklog mounts)"
 	header=$(printf '%s\n' "$planned" | sed -n 1p)
-	case "$header" in
-	"profile "*" true" | "profile "*" false") ;;
-	*) die "mount plan: malformed header: $header" ;;
-	esac
+	printf '%s\n' "$header" | grep -Eqx 'profile [A-Za-z0-9][A-Za-z0-9_.-]{0,63} (true|false)' ||
+		die "mount plan: malformed header"
 	if [ "$(uname -s)" = Darwin ] && [ "$(printf '%s\n' "$planned" | sed -n '2,$p' | grep -c .)" -gt 0 ]; then
 		die "local log sources are not supported with Docker Desktop on macOS (the containers' logs live in its VM); use a remote source"
 	fi
@@ -564,7 +618,7 @@ mcp)
 *)
 	need_docker
 	project_mount
-	exec docker run --rm "$tty" --user agent --network none $confined \
+	exec docker run --rm "$tty" --user agent --log-driver none --network none $confined \
 		-v locklog-run:/run/locklog -v "$project:$project:ro" -w "$workdir" "$image" "$@"
 	;;
 esac

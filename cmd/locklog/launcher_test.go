@@ -21,7 +21,7 @@ type launcherFixture struct {
 }
 
 var launcherTools = []string{"sh", "dirname", "mkdir", "id", "cat", "printf", "awk", "sha256sum", "shasum", "tar",
-	"gzip", "install", "mktemp", "rm", "uname", "sed", "tr", "tail", "grep", "stat", "cksum", "getconf", "nproc", "cut"}
+	"gzip", "install", "mktemp", "rm", "uname", "sed", "tr", "tail", "grep", "stat", "cksum", "getconf", "nproc", "cut", "ls"}
 
 func newLauncherFixture(t *testing.T) *launcherFixture {
 	t.Helper()
@@ -278,6 +278,10 @@ func TestLauncherConsoleRefusals(t *testing.T) {
 		{[]string{"PLAN=profile staging false\\nfile " + f.logs + "/app\\n"}, "malformed line"},
 		{[]string{"PLAN=profile staging false\\ndocker x\\n"}, "unknown line"},
 		{[]string{"PLAN=nonsense\\n"}, "malformed header"},
+		{[]string{"PLAN=profile st\\033[2Jx false\\n"}, "malformed header"},
+		{[]string{"PLAN=profile staging false\\nfile " + f.logs + "/app " + f.logs + "/app/../../etc/passw*\\n"}, "not a clean path"},
+		{[]string{"PLAN=profile staging false\\nfile " + f.logs + "/app " + f.logs + "/app//x\\n"}, "not a clean path"},
+		{[]string{plan(f), "LOCKLOG_EXTRA_ROOTS=" + f.logs + "/*"}, "glob character"},
 		{[]string{"PLAN_RC=1"}, "could not read the mount plan"},
 		{[]string{plan(f), "RUN_OWNER=1000:1000:777"}, "not created by locklog"},
 		{[]string{plan(f), "HOME_OWNER=10051:10051:755"}, "not created by locklog"},
@@ -533,6 +537,32 @@ func TestLauncherProjectRoot(t *testing.T) {
 	work := mk(filepath.Join(home, "work"), 0o755)
 	if p, _ := projectOf(work, "HOME="+home); p != work {
 		t.Errorf(".locklog above $HOME taken: %s", p)
+	}
+	// The console never starts on an untrusted .locklog in the directory
+	// it is run from: a group-writable .locklog, a sticky or a shared
+	// directory holding one.
+	for _, tt := range []struct {
+		name    string
+		dir, ll os.FileMode
+	}{
+		{"group-writable .locklog in the cwd", 0o755, 0o775},
+		{"sticky cwd", 0o1777, 0o755},
+		{"group-writable cwd", 0o775, 0o755},
+		{"world-writable cwd", 0o777, 0o755},
+	} {
+		dir := mk(filepath.Join(f.root, "cwd-"+strings.ReplaceAll(tt.name, " ", "-")), tt.dir)
+		mk(filepath.Join(dir, ".locklog"), tt.ll)
+		out, calls, err := f.run(t, dir, []string{plan(f)}, "console")
+		if err == nil || !strings.Contains(out, "no trusted .locklog/") {
+			t.Errorf("%s: console started: %v\n%s", tt.name, err, out)
+		}
+		for _, c := range calls {
+			for _, a := range c {
+				if strings.Contains(a, ".locklog") {
+					t.Errorf("%s: .locklog mounted: %q", tt.name, c)
+				}
+			}
+		}
 	}
 	// From the root directory, / is never the project.
 	for _, cmd := range []string{"console", "mcp", "status"} {

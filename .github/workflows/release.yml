@@ -68,7 +68,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # The image the launcher runs: ghcr.io/davidgodefroid/locklog:X.Y.Z and
-  # :X.Y.Z-vault, amd64 and arm64, each built on a native runner.
+  # :X.Y.Z-vault, amd64 and arm64, each built on a native runner. The
+  # per-architecture tags (X.Y.Z-amd64, ...) are build intermediates: they
+  # are not signed, and nothing runs them (install.sh and the launcher
+  # verify the signed manifest and run it by digest).
   image:
     name: image ${{ matrix.arch }}
     needs: test
@@ -159,6 +162,18 @@ jobs:
     permissions:
       contents: write # turn the draft into a published release
     steps:
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v2.6.1
+      - name: the draft's checksums.txt is signed by this workflow
+        run: |
+          gh release download "$GITHUB_TREF" --repo "$GITHUB_REPOSITORY" --pattern 'checksums.txt*' --dir draft
+          cosign verify-blob --bundle draft/checksums.txt.sigstore.json \
+            --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yml@refs/tags/$GITHUB_REF_NAME" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com draft/checksums.txt
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TREF: ${{ github.ref_name }}
       - name: gh release edit --draft=false
         run: gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false
         env:
@@ -174,13 +189,17 @@ jobs:
     timeout-minutes: 5
     permissions:
       actions: write # gh workflow run
+      contents: read # read .github/workflows/pages.yml
     steps:
       - name: gh workflow run pages.yml --ref main
         run: |
-          if gh workflow view pages.yml --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          if out=$(gh api "repos/$GITHUB_REPOSITORY/contents/.github/workflows/pages.yml?ref=main" --silent 2>&1); then
             gh workflow run pages.yml --repo "$GITHUB_REPOSITORY" --ref main
+          elif printf '%s' "$out" | grep -q 'HTTP 404'; then
+            echo "::notice::no pages.yml on main yet: nothing to deploy"
           else
-            echo "::notice::no pages.yml yet: nothing to deploy"
+            echo "::error::could not check for pages.yml: $out"
+            exit 1
           fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

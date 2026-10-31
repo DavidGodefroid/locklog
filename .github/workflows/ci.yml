@@ -116,7 +116,8 @@ jobs:
 
   # main's scripts/install.sh is what locklog.dev serves: once a release
   # exists, it changes only in a release pull request (title "release:"),
-  # so that it always matches the released logic.
+  # so that it always matches the released logic. A convention the review
+  # holds, not a security control: anyone can title a pull request.
   install-sh-rule:
     name: install.sh changes only in release PRs
     if: github.event_name == 'pull_request'
