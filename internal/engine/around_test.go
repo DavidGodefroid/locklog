@@ -1426,12 +1426,16 @@ func TestTailFutureIndexed(t *testing.T) {
 	if raceEnabled {
 		t.Skip("timing: the race detector slows masking several fold")
 	}
-	for _, idx := range []bool{false, true} {
+	for _, c := range []struct {
+		idx   bool
+		ahead time.Duration
+	}{{false, 20 * time.Second}, {true, 20 * time.Second}, {true, 48 * time.Hour}} {
+		idx := c.idx
 		f := newFixture(t, genLog(time.Now().Add(-time.Hour), 5, "c@example.org"), func(o *Options) { o.TailPoll = 700 * time.Millisecond })
 		path := filepath.Join(f.root, "logs", "app.log")
 		go func() {
 			time.Sleep(200 * time.Millisecond)
-			fut := time.Now().Add(20 * time.Second).UTC().Format(time.RFC3339Nano)
+			fut := time.Now().Add(c.ahead).UTC().Format(time.RFC3339Nano)
 			lines := []string{"time=" + fut + " level=error msg=\"skewed\""}
 			for range 6000 {
 				lines = append(lines, "time="+fut+" level=info msg=\""+strings.Repeat("p", 400)+"\"")
@@ -1451,7 +1455,7 @@ func TestTailFutureIndexed(t *testing.T) {
 			t.Fatal(err)
 		}
 		if len(res.Records) != 1 || !res.Complete {
-			t.Fatalf("indexed %v: %d records, complete %v", idx, len(res.Records), res.Complete)
+			t.Fatalf("indexed %v, %s ahead: %d records, complete %v", idx, c.ahead, len(res.Records), res.Complete)
 		}
 	}
 }
@@ -1660,6 +1664,9 @@ func writeRaw(t *testing.T, path, s string) {
 // granule end whose first part lacks the needle is returned once complete,
 // with the pre-filter on or off (tails do not pre-filter).
 func TestTailPrefilterPartialAtGranuleEnd(t *testing.T) {
+	if raceEnabled {
+		t.Skip("timing: the race detector slows masking several fold")
+	}
 	for _, pre := range []bool{false, true} {
 		f := newFixture(t, genLog(time.Now().Add(-time.Hour), 5, "c@example.org"), func(o *Options) { o.TailPoll = 50 * time.Millisecond; o.Prefilter = pre })
 		path := filepath.Join(f.root, "logs", "app.log")
@@ -1692,5 +1699,38 @@ func TestTailPrefilterPartialAtGranuleEnd(t *testing.T) {
 		if len(res.Records) != 1 || !res.Complete {
 			t.Errorf("prefilter %v: %d records, complete %v", pre, len(res.Records), res.Complete)
 		}
+	}
+}
+
+// TestTailFutureAlreadyThere: records dated two days ahead that were there,
+// indexed, when the tail starts are not new.
+func TestTailFutureAlreadyThere(t *testing.T) {
+	f := newFixture(t, genLog(time.Now().Add(-time.Hour), 5, "c@example.org"), func(o *Options) { o.TailPoll = 100 * time.Millisecond })
+	path := filepath.Join(f.root, "logs", "app.log")
+	fut := time.Now().Add(48 * time.Hour).UTC().Format(time.RFC3339Nano)
+	var lines []string
+	for range 3000 { // about 1.3 MiB: a sealed granule and the next one
+		lines = append(lines, "time="+fut+" level=error msg=\""+strings.Repeat("p", 400)+"\"")
+	}
+	appendLines(t, path, lines...)
+	for {
+		_, done, err := f.src.IndexStep(context.Background(), 1<<30, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if done {
+			break
+		}
+	}
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		appendLines(t, path, liveLine(1, "x"))
+	}()
+	res, err := f.eng.Tail(ctx, TailQuery{Duration: "1s", Where: []Pred{{Field: "level", Op: "=", Value: raw("error")}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Records) != 1 || !res.Complete || !strings.Contains(string(res.Records[0]), "live 1 ") {
+		t.Fatalf("%d records, complete %v", len(res.Records), res.Complete)
 	}
 }

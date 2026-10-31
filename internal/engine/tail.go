@@ -63,6 +63,10 @@ func (a pos) after(b pos) bool { return a.off > b.off || a.off == b.off && a.len
 
 type streamKey [2]string
 
+// tailFarFuture is the end of a local stream's tail plans: none, so that an
+// indexed granule of records dated ahead never drops out of a plan.
+var tailFarFuture = time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC)
+
 // maxTailAnchors bounds the anchors a tail keeps per stream (one per poll
 // the stream grew in) to recognise its copies.
 const maxTailAnchors = 64
@@ -103,7 +107,8 @@ type held struct {
 // Journal entries are atomic and never held. A
 // stream first seen during the tail is scanned from its start (its records
 // still need a time from the start on). A record that was already there at
-// the start is never new, whatever its date; one written after it with a
+// the start (for a byte stream, its end at the first listing, milliseconds
+// after the call starts) is never new, whatever its date; one written after it with a
 // time before the start (its second, for a byte stream) is not returned.
 //
 // Every record of a scanned granule is masked before evaluation, as in a
@@ -161,7 +166,7 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 			if e.remote(s) {
 				continue
 			}
-			p, err := e.o.Sources[s].Plan(tctx, source.Range{From: time.Unix(0, 0).UTC(), To: e.o.Now().Add(24 * time.Hour)}, source.Selector{})
+			p, err := e.o.Sources[s].Plan(tctx, source.Range{From: time.Unix(0, 0).UTC(), To: tailFarFuture}, source.Selector{})
 			if err != nil {
 				return nil, err
 			}
@@ -273,7 +278,7 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 		}
 		pq := q
 		planAt := time.Now()
-		// Local streams are planned up to a far bound: an indexed
+		// Local streams are planned with no upper bound: an indexed
 		// granule of records dated ahead (a writer's clock, a zone
 		// read as UTC) must not drop out of the plan. Remote slices
 		// end at now.
@@ -285,7 +290,7 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 			if len(sq.Sources) == 0 {
 				continue
 			}
-			sq.To = e.o.Now().UTC().Add(24 * time.Hour)
+			sq.To = tailFarFuture
 			if remote {
 				sq.To = e.o.Now().UTC().Truncate(time.Second).Add(time.Second)
 			}
