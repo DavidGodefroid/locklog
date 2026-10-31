@@ -398,11 +398,26 @@ func (e *Engine) callBytes(srcs []string) int64 {
 
 // freeze stores a plan for continuations and returns its id.
 func (e *Engine) freeze(query string, plan source.Byteplan, desc bool) *frozen {
+	f, _ := e.freezeReplacing(query, plan, desc, "")
+	return f
+}
+
+// freezeReplacing stores a plan in place of the frozen plan replace (none:
+// ""), in one step: the replaced plan's slot is freed before any eviction,
+// so a replacement never evicts another plan. It returns false, storing
+// nothing, when replace is no longer frozen (another call replaced it).
+func (e *Engine) freezeReplacing(query string, plan source.Byteplan, desc bool, replace string) (*frozen, bool) {
 	var b [12]byte
 	rand.Read(b[:])
 	f := &frozen{id: hex.EncodeToString(b[:]), query: query, plan: plan, desc: desc, lastUse: e.o.Now()}
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if replace != "" {
+		if _, ok := e.plans[replace]; !ok {
+			return nil, false
+		}
+		delete(e.plans, replace)
+	}
 	if len(e.plans) >= maxPlans {
 		var oldest *frozen
 		for _, p := range e.plans {
@@ -413,7 +428,7 @@ func (e *Engine) freeze(query string, plan source.Byteplan, desc bool) *frozen {
 		delete(e.plans, oldest.id)
 	}
 	e.plans[f.id] = f
-	return f
+	return f, true
 }
 
 // openCursor opens a cursor, before the query is validated: a query by last
@@ -468,7 +483,7 @@ func (e *Engine) resume(st cursorState, query string) (*frozen, *Error) {
 // and a cursor on f (a replay from before the split) is then stale. The
 // number of chunks is kept (patterns sort records into window and baseline
 // by chunk index).
-func (e *Engine) splitSlice(f *frozen, chunk, gran int, parts []source.Granule) *frozen {
+func (e *Engine) splitSlice(f *frozen, chunk, gran int, parts []source.Granule) (*frozen, bool) {
 	parts = slices.Clone(parts)
 	if f.desc {
 		slices.Reverse(parts)
@@ -477,11 +492,7 @@ func (e *Engine) splitSlice(f *frozen, chunk, gran int, parts []source.Granule) 
 	c := plan.Chunks[chunk]
 	c.Granules = slices.Concat(c.Granules[:gran], parts, c.Granules[gran+1:])
 	plan.Chunks[chunk] = c
-	n := e.freeze(f.query, plan, f.desc)
-	e.mu.Lock()
-	delete(e.plans, f.id)
-	e.mu.Unlock()
-	return n
+	return e.freezeReplacing(f.query, plan, f.desc, f.id)
 }
 
 // errSliceOver refuses a remote slice holding more than one call's budget
@@ -602,7 +613,13 @@ func (e *Engine) run(ctx context.Context, fp **frozen, chunk, gran int, needles 
 				if len(parts) < 2 {
 					return chunk, gran, sc, failures, errSliceOver()
 				}
-				*fp = e.splitSlice(*fp, chunk, gran, parts)
+				n, ok := e.splitSlice(*fp, chunk, gran, parts)
+				if !ok {
+					// A concurrent call on the same cursor split
+					// it first.
+					return chunk, gran, sc, failures, &Error{Code: EStale, Span: "cursor", Message: "the cursor expired: run the query again"}
+				}
+				*fp = n
 				return chunk, gran, sc, failures, nil
 			}
 			return chunk, gran, sc, failures, &Error{Code: EOverBudget, Message: "a log stream holds more data than one call can process (a compressed file expanding more than estimated, or large repeated records): narrow the range or the sources, or ask for locklog_scan"}

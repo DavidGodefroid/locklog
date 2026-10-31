@@ -17,6 +17,7 @@ import (
 
 	"github.com/DavidGodefroid/locklog/internal/egress"
 	"github.com/DavidGodefroid/locklog/internal/parse"
+	"github.com/DavidGodefroid/locklog/internal/source"
 	"github.com/DavidGodefroid/locklog/internal/source/loki"
 )
 
@@ -366,5 +367,49 @@ func TestLokiDenseSliceCount(t *testing.T) {
 	}
 	if total != 9*12+600 {
 		t.Fatalf("counted %d records, want %d", total, 9*12+600)
+	}
+}
+
+// TestLokiSplitFullPlans: with the frozen plans full, a query's splits
+// never evict another query's plan.
+func TestLokiSplitFullPlans(t *testing.T) {
+	d := &denseLoki{every: 5 * time.Second, denseEvery: 100 * time.Millisecond, denseFor: time.Minute,
+		dense: t0.Add(3 * time.Minute), pad: 4 << 10}
+	f := denseFixture(t, d, 256<<10)
+	qq := q(func(q *Query) {
+		q.From, q.To = t0, t0.Add(10*time.Minute)
+		q.Sources = []string{"lk"}
+		q.Limit = 200
+	})
+	res, err := f.eng.Search(ctx, qq) // the query's own plan
+	if err != nil || res.Complete {
+		t.Fatalf("first call: %v, complete %v", err, res.Complete)
+	}
+	var foreign []string
+	for len(f.eng.plans) < maxPlans {
+		foreign = append(foreign, f.eng.freeze("other", source.Byteplan{}, false).id)
+	}
+	splits := 0
+	for calls := 0; !res.Complete; calls++ {
+		if calls > 400 {
+			t.Fatal("no end")
+		}
+		qq.Cursor = res.Cursor
+		if res, err = f.eng.Search(ctx, qq); err != nil {
+			t.Fatalf("call %d: %v", calls, err)
+		}
+		if len(res.Records) == 0 {
+			splits++
+		}
+	}
+	if splits == 0 {
+		t.Fatal("no split")
+	}
+	f.eng.mu.Lock()
+	defer f.eng.mu.Unlock()
+	for _, id := range foreign {
+		if f.eng.plans[id] == nil {
+			t.Fatalf("a split evicted another query's plan (%d splits)", splits)
+		}
 	}
 }

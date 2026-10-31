@@ -112,7 +112,9 @@ type Chunk struct {
 	Source string
 	// Stream identifies the stream (a file identity, a remote stream).
 	Stream string
-	// Granules are consecutive and in stream order.
+	// Granules are consecutive and in stream order (the engine's split of
+	// a descending remote slice holds its parts newest first: remote
+	// granules are read one at a time).
 	Granules []Granule
 	// Bytes is the number of bytes processing the chunk costs: the
 	// granules' bytes, plus for a compressed stream the decompressed bytes
