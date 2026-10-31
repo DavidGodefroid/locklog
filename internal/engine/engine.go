@@ -545,7 +545,18 @@ func (e *Engine) run(ctx context.Context, fp **frozen, chunk, gran int, needles 
 		}
 		c := plan.Chunks[chunk]
 		remaining := time.Until(deadline)
-		groups := granuleGroups(c, gran, max(e.o.Cost.Budget(remaining)/factor, 1))
+		// A group is what the time left can mask and, with a byte
+		// budget, at most half of what is left of it: a record's own
+		// bytes run above its share of the stream (the fetch caps
+		// them at the budget), so a group sized to the whole budget
+		// would hit that cap and refuse the call instead of stopping
+		// it at a boundary (#88). Both bounds depend on the plan and
+		// the call only.
+		per := max(e.o.Cost.Budget(remaining)/factor, 1)
+		if callBytes > 0 {
+			per = min(per, max((callBytes-sc.Bytes)/2, 1))
+		}
+		groups := granuleGroups(c, gran, per)
 		if len(groups) == 0 {
 			chunk, gran = chunk+1, 0
 			continue

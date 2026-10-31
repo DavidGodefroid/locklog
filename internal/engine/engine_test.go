@@ -2247,3 +2247,46 @@ func TestRemoteSlicesPaged(t *testing.T) {
 		})
 	}
 }
+
+// TestPlanAtTheByteBudget (#88): a plan just under the call's byte budget,
+// on a cost model that would mask all of it in time, is answered through
+// continuations; it is never refused because its records' own bytes (above
+// their share of the stream) reach the fetch cap of one whole-budget group.
+func TestPlanAtTheByteBudget(t *testing.T) {
+	// Access-log lines: their fields' keys (remote_addr, status_class,
+	// user_agent, ...) put the records' own bytes above the line's.
+	var b strings.Builder
+	for i := range 40000 {
+		fmt.Fprintf(&b, `198.51.100.%d - - [%s] "GET /api/orders/%d HTTP/1.1" %d 512 "-" "shop-client/1.%d"`+"\n",
+			i%250, t0.Add(time.Duration(i)*time.Second).Format("02/Jan/2006:15:04:05 -0700"), 4000+i%1000, []int{200, 502}[i%2], i%9)
+	}
+	content := b.String()
+	f := newFixture(t, content, func(o *Options) { o.Limits.LocalBytes = int64(len(content)) + 1024 })
+	if len(content) < 4*source.GranuleBytes {
+		t.Fatalf("content of %d bytes: too few granules", len(content))
+	}
+	c := CountQuery{Query: q(nil), By: []string{"status"}}
+	pages := 0
+	for {
+		res, err := f.eng.Count(ctx, c)
+		if err != nil {
+			t.Fatalf("page %d: %v", pages, err)
+		}
+		pages++
+		if res.Complete {
+			if total(res.Groups) != 40000 {
+				t.Fatalf("%d records counted", total(res.Groups))
+			}
+			break
+		}
+		c.Cursor = res.Cursor
+		if pages > 100 {
+			t.Fatal("never completes")
+		}
+	}
+	// And a search with text through its pages.
+	_, sp := allRecords(t, f.eng, q(func(q *Query) { q.Text = "orders/4812"; q.Limit = 200 }))
+	if len(sp) == 0 {
+		t.Fatal("no search page")
+	}
+}
