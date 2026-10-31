@@ -264,7 +264,10 @@ var errUncategorized = errors.New("loki source: the response is not in the categ
 
 // decodeStreams decodes a streams response into entries, sorted by (ts,
 // stream, line): a deterministic order, independent of how Loki grouped
-// them.
+// them. It is not a streaming decoder: the egress client reads the body
+// whole, capped at egress.MaxResponseBytes (64 MiB), and it is decoded in
+// one json.Unmarshal, so a page costs its body plus its entries in memory.
+// Lines are cut at parse.MaxLineBytes (256 KiB) when parsed (record).
 func decodeStreams(body []byte) ([]entry, error) {
 	var r queryResponse
 	if err := json.Unmarshal(body, &r); err != nil || r.Status != "success" || r.Data.ResultType != "streams" {

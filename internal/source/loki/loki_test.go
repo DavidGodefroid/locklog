@@ -811,3 +811,30 @@ func TestMetadataNameThatIsALabelRefused(t *testing.T) {
 		}
 	}
 }
+
+func TestResponseAndLineCaps(t *testing.T) {
+	// The response cap (egress.MaxResponseBytes, 64 MiB; small here): a
+	// page past it fails the scan.
+	if egress.MaxResponseBytes != 64<<20 {
+		t.Fatalf("response cap %d", egress.MaxResponseBytes)
+	}
+	f := &fakeLoki{entries: dataset(300)}
+	srv := httptest.NewServer(f)
+	defer srv.Close()
+	cl, _ := egress.New(&config.Remote{URL: srv.URL, Auth: config.AuthNone}, egress.LokiRoutes, egress.Credentials{}, egress.Options{MaxResponseBytes: 4096})
+	p, _ := parse.New(parse.Options{})
+	s, _ := New(Options{Name: "l", Client: cl, Parser: p, Selector: map[string]string{"env": "prod"}, Limit: 100})
+	plan, _ := s.Plan(ctx, source.Range{From: t0, To: t0.Add(time.Hour)}, source.Selector{})
+	it, _ := s.Scan(ctx, plan.Chunks[0])
+	if _, err := it.Next(); !errors.Is(err, egress.ErrResponseTooLarge) {
+		t.Fatalf("over the response cap: %v", err)
+	}
+	it.Close()
+	// The line cap (parse.MaxLineBytes, 256 KiB): a longer line is cut.
+	long := strings.Repeat("x", parse.MaxLineBytes+1000)
+	f = &fakeLoki{entries: []fakeEntry{{ts: t0.UnixNano(), labels: map[string]string{"env": "prod"}, line: long}}}
+	recs := scanAll(t, newSource(t, f, nil), source.Range{From: t0, To: t0.Add(time.Minute)}, source.Selector{})
+	if len(recs) != 1 || len(recs[0].Event.Raw) != parse.MaxLineBytes || !recs[0].Event.Truncated {
+		t.Fatalf("long line: %d records, %d bytes kept", len(recs), len(recs[0].Event.Raw))
+	}
+}
