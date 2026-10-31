@@ -2,6 +2,7 @@ package mask
 
 import (
 	"fmt"
+	"math/big"
 	"regexp"
 	"slices"
 	"sort"
@@ -109,7 +110,10 @@ func (m *Masker) Mask(source string, ev parse.Event) (rec Record) {
 	// steps; secrets and detectors still run.
 	rec.attrs = w.members(ev.Attrs, "", "", true, inherited{})
 	if ev.Message != "" || ev.Fields == nil {
-		rec.msg = w.message(ev.Message, ev.MessageKey)
+		w.scoped(func() bool {
+			rec.msg = w.message(ev.Message, ev.MessageKey)
+			return rec.msg == Redacted
+		})
 	}
 	rec.kinds = sortedKeys(w.kinds)
 	rec.secretPaths = w.secretPaths
@@ -256,12 +260,34 @@ func (w *walk) value(v parse.Value, name, clearPath, shownPath string, trusted b
 // redaction tells nothing of what it held.
 func (w *walk) leaf(v parse.Value, name, clearPath, shownPath string, trusted bool, inh inherited) Value {
 	hadSecret := false
-	out := w.leafMasked(v, name, clearPath, trusted, inh, &hadSecret)
+	var out Value
+	w.scoped(func() bool {
+		out = w.leafMasked(v, name, clearPath, trusted, inh, &hadSecret)
+		return out.text == Redacted
+	})
 	if hadSecret && out.text != Redacted {
 		w.kinds["secret"] = true
 		w.secretPaths = append(w.secretPaths, shownPath)
 	}
 	return out
+}
+
+// scoped runs f with a kinds set of its own, merged into the record's
+// only when f's value was not withheld (f returns true): a redaction
+// tells nothing of what it held.
+func (w *walk) scoped(f func() (withheld bool)) {
+	outer := w.kinds
+	w.kinds = map[string]bool{}
+	withheld := f()
+	inner := w.kinds
+	w.kinds = outer
+	if withheld {
+		outer["redacted"] = true
+		return
+	}
+	for k := range inner {
+		outer[k] = true
+	}
 }
 
 func (w *walk) leafMasked(v parse.Value, name, clearPath string, trusted bool, inh inherited, hadSecret *bool) Value {
@@ -361,6 +387,15 @@ func (w *walk) message(s, key string) string {
 
 // detected masks the personal values the detectors find in s (step 4).
 func (w *walk) detected(k parse.Kind, s string, hadSecret bool) Value {
+	if k == parse.KindNumber {
+		// A number in exponent or decimal form ("4.111111111111111E15",
+		// Jackson's doubles) is read as the integer it is.
+		if it, ok := integralText(s); ok && it != s {
+			if ms := w.values(it); len(ms) > 0 {
+				return Value{kind: String, text: outputSafe(w.pseudonymise(it, ms))}
+			}
+		}
+	}
 	ms := w.values(s)
 	if len(ms) == 0 && !hadSecret {
 		if (k == parse.KindBool || k == parse.KindNumber) && !validLiteral(k, s) {
@@ -575,18 +610,32 @@ func validLiteral(k parse.Kind, s string) bool {
 	return jsonNumber.MatchString(s)
 }
 
+// integralText is the integer a number literal denotes exactly, written
+// in full, when it has one below 1e20.
+func integralText(s string) (string, bool) {
+	if !strings.ContainsAny(s, ".eE") || len(s) > 64 {
+		return "", false
+	}
+	f, _, err := big.ParseFloat(s, 10, 256, big.ToNearestEven)
+	if err != nil || !f.IsInt() || new(big.Float).Abs(f).Cmp(big.NewFloat(1e20)) >= 0 {
+		return "", false
+	}
+	i, _ := f.Int(nil)
+	return i.String(), true
+}
+
 // jsonNumber is a JSON number literal (RFC 8259 §6).
 var jsonNumber = regexp.MustCompile(`^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?$`)
 
 // cleanSource prepares source text for masking: the placeholder brackets
 // become U+FFFD (design §4.4 rule 6: only the masker writes them), and
 // controls (but tab and newline) and invisible characters are dropped
-// (§5.4), before detection, so that the detectors see exactly the text
+// (§5.4), as are invalid bytes and U+FFFD, before detection, so that the detectors see exactly the text
 // that will be shown.
 func cleanSource(s string) string {
-	dirty := false
+	dirty := !utf8.ValidString(s)
 	for _, r := range s {
-		if unsafeRune(r) || r == '\u27e6' || r == '\u27e7' {
+		if dirty || unsafeRune(r) || r == '\u27e6' || r == '\u27e7' || r == utf8.RuneError {
 			dirty = true
 			break
 		}
@@ -594,15 +643,24 @@ func cleanSource(s string) string {
 	if !dirty {
 		return s
 	}
-	return strings.Map(func(r rune) rune {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		r, n := utf8.DecodeRuneInString(s[i:])
 		switch {
+		case r == utf8.RuneError:
+			// An invalid byte, or the U+FFFD a parser put for one: dropped,
+			// so the detectors see the value it splits
+			// ("andr\xe9@example.com") as it will be read.
 		case r == '\u27e6' || r == '\u27e7':
-			return utf8.RuneError
+			b.WriteRune(utf8.RuneError)
 		case unsafeRune(r):
-			return -1
+		default:
+			b.WriteString(s[i : i+n])
 		}
-		return r
-	}, s)
+		i += n
+	}
+	return b.String()
 }
 
 // outputSafe replaces control characters (but tab and newline), format

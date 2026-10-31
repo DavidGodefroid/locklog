@@ -700,3 +700,39 @@ func TestRedactedSecretsAndPseudonymOrder(t *testing.T) {
 		t.Error("duplicate rules accepted")
 	}
 }
+
+func TestExponentNumbersInvalidBytesAndWithheldKinds(t *testing.T) {
+	m := newMasker(t, Options{Structured: StructuredDetect})
+	for _, line := range []string{
+		`{"n":4.111111111111111E15}`, `{"n":4.111111111111111e15}`, `{"n":-4.111111111111111E+15}`,
+		`{"n":41111111111111110e-1}`, `{"n":4111111111111111.0}`,
+		"{\"s\":\"andr\xe9@example.com\"}", "contact andr\xe9@example.com now",
+		"{\"s\":\"4111\xff1111\xff1111\xff1111\"}", "{\"s\":\"BE68\xff539007547034\"}",
+	} {
+		out := encode(t, m.Mask("api", event(t, line)))
+		for _, clear := range []string{"4111111111111111", "4.111111111111111", "example.com", "539007547034", "1111"} {
+			if strings.Contains(out, clear) {
+				t.Errorf("%q: %q survived: %s", line, clear, out)
+			}
+		}
+	}
+	glued := "+32475123456+32475123457+32475123458+32475123459+32475123450+32475123451"
+	for _, line := range []string{`{"x":"` + glued + `"}`, glued + " sk_test_" + strings.Repeat("a1", 16)} {
+		if k := m.Mask("api", event(t, line)).Kinds(); len(k) != 1 || k[0] != "redacted" {
+			t.Errorf("%q: Kinds = %v, want [redacted]", line, k)
+		}
+	}
+	ag, err := OpenAgentRules(filepath.Join(t.TempDir(), "pii"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rules := Rules{Agent: ag}
+	am := newMasker(t, Options{Structured: StructuredDetect, Rules: &rules})
+	am.Mask("api", event(t, `{"note":"x"}`))
+	if err := am.AgentAdd("api", "note", ModeRedact, t0, AgentLimits{PerHour: 10, Total: 50}); err != nil {
+		t.Fatal(err)
+	}
+	if k := am.Mask("api", event(t, `{"note":"mail john.doe@example.com"}`)).Kinds(); len(k) != 1 || k[0] != "redacted" {
+		t.Errorf("agent redact: Kinds = %v, want [redacted]", k)
+	}
+}
