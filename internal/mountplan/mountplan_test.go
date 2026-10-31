@@ -1,6 +1,9 @@
 package mountplan
 
 import (
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -161,6 +164,49 @@ func TestTLSFiles(t *testing.T) {
 		err := TLSFiles(prof(c.ca, c.cert, c.key), "/p")
 		if c.want == "" && err != nil || c.want != "" && (err == nil || !strings.Contains(err.Error(), c.want)) {
 			t.Errorf("%+v: %v", c, err)
+		}
+	}
+}
+
+// A client key is never under the project, even inside the home volume;
+// a project inside the home volume is refused; links are resolved.
+func TestTLSFilesProject(t *testing.T) {
+	prof := func(ca, cert, key string) config.Profile {
+		r := &config.Remote{URL: "https://es:9200"}
+		r.TLSCA, r.TLSCert, r.TLSKey = ca, cert, key
+		return config.Profile{Name: "p", Sources: []config.Source{{Name: "es", Kind: config.KindElastic, Remote: r}}}
+	}
+	// A project inside the home volume: its .locklog/ key would be "in the
+	// home volume" and readable by agents.
+	if err := TLSFiles(prof("", "/home/locklog/p/.locklog/c.crt", "/home/locklog/p/.locklog/c.key"), "/home/locklog/p"); err == nil || !strings.Contains(err.Error(), "inside the console's home volume") {
+		t.Errorf("project in the home volume: %v", err)
+	}
+	if err := TLSFiles(prof("", "", ""), "/home/locklog/p"); err != nil {
+		t.Errorf("no TLS file: %v", err)
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("the console's paths are Linux paths")
+	}
+	// A link under .locklog/ pointing elsewhere is where it points.
+	proj := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(proj, ".locklog"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(t.TempDir(), "ca.crt")
+	if err := os.WriteFile(out, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(proj, ".locklog", "ca.crt")
+	if err := os.Symlink(out, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := TLSFiles(prof(link, "", ""), proj); err == nil || !strings.Contains(err.Error(), "not readable by the console") {
+		t.Errorf("a linked CA: %v", err)
+	}
+	// A key in the project root or .locklog/: refused.
+	for _, k := range []string{filepath.Join(proj, "c.key"), filepath.Join(proj, ".locklog", "c.key")} {
+		if err := TLSFiles(prof("", "/home/locklog/c.crt", k), proj); err == nil || !strings.Contains(err.Error(), "readable by agents") {
+			t.Errorf("key %s: %v", k, err)
 		}
 	}
 }

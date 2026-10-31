@@ -24,6 +24,7 @@ package mountplan
 import (
 	"fmt"
 	"path"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -120,17 +121,55 @@ func beneath(p, dir string) bool {
 	return p == dir || strings.HasPrefix(p, strings.TrimSuffix(dir, "/")+"/")
 }
 
+// realPath is p cleaned and, where it exists here, with its symbolic
+// links resolved (its longest existing prefix is resolved and the rest
+// appended), so that a link cannot move a file in or out of a directory.
+func realPath(p string) string {
+	p = path.Clean(p)
+	rest := ""
+	for cur := p; ; {
+		if r, err := filepath.EvalSymlinks(cur); err == nil {
+			return path.Join(filepath.ToSlash(r), rest)
+		}
+		parent := path.Dir(cur)
+		if parent == cur {
+			return p
+		}
+		rest = path.Join(path.Base(cur), rest)
+		cur = parent
+	}
+}
+
+// under reports whether p is strictly beneath dir.
+func under(p, dir string) bool { return p != dir && beneath(p, dir) }
+
 // TLSFiles checks that the console can read the tls_ca, tls_cert and
-// tls_key files of p's remote sources without any mount of their own:
-// the launcher binds only the project's .locklog/ (read-only, also
-// readable by agents) and the console's home volume, and the console
-// confines its reads to them and the image's /etc/ssl. A CA certificate
-// (public) may be in project/.locklog/, the home volume or /etc/ssl; a
-// client certificate and its key only in the home volume (a key under
-// the project would be readable by agents). project is the project root
-// on the host, where .locklog/ is bound at the same path.
+// tls_key files of p's remote sources without any mount of their own,
+// and that no agent can read a client key: the launcher binds only the
+// project's .locklog/ (read-only, also readable by agents) and the
+// console's home volume, and the console confines its reads to them and
+// the image's /etc/ssl. A CA certificate (public) may be in
+// project/.locklog/, the home volume or /etc/ssl; a client certificate
+// and its key only in the home volume, never under the project (a
+// project inside the home volume is refused). project is the project
+// root on the host, where .locklog/ is bound at the same path. Paths are
+// compared cleaned and, where they exist here, with their links resolved.
 func TLSFiles(p config.Profile, project string) error {
-	ll := path.Join(project, ".locklog")
+	proj := ""
+	if project != "" {
+		proj = realPath(project)
+	}
+	home := ConsoleHome
+	hasTLS := false
+	for _, s := range p.Sources {
+		if r := s.Remote; r != nil && (r.TLSCA != "" || r.TLSCert != "" || r.TLSKey != "") {
+			hasTLS = true
+		}
+	}
+	if hasTLS && proj != "" && beneath(proj, home) {
+		return fmt.Errorf("the project %s is inside the console's home volume %s: refused (its files would be readable by agents)", proj, home)
+	}
+	ll := path.Join(proj, ".locklog")
 	for _, s := range p.Sources {
 		r := s.Remote
 		if r == nil {
@@ -140,20 +179,20 @@ func TLSFiles(p config.Profile, project string) error {
 			if f.val == "" {
 				continue
 			}
-			c := path.Clean(f.val)
-			if !path.IsAbs(f.val) || c != f.val {
+			if !path.IsAbs(f.val) || path.Clean(f.val) != f.val {
 				return fmt.Errorf("source %s: %s %q: want an absolute, clean path", s.Name, f.key, f.val)
 			}
-			home := beneath(c, ConsoleHome+"/") && c != ConsoleHome
+			c := realPath(f.val)
+			inProject := proj != "" && beneath(c, proj)
 			switch {
-			case f.key == "tls_ca" && (beneath(c, ll) && c != ll || beneath(c, imageCAs) || home):
-			case f.key != "tls_ca" && home:
+			case f.key == "tls_ca" && (proj != "" && under(c, ll) || beneath(c, imageCAs) || under(c, home)):
+			case f.key != "tls_ca" && under(c, home) && !inProject:
 			case f.key == "tls_ca":
 				return fmt.Errorf("source %s: tls_ca %s is not readable by the console: copy the CA certificate into %s/ (the console sees only the project's .locklog/, its home volume %s and the image's %s)",
-					s.Name, c, ll, ConsoleHome, imageCAs)
+					s.Name, c, ll, home, imageCAs)
 			default:
 				return fmt.Errorf("source %s: %s %s is not readable by the console, or would be readable by agents: put the client certificate and key in the console's home volume (%s/..., the locklog-home volume), never in the project",
-					s.Name, f.key, c, ConsoleHome)
+					s.Name, f.key, c, home)
 			}
 		}
 	}
