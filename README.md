@@ -14,7 +14,7 @@
 
 <p align="center">
   <b>Let Claude Code, Codex, Cursor or Gemini CLI investigate your production logs.<br>
-  The personal data and secrets locklog detects never reach the model.</b>
+  The personal data and secrets locklog detects never reach the model without your approval.</b>
 </p>
 
 <p align="center">
@@ -114,7 +114,7 @@ locklog console --profile <profile>
 
 Then, in another terminal, ask your agent: *"when did the 502s start?"*.
 It calls `locklog_count`, `locklog_patterns` and `locklog_trace`; the
-console shows each call and asks you only when the agent wants more than
+console audits every call and asks you only when the agent wants more than
 the free budgets or a value in clear. On the host, `locklog mcp` refuses
 every call on a production profile (`E_PRODUCTION_HOST_AGENT`): the host
 agent is the trial.
@@ -142,12 +142,13 @@ Your agent CLI's own login (Anthropic, OpenAI, Google) is yours to set up.
      │    read-only root, --cpus min(2,nproc), --memory 1g, --log-driver none
      │    read-only, non-recursive binds of the approved log directories
      │    volume locklog-home: pseudonym keys, local index, audit, rules (console only)
-     │    volume locklog-run:  /run/locklog/locklog.sock (2750 locklog:locklog-clients)
+     │    volume locklog-run:  /run/locklog (2750 locklog:locklog-clients), one socket
+     │                         per project and profile, <project-hash>-<profile>.sock (0660)
      │    network: none, or the backend's network for Loki
      └─ map loop: docker events → container names and ids of the approved globs
 
  agent (yours: your own container, or the host for the trial; lea planned)
-   MCP server `locklog mcp` → /run/locklog/locklog.sock (peer uid checked by the kernel)
+   MCP server `locklog mcp` → its project's socket in /run/locklog (peer uid checked by the kernel)
 ```
 
 1. The console reads the approved sources, and only those. The sources are
@@ -188,11 +189,13 @@ locklog enforces what it owns:
 
 - the console's **peer check**: only the clients group (10050), the image's
   `agent` (10052) and the uids you list in `--allowed-uids` reach the
-  socket, never root or `nobody`;
+  socket, never root or `nobody` (the launcher does not pass
+  `--allowed-uids` yet: [#102](https://github.com/DavidGodefroid/locklog/issues/102));
 - its mounts (read-only, non-recursive), its network, and its image
   hardening; **no Docker socket** in any locklog container;
 - on production, backends with **authentication over TLS**, and a refusal
-  when an endpoint answers a read without credentials;
+  when an endpoint answers a read without credentials (with remote
+  sources, [#97](https://github.com/DavidGodefroid/locklog/pull/97));
 - the masking pipeline, the budgets, and approvals bound to the exact plan
   (single use; an unmask re-reads the record and is refused if anything
   moved since you approved it).
