@@ -719,7 +719,7 @@ func (s *Session) describe(ctx context.Context) Sources {
 	for _, n := range s.names {
 		src := s.srcs[n]
 		info := SourceInfo{Name: n, Kind: src.Kind()}
-		sch, err := src.Describe(ctx)
+		sch, err := src.Describe(s.eng.Paced(ctx, n))
 		if err != nil {
 			info.Error = "the source could not be described"
 			out.Sources = append(out.Sources, info)

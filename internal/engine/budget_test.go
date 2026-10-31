@@ -194,3 +194,41 @@ func TestRequestLimiter(t *testing.T) {
 		t.Fatalf("second metric query: %v", err)
 	}
 }
+
+// describeSource is a remote source whose Describe sends one request.
+type describeSource struct{ source.Source }
+
+func (describeSource) Kind() string { return "loki" }
+
+func (describeSource) Describe(ctx context.Context) (source.Schema, error) {
+	if l := source.LimiterFrom(ctx); l != nil {
+		if err := l.Wait(ctx); err != nil {
+			return source.Schema{}, err
+		}
+	}
+	return source.Schema{}, nil
+}
+
+// TestPacedDescribe: describing a remote source (log.sources) goes through
+// the rolling request budget.
+func TestPacedDescribe(t *testing.T) {
+	f := newFixture(t, "", func(o *Options) {
+		o.Sources["lk"] = describeSource{}
+		o.Budgets.RemoteRequestsPerMinute = 1
+	})
+	cctx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	if _, err := f.eng.o.Sources["lk"].Describe(f.eng.Paced(cctx, "lk")); err != nil {
+		t.Fatal(err)
+	}
+	if f.eng.ledger.requestsLeft("lk") != 0 {
+		t.Fatal("the describe request was not charged")
+	}
+	if _, err := f.eng.o.Sources["lk"].Describe(f.eng.Paced(cctx, "lk")); err != errRequestBudget {
+		t.Fatalf("second describe: %v", err)
+	}
+	// A local source is not paced.
+	if f.eng.Paced(cctx, "app") != cctx {
+		t.Fatal("a local source got a request limiter")
+	}
+}

@@ -975,6 +975,16 @@ func (e *Engine) estimate(plan source.Byteplan, chunk, gran int, callBytes int64
 
 // limiter is the request limiter of a call to remote source src: the
 // rolling per-minute budget of free calls, or an approved scan's own.
+// Paced returns ctx with the request limiter of a free call to the remote
+// source src: its requests outside a query (log.sources describing it) are
+// paced and charged to the rolling request budget like a query's.
+func (e *Engine) Paced(ctx context.Context, src string) context.Context {
+	if _, ok := e.o.Sources[src]; !ok || !e.remote(src) {
+		return ctx
+	}
+	return source.WithLimiter(ctx, e.limiter(ctx, src))
+}
+
 func (e *Engine) limiter(ctx context.Context, src string) source.Limiter {
 	if sc := scanFrom(ctx); sc != nil {
 		return sc.limiter(src)
