@@ -133,7 +133,7 @@ func TestSuiteOracle(t *testing.T) {
 		// length: different lengths are compared on the sources whose
 		// records carry the padding in a secret-named field.
 		{"same length", true, suiteSources()},
-		{"different length", false, []string{"json", "logfmt", "cri", "docker-json", srcJournal, srcDocker}},
+		{"different length", false, []string{"json", "logfmt", "cri", "docker-json", srcJournal, srcDocker, srcLoki}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a, b := oraclePair(t, tc.sameLen)
@@ -280,7 +280,7 @@ func TestSuiteOracleLatency(t *testing.T) {
 	}
 	corpus := func(v string) map[string][]suiteRecord {
 		out := map[string][]suiteRecord{}
-		for _, src := range []string{"json", srcJournal, srcDocker} {
+		for _, src := range []string{"json", srcJournal, srcDocker, srcLoki} {
 			for j := range 6000 {
 				msg := fmt.Sprintf("render pdf for %s failed: upstream timed out (order %d)", v, j)
 				out[src] = append(out[src], suiteRecord{TS: suiteBase.Add(time.Duration(j) * time.Second), Kind: "json",

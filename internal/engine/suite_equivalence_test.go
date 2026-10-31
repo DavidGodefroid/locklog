@@ -113,8 +113,9 @@ func TestSuiteEquivalenceIndex(t *testing.T) {
 	cfg.Index = true
 	ix := newSuite(t, recs, cfg)
 	calls := equivalenceCalls()
-	// The indexed sources: files and docker (journald has no local index).
-	indexed := slices.DeleteFunc(suiteSources(), func(s string) bool { return s == srcJournal })
+	// The indexed sources: files and docker (journald has no local index;
+	// Loki's counts are its own, compared with a scan below).
+	indexed := slices.DeleteFunc(suiteSources(), func(s string) bool { return s == srcJournal || s == srcLoki })
 	cq := func(name string, mod func(*CountQuery)) agentCall {
 		c := CountQuery{Query: suiteQuery(func(q *Query) { q.Sources = indexed })}
 		mod(&c)
@@ -150,5 +151,49 @@ func TestSuiteEquivalenceIndex(t *testing.T) {
 				t.Errorf("%s: not served from the index", c.name)
 			}
 		}
+	}
+}
+
+// TestSuiteEquivalenceLokiCounts: a count by Loki's trusted labels is
+// answered by Loki's metric queries (server-side, no line fetched), and
+// gives the groups a scan of the same lines gives (the same count with a
+// predicate on every line, which only a scan can evaluate).
+func TestSuiteEquivalenceLokiCounts(t *testing.T) {
+	recs := map[string][]suiteRecord{srcLoki: equivalenceCorpus(t)[srcLoki]}
+	s := newSuite(t, recs, suiteConfig{Structured: mask.StructuredDetect, Workers: 2})
+	for _, tc := range []struct {
+		name   string
+		bucket string
+		where  []Pred
+	}{
+		{"per hour", "1h", nil},
+		{"per 2 min", "2m", nil},
+		{"whole range", "", nil},
+		{"where app", "10m", []Pred{{Label: "app", Op: OpEq, Value: raw("shop-pdf")}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := CountQuery{Query: suiteQuery(func(q *Query) { q.Sources = []string{srcLoki}; q.Where = tc.where }),
+				ByLabels: []string{"app"}, Bucket: tc.bucket}
+			metric := s.mustRun(agentCall{"metric", MethodCount, c})
+			if r := lastCount(t, metric); !r.FromIndex || r.Scanned.Bytes != 0 {
+				t.Fatalf("not answered by Loki's counts: from_index %v, scanned %d", r.FromIndex, r.Scanned.Bytes)
+			}
+			c.Where = append(slices.Clone(c.Where), Pred{Field: "level", Op: OpExists})
+			scanned := s.mustRun(agentCall{"scanned", MethodCount, c})
+			r := lastCount(t, scanned)
+			if r.FromIndex || r.Scanned.Bytes == 0 {
+				t.Fatalf("the predicate on the lines did not scan: from_index %v", r.FromIndex)
+			}
+			var n int64
+			for _, g := range r.Groups {
+				n += g.N
+			}
+			if want := int64(len(recs[srcLoki])); tc.where == nil && n != want {
+				t.Fatalf("scanned %d records, want %d", n, want)
+			}
+			if x, y := answer(t, s.eng, metric), answer(t, s.eng, scanned); x != y {
+				t.Errorf("Loki's counts and a scan differ: %s", firstDiff([]string{x}, []string{y}))
+			}
+		})
 	}
 }

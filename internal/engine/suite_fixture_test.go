@@ -6,8 +6,9 @@ package engine
 // multi-source fixture: a file source per format (json, logfmt, plain,
 // syslog, combined, cri, docker-json), a journald source and a docker
 // json-file source, all fed the same records, each rendered in its source's
-// own format. Every agent call goes through Handle (the IPC methods) and is
-// followed through its continuation pages.
+// own format, and a Loki source (a fake Loki over HTTP, suite_loki_test.go).
+// Every agent call goes through Handle (the IPC methods) and is followed
+// through its continuation pages.
 
 import (
 	"crypto/rand"
@@ -64,7 +65,9 @@ func heavySuite(t testing.TB) {
 }
 
 // suiteSources are every source of the fixture.
-func suiteSources() []string { return append(slices.Clone(suiteFileFormats), srcJournal, srcDocker) }
+func suiteSources() []string {
+	return append(slices.Clone(suiteFileFormats), srcJournal, srcDocker, srcLoki)
+}
 
 // The suite clock: records start at suiteBase; queries cover the day.
 var (
@@ -75,10 +78,10 @@ var (
 )
 
 // Trusted names of the fixture: line fields, and labels (docker's
-// container and stream).
+// container and stream, Loki's app).
 var (
 	suiteTrustedFields = []string{"level", "status", "status_class", "method", "PRIORITY", "_SYSTEMD_UNIT", "SYSLOG_IDENTIFIER"}
-	suiteTrustedLabels = []string{docker.ContainerField, "stream"}
+	suiteTrustedLabels = []string{docker.ContainerField, "stream", "app"}
 	suiteIndexed       = []string{"level", "status", "status_class", "method"}
 )
 
@@ -170,6 +173,11 @@ type suiteConfig struct {
 	Cost    *CostModel
 	Workers int
 	Limits  func(*Limits)
+	// Budgets changes the rolling budgets (the defaults, the remote
+	// request pacing and metric queries unbounded); Engine changes any
+	// other option.
+	Budgets func(*Budgets)
+	Engine  func(*Options)
 	// Epoch shares a pseudonym epoch between fixtures.
 	Epoch *pii.Pseudonymizer
 	// Index builds the local index of the indexable sources.
@@ -328,6 +336,9 @@ func newSuite(t testing.TB, recs map[string][]suiteRecord, cfg suiteConfig) *sui
 		srcs[srcDocker] = ds
 		s.indexers = append(s.indexers, ds)
 	}
+	if rs, ok := recs[srcLoki]; ok {
+		srcs[srcLoki] = newSuiteLoki(t, rs)
+	}
 	// The agent rule the corpus's "meta" positions assume, per source.
 	if !cfg.NoAgentMeta {
 		p, _ := parse.New(parse.Options{})
@@ -361,9 +372,20 @@ func newSuite(t testing.TB, recs map[string][]suiteRecord, cfg suiteConfig) *sui
 		Prefilter:  cfg.Prefilter,
 		Workers:    cfg.Workers,
 		Now:        func() time.Time { return suiteNow },
+		Budgets:    DefaultBudgets(),
+	}
+	// The suites are not about the request pacing (budget_test.go is):
+	// the fake Loki's requests are not paced, and its metric counts not
+	// capped per hour.
+	o.Budgets.RemoteRequestsPerMinute, o.Budgets.MetricQueriesPerHour = 1<<30, 1<<30
+	if cfg.Budgets != nil {
+		cfg.Budgets(&o.Budgets)
 	}
 	if cfg.Limits != nil {
 		cfg.Limits(&o.Limits)
+	}
+	if cfg.Engine != nil {
+		cfg.Engine(&o)
 	}
 	if s.eng, err = New(o); err != nil {
 		t.Fatal(err)
@@ -533,7 +555,8 @@ func suiteCalls() []agentCall {
 		cq("count text", func(c *CountQuery) { c.Text = "timed out"; c.Bucket = "5m"; c.By = []string{"status"} }),
 		pq("patterns", func(p *PatternsQuery) { p.Top = MaxTop }),
 		pq("patterns text", func(p *PatternsQuery) { p.Text = "for"; p.Top = 10 }),
-		pq("patterns baseline", func(p *PatternsQuery) { p.Top = 50; p.Baseline = "24h" }),
+		// The window and its baseline within a remote source's range.
+		pq("patterns baseline", func(p *PatternsQuery) { p.To = suiteFrom.Add(12 * time.Hour); p.Top = 50; p.Baseline = "12h" }),
 	}
 }
 
