@@ -14,7 +14,7 @@ import (
 //     also with an RFC 3339 timestamp (rsyslog's high-precision template).
 //
 // The header becomes fields (facility, level, host, app, pid, msgid, and
-// structured data as one object per SD-ID); the text after it is the
+// structured data as "sd", one object per SD-ID); the text after it is the
 // message. A 3164 timestamp has no year and no zone: it is read in the
 // parser's location, in the latest year that does not put it more than a
 // day in the future.
@@ -39,28 +39,23 @@ var syslogFacilities = [24]string{"kern", "user", "mail", "daemon", "auth", "sys
 	"uucp", "cron", "authpriv", "ftp", "ntp", "audit", "alert", "clock",
 	"local0", "local1", "local2", "local3", "local4", "local5", "local6", "local7"}
 
-// Detect accepts an RFC 5424 header, or an RFC 3164 header whose host is
-// followed by a tag: a line that only starts with a date is plain text.
+// Detect accepts what Decode accepts, except an RFC 3164 header without a
+// tag after the host: a line that only starts with a date is plain text.
 func (syslogFormat) Detect(line string) bool {
-	if m := syslog5424Re.FindStringSubmatch(line); m != nil {
-		_, ok := pri(m[1])
-		return ok
+	if _, ok := decode5424(line); ok {
+		return true
 	}
-	m := syslog3164Re.FindStringSubmatchIndex(line)
-	if m == nil || m[2] >= 0 && !validPri(line[m[2]:m[3]]) {
-		return false
-	}
-	return syslogTagRe.MatchString(line[m[1]:])
+	_, tagged, ok := decode3164(line, nil)
+	return ok && tagged
 }
 
 func (f syslogFormat) Decode(text string, o *Options) (Event, bool) {
 	if ev, ok := decode5424(text); ok {
 		return ev, true
 	}
-	return decode3164(text, o)
+	ev, _, ok := decode3164(text, o)
+	return ev, ok
 }
-
-func validPri(s string) bool { _, ok := pri(s); return ok }
 
 // pri reads a PRI value (0..191).
 func pri(s string) (int, bool) {
@@ -109,7 +104,7 @@ func decode5424(text string) (Event, bool) {
 		if !ok {
 			return Event{}, false
 		}
-		fields = append(fields, sd...)
+		fields = append(fields, Member{Key: "sd", Value: Value{Kind: KindObject, Members: sd}})
 		rest = rest[n:]
 	} else {
 		rest = rest[1:]
@@ -129,7 +124,7 @@ func structuredData(s string) ([]Member, int, bool) {
 	for i < len(s) && s[i] == '[' {
 		i++
 		j := i
-		for j < len(s) && s[j] != ' ' && s[j] != ']' && s[j] != '=' && s[j] != '"' {
+		for j < len(s) && sdNameByte(s[j]) {
 			j++
 		}
 		if j == i || j-i > 32 || j >= len(s) {
@@ -140,7 +135,7 @@ func structuredData(s string) ([]Member, int, bool) {
 		for i < len(s) && s[i] == ' ' {
 			i++
 			j = i
-			for j < len(s) && s[j] != '=' && s[j] != ' ' && s[j] != ']' && s[j] != '"' {
+			for j < len(s) && sdNameByte(s[j]) {
 				j++
 			}
 			if j == i || j-i > 32 || j+1 >= len(s) || s[j] != '=' || s[j+1] != '"' {
@@ -173,17 +168,30 @@ func structuredData(s string) ([]Member, int, bool) {
 	return out, i, true
 }
 
-func decode3164(text string, o *Options) (Event, bool) {
+// decode3164 also reports whether the header has a tag.
+// sdNameByte is a byte of an SD-NAME: PRINTUSASCII except "=", " ", "]"
+// and '"'.
+func sdNameByte(c byte) bool {
+	return c > ' ' && c < 0x7f && c != '=' && c != ']' && c != '"'
+}
+
+func decode3164(text string, o *Options) (Event, bool, bool) {
 	m := syslog3164Re.FindStringSubmatchIndex(text)
 	if m == nil {
-		return Event{}, false
+		return Event{}, false, false
+	}
+	host := text[m[8]:m[9]]
+	if _, isLevel := levels[strings.ToLower(host)]; isLevel {
+		// "<time> ERROR db: x": an application line with a level, not
+		// a host.
+		return Event{}, false, false
 	}
 	ev := Event{Format: "syslog"}
 	var fields []Member
 	if m[2] >= 0 {
 		p, ok := pri(text[m[2]:m[3]])
 		if !ok {
-			return Event{}, false
+			return Event{}, false, false
 		}
 		fields = priFields(p)
 	}
@@ -196,9 +204,13 @@ func decode3164(text string, o *Options) (Event, bool) {
 			ev.Time, ev.HasTime = t, true
 		}
 	}
-	fields = append(fields, strMember("host", text[m[8]:m[9]]))
+	fields = append(fields, strMember("host", host))
 	rest := text[m[1]:]
-	if t := syslogTagRe.FindStringSubmatchIndex(rest); t != nil {
+	t := syslogTagRe.FindStringSubmatchIndex(rest)
+	if t != nil && strings.HasPrefix(rest[t[1]-1:], "::") {
+		t = nil // "crate::module:": a path, not a tag
+	}
+	if t != nil {
 		fields = append(fields, strMember("app", rest[t[2]:t[3]]))
 		if t[4] >= 0 {
 			fields = append(fields, strMember("pid", rest[t[4]:t[5]]))
@@ -206,7 +218,7 @@ func decode3164(text string, o *Options) (Event, bool) {
 		rest = rest[t[1]:]
 	}
 	ev.Fields, ev.Message = fields, rest
-	return ev, true
+	return ev, true, t != nil
 }
 
 // bsdTime reads "Oct 11 22:14:15" in loc, in the latest year that does not

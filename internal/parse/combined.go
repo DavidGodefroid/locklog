@@ -20,9 +20,19 @@ func (combinedFormat) Name() string { return "combined" }
 
 var combinedRe = regexp.MustCompile(`^(\S{1,255}) (\S{1,255}) (\S{1,255}) \[([0-9]{2}/[A-Z][a-z]{2}/[0-9]{4}:[0-9]{2}:[0-9]{2}:[0-9]{2} [+-][0-9]{4})\] "((?:[^"\\]|\\.)*)" ([1-5][0-9]{2}|-) ([0-9]{1,20}|-)(?: "((?:[^"\\]|\\.)*)" "((?:[^"\\]|\\.)*)")?(?: (.*))?$`)
 
-func (combinedFormat) Detect(line string) bool { return combinedRe.MatchString(line) }
+// Detect needs the "[" of the timestamp within the first 800 bytes (three
+// fields of at most 255 bytes) before it runs the expression.
+func (combinedFormat) Detect(line string) bool {
+	if strings.IndexByte(line[:min(len(line), 800)], '[') < 0 {
+		return false
+	}
+	return combinedRe.MatchString(line)
+}
 
 func (combinedFormat) Decode(text string, o *Options) (Event, bool) {
+	if !(combinedFormat{}).Detect(text) {
+		return Event{}, false
+	}
 	m := combinedRe.FindStringSubmatchIndex(text)
 	if m == nil {
 		return Event{}, false
@@ -63,11 +73,12 @@ func (combinedFormat) Decode(text string, o *Options) (Event, bool) {
 		fields = append(fields, Member{Key: "status", Value: Value{Kind: KindNumber, Str: st}}, strMember("status_class", st[:1]+"xx"))
 	}
 	if b, _ := g(7); b != "-" {
-		kind := KindNumber
-		if len(b) > 1 && b[0] == '0' {
-			kind = KindString // not a JSON number literal
+		if t := strings.TrimLeft(b, "0"); t != "" {
+			b = t // a JSON number literal has no leading zero
+		} else {
+			b = "0"
 		}
-		fields = append(fields, Member{Key: "bytes", Value: Value{Kind: kind, Str: b}})
+		fields = append(fields, Member{Key: "bytes", Value: Value{Kind: KindNumber, Str: b}})
 	}
 	if ref, ok := g(8); ok {
 		add("referer", unescapeCLF(ref))

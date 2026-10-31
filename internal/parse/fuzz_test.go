@@ -231,6 +231,7 @@ var formatSeeds = []string{
 	"<34>Oct 11 22:14:15 host su[1]: x\nFeb 29 12:00:00 h a: y\n2026-01-02T09:00:00+01:00 web s: z\n",
 	`1.2.3.4 - u [10/Oct/2000:13:55:36 -0700] "GET /\"q HTTP/1.0" 200 1 "r" "ua" extra` + "\n",
 	"2026-10-31T02:41:55Z stderr P {\"a\":\n2026-10-31T02:41:55Z stderr F 1}\n2026-10-31T02:41:56Z stdout F\n",
+	"2026-10-31T02:41:55Z stdout P a\n2026-10-31T02:41:55Z stderr P b\n2026-10-31T02:41:55Z stdout F c\n2026-10-31T02:41:55Z stderr F d\n",
 	`{"log":"a","stream":"stdout","time":"2026-10-31T02:41:55Z"}` + "\n" + `{"log":"b\n","attrs":{"t":"x"}}` + "\n",
 }
 
@@ -243,8 +244,8 @@ func fuzzFormat(f *testing.F, name string, framed bool) {
 		evs := fuzzRead(t, p, in)
 		checkEventsGaps(t, in, evs, !framed)
 		for _, e := range evs {
-			if e.Format == name && !strings.Contains(in, e.Message) && name != "combined" && name != "syslog" {
-				t.Fatalf("message %q not in the input", e.Message)
+			if e.Format == "syslog" && !strings.HasSuffix(e.Raw, e.Message) {
+				t.Fatalf("syslog message %q is not the end of %q", e.Message, e.Raw)
 			}
 		}
 	})
@@ -266,7 +267,10 @@ func FuzzSyslogAndCombinedDecode(f *testing.F) {
 		if !utf8.ValidString(line) {
 			return // the reader replaces invalid UTF-8 before decoding
 		}
-		if ev, ok := (syslogFormat{}).Decode(line, nil); ok {
+		if ev, ok := (syslogFormat{}).Decode(line, nil); ok || (syslogFormat{}).Detect(line) {
+			if !ok {
+				t.Fatal("syslog Detect accepts what Decode refuses")
+			}
 			if !strings.HasSuffix(line, ev.Message) {
 				t.Fatalf("syslog message %q is not the end of %q", ev.Message, line)
 			}

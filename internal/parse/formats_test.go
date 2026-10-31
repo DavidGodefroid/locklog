@@ -40,11 +40,12 @@ func TestSyslog5424(t *testing.T) {
 	if got := fieldsOf(t, e, "facility", "level", "host", "app", "pid", "msgid"); got != "facility=local4 level=notice host=mymachine.example.com app=evntslog pid=1234 msgid=ID47" {
 		t.Fatal(got)
 	}
-	sd, ok := Get(e.Fields, "exampleSDID@32473")
+	sdv, _ := Get(e.Fields, "sd")
+	sd, ok := Get(sdv.Members, "exampleSDID@32473")
 	if !ok || sd.Kind != KindObject || len(sd.Members) != 2 || sd.Members[1].Value.Str != `App"x]` {
 		t.Fatalf("structured data %+v", e.Fields)
 	}
-	if _, ok := Get(e.Fields, "meta"); !ok {
+	if _, ok := Get(sdv.Members, "meta"); !ok {
 		t.Fatalf("second SD element lost: %+v", e.Fields)
 	}
 	if e := evs[1]; e.Message != "'su root' failed" || fieldStr(t, e, "level") != "critical" || fieldStr(t, e, "facility") != "auth" || fieldStr(t, e, "pid") != "<none>" {
@@ -244,5 +245,40 @@ func TestAutoDetectsNewFormats(t *testing.T) {
 		if e := readAll(t, p, in+"\n")[0]; e.Format != want {
 			t.Errorf("auto(%q) = %s, want %s", in, e.Format, want)
 		}
+	}
+}
+
+func TestFramesSplitByStream(t *testing.T) {
+	for name, in := range map[string]string{
+		"cri": "2026-10-31T02:41:55Z stdout P hello \n2026-10-31T02:41:55Z stderr F ERR boom\n2026-10-31T02:41:56Z stdout F world\n",
+		"docker-json": `{"log":"hello ","stream":"stdout"}` + "\n" + `{"log":"ERR boom\n","stream":"stderr"}` + "\n" +
+			`{"log":"world\n","stream":"stdout"}` + "\n",
+	} {
+		p := mustParser(t, Options{Format: name})
+		evs := readAll(t, p, in)
+		if len(evs) != 3 {
+			t.Fatalf("%s: %d events %+v", name, len(evs), evs)
+		}
+		for i, want := range []string{"hello stdout", "ERR boom stderr", "world stdout"} {
+			s, _ := Get(evs[i].Attrs, "stream")
+			if got := strings.TrimSpace(evs[i].Message) + " " + s.Str; got != want {
+				t.Errorf("%s event %d: %q, want %q", name, i, got, want)
+			}
+		}
+		checkCoverage(t, in, evs)
+	}
+}
+
+func TestDockerJSONStreamVocabulary(t *testing.T) {
+	fr, ok := (dockerJSONFormat{}).Unwrap(`{"log":"x\n","stream":"secret-value"}`, nil)
+	if _, has := Get(fr.Attrs, "stream"); !ok || has {
+		t.Fatalf("%+v", fr)
+	}
+}
+
+func TestCombinedBytesNumber(t *testing.T) {
+	e, ok := (combinedFormat{}).Decode(`1.2.3.4 - - [10/Oct/2000:13:55:36 -0700] "GET / HTTP/1.1" 200 0042`, nil)
+	if v, _ := Get(e.Fields, "bytes"); !ok || v.Kind != KindNumber || v.Str != "42" {
+		t.Fatalf("%+v", e.Fields)
 	}
 }

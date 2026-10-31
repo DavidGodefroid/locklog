@@ -17,7 +17,10 @@ type Reader struct {
 	p  *Parser
 	lr *LineReader
 
-	peeks   []logical // lines read ahead, in order
+	peeks []logical // lines read ahead, in order
+	// held is a frame line read ahead that ended another stream's partial
+	// run: it is unwrapped (and may start its own run) on the next call.
+	held    *Line
 	pending *assembly
 	err     error
 
@@ -81,6 +84,8 @@ func (r *Reader) Offset() int64 {
 		return r.pending.offset
 	case len(r.peeks) > 0:
 		return r.peeks[0].Offset
+	case r.held != nil:
+		return r.held.Offset
 	}
 	return r.lr.Offset()
 }
@@ -148,13 +153,18 @@ func (r *Reader) nextLogical() (logical, error) {
 		r.peeks = r.peeks[1:]
 		return ln, nil
 	}
-	if r.err != nil {
-		return logical{}, r.err
-	}
-	l, err := r.lr.Next()
-	if err != nil {
-		r.err = err
-		return logical{}, err
+	var l Line
+	if r.held != nil {
+		l, r.held = *r.held, nil
+	} else {
+		if r.err != nil {
+			return logical{}, r.err
+		}
+		var err error
+		if l, err = r.lr.Next(); err != nil {
+			r.err = err
+			return logical{}, err
+		}
 	}
 	if r.p.framer == nil {
 		return logical{Line: l}, nil
@@ -186,6 +196,12 @@ func (r *Reader) nextLogical() (logical, error) {
 			// may be a frame still being written: hold the run.
 			r.peeks = append(r.peeks, logical{Line: l2})
 			open = open || l2.Unterminated
+			break
+		}
+		if frameStream(next) != frameStream(fr) {
+			// Runtimes interleave stdout and stderr in one file: a
+			// frame of the other stream ends this run, never joins it.
+			r.held = &l2
 			break
 		}
 		next.Text = validText([]byte(next.Text))
@@ -322,4 +338,10 @@ func (r *Reader) emit() Event {
 		ev.Time, ev.Inherited = r.lastTime, true
 	}
 	return ev
+}
+
+// frameStream is a frame's "stream" attribute ("" when it has none).
+func frameStream(fr Frame) string {
+	v, _ := Get(fr.Attrs, "stream")
+	return v.Str
 }

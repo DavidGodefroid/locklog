@@ -10,8 +10,9 @@ import (
 //	2026-10-31T02:41:55.123456789Z stderr F payload
 //
 // The runtime's timestamp is the frame's time, the stream an attribute,
-// and a "P" tag marks a line the runtime split (the reader joins the run).
-// The payload is decoded with "auto".
+// and a "P" tag marks a line the runtime split (the reader joins the run,
+// which a frame of the other stream ends). The payload is decoded with
+// "auto"; a frame with an empty payload is a blank line and makes no event.
 type criFormat struct{}
 
 func (criFormat) Name() string                          { return "cri" }
@@ -79,7 +80,8 @@ func (dockerJSONFormat) Unwrap(line string, _ *Options) (Frame, bool) {
 	} else {
 		fr.Partial = true
 	}
-	if s, ok := Get(v.Members, "stream"); ok && s.Kind == KindString {
+	// "stream" is trusted: only Docker's own two values are kept.
+	if s, ok := Get(v.Members, "stream"); ok && (s.Str == "stdout" || s.Str == "stderr") && s.Kind == KindString {
 		fr.Attrs = append(fr.Attrs, strMember("stream", s.Str))
 	}
 	if a, ok := Get(v.Members, "attrs"); ok && a.Kind == KindObject {
