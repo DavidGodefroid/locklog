@@ -295,3 +295,18 @@ func TestFailureRemovesTheDirectoryItCreated(t *testing.T) {
 		}
 	}
 }
+
+func TestDirLockedBeforeTheEmptinessCheck(t *testing.T) {
+	// An existing Dir open to its group: made 0700 before it is checked
+	// empty (and left so when it is refused for not being empty).
+	o, _ := setup(t)
+	os.MkdirAll(o.Dir, 0o700)
+	os.Chmod(o.Dir, 0o770)
+	os.WriteFile(filepath.Join(o.Dir, "planted"), nil, 0o600)
+	if _, err := Generate(o); err == nil {
+		t.Fatal("a non-empty directory accepted")
+	}
+	if fi, _ := os.Stat(o.Dir); fi.Mode().Perm() != 0o700 {
+		t.Fatalf("mode %v after the check", fi.Mode().Perm())
+	}
+}

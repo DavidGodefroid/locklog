@@ -107,13 +107,14 @@ func writeFiles(dir string, files []file) error {
 		cleanup()
 		return errors.New("authproxy: the directory is not a directory of yours")
 	}
-	if names, err := d.Readdirnames(-1); err != nil || len(names) > 0 {
-		cleanup()
-		return errors.New("authproxy: the directory exists and is not empty")
-	}
+	// 0700 first: nothing can be added by others once it is checked empty.
 	if err := unix.Fchmod(dfd, 0o700); err != nil {
 		cleanup()
 		return err
+	}
+	if names, err := d.Readdirnames(-1); err != nil || len(names) > 0 {
+		cleanup()
+		return errors.New("authproxy: the directory exists and is not empty")
 	}
 	afterOpen()
 	for _, f := range files {
