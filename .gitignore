@@ -1,0 +1,7 @@
+/locklog
+/locklog.exe
+/dist/
+*.test
+*.out
+go.work
+go.work.sum

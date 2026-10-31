@@ -2,8 +2,14 @@
 
 Your AI reads the logs, not the people in them.
 
-locklog lets an AI agent search and count across your logs over MCP, while a
-console held by a human reads them. The personal data and secrets locklog
-detects are masked before anything reaches the model.
+locklog lets an AI agent (Claude Code, Codex, Cursor, Gemini CLI) find when
+something broke in your logs, over MCP, without reading them in clear. A
+console held by a human, in its own account and container, reads the logs;
+the agent gets masked, bounded answers. The personal data and secrets
+locklog detects are masked before anything reaches the model.
 
-Status: in development; no release yet. Licensed under the Apache License 2.0.
+**Status:** in development, no release yet. Nothing here is ready to use.
+
+## License
+
+Apache License 2.0: see [LICENSE](LICENSE) and [NOTICE](NOTICE).

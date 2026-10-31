@@ -1,0 +1,39 @@
+name: Bug report
+description: Something does not work as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For a security issue, use the private report link instead. Never paste real credentials, tokens, cookies, real personal data or unmasked log lines.
+  - type: input
+    id: version
+    attributes:
+      label: locklog version
+      description: Output of `locklog version`.
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: OS, agent and log source
+      placeholder: Ubuntu 24.04, Docker 27, agent in its own container, journald
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected and actual behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Output or logs
+      render: text

@@ -1,0 +1,107 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.x"
+          check-latest: true
+      - name: go vet
+        run: go vet ./...
+      - name: go test
+        shell: bash
+        run: |
+          set -o pipefail
+          go test ./... 2>&1 | tee test.log || {
+            # Surface the failures as annotations, readable without the logs.
+            grep -E -- '--- FAIL|_test\.go:[0-9]+:|^FAIL|panic:' test.log | head -40 | sed 's/^/::error::/'
+            exit 1
+          }
+
+  # Windows: the module builds and its unit tests run, but the locklog
+  # console itself runs only on Linux (in Docker). Test files that need Unix
+  # accounts, file modes, sockets or terminals carry `//go:build unix`.
+  test-windows:
+    name: test (windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 15
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      # Keep LF line endings: fixtures and golden text are compared byte
+      # for byte.
+      - name: git line endings
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.x"
+          check-latest: true
+      - name: go build
+        run: go build ./...
+      - name: go vet
+        run: go vet ./...
+      - name: go test
+        shell: bash
+        run: |
+          set -o pipefail
+          go test ./... 2>&1 | tee test.log || {
+            grep -E -- '--- FAIL|_test\.go:[0-9]+:|^FAIL|panic:' test.log | head -40 | sed 's/^/::error::/'
+            exit 1
+          }
+
+  # One required check name ("lint") for every static check; later pull
+  # requests add steps here (goreleaser check, install.sh rules, ...).
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: hygiene (no internal names in tracked files)
+        run: sh scripts/hygiene.sh
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.x"
+          check-latest: true
+      - name: gofmt
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then echo "gofmt: these files need formatting:"; echo "$out"; exit 1; fi
+      - name: go vet
+        run: go vet ./...
+      - name: staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.1 ./...
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
