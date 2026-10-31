@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/DavidGodefroid/locklog/internal/index"
-	"github.com/DavidGodefroid/locklog/internal/parse"
 	"github.com/DavidGodefroid/locklog/internal/source"
 )
 
@@ -140,9 +139,11 @@ func scanAll(t *testing.T, s *Source, sel source.Selector) []source.RawRecord {
 	return out
 }
 
+// attr is a trusted attribute of a record ("attrs.<key>" into the frame's
+// attrs object), as the index reads it.
 func attr(r source.RawRecord, k string) string {
-	v, _ := parse.Get(r.Event.Attrs, k)
-	return v.Str
+	v, _ := index.Lookup(r.Event, k)
+	return v
 }
 
 // messages returns "<container>: <message>" per record, sorted.
@@ -185,7 +186,14 @@ func TestServesOnlyApprovedContainers(t *testing.T) {
 		"c "+self+" shop-self 1 0\n"+
 		"c "+short+" shop-short 1 0\n"+
 		"x "+x+"\n")
-	got := messages(scanAll(t, e.source("shop-*"), source.Selector{}))
+	recs := scanAll(t, e.source("shop-*"), source.Selector{})
+	// The json-file attrs: only the allowlisted key (team), as attrs.team.
+	for _, r := range recs {
+		if attr(r, "attrs.team") != "shop" || attr(r, "attrs.env") != "" {
+			t.Fatalf("attrs %+v", r.Event.Attrs)
+		}
+	}
+	got := messages(recs)
 	want := append(append(lines("shop-api-1|live", 0, 1), lines("shop-api-1|rot1", 0, 1)...), lines("shop-api-1|rot2", 0, 1)...)
 	sort.Strings(want)
 	if !slices.Equal(got, want) {

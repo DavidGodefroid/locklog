@@ -122,9 +122,10 @@ type Options struct {
 	Start string
 	// Location reads zone-less timestamps; nil means UTC.
 	Location *time.Location
-	// FrameAttrs are the keys of a frame's own attributes a framer keeps
-	// (docker-json "attrs", kept as "attrs.<key>"); the others are
-	// dropped. Default: none.
+	// FrameAttrs are the keys of a docker-json frame's "attrs" object (the
+	// log driver's labels and env) kept in the event's "attrs" attribute;
+	// the others are dropped, and the attribute too when none is left.
+	// Default: none.
 	FrameAttrs []string
 	// StaticAttrs are attributes the source puts on every event, framed or
 	// not, before the frame's own (docker: the trusted container name).
@@ -268,11 +269,40 @@ func (p *Parser) Line(text string) Event {
 
 // attrs returns an event's attributes: the static ones, then the frame's.
 func (p *Parser) attrs(frame []Member) []Member {
+	frame = p.filterFrameAttrs(frame)
 	if len(p.opts.StaticAttrs) == 0 {
 		return frame
 	}
 	return append(slices.Clone(p.opts.StaticAttrs), frame...)
 }
+
+// filterFrameAttrs keeps, of a frame's "attrs" object, only the members
+// FrameAttrs names (string values only: Docker writes no other).
+func (p *Parser) filterFrameAttrs(frame []Member) []Member {
+	i := slices.IndexFunc(frame, func(m Member) bool { return m.Key == "attrs" })
+	if i < 0 {
+		return frame
+	}
+	out := slices.Clone(frame)
+	var kept []Member
+	if out[i].Value.Kind == KindObject {
+		for _, m := range out[i].Value.Members {
+			if m.Value.Kind == KindString && slices.Contains(p.opts.FrameAttrs, m.Key) && !slices.ContainsFunc(kept, func(k Member) bool { return k.Key == m.Key }) {
+				kept = append(kept, m)
+			}
+		}
+	}
+	if len(kept) == 0 {
+		return slices.Delete(out, i, i+1)
+	}
+	out[i] = Member{Key: "attrs", Value: Value{Kind: KindObject, Members: kept}}
+	return out
+}
+
+// FrameKeys are the attributes a framer sets (cri, docker-json): on a
+// framed event they resolve against Event.Attrs only, never against the
+// payload's fields, which may hold the same keys.
+var FrameKeys = []string{"stream", "attrs"}
 
 // plainFormat is free text: an optional leading timestamp (bare or in
 // brackets) and an optional level word after it, kept as the parser-known

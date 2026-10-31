@@ -5,12 +5,19 @@ import (
 	"testing"
 )
 
+// attr returns an attribute, "attrs.<key>" reaching into the attrs object.
 func attr(ev Event, key string) (string, bool) {
-	v, ok := Get(ev.Attrs, key)
+	head, rest, nested := strings.Cut(key, ".")
+	v, ok := Get(ev.Attrs, head)
+	if ok && nested {
+		v, ok = Get(v.Members, rest)
+	}
 	return v.Str, ok
 }
 
-func TestDockerJSONFrames(t *testing.T) {
+// The docker-json frame with the source's options: FrameAttrs filters the
+// attrs object, StaticAttrs comes first on every event.
+func TestDockerJSONFrameAttrs(t *testing.T) {
 	p := mustParser(t, Options{Format: "docker-json", FrameAttrs: []string{"team"},
 		StaticAttrs: []Member{{Key: "container", Value: Value{Kind: KindString, Str: "shop-api-1"}}}})
 	in := `{"log":"{\"msg\":\"he","stream":"stdout","time":"2026-10-31T01:20:40.732446205Z"}` + "\n" +
@@ -48,10 +55,11 @@ func TestDockerJSONFrames(t *testing.T) {
 	if v, _ := attr(e, "attrs.team"); v != "shop" {
 		t.Errorf("allowed attr: %+v", e.Attrs)
 	}
-	for _, m := range e.Attrs {
-		if strings.Contains(m.Value.Str, "X=1") || m.Key == "attrs.env" || m.Key == "attrs.secret" {
-			t.Errorf("attr outside the allowlist kept: %+v", e.Attrs)
-		}
+	if a, _ := Get(e.Attrs, "attrs"); len(a.Members) != 1 {
+		t.Errorf("attrs outside the allowlist kept: %+v", e.Attrs)
+	}
+	if !e.Framed || evs[2].Framed {
+		t.Errorf("Framed: %v %v", e.Framed, evs[2].Framed)
 	}
 	// A non-frame line is free text, with the static attrs only.
 	if e := evs[2]; e.Raw != "not a frame" || len(e.Attrs) != 1 || e.Attrs[0].Key != "container" {
@@ -92,7 +100,7 @@ func TestDockerJSONPartialAtEOFHeld(t *testing.T) {
 	}
 }
 
-func FuzzParseDockerJSON(f *testing.F) {
+func FuzzParseDockerJSONFrameAttrs(f *testing.F) {
 	for _, s := range fuzzSeeds {
 		f.Add(s)
 	}
@@ -108,7 +116,10 @@ func FuzzParseDockerJSON(f *testing.F) {
 				t.Fatalf("static attr missing: %+v", e.Attrs)
 			}
 			for _, m := range e.Attrs[1:] {
-				if m.Key != "stream" && m.Key != "attrs.k" {
+				if m.Key == "attrs" && (len(m.Value.Members) != 1 || m.Value.Members[0].Key != "k") {
+					t.Fatalf("attrs not filtered: %+v", m.Value)
+				}
+				if m.Key != "stream" && m.Key != "attrs" {
 					t.Fatalf("unexpected attr %q", m.Key)
 				}
 			}

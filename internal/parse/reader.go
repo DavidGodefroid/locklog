@@ -348,6 +348,7 @@ func (r *Reader) emit() Event {
 	}
 	ev.Attrs = r.p.attrs(nil)
 	if a.frame != nil {
+		ev.Framed = true
 		ev.Attrs = r.p.attrs(a.frame.Attrs)
 		if a.frame.HasTime {
 			// The runtime's timestamp is authoritative for ordering;

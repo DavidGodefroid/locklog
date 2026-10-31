@@ -272,3 +272,29 @@ func TestLookupPrefersFrameAttrs(t *testing.T) {
 		t.Errorf("level = %q %v", v, ok)
 	}
 }
+
+// On a framed event, the frame keys resolve against the attributes only:
+// a payload "stream" never stands for the runtime's; attrs.<key> reaches
+// into the frame's attrs object.
+func TestLookupFrameKeys(t *testing.T) {
+	e := ev(t0, "stream", "spoofed", "level", "warn")
+	e.Framed = true
+	if v, ok := Lookup(e, "stream"); ok {
+		t.Errorf("framed: payload stream %q used", v)
+	}
+	e.Attrs = []parse.Member{{Key: "attrs", Value: parse.Value{Kind: parse.KindObject,
+		Members: []parse.Member{{Key: "team", Value: parse.Value{Kind: parse.KindString, Str: "shop"}}}}}}
+	if v, ok := Lookup(e, "attrs.team"); !ok || v != "shop" {
+		t.Errorf("attrs.team = %q %v", v, ok)
+	}
+	if _, ok := Lookup(e, "attrs.other"); ok {
+		t.Error("attrs.other found")
+	}
+	if v, ok := Lookup(e, "level"); !ok || v != "warn" {
+		t.Errorf("level = %q %v", v, ok)
+	}
+	e.Framed = false
+	if v, _ := Lookup(e, "stream"); v != "spoofed" {
+		t.Errorf("not framed: %q", v)
+	}
+}

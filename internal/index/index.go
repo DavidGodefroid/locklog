@@ -196,13 +196,21 @@ func Values(ev parse.Event, fields []string, sensitive func(field, value string)
 	return out
 }
 
-// Lookup returns the scalar text of a field of ev: a frame attribute (the
-// runtime's stream, the source's container name) first, so that a payload
-// field of the same name cannot stand for it; else a top-level member named
-// name, else a dotted path through nested objects.
+// Lookup returns the scalar text of a field of ev: an attribute (the
+// runtime's stream, a docker attrs.<key>, the source's container name)
+// first, so that a payload field of the same name cannot stand for it; on a
+// framed event, a frame key (parse.FrameKeys) resolves against the
+// attributes only; else a top-level member named name, else a dotted path
+// through nested objects.
 func Lookup(ev parse.Event, name string) (string, bool) {
-	if v, ok := parse.Get(ev.Attrs, name); ok {
-		return scalar(v)
+	if v, ok := lookupMembers(ev.Attrs, name); ok {
+		return v, true
+	}
+	if ev.Framed {
+		head, _, _ := strings.Cut(name, ".")
+		if slices.Contains(parse.FrameKeys, head) {
+			return "", false
+		}
 	}
 	return lookupMembers(ev.Fields, name)
 }
