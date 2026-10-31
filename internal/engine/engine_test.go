@@ -297,6 +297,7 @@ func TestMaskedViewSemantics(t *testing.T) {
 }
 
 func TestCursorsContinueAndAgree(t *testing.T) {
+	heavyRace(t)
 	content := genLog(t0, 30000, "canary@example.org") // > 3 granules
 	whole := newFixture(t, content, nil)
 	want, _ := allRecords(t, whole.eng, q(func(q *Query) { q.Where = []Pred{{Field: "level", Op: "=", Value: raw("error")}}; q.Limit = 200 }))
@@ -370,6 +371,7 @@ func TestCursorRefusals(t *testing.T) {
 // that differ only in which canary they look for stop at the same plan
 // positions and report the same work.
 func TestStoppingPointsIndependentOfPredicates(t *testing.T) {
+	heavyRace(t)
 	a, b := "alpha.canary@example.org", "b@example.net"
 	content := genLog(t0, 30000, a)
 	run := func(text string) []Scanned {
@@ -444,6 +446,7 @@ func allPages(t *testing.T, e *Engine, qq Query) []string {
 // a log with records masking fails on, only masked_failures differs (0 with
 // the filter, see prefilter.go).
 func TestPrefilterEquivalence(t *testing.T) {
+	heavyRace(t)
 	content := genLog(t0, 20000, "canary@example.org") + "time=2026-10-30T13:00:00Z level=info msg=\"caf\\u00e9 ok\"\n" +
 		// Invisible runes and invalid bytes the masker drops join text.
 		"time=2026-10-30T13:00:01Z level=info msg=\"ab\\u200bcd joined\"\n" +
@@ -620,6 +623,7 @@ func TestNoDigestOnTheSocket(t *testing.T) {
 }
 
 func TestCountFromIndexEqualsScan(t *testing.T) {
+	heavyRace(t)
 	// The last granule holds records the masker fails on: the index
 	// counts them by their trusted values, and so must a scan.
 	content := boomLog(30000)
@@ -699,7 +703,11 @@ func TestCalibration(t *testing.T) {
 	p, _ := parse.New(parse.Options{})
 	c := NewCostModel(p, func(ev parse.Event) { f.masker.Mask("app", ev) }, 2, time.Now)
 	ns := c.NsPerByte()
-	if ns < minCostPerByte || ns > DefaultNsPerByte*10 {
+	ceiling := float64(DefaultNsPerByte * 10)
+	if raceEnabled {
+		ceiling *= 10 // the race detector slows masking several fold
+	}
+	if ns < minCostPerByte || ns > ceiling {
 		t.Fatalf("calibrated %.1f ns/byte", ns)
 	}
 	if b := c.Budget(time.Second); b <= 0 || c.Time(b) > time.Second+time.Millisecond {
@@ -767,6 +775,7 @@ func TestCalibrationInBackground(t *testing.T) {
 // evaluator; the index holds raw literals, so numeric terms are never pushed
 // down nor served from it, and cold and indexed answers agree.
 func TestNumericTermsColdEqualsIndexed(t *testing.T) {
+	heavyRace(t)
 	content := genLog(t0, 10000, "c@example.org") // 3 granules
 	type tc struct {
 		name string
@@ -899,6 +908,7 @@ func TestSourceErrorsAreContentFree(t *testing.T) {
 // TestLastCursorsContinue: a query by last keeps the window resolved at its
 // first call; continuations made while the clock moves continue it.
 func TestLastCursorsContinue(t *testing.T) {
+	heavyRace(t)
 	content := genLog(t0, 30000, "c@example.org") // 8h20m, 4 granules
 	f := newFixture(t, content, oneGranulePerCall)
 	now := t0.Add(3 * time.Hour)
@@ -944,6 +954,7 @@ func TestLastCursorsContinue(t *testing.T) {
 // TestFailedContinuationKeepsItsState: a continuation that fails leaves its
 // cached page and partial count in place; retrying the cursor completes.
 func TestFailedContinuationKeepsItsState(t *testing.T) {
+	heavyRace(t)
 	content := genLog(t0, 30000, "c@example.org")
 	flaky := func(f *fixture) {
 		calls := 0
@@ -1033,6 +1044,7 @@ func boomLog(n int) string {
 // whole and counted; every other record of its granule is answered, and no
 // call is refused, so cursors always get past it.
 func TestMaskFailuresWithheldPerRecord(t *testing.T) {
+	heavyRace(t)
 	f := newFixtureMask(t, boomLog(30000), withBoom, oneGranulePerCall)
 	qq := q(func(q *Query) { q.Text = "upstream"; q.Limit = 200; q.Fields = []string{"level"} })
 	recs, pages := allRecords(t, f.eng, qq)
@@ -1072,6 +1084,7 @@ func TestMaskFailuresWithheldPerRecord(t *testing.T) {
 // TestLastCursorMismatch: a cursor of a query by last continues only the
 // same last; another last, or the resolved from/to, is another query.
 func TestLastCursorMismatch(t *testing.T) {
+	heavyRace(t)
 	f := newFixture(t, genLog(t0, 30000, "c@example.org"), oneGranulePerCall)
 	f.eng.o.Now = func() time.Time { return t0.Add(3 * time.Hour) }
 	res, err := f.eng.Search(ctx, Query{Last: "2h", Limit: 200})
@@ -1669,6 +1682,7 @@ func (it processedIter) Close() error {
 // by estimate, that expands beyond the call's byte budget is refused once
 // the budget is processed, never buffered whole.
 func TestUnmeasuredCompressedBudget(t *testing.T) {
+	heavyRace(t)
 	// About 30:1: repeated blocks, each with a random id.
 	var pb strings.Builder
 	block := genLog(t0, 50, "c@example.org")
@@ -1842,6 +1856,7 @@ func checkOrder(t *testing.T, ts []time.Time, want int, desc bool) {
 // compressed) and for an ascending one over a stream the index prunes into
 // several chunks.
 func TestOrderAcrossCalls(t *testing.T) {
+	heavyRace(t)
 	errors := q(func(q *Query) {
 		q.Where = []Pred{{Field: "level", Op: OpEq, Value: raw("error")}}
 		q.Limit = 200
@@ -1973,6 +1988,7 @@ func (u unknownGranules) Plan(ctx context.Context, r source.Range, sel source.Se
 // of known bytes are sized by their share of it: a call takes the groups
 // that fit, never the whole chunk, and order holds across calls.
 func TestUnknownGranuleBytesStillGrouped(t *testing.T) {
+	heavyRace(t)
 	f := newFixture(t, genLog(t0, 30000, "c@example.org"), func(o *Options) {
 		oneGranulePerCall(o)
 		o.Sources["app"] = unknownGranules{o.Sources["app"]}
@@ -2036,6 +2052,7 @@ func TestDedupRecordsBounded(t *testing.T) {
 // granule cannot be read within the byte budget is refused at admission,
 // as the ascending one is, before reading anything.
 func TestDescCompressedTailAdmission(t *testing.T) {
+	heavyRace(t)
 	start := t0.Add(-30 * time.Hour)
 	plain := genLog(start, 120000, "c@example.org") // ~14 MiB, 33 h
 	var gz bytes.Buffer
