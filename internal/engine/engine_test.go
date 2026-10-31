@@ -435,13 +435,38 @@ func allPages(t *testing.T, e *Engine, qq Query) []string {
 }
 
 // TestPrefilterEquivalence: the opt-in pre-filter changes nothing a call
-// returns (records, scanned work, failures, completeness, cursor
-// positions), whichever needle, including needles found only inside masked
-// values.
+// returns (records, counts, scanned work, completeness, cursor positions),
+// whichever needle, including needles found only inside masked values; on
+// a log with records masking fails on, only masked_failures differs (0 with
+// the filter, see prefilter.go).
 func TestPrefilterEquivalence(t *testing.T) {
 	content := genLog(t0, 20000, "canary@example.org") + "time=2026-10-30T13:00:00Z level=info msg=\"caf\\u00e9 ok\"\n"
-	f := newFixture(t, content, oneGranulePerCall)
+	t.Run("plain", func(t *testing.T) { prefilterEquivalence(t, newFixture(t, content, oneGranulePerCall), false) })
+	t.Run("failing granule", func(t *testing.T) {
+		prefilterEquivalence(t, newFixtureMask(t, boomLog(), withBoom, oneGranulePerCall), true)
+	})
+}
+
+func prefilterEquivalence(t *testing.T, f *fixture, failing bool) {
+	// noFailures drops masked_failures from a normalised search page,
+	// checking that the filter reports none.
+	noFailures := func(pages []string, on bool) []string {
+		var out []string
+		for _, p := range pages {
+			var m map[string]any
+			json.Unmarshal([]byte(p), &m)
+			if on && m["masked_failures"] != nil {
+				t.Fatalf("masked failures reported with the pre-filter: %v", m["masked_failures"])
+			}
+			delete(m, "masked_failures")
+			b, _ := json.Marshal(m)
+			out = append(out, string(b))
+		}
+		return out
+	}
 	queries := []Query{
+		q(func(q *Query) { q.Text = "upstream"; q.Limit = 200 }),
+		q(func(q *Query) { q.Text = "kaboom"; q.Limit = 200 }),
 		q(func(q *Query) { q.Text = "order 12"; q.Limit = 200 }),
 		q(func(q *Query) { q.Text = "café"; q.Limit = 200 }),
 		q(func(q *Query) {
@@ -459,6 +484,9 @@ func TestPrefilterEquivalence(t *testing.T) {
 		off := allPages(t, f.eng, qq)
 		f.eng.o.Prefilter = true
 		on := allPages(t, f.eng, qq)
+		if failing {
+			off, on = noFailures(off, false), noFailures(on, true)
+		}
 		if !slices.Equal(off, on) {
 			t.Errorf("%q: the pre-filter changes the result:\n%v\n%v", qq.Text, off, on)
 		}
@@ -477,6 +505,9 @@ func TestPrefilterEquivalence(t *testing.T) {
 		if x, y := normalize(t, f.eng, a), normalize(t, f.eng, b); x != y {
 			t.Errorf("%q: the pre-filter changes the count:\n%s\n%s", qq.Text, x, y)
 		}
+	}
+	if failing {
+		return
 	}
 	f.eng.o.Prefilter = true
 	// scanned.records counts every record of the plan.
