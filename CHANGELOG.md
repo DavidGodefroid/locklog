@@ -6,6 +6,12 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-01
+
+The first release: the console, the engine and the MCP server over files,
+journald and Docker logs (and Loki), with the masking pipeline, the local
+index, budgets and scan approvals, and the site locklog.dev.
+
 ### Added
 
 - Repository bootstrap: Go module, `locklog version`, CI (tests on Linux,
@@ -222,3 +228,6 @@ uses [Semantic Versioning](https://semver.org/).
 - The launcher chooses the non-recursive bind option from the Docker CLI
   version, which parses it (`bind-recursive=disabled` from CLI 25), not from
   the engine's.
+
+[Unreleased]: https://github.com/DavidGodefroid/locklog/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/DavidGodefroid/locklog/releases/tag/v0.1.0
