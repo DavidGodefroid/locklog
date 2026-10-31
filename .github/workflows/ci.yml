@@ -141,10 +141,60 @@ jobs:
       - name: integration tests
         env:
           LOCKLOG_LOKI_URL: http://127.0.0.1:3100
-        run: go test -tags integration -count=1 ./test/...
+        run: go test -tags integration -count=1 ./test/loki/...
       - name: backend logs on failure
         if: failure()
         run: docker logs loki 2>&1 | tail -100
+
+  # The Elasticsearch source against Elasticsearch 8 and OpenSearch 2, both
+  # with security on (OpenSearch: the security plugin's demo configuration,
+  # TLS on the transport layer only), from pulled images. The tests create
+  # read-only and write-capable users and check the production refusal.
+  integration-elastic:
+    name: integration (elasticsearch, opensearch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      CGO_ENABLED: "0"
+      OS_ADMIN_PW: "Zq8#Vt3rLp!kW7xN-ci"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.x"
+          check-latest: true
+      - name: start Elasticsearch and OpenSearch
+        run: |
+          docker run -d --name es -p 127.0.0.1:9200:9200 -e discovery.type=single-node \
+            -e xpack.security.enabled=true -e xpack.security.http.ssl.enabled=false \
+            -e ELASTIC_PASSWORD=ci-elastic-pw -e "ES_JAVA_OPTS=-Xms512m -Xmx512m" \
+            docker.elastic.co/elasticsearch/elasticsearch:8.15.3
+          docker run -d --name os -p 127.0.0.1:9201:9200 -e discovery.type=single-node \
+            -e "OPENSEARCH_INITIAL_ADMIN_PASSWORD=$OS_ADMIN_PW" -e plugins.security.ssl.http.enabled=false \
+            -e "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m" opensearchproject/opensearch:2.17.1
+          for i in $(seq 1 120); do
+            if curl -fsS -u elastic:ci-elastic-pw http://127.0.0.1:9200/_cluster/health >/dev/null 2>&1 &&
+              curl -fsS -u "admin:$OS_ADMIN_PW" http://127.0.0.1:9201/_plugins/_security/authinfo >/dev/null 2>&1; then exit 0; fi
+            sleep 2
+          done
+          docker logs es | tail -50
+          docker logs os | tail -50
+          exit 1
+      - name: OpenSearch refuses an anonymous read
+        run: test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:9201/_cat/indices)" = 401
+      - name: integration tests
+        env:
+          LOCKLOG_ES_URL: http://127.0.0.1:9200
+          LOCKLOG_ES_ADMIN: elastic:ci-elastic-pw
+          LOCKLOG_OPENSEARCH_URL: http://127.0.0.1:9201
+        run: LOCKLOG_OPENSEARCH_ADMIN="admin:$OS_ADMIN_PW" go test -tags integration -count=1 -v ./test/elastic/...
+      - name: backend logs on failure
+        if: failure()
+        run: |
+          docker logs es 2>&1 | tail -100
+          docker logs os 2>&1 | tail -100
 
   # Every fuzz target for a short time; run scripts/fuzz.sh with a longer
   # FUZZTIME locally for deeper runs.
