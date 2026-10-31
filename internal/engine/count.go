@@ -52,6 +52,10 @@ type CountQuery struct {
 	// values, then the ByLabels values.
 	By       []string `json:"by,omitempty"`
 	ByLabels []string `json:"by_labels,omitempty"`
+	// ByPattern also groups by the Template of the masked message (the
+	// last key; null without a message). It counts as one of MaxBy and is
+	// never served from the index.
+	ByPattern bool `json:"by_pattern,omitempty"`
 	// FirstLast adds each group's first and last timestamp.
 	FirstLast bool `json:"first_last,omitempty"`
 
@@ -88,6 +92,7 @@ type CountResult struct {
 type agg struct {
 	groups  map[string]*Group
 	untimed int64
+	noText  int64 // patterns: matching records without a message
 	indexed bool
 	from    time.Time
 	until   time.Time
@@ -232,13 +237,16 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 	cursor := q.Cursor
 	q.Cursor = ""
 	// The caps first: the trust loops below are sources × predicates.
-	if len(q.Sources) > MaxSources || len(q.Where) > MaxPredicates || len(q.By)+len(q.ByLabels) > MaxBy {
+	if len(q.Sources) > MaxSources || len(q.Where) > MaxPredicates || q.byCount() > MaxBy {
 		return CountResult{}, refuse(EBadQuery, "", "at most %d sources, %d predicates and %d fields and labels to count by", MaxSources, MaxPredicates, MaxBy)
 	}
 	trustedOnly := q.trustedOnly(e.o.Trusted)
 	if len(q.Sources) == 0 {
 		q.Sources = append([]string(nil), e.names...)
 		trustedOnly = q.trustedOnly(e.o.Trusted)
+	}
+	if q.ByPattern {
+		trustedOnly = false // a template is of masked text
 	}
 	for _, p := range q.groupBy() {
 		for _, s := range q.Sources {
@@ -275,8 +283,8 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 	if err := v.validate(&q.Query); err != nil {
 		return CountResult{}, err
 	}
-	if len(q.By)+len(q.ByLabels) > MaxBy {
-		return CountResult{}, refuse(EBadQuery, "by", "at most %d fields and labels", MaxBy)
+	if q.byCount() > MaxBy {
+		return CountResult{}, refuse(EBadQuery, "by", "at most %d fields, labels and the pattern", MaxBy)
 	}
 	for i, b := range q.By {
 		if err := v.path(&q.Query, b, fmt.Sprintf("by[%d]", i)); err != nil {
@@ -360,7 +368,11 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 
 	sc, failures := Scanned{}, 0
 	var err *Error
-	chunk, gran, sc, failures, err = e.run(ctx, f.plan, chunk, gran, nil, e.callBytes(q.Sources), q.evalFactor(), func(raw source.RawRecord, rec mask.Record, b *budget) {
+	factor := q.evalFactor()
+	if q.ByPattern {
+		factor++ // templating reads every matching message
+	}
+	chunk, gran, sc, failures, err = e.run(ctx, f.plan, chunk, gran, nil, e.callBytes(q.Sources), factor, func(raw source.RawRecord, rec mask.Record, b *budget) {
 		if rec.Failed() && trustedOnly {
 			// The index counts every record by its trusted values;
 			// a scan of a trusted-only count does the same for a
@@ -391,6 +403,17 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 				s := vs[0].text
 				key[i] = &s
 			}
+		}
+		if q.ByPattern {
+			var p *string
+			if m := rec.Message(); m != "" {
+				if b.charge(leafCost + int64(len(m))) {
+					return
+				}
+				tp := Template(m)
+				p = &tp
+			}
+			key = append(key, p)
 		}
 		a.add(q.bucketOf(t), key, 1, t, true)
 	})
@@ -509,6 +532,15 @@ func (e *Engine) countFailed(q *CountQuery, raw source.RawRecord, rec mask.Recor
 }
 
 // groupBy is the group key's parts: By fields, then ByLabels labels.
+// byCount is the number of keys a count groups by.
+func (q *CountQuery) byCount() int {
+	n := len(q.By) + len(q.ByLabels)
+	if q.ByPattern {
+		n++
+	}
+	return n
+}
+
 func (q *CountQuery) groupBy() []Pred {
 	var out []Pred
 	for _, b := range q.By {

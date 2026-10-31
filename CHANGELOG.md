@@ -49,6 +49,12 @@ uses [Semantic Versioning](https://semver.org/).
   refused); public IP addresses (`ip`) join the default detectors;
   `person_name` and `phone_loose` are opt-in by naming them in a profile's
   `detectors`.
+- Patterns (`log.patterns`): the top templates of the masked message text
+  (pseudonyms keep their kind, `⟦email:…⟧`; digit-bearing parts become
+  `<*>`), with first/last times, an optional `baseline` offset (the same
+  window earlier: baseline counts, `new` and `gone` patterns, each granule
+  read once), plan-based admission and free continuations; `count` gains
+  `by_pattern`.
 
 ### Fixed
 
