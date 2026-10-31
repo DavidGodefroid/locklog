@@ -8,6 +8,9 @@
 //
 //	file <dir> <glob>     a file source: bind <dir>, open only <glob> in it
 //	journald              the journal directories (/var/log/journal, /run/log/journal)
+//	docker <glob>         an approved container name glob of a docker source: the
+//	                      launcher binds the containers root and maps the
+//	                      containers whose name matches
 //
 // No field holds a space, a comma, ';', ':', '=', a quote or a control character:
 // the config refuses such globs, and Lines refuses them again.
@@ -24,15 +27,18 @@ import (
 
 // Line is one entry of the plan.
 type Line struct {
-	Kind string // "file" or "journald"
+	Kind string // "file", "journald" or "docker"
 	Dir  string // file: the directory to bind
-	Glob string // file: the absolute glob opened under Dir
+	Glob string // file: the absolute glob opened under Dir; docker: the container name glob
 }
 
 // String is the line as the launcher reads it.
 func (l Line) String() string {
-	if l.Kind == config.KindJournald {
+	switch l.Kind {
+	case config.KindJournald:
 		return "journald"
+	case config.KindDocker:
+		return "docker " + l.Glob
 	}
 	return "file " + l.Dir + " " + l.Glob
 }
@@ -52,8 +58,9 @@ func Dir(glob string) string {
 	return "/" + strings.Join(comps[:n], "/")
 }
 
-// Lines is the plan of p: its file sources and, when it has one, the
-// journal. Docker and remote sources mount nothing here.
+// Lines is the plan of p: its file sources, the container globs of its
+// docker sources and, when it has one, the journal. Remote sources mount
+// nothing.
 func Lines(p config.Profile) ([]Line, error) {
 	var out []Line
 	journald := false
@@ -73,7 +80,13 @@ func Lines(p config.Profile) ([]Line, error) {
 		case config.KindJournald:
 			journald = true
 		case config.KindDocker:
-			return nil, fmt.Errorf("source %s: docker sources are not supported by this version", s.Name)
+			for _, g := range s.Containers {
+				if g == "" || strings.Trim(g, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.*?-") != "" ||
+					strings.HasPrefix(g, "-") {
+					return nil, fmt.Errorf("source %s: container glob %q cannot be mapped", s.Name, g)
+				}
+				out = append(out, Line{Kind: config.KindDocker, Glob: g})
+			}
 		}
 	}
 	slices.SortFunc(out, func(a, b Line) int { return strings.Compare(a.String(), b.String()) })
