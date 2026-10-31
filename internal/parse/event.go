@@ -8,6 +8,7 @@
 package parse
 
 import (
+	"slices"
 	"time"
 )
 
@@ -138,4 +139,18 @@ type Event struct {
 
 	timeMember *Member // the member Time was lifted from
 	timePos    int     // its index in Fields had it not been lifted
+}
+
+// SetTime gives the event an authoritative time from outside its text (a
+// container runtime's frame, a remote backend's entry timestamp). A
+// timestamp the payload carried stays in the payload: a lifted time field
+// goes back to its place in Fields, and a plain line keeps it in Message.
+func (ev *Event) SetTime(t time.Time) {
+	if ev.timeMember != nil {
+		ev.Fields = slices.Insert(slices.Clone(ev.Fields), min(ev.timePos, len(ev.Fields)), *ev.timeMember)
+	}
+	if ev.Format == "plain" && ev.HasTime {
+		ev.Message = ev.Raw
+	}
+	ev.Time, ev.HasTime, ev.Inherited, ev.TimeKey, ev.timeMember = t, true, false, "", nil
 }

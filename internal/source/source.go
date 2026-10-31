@@ -91,6 +91,10 @@ type Granule struct {
 	Indexed  bool
 	From, To time.Time
 	Records  int64
+	// Bytes is the planned cost of the granule (its length for a byte
+	// stream); 0 when unknown before the fetch (a remote time slice,
+	// charged by the bytes actually fetched).
+	Bytes int64
 }
 
 // Chunk is a unit of a byte plan: consecutive granules of one stream.
@@ -259,4 +263,23 @@ type CountResult struct {
 // local index, Loki metric queries), returning the plan of what it cannot.
 type Counter interface {
 	IndexCounts(ctx context.Context, q CountQuery) (CountResult, error)
+}
+
+// Limiter paces the requests of a call to a backend (the rolling request
+// budget of free calls, an approved scan's own plan-based rate).
+type Limiter interface {
+	Wait(ctx context.Context) error
+}
+
+type limiterKey struct{}
+
+// WithLimiter attaches the call's request limiter to ctx.
+func WithLimiter(ctx context.Context, l Limiter) context.Context {
+	return context.WithValue(ctx, limiterKey{}, l)
+}
+
+// LimiterFrom returns the call's limiter, or nil.
+func LimiterFrom(ctx context.Context) Limiter {
+	l, _ := ctx.Value(limiterKey{}).(Limiter)
+	return l
 }

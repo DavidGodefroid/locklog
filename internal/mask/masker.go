@@ -98,11 +98,11 @@ func (m *Masker) Epoch() string { return m.o.Pseudonyms.Epoch() }
 func (m *Masker) Mask(source string, ev parse.Event) (rec Record) {
 	defer func() {
 		if recover() != nil {
-			rec = Record{ok: true, failed: true, ts: ev.Time, hasTime: ev.HasTime, offset: ev.Offset, length: ev.Length}
+			rec = Record{ok: true, failed: true, ts: ev.Time, hasTime: ev.HasTime || ev.Inherited, offset: ev.Offset, length: ev.Length}
 		}
 	}()
 	w := &walk{m: m, source: source, kinds: map[string]bool{}}
-	rec = Record{ok: true, ts: ev.Time, hasTime: ev.HasTime, format: ev.Format, offset: ev.Offset, length: ev.Length}
+	rec = Record{ok: true, ts: ev.Time, hasTime: ev.HasTime || ev.Inherited, format: ev.Format, offset: ev.Offset, length: ev.Length}
 	rec.fields = w.members(ev.Fields, "", "", false, inherited{})
 	// Attrs come from the source's own frame (journald, docker), never
 	// from the line: only allowlisted ones reach here (LL-11 `attrs`,

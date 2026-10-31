@@ -398,7 +398,7 @@ func (s *Source) Plan(ctx context.Context, r source.Range, sel source.Selector) 
 		n := (size + source.GranuleBytes - 1) / source.GranuleBytes
 		for i := int64(0); i < n; i++ {
 			start, end := granuleBounds(i, size)
-			g := source.Granule{Start: start, End: end}
+			g := source.Granule{Start: start, End: end, Bytes: end - start}
 			if ig := gs[i]; usable(ig, size) {
 				g.Indexed, g.Records = true, ig.Records
 				g.From, g.To, _ = ig.Span()

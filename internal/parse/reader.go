@@ -2,7 +2,6 @@ package parse
 
 import (
 	"io"
-	"slices"
 	"strings"
 	"time"
 )
@@ -329,17 +328,7 @@ func (r *Reader) emit() Event {
 	if a.frame != nil {
 		ev.Attrs = a.frame.Attrs
 		if a.frame.HasTime {
-			// The runtime's timestamp is authoritative for ordering;
-			// a payload timestamp stays in the payload text/fields.
-			if ev.timeMember != nil {
-				ev.Fields = slices.Insert(slices.Clone(ev.Fields), min(ev.timePos, len(ev.Fields)), *ev.timeMember)
-			}
-			if ev.Format == "plain" && ev.HasTime {
-				// Keep the payload's leading timestamp in the
-				// message.
-				ev.Message = text
-			}
-			ev.Time, ev.HasTime, ev.TimeKey, ev.timeMember = a.frame.Time, true, "", nil
+			ev.SetTime(a.frame.Time)
 		}
 	}
 	if ev.HasTime {
