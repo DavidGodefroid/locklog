@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -60,7 +61,8 @@ func confineRules(in confineInput) landlock.Rules {
 		r.ReadOnly = append(r.ReadOnly, docker.DefaultMapDir)
 	}
 	if in.Project != "" {
-		r.ReadOnly = append(r.ReadOnly, filepath.Join(in.Project, ".locklog"))
+		// Linux paths (Landlock is Linux-only), whatever the build's OS.
+		r.ReadOnly = append(r.ReadOnly, path.Join(in.Project, ".locklog"))
 	}
 	r.ReadOnly = append(r.ReadOnly, consoleSystemRead...)
 	if in.StateDir != "" && !slices.ContainsFunc(r.ReadWrite, func(w string) bool { return beneath(in.StateDir, w) }) {
