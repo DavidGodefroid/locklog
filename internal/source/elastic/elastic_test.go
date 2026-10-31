@@ -622,9 +622,11 @@ func TestCheckPrivileges(t *testing.T) {
 			f.mapping = `{"logs-a":{"mappings":{"properties":{"level":{"type":"keyword","normalizer":"lowercase"}}}}}`
 		}, false, false},
 		{"normalizer on a multi-field", func(f *fakeES) {
-			f.mapping = `{"logs-a":{"mappings":{"properties":{"app":{"type":"text","fields":{"raw":{"type":"keyword","normalizer":"lc"}}},"level":{"type":"keyword"}}}}}`
+			f.mapping = `{"logs-a":{"mappings":{"properties":{"app":{"type":"keyword","fields":{"raw":{"type":"keyword","normalizer":"lc"}}},"level":{"type":"keyword"}}}}}`
 		}, false, true},
 		{"mappings unreadable on production", func(f *fakeES) { f.mapping = "nope" }, true, false},
+		{"settings unreadable on production", func(f *fakeES) { f.settings = "nope" }, true, false},
+		{"settings of an index missing on production", func(f *fakeES) { f.settings = `{"logs-a":{"settings":{}}}` }, true, false},
 		{"mappings unreadable off production", func(f *fakeES) { f.mapping = "nope" }, false, true},
 		{"time field not a date", func(f *fakeES) { f.types["@timestamp"] = "keyword" }, false, false},
 	} {

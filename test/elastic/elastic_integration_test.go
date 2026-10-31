@@ -379,7 +379,7 @@ func TestOpenSearch(t *testing.T) {
 		admin(t, base, au, ap, "PUT", "/_plugins/_security/api/rolesmapping/"+name, "application/json", []byte(`{"users":["`+name+`"]}`))
 		return egress.Credentials{User: name, Secret: pw}
 	}
-	readRole := `{"cluster_permissions":["cluster_composite_ops_ro","cluster_monitor"],"index_permissions":[{"index_patterns":["locklog-it-*"],"allowed_actions":["read","indices:admin/mappings/get"]}]}`
+	readRole := `{"cluster_permissions":["cluster_composite_ops_ro","cluster_monitor"],"index_permissions":[{"index_patterns":["locklog-it-*"],"allowed_actions":["read","indices:admin/mappings/get","indices:monitor/settings/get"]}]}`
 	reader := user("locklog_reader_"+run, readRole)
 	writer := user("locklog_writer_"+run, `{"cluster_permissions":["cluster_composite_ops_ro","cluster_monitor"],"index_permissions":[{"index_patterns":["locklog-it-*"],"allowed_actions":["read","write"]}]}`)
 

@@ -531,11 +531,11 @@ func buildRemote(kind string, r rawSource, production bool, errf func(string, ..
 		}
 		return nil, errf("unknown auth mode (want none, basic, bearer or mtls)")
 	}
-	if production && kind == KindOpenSearch && rem.Auth == AuthMTLS {
+	if production && kind == KindOpenSearch && (rem.Auth == AuthMTLS || r.TLSCert != "" || r.TLSKey != "") {
 		// The security plugin's admin certificate (admin_dn) holds every
-		// permission and maps to no role: the privilege check cannot tell
-		// it from a reader's certificate.
-		return nil, errf("auth = \"mtls\" is refused for kind = \"opensearch\" on a production profile: an admin certificate cannot be told from a reader's (use basic or bearer)")
+		// permission and maps to no role, whatever else authenticates the
+		// request: the privilege check cannot tell it from a reader's.
+		return nil, errf("a client certificate (auth = \"mtls\", tls_cert, tls_key) is refused for kind = \"opensearch\" on a production profile: an admin certificate cannot be told from a reader's (use basic or bearer without a client certificate)")
 	}
 	needsSecret := rem.Auth == AuthBasic || rem.Auth == AuthBearer || rem.Auth == AuthAPIKey
 	switch rem.Credentials {

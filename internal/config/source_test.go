@@ -336,7 +336,11 @@ func TestElasticProduction(t *testing.T) {
 	}
 	// An OpenSearch admin certificate cannot be told from a reader's.
 	mtls := strings.Replace(openSearchOK, "auth = \"basic\"\nuser = \"reader\"", "auth = \"mtls\"\ntls_cert = \"/c.pem\"\ntls_key = \"/k.pem\"", 1)
-	wantErr(t, prodSrc(mtls), `auth = "mtls" is refused for kind = "opensearch"`)
+	wantErr(t, prodSrc(mtls), `a client certificate (auth = "mtls", tls_cert, tls_key) is refused for kind = "opensearch"`)
+	// Whatever the auth mode: a client certificate rides along.
+	wantErr(t, prodSrc(openSearchOK+"tls_cert = \"/c.pem\"\ntls_key = \"/k.pem\""), `is refused for kind = "opensearch" on a production profile`)
+	mustParse(t, src(openSearchOK+"tls_cert = \"/c.pem\"\ntls_key = \"/k.pem\""))
+	mustParse(t, prodSrc(strings.Replace(elasticOK, `auth = "api_key"`, `auth = "bearer"`, 1)+"tls_cert = \"/c.pem\"\ntls_key = \"/k.pem\""))
 	mustParse(t, src(mtls))
 	mustParse(t, prodSrc(strings.Replace(mtls, `kind = "opensearch"`, `kind = "elastic"`, 1)))
 	// Off production, plain http on loopback and no auth are fine.

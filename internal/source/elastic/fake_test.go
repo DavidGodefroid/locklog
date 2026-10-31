@@ -23,6 +23,14 @@ const readOnlyGrants = `{"cluster":["monitor"],"global":[],"indices":[{"names":[
 // Elasticsearch 8.15): two indices, an alias, a data stream.
 const resolvedLogs = `{"indices":[{"name":"logs-a","aliases":["logs-current"],"attributes":["open"]},{"name":"logs-b","attributes":["open"]},{"name":".ds-logs-app-2026.10.30-000001","attributes":["open"],"data_stream":"logs-app"}],"aliases":[{"name":"logs-current","indices":["logs-a"]}],"data_streams":[{"name":"logs-app","backing_indices":[".ds-logs-app-2026.10.30-000001"],"timestamp_field":"@timestamp"}]}`
 
+// defaultMapping and defaultSettings are the fake's two indices (shapes
+// recorded from Elasticsearch 8.15).
+const (
+	mappedFields    = `{"@timestamp":{"type":"date"},"message":{"type":"text"},"app":{"type":"keyword"},"level":{"type":"keyword"},"pod":{"type":"keyword"},"env":{"type":"keyword"},"user_email":{"type":"keyword"},"event":{"properties":{"id":{"type":"keyword"}}}}`
+	defaultMapping  = `{"logs-a":{"mappings":{"properties":` + mappedFields + `}},"logs-b":{"mappings":{"properties":` + mappedFields + `}}}`
+	defaultSettings = `{"logs-a":{"settings":{"index.number_of_shards":"1","index.uuid":"a"}},"logs-b":{"settings":{"index.number_of_shards":"1","index.uuid":"b"}}}`
+)
+
 var t0 = time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
 
 // fakeDoc is one document: its time (milliseconds, as a date field) and
@@ -48,7 +56,8 @@ type fakeES struct {
 	flavour   string // "" (Elasticsearch) or "opensearch"
 	grants    string // the _privileges answer
 	resolved  string // the _resolve/index answer
-	mapping   string // the _mapping answer
+	mapping   string // the _mapping answer (default: defaultMapping)
+	settings  string // the _settings answer (default: defaultSettings)
 	termsErr  int    // doc_count_error_upper_bound of terms answers
 	roles     []string
 	security  bool // privilege endpoints answer
@@ -134,7 +143,17 @@ func (f *fakeES) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte(f.mapping))
 			return
 		}
-		_, _ = w.Write([]byte(`{"logs-a":{"mappings":{}}}`))
+		_, _ = w.Write([]byte(defaultMapping))
+	case r.Method == "GET" && r.URL.Path == pre+"/_settings":
+		if r.URL.Query().Get("flat_settings") != "true" {
+			f.fail(w, 400, "flat_settings")
+			return
+		}
+		if f.settings != "" {
+			_, _ = w.Write([]byte(f.settings))
+			return
+		}
+		_, _ = w.Write([]byte(defaultSettings))
 	case r.Method == "POST" && r.URL.Path == pre+"/_count":
 		var cb CountBody
 		if err := strictDecode(body, &cb); err != nil {

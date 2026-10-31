@@ -337,3 +337,51 @@ func mustScan(t *testing.T, s *Source, c source.Chunk) source.Iterator {
 	}
 	return it
 }
+
+// TestCheckMappings: every keyword field the source names must be a
+// concrete keyword field without a normalizer in every index (an alias
+// judged by its target), never a runtime field; ignore_above on the field
+// or the index keeps its terms local; a field missing from one index is
+// refused on production.
+func TestCheckMappings(t *testing.T) {
+	both := func(a, b string) string {
+		return `{"logs-a":{"mappings":` + a + `},"logs-b":{"mappings":` + b + `}}`
+	}
+	good := `{"properties":{"@timestamp":{"type":"date"},"app":{"type":"keyword"},"level":{"type":"keyword"}}}`
+	lv := source.Term{Field: "level", Label: true, Op: "=", Values: []string{"error"}}
+	for _, tt := range []struct {
+		name, mapping, settings string
+		production, ok, local   bool
+	}{
+		{"good", both(good, good), "", true, true, false},
+		{"alias to a keyword field", both(good, `{"properties":{"@timestamp":{"type":"date"},"app":{"type":"keyword"},"lvl":{"type":"keyword"},"level":{"type":"alias","path":"lvl"}}}`), "", true, true, false},
+		{"alias to a normalized field", both(good, `{"properties":{"@timestamp":{"type":"date"},"app":{"type":"keyword"},"lvl":{"type":"keyword","normalizer":"lowercase"},"level":{"type":"alias","path":"lvl"}}}`), "", false, false, false},
+		{"alias to a text field", both(good, `{"properties":{"@timestamp":{"type":"date"},"app":{"type":"keyword"},"msg":{"type":"text"},"level":{"type":"alias","path":"msg"}}}`), "", false, false, false},
+		{"alias to nothing", both(good, `{"properties":{"@timestamp":{"type":"date"},"app":{"type":"keyword"},"level":{"type":"alias","path":"gone"}}}`), "", true, false, false},
+		{"runtime field", both(good, `{"runtime":{"level":{"type":"keyword","script":{"source":"emit('x')"}}},"properties":{"@timestamp":{"type":"date"},"app":{"type":"keyword"}}}`), "", false, false, false},
+		{"runtime field shadowing a mapped one", both(good, `{"runtime":{"level":{"type":"keyword"}},"properties":{"@timestamp":{"type":"date"},"app":{"type":"keyword"},"level":{"type":"keyword"}}}`), "", true, false, false},
+		{"field missing in one index on production", both(good, `{"properties":{"@timestamp":{"type":"date"},"app":{"type":"keyword"}}}`), "", true, false, false},
+		{"field missing in one index off production", both(good, `{"properties":{"@timestamp":{"type":"date"},"app":{"type":"keyword"}}}`), "", false, true, false},
+		{"text in one index", both(good, `{"properties":{"@timestamp":{"type":"date"},"app":{"type":"keyword"},"level":{"type":"text"}}}`), "", false, false, false},
+		{"ignore_above on the field", both(good, `{"properties":{"@timestamp":{"type":"date"},"app":{"type":"keyword"},"level":{"type":"keyword","ignore_above":1024}}}`), "", true, true, true},
+		{"index-level ignore_above", both(good, good), `{"logs-a":{"settings":{}},"logs-b":{"settings":{"index.mapping.ignore_above":"256"}}}`, true, true, true},
+	} {
+		f := newFake(nil)
+		f.mapping, f.settings = tt.mapping, tt.settings
+		s := newSource(t, f, nil)
+		_, err := s.Check(ctx, tt.production)
+		if (err == nil) != tt.ok {
+			t.Errorf("%s: %v", tt.name, err)
+			continue
+		}
+		if tt.ok {
+			if got := !s.pushable(lv); got != tt.local {
+				t.Errorf("%s: level kept local %t, want %t", tt.name, got, tt.local)
+			}
+			// The index-level setting holds for every keyword field.
+			if app := s.pushable(source.Term{Field: "app", Label: true, Op: "=", Values: []string{"api"}}); app != (tt.settings == "") {
+				t.Errorf("%s: app pushable %t", tt.name, app)
+			}
+		}
+	}
+}

@@ -475,21 +475,40 @@ func (s *Source) Check(ctx context.Context, production bool) (Info, error) {
 			}
 		}
 	}
-	// A normalizer makes the indexed term differ from the value: refused.
-	// ignore_above leaves long values unindexed: terms on such a field are
-	// kept local (pushable).
+	// Every keyword field the source names must be, in every index the
+	// source reads, a concrete keyword or constant_keyword field (an
+	// alias resolved to its target) without a normalizer (the indexed
+	// term would differ from the value): else refused. A runtime field is
+	// refused (computed by a script, not indexed). ignore_above (on the
+	// field, or index.mapping.ignore_above on the index) leaves long
+	// values unindexed: terms on such a field are kept local (pushable).
+	// A field missing from an index, or mappings or settings that cannot
+	// be read, are refused on production only.
 	m, err := s.mappingFacts(ctx)
 	switch {
 	case err != nil && production:
-		return info, fmt.Errorf("elasticsearch source: reading the mappings (the key needs view_index_metadata), which a production profile requires: %w", err)
+		return info, fmt.Errorf("elasticsearch source: reading the mappings and settings (the key needs view_index_metadata), which a production profile requires: %w", err)
 	case err == nil:
 		local := map[string]bool{}
 		for _, f := range keywords {
-			if m.normalizer[f] {
-				return info, fmt.Errorf("elasticsearch source: %s has a normalizer in some index: its indexed terms are not its values; it cannot be trusted or selected on", f)
-			}
-			if m.ignoreAbove[f] {
-				local[f] = true
+			for _, ix := range m.indices {
+				d, ok := ix.field(f)
+				switch {
+				case ix.runtime[f]:
+					return info, fmt.Errorf("elasticsearch source: %s is a runtime field in some index: it cannot be trusted or selected on", f)
+				case !ok:
+					if production {
+						return info, fmt.Errorf("elasticsearch source: %s is not mapped in every index of the source: a production profile refuses it", f)
+					}
+					continue
+				case d.Type != "keyword" && d.Type != "constant_keyword":
+					return info, fmt.Errorf("elasticsearch source: %s is mapped as %q in some index; trusted, selector and tiebreaker fields must be keyword fields", f, d.Type)
+				case d.Normalizer != "":
+					return info, fmt.Errorf("elasticsearch source: %s has a normalizer in some index: its indexed terms are not its values; it cannot be trusted or selected on", f)
+				}
+				if d.IgnoreAbove != nil || ix.ignoreAbove {
+					local[f] = true
+				}
 			}
 		}
 		s.mu.Lock()
@@ -499,41 +518,85 @@ func (s *Source) Check(ctx context.Context, production bool) (Info, error) {
 	return info, nil
 }
 
-// mappingFacts are what the mappings say about keyword fields, by dotted
-// name (multi-fields included), over every index of the source.
-type mappingFacts struct {
-	normalizer, ignoreAbove map[string]bool
+// indexMapping is one index's fields by dotted name (multi-fields
+// included), its runtime fields and whether index.mapping.ignore_above is
+// set.
+type indexMapping struct {
+	fields      map[string]mappingDef
+	runtime     map[string]bool
+	ignoreAbove bool
 }
 
-// mappingFacts reads GET /{indices}/_mapping.
+// field returns the definition of f, an alias resolved to its target
+// (Elasticsearch allows no alias of an alias).
+func (ix indexMapping) field(f string) (mappingDef, bool) {
+	d, ok := ix.fields[f]
+	if ok && d.Type == "alias" {
+		if d.Path == "" || d.Path == f {
+			return mappingDef{}, false
+		}
+		d, ok = ix.fields[d.Path]
+		if ok && d.Type == "alias" {
+			return mappingDef{}, false
+		}
+	}
+	return d, ok
+}
+
+// mappingFacts are the mappings of every index of the source.
+type mappingFacts struct {
+	indices map[string]indexMapping
+}
+
+// mappingFacts reads GET /{indices}/_mapping and GET /{indices}/_settings.
 func (s *Source) mappingFacts(ctx context.Context) (mappingFacts, error) {
 	body, err := s.do(ctx, http.MethodGet, "/"+s.seg+"/_mapping", readParams(), nil)
 	if err != nil {
 		return mappingFacts{}, err
 	}
 	var idx map[string]struct {
-		Mappings mappingDef `json:"mappings"`
+		Mappings struct {
+			Properties map[string]mappingDef      `json:"properties"`
+			Runtime    map[string]json.RawMessage `json:"runtime"`
+		} `json:"mappings"`
 	}
 	if json.Unmarshal(body, &idx) != nil || idx == nil {
 		return mappingFacts{}, errResponse
 	}
-	m := mappingFacts{normalizer: map[string]bool{}, ignoreAbove: map[string]bool{}}
-	var walk func(prefix string, props map[string]mappingDef)
-	walk = func(prefix string, props map[string]mappingDef) {
-		for name, d := range props {
-			full := prefix + name
-			if d.Normalizer != "" {
-				m.normalizer[full] = true
-			}
-			if d.IgnoreAbove != nil {
-				m.ignoreAbove[full] = true
-			}
-			walk(full+".", d.Properties)
-			walk(full+".", d.Fields)
-		}
+	q := readParams()
+	q.Set("flat_settings", "true")
+	body, err = s.do(ctx, http.MethodGet, "/"+s.seg+"/_settings", q, nil)
+	if err != nil {
+		return mappingFacts{}, err
 	}
-	for _, i := range idx {
+	var settings map[string]struct {
+		Settings map[string]json.RawMessage `json:"settings"`
+	}
+	if json.Unmarshal(body, &settings) != nil || settings == nil {
+		return mappingFacts{}, errResponse
+	}
+	m := mappingFacts{indices: map[string]indexMapping{}}
+	for name, i := range idx {
+		ix := indexMapping{fields: map[string]mappingDef{}, runtime: map[string]bool{}}
+		var walk func(prefix string, props map[string]mappingDef)
+		walk = func(prefix string, props map[string]mappingDef) {
+			for n, d := range props {
+				full := prefix + n
+				ix.fields[full] = d
+				walk(full+".", d.Properties)
+				walk(full+".", d.Fields)
+			}
+		}
 		walk("", i.Mappings.Properties)
+		for n := range i.Mappings.Runtime {
+			ix.runtime[n] = true
+		}
+		st, ok := settings[name]
+		if !ok {
+			return mappingFacts{}, errResponse // every index's settings are read
+		}
+		_, ix.ignoreAbove = st.Settings["index.mapping.ignore_above"]
+		m.indices[name] = ix
 	}
 	return m, nil
 }
@@ -541,6 +604,7 @@ func (s *Source) mappingFacts(ctx context.Context) (mappingFacts, error) {
 // mappingDef is one field of a mapping, as far as Check reads it.
 type mappingDef struct {
 	Type        string                `json:"type"`
+	Path        string                `json:"path"`
 	Normalizer  string                `json:"normalizer"`
 	IgnoreAbove *json.Number          `json:"ignore_above"`
 	Properties  map[string]mappingDef `json:"properties"`

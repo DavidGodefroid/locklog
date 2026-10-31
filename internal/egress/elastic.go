@@ -36,7 +36,7 @@ func IndexSegment(indices []string) (string, error) {
 }
 
 // ElasticRoutes are the only Elasticsearch / OpenSearch requests locklog
-// sends: searches, counts, field capabilities and mappings of the
+// sends: searches, counts, field capabilities, mappings and settings of the
 // source's own indices (the segment is literal: no other index is
 // reachable), the root (flavour and version), and the read-only privilege
 // checks of each flavour: Elasticsearch's grants of the user and what the
@@ -52,6 +52,7 @@ func ElasticRoutes(indices []string) (*Allowlist, error) {
 		Route{http.MethodPost, "/" + seg + "/_count"},
 		Route{http.MethodGet, "/" + seg + "/_field_caps"},
 		Route{http.MethodGet, "/" + seg + "/_mapping"},
+		Route{http.MethodGet, "/" + seg + "/_settings"},
 		Route{http.MethodGet, "/"},
 		Route{http.MethodGet, ElasticUserPrivilegesPath},
 		Route{http.MethodGet, "/_resolve/index/" + seg},
