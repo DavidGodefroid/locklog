@@ -12,11 +12,12 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// Test hooks: trustedRoot is the directory whose own ancestors are not
-// checked ("/": all of them); afterOpen runs once Dir is open, before any
-// file is written.
+// Test hooks: TrustedRoot is the directory whose own ancestors are not
+// checked ("/": all of them; tests only, exported for setup's tests whose
+// temporary directories live under the sticky /tmp); afterOpen runs once
+// Dir is open, before any file is written.
 var (
-	trustedRoot = "/"
+	TrustedRoot = "/"
 	afterOpen   = func() {}
 )
 
@@ -28,7 +29,7 @@ func safeAncestor(mode, uid uint32, euid int) bool {
 	return mode&unix.S_IFMT == unix.S_IFDIR && (uid == 0 || int(uid) == euid) && mode&0o022 == 0
 }
 
-// checkAncestors Lstats every component of dir's parent, from trustedRoot
+// checkAncestors Lstats every component of dir's parent, from TrustedRoot
 // down, and returns the parent's stat.
 func checkAncestors(parent string) (unix.Stat_t, error) {
 	var st unix.Stat_t
@@ -41,7 +42,7 @@ func checkAncestors(parent string) (unix.Stat_t, error) {
 			}
 			p = filepath.Join(p, comps[i])
 		}
-		if p != trustedRoot && !inside(p, trustedRoot) {
+		if p != TrustedRoot && !inside(p, TrustedRoot) {
 			continue
 		}
 		if err := unix.Lstat(p, &st); err != nil {

@@ -18,6 +18,8 @@ Commands:
   version                 print the version
   console [--profile P]   the console of a profile (in the launcher's container)
   mcp [--profile P]       the agent's MCP server (stdin and stdout)
+  setup                   write .locklog/config.toml from this host, wire the agent
+  doctor [--profile P]    check what the agent's account can reach (advisory)
   init <agent>            wire an agent (claude, codex, cursor, gemini) to locklog in this project
   mounts [--profile P]    print the mount plan of a profile (read by the launcher)
 `
@@ -43,6 +45,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 0
 	case "mcp":
 		return mcpCmd(args[1:], os.Stdin, stdout, stderr)
+	case "setup":
+		return setupCmd(args[1:], os.Stdin, stdout, stderr)
+	case "doctor":
+		return doctorCmd(args[1:], stdout, stderr)
 	case "init":
 		return initCmd(args[1:], stdout, stderr)
 	case "console":

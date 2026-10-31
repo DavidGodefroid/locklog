@@ -1,0 +1,40 @@
+# The own-container recipe: your agent runs in an image of yours, as a
+# non-root user without sudo, and reaches the console only through its
+# socket (the locklog-run volume). It never sees the logs, the keys or the
+# console's terminal.
+#
+# 1. Add this to your agent's Dockerfile, after its packages are installed:
+
+# locklog's client, its root-owned system file (the console account and
+# the clients group the socket admits), and the accounts it names.
+COPY --from=ghcr.io/davidgodefroid/locklog@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef --chown=root:root --chmod=0755 /usr/local/bin/locklog /usr/local/bin/locklog
+COPY --from=ghcr.io/davidgodefroid/locklog@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef --chown=root:root --chmod=0644 /etc/locklog/system.toml /etc/locklog/system.toml
+# The console account (10051) only names the socket's owner, which the client
+# checks: no shell, no home, no password, nothing runs as it here. The agent
+# user is not root, has no sudo, and is in locklog-clients (10050).
+RUN set -eu; \
+    if command -v useradd >/dev/null 2>&1; then \
+      groupadd -g 10050 locklog-clients; \
+      useradd -M -N -u 10051 -s /usr/sbin/nologin locklog; \
+      useradd -m -u 10052 -g locklog-clients -s /bin/sh agent; \
+    else \
+      addgroup -g 10050 locklog-clients; \
+      adduser -D -H -u 10051 -s /sbin/nologin locklog; \
+      adduser -D -u 10052 -G locklog-clients -s /bin/sh agent; \
+    fi; \
+    if command -v sudo >/dev/null 2>&1; then echo "the agent image must not have sudo" >&2; exit 1; fi
+USER 10052:10050
+
+# 2. Start the console, in a terminal of yours, from the project:
+
+  locklog console --profile prod
+
+# 3. Run the agent's container with the socket volume and the project at its
+#    own path (the socket is named after the project's path):
+
+  docker run --rm -it -v locklog-run:/run/locklog -v "$PWD:$PWD" -w "$PWD" your-agent-image
+
+# In it, the agent's MCP server is `locklog mcp` (locklog init <agent> writes the
+# project's MCP entry). Every agent whose container mounts this locklog-run
+# volume reaches every console on it: one locklog-run volume is one trust
+# domain. Give agents that must not share a console their own volume.

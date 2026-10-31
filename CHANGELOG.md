@@ -97,6 +97,37 @@ uses [Semantic Versioning](https://semver.org/).
   patterns capped apart from the window's, `truncated` past the cap; with a
   remote source both windows fit its range budget), plan-based admission
   and free continuations; `count` gains `by_pattern`.
+- `locklog setup`: the trusted `.locklog/` (yours, 0755, writable by no one
+  else; checked again by the launcher afterwards) and a first
+  `config.toml` from the host's facts, which the launcher gathers on the
+  host (`internal/hostfacts`): log file families with their rotated and
+  compressed siblings under one glob, the journal, the running containers
+  (in a `-docker` profile of their own), never a console container. It
+  asks whether the profile is production, and an unanswered question is
+  yes; `--yes --no-production --agent host` for scripts. `--agent host`
+  runs `agentassets.InitProject` for each detected agent (the Claude Code
+  allow list in the project's `.claude/settings.local.json` only, nothing
+  at user scope) and prints what it wrote; `--agent container` prints the
+  own-container recipe (a Dockerfile snippet copying the binary and a
+  root-owned `/etc/locklog/system.toml` from the image by digest, a
+  non-root agent user without sudo in group 10050, the console account
+  10051 kept only as the name the client checks the socket's owner
+  against, the run line, `--allowed-uids` for another uid, one
+  `locklog-run` volume = one trust domain); `--agent lea` says where lea
+  stands. `--loki-proxy SERVICE` wires `internal/authproxy` for a Compose
+  Loki: Caddy gets only a bcrypt hash, the token is shown once on the
+  terminal (and refused without one), the CA key is discarded, the files go
+  to `~/.config/locklog/proxy/` (0700, outside the project), and only the
+  CA certificate is copied beside the config, for `tls_ca`.
+- `locklog doctor` (advisory, not a boundary): the Docker engine and
+  `DOCKER_HOST`, the groups `docker`, `adm` and `systemd-journal`, `sudo -n`,
+  euid 0, a readable `/var/log/journal` or `/var/lib/docker`, cloud
+  credential files, unauthenticated read probes of the configured backends
+  and of the clouds' metadata credential paths (a status code and whether
+  the API was recognised; never a response body), with a remedy for each
+  finding; residuals: Landlock, containers with `IpcMode` shareable, swarm
+  mode. On a production profile the findings are red and doctor exits 1.
+  The launcher runs it as the agent account with the host's network.
 
 ### Fixed
 

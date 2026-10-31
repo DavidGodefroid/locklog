@@ -8,8 +8,11 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/DavidGodefroid/locklog/internal/hostfacts"
 )
 
 // launcherFixture runs scripts/locklog, the host launcher, with a fake
@@ -22,7 +25,7 @@ type launcherFixture struct {
 
 var launcherTools = []string{"sh", "dirname", "mkdir", "id", "cat", "printf", "awk", "sha256sum", "shasum", "tar",
 	"gzip", "install", "mktemp", "rm", "uname", "sed", "tr", "tail", "grep", "stat", "cksum", "getconf", "nproc", "cut", "ls",
-	"mv", "chmod", "date", "sleep", "mkfifo", "find", "rmdir"}
+	"mv", "chmod", "date", "sleep", "mkfifo", "find", "rmdir", "cp", "pwd"}
 
 func newLauncherFixture(t *testing.T) *launcherFixture {
 	t.Helper()
@@ -102,6 +105,7 @@ volume) [ "$2" = inspect ] && exit "${VOLUME_MISSING:-0}" ;;
 run)
 	for a in "$@"; do
 		case "$a" in
+		*:/run/locklog-facts:ro) cp "${a%%:*}" '`+filepath.Join(root, "facts.copy")+`' ;;
 		locklog-run:/run/locklog) vol=run ;;
 		locklog-home:/home/locklog) vol=home ;;
 		esac
@@ -470,6 +474,75 @@ func TestLauncherMCP(t *testing.T) {
 	}
 	if slices.Contains(run, "-it") || slices.ContainsFunc(run, func(a string) bool { return strings.Contains(a, "locklog-home") }) {
 		t.Errorf("mcp has a terminal or the home volume: %q", run)
+	}
+}
+
+// setup runs in the image as you, with the project writable, the facts of
+// this host and the proxies' directory (0700, outside the project); no
+// network. doctor runs as the agent account with the host's network and
+// the project read-only. Neither gets a volume of the console's.
+func TestLauncherSetupDoctor(t *testing.T) {
+	f := newLauncherFixture(t)
+	writeExec(t, filepath.Join(f.bin, "claude"), "#!/bin/sh\n")
+	_, calls, err := f.run(t, f.project, []string{"DOCKER_PS=web nginx:1 web shop shop_default\\n"}, "setup", "--yes", "--no-production", "--agent", "host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	noEngineSocket(t, calls)
+	run := lastRun(t, calls)
+	confined(t, run)
+	me := strconv.Itoa(os.Getuid()) + ":" + strconv.Itoa(os.Getgid())
+	proxy := filepath.Join(f.root, "home", ".config", "locklog", "proxy")
+	for _, seq := range [][]string{{"--user", me}, {"--network", "none"}, {"--log-driver", "none"}, {"-v", f.project + ":" + f.project},
+		{"-v", proxy + ":" + proxy}, {"-w", f.project}, {"-e", "LOCKLOG_IMAGE_REF=locklog"},
+		{"locklog", "setup", "--facts", "/run/locklog-facts", "--proxy-dir", proxy, "--yes", "--no-production", "--agent", "host"}} {
+		if !hasSeq(run, seq...) {
+			t.Errorf("setup run lacks %q: %q", seq, run)
+		}
+	}
+	if slices.ContainsFunc(run, func(a string) bool { return strings.Contains(a, "locklog-run") || strings.Contains(a, "locklog-home") }) {
+		t.Errorf("setup has a console volume: %q", run)
+	}
+	if st, err := os.Stat(proxy); err != nil || st.Mode().Perm() != 0o700 {
+		t.Errorf("proxy dir: %v %v", st, err)
+	}
+	facts, err := os.ReadFile(filepath.Join(f.root, "facts.copy"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs, err := hostfacts.Parse(strings.NewReader(string(facts)))
+	if err != nil {
+		t.Fatalf("facts: %v\n%s", err, facts)
+	}
+	if fs.EUID != os.Geteuid() || fs.Sudo != hostfacts.SudoAbsent || fs.Docker != hostfacts.DockerReachable ||
+		!slices.Contains(fs.Agents, "claude") || len(fs.Containers) != 1 || fs.Containers[0].Project != "shop" ||
+		!slices.Contains(fs.Logs, filepath.Join(f.logs, "app", "app.log")) {
+		t.Errorf("facts = %+v\n%s", fs, facts)
+	}
+
+	// An untrusted .locklog/ after the run fails setup.
+	if err := os.Chmod(filepath.Join(f.project, ".locklog"), 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if out, _, err := f.run(t, f.project, nil, "setup", "--yes"); err == nil || !strings.Contains(out, "fix it before locklog console") {
+		t.Errorf("untrusted .locklog accepted: %v\n%s", err, out)
+	}
+	os.Chmod(filepath.Join(f.project, ".locklog"), 0o755)
+
+	_, calls, err = f.run(t, filepath.Join(f.project, "sub"), nil, "doctor", "--profile", "x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run = lastRun(t, calls)
+	confined(t, run)
+	for _, seq := range [][]string{{"--user", "agent"}, {"--network", "host"}, {"-v", f.project + ":" + f.project + ":ro"},
+		{"-w", filepath.Join(f.project, "sub")}, {"locklog", "doctor", "--facts", "/run/locklog-facts", "--profile", "x"}} {
+		if !hasSeq(run, seq...) {
+			t.Errorf("doctor run lacks %q: %q", seq, run)
+		}
+	}
+	if slices.ContainsFunc(run, func(a string) bool { return strings.Contains(a, "locklog-run") }) {
+		t.Errorf("doctor has the socket volume: %q", run)
 	}
 }
 
