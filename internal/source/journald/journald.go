@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path"
 	"slices"
@@ -291,12 +292,15 @@ type granule struct {
 	first    uint64 // offset of its first entry
 	n        int64
 	min, max uint64 // realtime bounds of its entries (µs)
+	anyTime  bool   // an entry's time could not be read: any range may match
 }
 
-// fileGranules are the granules of one file, cached by stream and size.
+// fileGranules are the granules of one file, cached by stream and by the
+// header fields every append changes (journald preallocates its files, so
+// the size alone does not change when entries are added).
 type fileGranules struct {
-	size int64
-	gs   []granule
+	key granKey
+	gs  []granule
 	// complete is false when the entry-array chain broke: gs is the
 	// readable prefix.
 	complete bool
@@ -309,38 +313,47 @@ func granules(jf *journal.File) ([]granule, bool) {
 	var out []granule
 	err := jf.EntryOffsets(func(i, off uint64) bool {
 		rt, err := jf.Realtime(off)
-		if err != nil {
-			return false
-		}
 		if i%GranuleEntries == 0 {
-			out = append(out, granule{index: int64(i / GranuleEntries), first: off, min: rt, max: rt})
+			out = append(out, granule{index: int64(i / GranuleEntries), first: off, min: math.MaxUint64})
 		}
 		g := &out[len(out)-1]
 		g.n++
+		if err != nil {
+			// An unreadable entry (Scan skips it): its granule may
+			// hold any time.
+			g.anyTime = true
+			return true
+		}
 		g.min, g.max = min(g.min, rt), max(g.max, rt)
 		return true
 	})
 	if err != nil {
 		return out, false
 	}
-	// A stop on an unreadable entry also leaves a prefix: a complete
-	// file has every entry the arrays list.
-	n := int64(0)
-	for _, g := range out {
-		n += g.n
-	}
-	return out, uint64(n) == jf.Header().NEntries || jf.Header().State != 0
+	return out, true
+}
+
+type granKey struct {
+	size          int64
+	entries, tail uint64
+	tailRT        uint64
+	state         uint8
 }
 
 func (s *Source) granulesOf(fi fileInfo, jf *journal.File, size int64) fileGranules {
 	s.mu.Lock()
 	c, ok := s.grans[fi.stream]
 	s.mu.Unlock()
-	if ok && c.size == size {
+	h := jf.Header()
+	key := granKey{size: size, entries: h.NEntries, tail: h.TailObjectOffset, tailRT: h.TailRealtime, state: h.State}
+	if ok && c.key == key {
 		return c
 	}
 	gs, complete := granules(jf)
-	c = fileGranules{size: size, gs: gs, complete: complete}
+	c = fileGranules{key: key, gs: gs, complete: complete}
+	if !complete {
+		return c // a torn read of a file being written: read it again next time
+	}
 	s.mu.Lock()
 	if len(s.grans) > 4096 {
 		clear(s.grans)
@@ -381,7 +394,7 @@ func (s *Source) Plan(ctx context.Context, r source.Range, _ source.Selector) (s
 			run = nil
 		}
 		for i, g := range fg.gs {
-			if !r.Overlaps(usec(g.min), usec(g.max)) {
+			if !g.anyTime && !r.Overlaps(usec(g.min), usec(g.max)) {
 				flush()
 				continue
 			}
@@ -396,6 +409,9 @@ func (s *Source) Plan(ctx context.Context, r source.Range, _ source.Selector) (s
 			} else {
 				runEnd = uint64(size)
 			}
+			if runEnd < runStart { // offsets going backwards: a corrupt file
+				runEnd = runStart
+			}
 			run = append(run, source.Granule{Start: g.index * GranuleEntries, End: g.index*GranuleEntries + g.n})
 		}
 		flush()
@@ -403,7 +419,7 @@ func (s *Source) Plan(ctx context.Context, r source.Range, _ source.Selector) (s
 	return plan, nil
 }
 
-func usec(us uint64) time.Time { return time.UnixMicro(int64(us)).UTC() }
+func usec(us uint64) time.Time { return time.UnixMicro(int64(min(us, math.MaxInt64))).UTC() }
 
 // Scan reads the entries of a chunk: entry indexes [Start, End) of its
 // granules, in file order.
@@ -439,7 +455,7 @@ func (s *Source) Scan(ctx context.Context, c source.Chunk) (source.Iterator, err
 		}
 		return nil, err
 	}
-	return &iter{ctx: ctx, src: s, f: f, jf: jf, stream: c.Stream, offs: offs, base: start, start: start}, nil
+	return &iter{ctx: ctx, src: s, f: f, jf: jf, stream: c.Stream, offs: offs, base: start}, nil
 }
 
 type iter struct {
@@ -450,7 +466,6 @@ type iter struct {
 	stream    string
 	offs      []uint64
 	base      int64 // entry index of offs[0]
-	start     int64 // entry index of the chunk's first granule
 	i         int
 	processed int64
 }
@@ -471,7 +486,8 @@ func (it *iter) Next() (source.RawRecord, error) {
 		if !ok {
 			continue // a unit not served
 		}
-		rec.Granule = int((idx - it.start) / GranuleEntries)
+		// The file's granule index, as the file source reports it.
+		rec.Granule = int(idx / GranuleEntries)
 		return rec, nil
 	}
 	return source.RawRecord{}, io.EOF

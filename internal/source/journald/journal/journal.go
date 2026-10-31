@@ -18,7 +18,6 @@ import (
 
 	"github.com/klauspost/compress/zstd"
 	"github.com/pierrec/lz4/v4"
-	"github.com/ulikunitz/xz"
 )
 
 const (
@@ -58,6 +57,10 @@ const (
 	// MaxEntryData bounds the decompressed bytes kept for one entry: the
 	// fields past it are reported as dropped.
 	MaxEntryData = 2 * MaxData
+	// maxEntryWork bounds the bytes decoded for one entry, kept or not:
+	// an over-cap field costs MaxData, and past the bound the remaining
+	// fields are dropped undecoded.
+	maxEntryWork = 4 * MaxData
 	// lz4PrefixSource bounds the compressed bytes read to decode a field
 	// name from an LZ4 payload.
 	lz4PrefixSource = 64 << 10
@@ -316,7 +319,7 @@ func (f *File) Entry(off uint64, keep func(name string) bool) (*Entry, error) {
 	}
 	e := &Entry{EntryHead: h, Offset: off}
 	seen := map[uint64]bool{}
-	budget := MaxEntryData
+	budget, work := MaxEntryData, maxEntryWork
 	step := uint64(16)
 	if f.compact {
 		step = 4
@@ -339,15 +342,17 @@ func (f *File) Entry(off uint64, keep func(name string) bool) (*Entry, error) {
 		if !keep(name) {
 			continue
 		}
-		if budget <= 0 {
+		if budget <= 0 || work <= 0 {
 			e.Dropped++
 			continue
 		}
 		v, err := f.value(p, len(name))
 		if errors.Is(err, errTooLarge) {
+			work -= MaxData
 			e.Dropped++
 			continue
 		}
+		work -= len(v)
 		if err != nil {
 			return nil, err
 		}
@@ -389,9 +394,9 @@ func (f *File) name(off uint64) (string, error) {
 			return "", err
 		}
 	case objCompressedZSTD, objCompressedXZ:
-		r, err := f.stream(flags, off+start, stored)
+		r, err := f.stream(flags, off+start, stored, true)
 		if err != nil {
-			return "", err
+			return "", corrupt("compressed data", off)
 		}
 		prefix = make([]byte, MaxNameBytes+1)
 		k, err := io.ReadFull(r, prefix)
@@ -481,7 +486,7 @@ func (f *File) value(off uint64, nameLen int) ([]byte, error) {
 				return nil, errTooLarge
 			}
 		}
-		r, err := f.stream(flags, off+start, stored)
+		r, err := f.stream(flags, off+start, stored, false)
 		if err != nil {
 			return nil, err
 		}
@@ -513,7 +518,7 @@ func (f *File) value(off uint64, nameLen int) ([]byte, error) {
 }
 
 // stream returns a decompressing reader over a ZSTD or XZ payload.
-func (f *File) stream(flags uint8, off, n uint64) (io.Reader, error) {
+func (f *File) stream(flags uint8, off, n uint64, prefixOnly bool) (io.Reader, error) {
 	if off < f.h.HeaderSize || off+n < off || off+n > f.size {
 		return nil, corrupt("object out of bounds", off)
 	}
@@ -524,7 +529,10 @@ func (f *File) stream(flags uint8, off, n uint64) (io.Reader, error) {
 		}
 		return f.zd, nil
 	}
-	r, err := xz.ReaderConfig{DictCap: MaxData + 64<<10}.NewReader(src)
+	r, err := xzReader(src, prefixOnly)
+	if errors.Is(err, errTooLarge) {
+		return nil, err
+	}
 	if err != nil {
 		return nil, corrupt("xz data", off)
 	}

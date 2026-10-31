@@ -457,3 +457,76 @@ func FuzzJournal(f *testing.F) {
 		readAll(b)
 	})
 }
+
+// xzDataObject returns the offset of the XZ DATA object holding name.
+func xzObject(t *testing.T, raw []byte, name string) uint64 {
+	t.Helper()
+	f, err := Open(bytes.NewReader(raw), int64(len(raw)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for off := range f.dataOffsets(t) {
+		if n, _ := f.name(off); n == name {
+			return off
+		}
+	}
+	t.Fatalf("no %s object", name)
+	return 0
+}
+
+func TestXZDictionaryCapped(t *testing.T) {
+	for _, dictByte := range []byte{0x20, 40} { // 128 MiB, 4 GiB
+		raw := build(true, "xz", journaltest.Entry{Realtime: 1, Fields: []string{"MESSAGE=hello", "PRIORITY=3"}})
+		off := xzObject(t, raw, "MESSAGE")
+		// Stream header (12 bytes), then the block header: size, flags,
+		// filter id 0x21, property size 1, the dictionary byte.
+		p := raw[off+72:]
+		i := 12 + 2
+		if p[13]&0x40 != 0 || p[13]&0x80 != 0 {
+			t.Skip("builder wrote sizes in the block header")
+		}
+		if p[i] != 0x21 || p[i+1] != 1 {
+			t.Fatalf("unexpected block header % x", p[12:20])
+		}
+		p[i+2] = dictByte // the block header CRC is not checked
+		f, _ := Open(bytes.NewReader(raw), int64(len(raw)))
+		var ms0, ms1 runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&ms0)
+		if n, err := f.name(off); err != nil || n != "MESSAGE" {
+			t.Fatalf("dict %#x: name %q %v", dictByte, n, err)
+		}
+		if _, err := f.value(off, len("MESSAGE")); !errors.Is(err, errTooLarge) {
+			t.Fatalf("dict %#x: value %v", dictByte, err)
+		}
+		runtime.ReadMemStats(&ms1)
+		if a := ms1.TotalAlloc - ms0.TotalAlloc; a > 4*MaxXZDict {
+			t.Fatalf("dict %#x: %d bytes allocated", dictByte, a)
+		}
+	}
+}
+
+func TestEntryDecodeWorkBounded(t *testing.T) {
+	// 64 distinct over-cap XZ fields: each would be decoded whole to find
+	// it is over the cap; the entry stops decoding after maxEntryWork.
+	var fields []string
+	for i := 0; i < 64; i++ {
+		fields = append(fields, fmt.Sprintf("F_%d=%s", i, strings.Repeat(string(rune('a'+i%26)), MaxData+10)))
+	}
+	raw := build(true, "xz", journaltest.Entry{Realtime: 1, Fields: append(fields, "PRIORITY=3")})
+	f, _ := Open(bytes.NewReader(raw), int64(len(raw)))
+	var ms0, ms1 runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&ms0)
+	f.EntryOffsets(func(_, off uint64) bool {
+		e, err := f.Entry(off, keepAll)
+		if err != nil || e.Dropped < 64 {
+			t.Fatalf("entry: %v, dropped %d", err, e.Dropped)
+		}
+		return true
+	})
+	runtime.ReadMemStats(&ms1)
+	if a := ms1.TotalAlloc - ms0.TotalAlloc; a > 64*MaxData {
+		t.Fatalf("%d bytes allocated for one entry", a)
+	}
+}

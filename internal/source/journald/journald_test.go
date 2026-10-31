@@ -618,3 +618,71 @@ func TestAllowlistOnEveryFixture(t *testing.T) {
 		}
 	}
 }
+
+// padTo pads a built file with zeros to size, as journald preallocates.
+func padTo(raw []byte, size int) []byte {
+	return append(raw, make([]byte, size-len(raw))...)
+}
+
+func TestAppendWithoutGrowingIsPlanned(t *testing.T) {
+	es := clockStep()
+	r := rootWith(t, padTo(journaltest.Build(journaltest.Options{Compact: true}, es[:100]), 1<<20))
+	s := newSource(t, Options{Roots: []string{r}})
+	if n := len(scanAll(t, s, everything)); n != 100 {
+		t.Fatalf("%d records", n)
+	}
+	// journald appends in place: same size, more entries.
+	path := filepath.Join(r, mid, "system.journal")
+	if err := os.WriteFile(path, padTo(journaltest.Build(journaltest.Options{Compact: true}, es[:700]), 1<<20), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	s.catalog = nil // past the listing's TTL
+	s.mu.Unlock()
+	if n := len(scanAll(t, s, everything)); n != 700 {
+		t.Fatalf("after an append at the same size: %d records of 700", n)
+	}
+}
+
+func TestUnreadableEntryKeepsTheRest(t *testing.T) {
+	es := clockStep()[:600]
+	raw := journaltest.Build(journaltest.Options{Compact: true, PerArray: 100}, es)
+	jf, _ := journal.Open(bytes.NewReader(raw), int64(len(raw)))
+	var bad uint64
+	jf.EntryOffsets(func(i, off uint64) bool {
+		if i == 300 {
+			bad = off
+		}
+		return i < 300
+	})
+	raw[bad] = 0x7f // not an entry any more
+	s := newSource(t, Options{Roots: []string{rootWith(t, raw)}})
+	if n := len(scanAll(t, s, everything)); n != 599 {
+		t.Fatalf("%d records, want 599", n)
+	}
+}
+
+func TestScanAndRereadAgreeOnGranules(t *testing.T) {
+	s := newSource(t, Options{Roots: []string{rootWith(t, journaltest.Build(journaltest.Options{Compact: true}, clockStep()))}})
+	ctx := context.Background()
+	plan, _ := s.Plan(ctx, everything, source.Selector{})
+	for _, c := range plan.Chunks {
+		for _, g := range c.Granules[1:] {
+			one := c
+			one.Granules = []source.Granule{g}
+			it, err := s.Scan(ctx, one)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rec, err := it.Next()
+			it.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			back, err := s.Reread(ctx, rec.Ref)
+			if err != nil || back.Granule != rec.Granule || rec.Granule != int(g.Start/GranuleEntries) {
+				t.Fatalf("granule: scan %d reread %d (%v), start %d", rec.Granule, back.Granule, err, g.Start)
+			}
+		}
+	}
+}

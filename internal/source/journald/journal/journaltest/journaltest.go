@@ -78,7 +78,7 @@ func compress(kind string, p []byte) ([]byte, uint8) {
 		return out[:8+n], 2
 	case "xz":
 		var buf bytes.Buffer
-		w, _ := xz.NewWriter(&buf)
+		w, _ := xz.WriterConfig{DictCap: 1 << 20}.NewWriter(&buf) // journald's dictionary
 		w.Write(p)
 		w.Close()
 		return buf.Bytes(), 1
