@@ -718,6 +718,9 @@ func TestTailReplicas(t *testing.T) {
 // TestTailBudgetOnNewData: admission applies to what a poll scans for new
 // records, not to the whole unindexed file.
 func TestTailBudgetOnNewData(t *testing.T) {
+	if raceEnabled {
+		t.Skip("timing: the race detector slows masking several fold")
+	}
 	content := genLog(time.Now().Add(-30*time.Hour), 80000, "c@example.org") // > 8 MiB, unindexed
 	f := newFixture(t, content, func(o *Options) { o.TailPoll = 50 * time.Millisecond; o.Limits.LocalBytes = 4 << 20 })
 	path := filepath.Join(f.root, "logs", "app.log")
@@ -733,6 +736,9 @@ func TestTailBudgetOnNewData(t *testing.T) {
 
 // TestTailWorkFollowsNewData: polls scan only what grew, not the stream.
 func TestTailWorkFollowsNewData(t *testing.T) {
+	if raceEnabled {
+		t.Skip("timing: the race detector slows masking several fold")
+	}
 	content := genLog(time.Now().Add(-30*time.Hour), 80000, "c@example.org") // > 8 granules
 	f := newFixture(t, content, func(o *Options) { o.TailPoll = 50 * time.Millisecond })
 	path := filepath.Join(f.root, "logs", "app.log")
@@ -1175,6 +1181,9 @@ func TestTailOneLineCopytruncate(t *testing.T) {
 // TestTailGranuleEndCopytruncate: app.log ends exactly on a granule end at
 // the start; one line appended, then copytruncate: returned once.
 func TestTailGranuleEndCopytruncate(t *testing.T) {
+	if raceEnabled {
+		t.Skip("timing: the race detector slows masking several fold")
+	}
 	eng, dir := globEngine(t, "/logs/app.log*")
 	path := filepath.Join(dir, "app.log")
 	st, _ := os.Stat(path)
