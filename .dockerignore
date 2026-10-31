@@ -1,0 +1,6 @@
+.git
+dist
+*.test
+*.out
+go.work
+go.work.sum

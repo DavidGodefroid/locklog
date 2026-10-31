@@ -1,0 +1,205 @@
+name: release
+
+# Runs only when a version tag is pushed. Creating the tag is a manual,
+# explicit decision. The order: tests, then GoReleaser creates the release
+# as a draft (archives, signed checksums.txt, SBOMs) while the images are
+# built on native runners; the manifests are signed by digest; a fresh
+# runner pulls them anonymously and checks their signatures; only then is
+# the release published and the site (install.sh) redeployed.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/davidgodefroid/locklog
+
+jobs:
+  test:
+    name: test before release
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.x"
+      - name: go vet
+        run: go vet ./...
+      - name: go test
+        run: go test ./...
+
+  goreleaser:
+    name: goreleaser (draft release)
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write # create the draft release and upload assets
+      id-token: write # cosign keyless signing (GitHub OIDC)
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # changelog needs the full history and tags
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.x"
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v2.6.1
+      - uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          syft-version: v1.54.1
+      - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
+        with:
+          distribution: goreleaser
+          version: v2.18.3
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # The image the launcher runs: ghcr.io/davidgodefroid/locklog:X.Y.Z and
+  # :X.Y.Z-vault, amd64 and arm64, each built on a native runner. The
+  # per-architecture tags (X.Y.Z-amd64, ...) are build intermediates: they
+  # are not signed, and nothing runs them (install.sh and the launcher
+  # verify the signed manifest and run it by digest).
+  image:
+    name: image ${{ matrix.arch }}
+    needs: test
+    strategy:
+      matrix:
+        include:
+          - { arch: amd64, runner: ubuntu-24.04 }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write # push to ghcr.io
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: log in to ghcr.io
+        run: printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: build and push
+        run: |
+          v=${GITHUB_REF_NAME#v}
+          docker build --build-arg VERSION="$v" -t "$IMAGE:$v-${{ matrix.arch }}" .
+          docker build --build-arg VERSION="$v" --target vault -t "$IMAGE:$v-vault-${{ matrix.arch }}" .
+          docker push "$IMAGE:$v-${{ matrix.arch }}"
+          docker push "$IMAGE:$v-vault-${{ matrix.arch }}"
+
+  image-manifest:
+    name: image manifest (signed)
+    needs: image
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write # push to ghcr.io
+      id-token: write # cosign keyless signing (GitHub OIDC)
+    steps:
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v2.6.1
+      - name: log in to ghcr.io
+        run: printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: manifests, signed by digest
+        run: |
+          v=${GITHUB_REF_NAME#v}
+          for tag in "$v" "$v-vault"; do
+            docker buildx imagetools create -t "$IMAGE:$tag" "$IMAGE:$tag-amd64" "$IMAGE:$tag-arm64"
+            digest=$(docker buildx imagetools inspect "$IMAGE:$tag" --format '{{json .Manifest.Digest}}' | tr -d '"')
+            cosign sign --yes "$IMAGE@$digest"
+          done
+
+  # A fresh runner, never logged in to ghcr.io: what a user's install.sh
+  # does. A private package fails here, before the release is published.
+  anonymous-pull:
+    name: anonymous pull and signature check
+    needs: image-manifest
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions: {}
+    steps:
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v2.6.1
+      - name: pull and verify
+        run: |
+          v=${GITHUB_REF_NAME#v}
+          identity="https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yml@refs/tags/$GITHUB_REF_NAME"
+          for tag in "$v" "$v-vault"; do
+            out=$(cosign verify --certificate-identity "$identity" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com "$IMAGE:$tag")
+            digest=$(printf '%s' "$out" | sed -n 's/.*"docker-manifest-digest":"\(sha256:[0-9a-f]\{64\}\)".*/\1/p' | sed -n 1p)
+            test -n "$digest"
+            docker pull "$IMAGE@$digest" || {
+              echo "::error::anonymous pull of $IMAGE@$digest failed: make the ghcr.io package public (Package settings, Change visibility)"
+              exit 1
+            }
+          done
+
+  publish:
+    name: publish the release
+    needs: [goreleaser, anonymous-pull]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write # turn the draft into a published release
+    steps:
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v2.6.1
+      - name: the draft's checksums.txt is signed by this workflow
+        run: |
+          gh release download "$GITHUB_TREF" --repo "$GITHUB_REPOSITORY" --pattern 'checksums.txt*' --dir draft
+          cosign verify-blob --bundle draft/checksums.txt.sigstore.json \
+            --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yml@refs/tags/$GITHUB_REF_NAME" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com draft/checksums.txt
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TREF: ${{ github.ref_name }}
+      - name: gh release edit --draft=false
+        run: gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # install.sh at locklog.dev: pages.yml deploys main's site with main's
+  # scripts/install.sh. Dispatched on main (the github-pages environment
+  # refuses tag refs).
+  pages:
+    name: dispatch pages
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write # gh workflow run
+      contents: read # read .github/workflows/pages.yml
+    steps:
+      - name: gh workflow run pages.yml --ref main
+        run: |
+          if out=$(gh api "repos/$GITHUB_REPOSITORY/contents/.github/workflows/pages.yml?ref=main" --silent 2>&1); then
+            gh workflow run pages.yml --repo "$GITHUB_REPOSITORY" --ref main
+          elif printf '%s' "$out" | grep -q 'HTTP 404'; then
+            echo "::notice::no pages.yml on main yet: nothing to deploy"
+          else
+            echo "::error::could not check for pages.yml: $out"
+            exit 1
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

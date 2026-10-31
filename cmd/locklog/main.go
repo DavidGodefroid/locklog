@@ -15,7 +15,8 @@ var version = "dev"
 const usage = `usage: locklog <command>
 
 Commands:
-  version   print the version
+  version                 print the version
+  mounts [--profile P]    print the mount plan of a profile (read by the launcher)
 `
 
 func main() {
@@ -23,7 +24,7 @@ func main() {
 }
 
 // run executes one command and returns the process exit code: 0 on
-// success, 2 on a usage error.
+// success, 1 on a failure, 2 on a usage error.
 func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprint(stderr, usage)
@@ -37,6 +38,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 		fmt.Fprintf(stdout, "locklog %s\n", version)
 		return 0
+	case "mounts":
+		return mounts(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		if len(args) > 1 {
 			fmt.Fprint(stderr, usage)
