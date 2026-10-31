@@ -731,3 +731,27 @@ func TestExplicitLogfmtOnePair(t *testing.T) {
 		t.Fatalf("%+v", ev)
 	}
 }
+
+func TestTimestampFollowedByTab(t *testing.T) {
+	p := mustParser(t, Options{Format: "plain"})
+	ev := p.Line("2026-10-30T14:02:11Z\tERROR x")
+	if lvl, _ := Get(ev.Fields, "level"); !ev.HasTime || lvl.Str != "error" || ev.Message != "ERROR x" {
+		t.Fatalf("%+v", ev)
+	}
+}
+
+func TestResumeOnCausedBySplit(t *testing.T) {
+	p := mustParser(t, Options{Format: "logfmt"})
+	var b strings.Builder
+	b.WriteString("head\n")
+	for i := 0; i < MaxEventLines-1; i++ {
+		b.WriteString("\tat x\n")
+	}
+	b.WriteString("Caused by: k=v\n\tat y\n")
+	in := b.String()
+	all := readAll(t, p, in)
+	rest := readAll(t, p, in[all[len(all)-1].Offset:])
+	if len(rest) != 1 || rest[0].Raw != all[len(all)-1].Raw {
+		t.Fatalf("resumed %d events", len(rest))
+	}
+}
