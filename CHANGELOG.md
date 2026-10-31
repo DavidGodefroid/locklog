@@ -38,6 +38,11 @@ uses [Semantic Versioning](https://semver.org/).
   (read-only beneath the log and containers roots, writes only to its
   volumes and /tmp, rights chosen by ABI), and the rule that a docker source
   on a production profile needs Landlock or openat2 with `RESOLVE_NO_XDEV`.
+- Parsing: the `syslog` (RFC 5424 with structured data, RFC 3164 with or
+  without PRI, rsyslog's RFC 3339 variant) and `combined` (NCSA
+  common/combined access logs) formats, detected by `auto` after JSON and
+  logfmt, and the `cri` and `docker-json` container frames (runtime time,
+  stream, split lines joined, payload decoded with `auto`).
 
 ### Fixed
 

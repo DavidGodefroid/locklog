@@ -105,6 +105,30 @@ jobs:
           path: "**/testdata/fuzz/**"
           if-no-files-found: ignore
 
+  # Sources against the runner's own services: journald (the source reads
+  # /var/log/journal as root, like a console with the journal group would).
+  integration:
+    name: integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.x"
+          check-latest: true
+      - name: journald
+        shell: bash
+        run: |
+          set -o pipefail
+          go test -c -o journald.test ./internal/source/journald/
+          sudo LOCKLOG_JOURNALD_IT=1 ./journald.test -test.run '^TestLiveJournal$' -test.v | tee it.log
+          grep -q -- '--- PASS: TestLiveJournal' it.log
+
   # One required check name ("lint") for every static check; later pull
   # requests add steps here (goreleaser check, install.sh rules, ...).
   lint:
