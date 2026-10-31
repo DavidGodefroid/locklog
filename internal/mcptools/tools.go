@@ -126,7 +126,7 @@ type RangeIn struct {
 	Sources []string `json:"sources,omitempty" jsonschema:"source names (default: every source)"`
 	From    string   `json:"from,omitempty" jsonschema:"RFC 3339 start of the range"`
 	To      string   `json:"to,omitempty" jsonschema:"RFC 3339 end of the range (default: now)"`
-	Last    string   `json:"last,omitempty" jsonschema:"instead of from/to: the last duration, e.g. 1h or 7d"`
+	Last    string   `json:"last,omitempty" jsonschema:"instead of from/to: the last duration, e.g. 1h or 168h (units: s, m, h)"`
 	Where   []Pred   `json:"where,omitempty" jsonschema:"predicates, all of which must hold"`
 	Text    string   `json:"text,omitempty" jsonschema:"text the masked message contains"`
 	Regex   string   `json:"regex,omitempty" jsonschema:"RE2 the masked message matches (at most 256 bytes)"`
@@ -153,7 +153,7 @@ type CountIn struct {
 type PatternsIn struct {
 	RangeIn
 	Top      int    `json:"top,omitempty" jsonschema:"patterns to return, 1 to 100 (default 20)"`
-	Baseline string `json:"baseline,omitempty" jsonschema:"compare with the same window this much earlier, e.g. 24h or 7d (at least the window's length): adds baseline counts and the new and gone patterns"`
+	Baseline string `json:"baseline,omitempty" jsonschema:"compare with the same window this much earlier, e.g. 24h or 168h (units: s, m, h; at least the window's length): adds baseline counts and the new and gone patterns"`
 }
 
 // PIIAddIn proposes a mask rule.

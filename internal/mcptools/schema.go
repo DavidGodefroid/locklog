@@ -15,7 +15,7 @@ const (
 	maxChange   = 2000 // a change request
 	maxRegex    = 256
 	maxTop      = 100 // engine.MaxTop
-	maxDuration = 16  // a duration such as 24h or 7d
+	maxDuration = 16  // a duration such as 24h or 168h
 )
 
 var (
