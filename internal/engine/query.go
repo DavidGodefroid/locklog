@@ -22,8 +22,8 @@ const (
 	EPIIInQuery   = "E_PII_IN_QUERY"
 	EOverBudget   = "E_OVER_BUDGET"
 	ESource       = "E_SOURCE"
-	// EMask is reserved: search and count skip a granule where masking
-	// fails too often instead of refusing (see run).
+	// EMask is reserved: a record masking fails on is withheld and
+	// counted in masked_failures, never refused (see run).
 	EMask          = "E_MASK"
 	EPolicyChanged = "E_POLICY_CHANGED"
 	EStale         = "E_STALE"

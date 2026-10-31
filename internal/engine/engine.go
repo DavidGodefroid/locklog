@@ -50,9 +50,6 @@ type Limits struct {
 	MaxOutput  int
 	// Deadline of one call.
 	Deadline time.Duration
-	// MaxMaskFailures in one granule before the granule is skipped
-	// whole (see run).
-	MaxMaskFailures int
 }
 
 // DefaultLimits are the design defaults.
@@ -63,7 +60,7 @@ func DefaultLimits() Limits {
 		// 1 MB/s/core, so 512 MiB (both kinds) is several free
 		// continuations; the code ceiling stays 64 GiB.
 		LocalBytes: 512 << 20, RemoteBytes: 512 << 20, MaxRecords: 200, MaxOutput: 64 << 10,
-		Deadline: 30 * time.Second, MaxMaskFailures: 3}
+		Deadline: 30 * time.Second}
 }
 
 // Options configure an Engine.
@@ -226,8 +223,7 @@ type SearchResult struct {
 	Scanned      Scanned           `json:"scanned"`
 	Masking      Masking           `json:"masking"`
 	// MaskedFailures counts records withheld whole because masking
-	// failed: the records it failed on, and every record of a granule
-	// where it failed MaxMaskFailures times or more.
+	// failed (0 with the opt-in pre-filter, see prefilter.go).
 	MaskedFailures int `json:"masked_failures,omitempty"`
 }
 
@@ -428,27 +424,14 @@ func (e *Engine) run(ctx context.Context, plan source.Byteplan, chunk, gran int,
 		// which ones do, so they are not counted (failed records are
 		// still withheld whole, as they never match); see
 		// prefilter.go.
-		perGranule := map[int]int{}
-		for i := range recs {
-			if recs[i].Failed() && !filtered {
-				perGranule[raws[i].Granule]++
-			}
-		}
 		for i := range raws {
-			// A granule where masking failed MaxMaskFailures times
-			// or more is skipped whole: none of its records is
-			// returned or counted, and all of them count as masked
-			// failures (a masker failing that often on a granule's
-			// content is not trusted with the rest of it). This was
-			// chosen over a call-level E_MASK refusal: the call
-			// would stop there every time, so no cursor (and, on a
-			// cold plan, no narrower range) could ever get past it.
-			// Skipping depends on the plan's granules and their
-			// bytes only, never on predicates or call boundaries.
-			if n := perGranule[raws[i].Granule]; n >= e.o.Limits.MaxMaskFailures {
-				failures++
-				continue
-			}
+			// A record masking failed on is withheld whole (it
+			// never matches nor counts by masked values) and
+			// counted; the call goes on, so no cursor ever stops at
+			// it. With the pre-filter on, only the records whose
+			// clear text holds the needles are masked: their
+			// failures would tell which ones do, so they are not
+			// counted (see prefilter.go).
 			if recs[i].Failed() && !filtered {
 				failures++
 			}

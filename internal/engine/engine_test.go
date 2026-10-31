@@ -961,40 +961,35 @@ func TestFailedContinuationKeepsItsState(t *testing.T) {
 	}
 }
 
-// TestMaskFailuresSkipTheirGranule: a granule holding MaxMaskFailures
-// records the masker fails on is skipped whole and counted as masked
-// failures; the query completes past it, the same way each time and however
-// calls are sliced.
-func TestMaskFailuresSkipTheirGranule(t *testing.T) {
+// boomLog is genLog(t0, 30000) with three records the masker fails on in
+// its last granule.
+func boomLog() string {
 	var b strings.Builder
 	b.WriteString(genLog(t0, 30000, "c@example.org"))
 	for i := 0; i < 3; i++ {
-		fmt.Fprintf(&b, "time=2026-10-30T21:00:0%dZ level=info msg=\"kaboom BOOM %d\"\n", i, i)
+		fmt.Fprintf(&b, "time=2026-10-30T21:00:0%dZ level=error status=500 msg=\"kaboom upstream BOOM %d\"\n", i, i)
 	}
-	const all = 30003
-	f := newFixtureMask(t, b.String(), withBoom, oneGranulePerCall)
+	return b.String()
+}
+
+// TestMaskFailuresWithheldPerRecord: a record masking fails on is withheld
+// whole and counted; every other record of its granule is answered, and no
+// call is refused, so cursors always get past it.
+func TestMaskFailuresWithheldPerRecord(t *testing.T) {
+	f := newFixtureMask(t, boomLog(), withBoom, oneGranulePerCall)
 	qq := q(func(q *Query) { q.Text = "upstream"; q.Limit = 200; q.Fields = []string{"level"} })
-	var runs []string
-	for run := 0; run < 2; run++ {
-		recs, pages := allRecords(t, f.eng, qq)
-		failed := 0
-		for _, p := range pages {
-			failed += p.MaskedFailures
-		}
-		if failed < 3 || failed == all || len(recs)+failed != all {
-			t.Fatalf("%d records, %d masked failures", len(recs), failed)
-		}
-		runs = append(runs, fmt.Sprint(len(recs), failed))
+	recs, pages := allRecords(t, f.eng, qq)
+	failed := 0
+	for _, p := range pages {
+		failed += p.MaskedFailures
 	}
-	if runs[0] != runs[1] {
-		t.Fatalf("not deterministic: %v", runs)
+	if len(recs) != 30000 || failed != 3 {
+		t.Fatalf("%d records, %d masked failures", len(recs), failed)
 	}
-	// A count, in one call, skips the same granule.
-	f.eng.o.Cost = fixedCost(1)
 	cq := CountQuery{Query: qq}
 	cq.Limit = 0
 	var n int64
-	failed := 0
+	failed = 0
 	for i := 0; ; i++ {
 		res, err := f.eng.Count(ctx, cq)
 		if err != nil {
@@ -1012,7 +1007,7 @@ func TestMaskFailuresSkipTheirGranule(t *testing.T) {
 			t.Fatal("never completes")
 		}
 	}
-	if fmt.Sprint(n, failed) != runs[0] {
-		t.Fatalf("count %d with %d failures, search %s", n, failed, runs[0])
+	if n != 30000 || failed != 3 {
+		t.Fatalf("count %d with %d failures", n, failed)
 	}
 }
