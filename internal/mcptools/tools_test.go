@@ -10,6 +10,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/DavidGodefroid/lockkit/client"
 	"github.com/DavidGodefroid/lockkit/ipc"
 	"github.com/DavidGodefroid/lockkit/refusal"
 
@@ -201,5 +202,97 @@ func TestHostAgentGuard(t *testing.T) {
 	cs2 := connect(t, withConn(c2))
 	if res := call(t, cs2, ToolSearch, map[string]any{"text": "x"}); res.IsError {
 		t.Errorf("own container on production: %s", text(res))
+	}
+}
+
+// leaves lists the string and number values of a decoded JSON value.
+func leaves(v any, out *[]string) {
+	switch x := v.(type) {
+	case map[string]any:
+		for _, e := range x {
+			leaves(e, out)
+		}
+	case []any:
+		for _, e := range x {
+			leaves(e, out)
+		}
+	case string:
+		*out = append(*out, x)
+	case float64:
+		b, _ := json.Marshal(x)
+		*out = append(*out, string(b))
+	}
+}
+
+// checkParity fails when the structured output holds a value the text
+// does not show.
+func checkParity(t *testing.T, what string, res *mcp.CallToolResult) {
+	t.Helper()
+	txt := text(res)
+	var vals []string
+	leaves(res.StructuredContent, &vals)
+	for _, v := range vals {
+		q, _ := json.Marshal(v)
+		if !strings.Contains(txt, v) && !strings.Contains(txt, string(q)) {
+			t.Errorf("%s: structured value %q is not in the text:\n%s", what, v, txt)
+		}
+	}
+}
+
+// A host agent asking the status of a production profile gets no status
+// fields, in the text or the structured output.
+func TestHostAgentStatusStructured(t *testing.T) {
+	o := withConn(&fakeConn{production: true})
+	o.HostAgent = true
+	res := call(t, connect(t, o), ToolStatus, nil)
+	b, _ := json.Marshal(res.StructuredContent)
+	var got struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(b, &got); err != nil || len(got.Data) != 1 {
+		t.Fatalf("structured = %s (%v)", b, err)
+	}
+	if _, ok := got.Data[0]["status"]; ok {
+		t.Errorf("a host agent got the production status: %s", b)
+	}
+	if got.Data[0]["refused"] != refusedProduction {
+		t.Errorf("no refusal marker: %s", b)
+	}
+	if strings.Contains(text(res), `"production"`) || strings.Contains(text(res), `"profile":"dev"`) {
+		t.Errorf("the text shows the production status: %s", text(res))
+	}
+	checkParity(t, "status", res)
+}
+
+// The structured output of every tool never carries more than its text:
+// served, refused by the console, refused to a host agent on production,
+// and a status without a console.
+func TestStructuredParity(t *testing.T) {
+	args := map[string]map[string]any{ToolSearch: {"text": "x"}, ToolCount: {"text": "x"}, ToolPIIAdd: {"pattern": "x"}, ToolRequestChange: {"change": "y"}}
+	refused := &ipc.RPCError{Code: ipc.CodeRefused, Message: "over the budget", Data: &refusal.Info{Code: "E_OVER_BUDGET", Retry: refusal.RetryRewrite, Hint: "narrow the range", Span: &refusal.Span{Line: 1, Col: 7, Token: "regex"}}}
+	cases := []struct {
+		name string
+		conn *fakeConn
+		host bool
+	}{
+		{"served", &fakeConn{}, false},
+		{"served production", &fakeConn{production: true}, false},
+		{"console refusal", &fakeConn{err: refused}, false},
+		{"host agent production", &fakeConn{production: true}, true},
+		{"host agent non-production", &fakeConn{}, true},
+	}
+	for _, tc := range cases {
+		o := withConn(tc.conn)
+		o.HostAgent = tc.host
+		cs := connect(t, o)
+		for _, tool := range Names() {
+			checkParity(t, tc.name+"/"+tool, call(t, cs, tool, args[tool]))
+		}
+	}
+	o := withConn(nil)
+	o.Dial = func(string) (Conn, error) { return nil, client.ErrNoConsole }
+	cs := connect(t, o)
+	for _, tool := range Names() {
+		checkParity(t, "no console/"+tool, call(t, cs, tool, args[tool]))
 	}
 }

@@ -238,6 +238,10 @@ func answer(what string, data any, err error) (*mcp.CallToolResult, Out, error) 
 	if err != nil {
 		err = toolErr(err)
 		if res, info, ok := mcpkit.Refused(err); ok {
+			// The text carries the whole structured refusal, so the
+			// structured output never says more than the text.
+			j, _ := json.Marshal(info)
+			res.Content = append(res.Content, &mcp.TextContent{Text: "refusal: " + string(j)})
 			return res, Out{Refusal: info}, nil
 		}
 		return nil, Out{}, err
@@ -305,7 +309,14 @@ type StatusOut struct {
 	// Start is the command the user runs to start the console.
 	Start  string `json:"start,omitempty"`
 	Status any    `json:"status,omitempty"`
+	// Refused says why Status is left out: a host agent is never shown a
+	// production profile's status.
+	Refused string `json:"refused,omitempty"`
 }
+
+// refusedProduction is StatusOut.Refused for a production profile asked by
+// a host agent.
+const refusedProduction = "production profile: host agents are refused"
 
 func (t *tools) status(ctx context.Context, _ *mcp.CallToolRequest, in ProfileIn) (*mcp.CallToolResult, Out, error) {
 	names, err := t.profiles.ForStatus(in.Profile)
@@ -320,6 +331,9 @@ func (t *tools) status(ctx context.Context, _ *mcp.CallToolRequest, in ProfileIn
 			if start, hint, ok := mcpkit.NoConsole(product.P, n, err); ok {
 				out = append(out, StatusOut{Profile: n, Start: start})
 				text.WriteString(mcpkit.NoConsoleLine(n, hint))
+				if !strings.Contains(hint, start) {
+					fmt.Fprintf(&text, "start: %s\n", start)
+				}
 				continue
 			}
 			return nil, Out{}, toolErr(err)
@@ -336,11 +350,14 @@ func (t *tools) status(ctx context.Context, _ *mcp.CallToolRequest, in ProfileIn
 			Production bool `json:"production"`
 		}
 		_ = json.Unmarshal(st, &prod)
-		out = append(out, StatusOut{Profile: n, Running: true, Status: v})
 		if t.o.HostAgent && prod.Production {
-			fmt.Fprintf(&text, "profile %s: production: refused to a host agent (%s)\n", n, errProduction.Msg)
+			// Neither the text nor the structured output carries the
+			// production console's status.
+			out = append(out, StatusOut{Profile: n, Running: true, Refused: refusedProduction})
+			fmt.Fprintf(&text, "profile %s: %s: refused to a host agent (%s)\n", n, refusedProduction, errProduction.Msg)
 			continue
 		}
+		out = append(out, StatusOut{Profile: n, Running: true, Status: v})
 		fmt.Fprintf(&text, "%s\nprofile %s: console running: %s\n", mcpkit.Untrusted("status", "the console"), n, st)
 	}
 	return mcpkit.Text(text.String()), Out{Data: out}, nil
