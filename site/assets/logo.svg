@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="locklog logo">
+  <defs>
+    <linearGradient id="body" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0EA5E9"/><stop offset="1" stop-color="#0369A1"/></linearGradient>
+    <linearGradient id="shackle" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#5EEAD4"/><stop offset="1" stop-color="#14B8A6"/></linearGradient>
+    <clipPath id="lines"><circle cx="64" cy="84" r="38"/></clipPath>
+  </defs>
+  <path d="M42 60 V38 a22 22 0 0 1 44 0 V60" fill="none" stroke="url(#shackle)" stroke-width="11" stroke-linecap="round"/>
+    <circle cx="64" cy="84" r="38" fill="url(#body)"/>
+    <g clip-path="url(#lines)" stroke="#E0F2FE" stroke-opacity=".6" stroke-width="4" stroke-linecap="round"><path d="M34 66 H70"/><path d="M34 102 H94"/><path d="M78 66 H90"/><path d="M80 84 H94"/><path d="M34 84 H48"/></g>
+    <circle cx="64" cy="80" r="7" fill="#0F172A"/>
+    <path d="M60.5 83 L58.5 96 H69.5 L67.5 83 Z" fill="#0F172A"/>
+</svg>

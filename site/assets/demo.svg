@@ -1,0 +1,169 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 620" width="1200" height="620" role="img" aria-label="locklog: Claude Code asks when the PDF errors started on a staging profile. locklog_count shows the step at 14:02, locklog_patterns finds the new pattern with the email and the IP masked, and locklog_trace follows order 4812: all free and masked. The agent then asks locklog_unmask for the email. The locklog console, in its own account and container, shows the read-pii approval screen with the masked record and the span marked; the human answers n. The agent gets denied and carries on without the address; the audit records every call with pseudonyms only.">
+<title>locklog: your AI reads the logs, not the people in them</title>
+<style>@keyframes k1{0.00%{opacity:0} 1.88%{opacity:0} 3.12%{opacity:1} 96.25%{opacity:1} 97.50%{opacity:0} 100.00%{opacity:0}}
+.k1{animation:k1 16.0s linear infinite}
+@keyframes k2{0.00%{opacity:0} 6.25%{opacity:0} 7.50%{opacity:1} 96.25%{opacity:1} 97.50%{opacity:0} 100.00%{opacity:0}}
+.k2{animation:k2 16.0s linear infinite}
+@keyframes k3{0.00%{opacity:0} 11.25%{opacity:0} 12.50%{opacity:1} 96.25%{opacity:1} 97.50%{opacity:0} 100.00%{opacity:0}}
+.k3{animation:k3 16.0s linear infinite}
+@keyframes k4{0.00%{opacity:0} 16.25%{opacity:0} 17.50%{opacity:1} 96.25%{opacity:1} 97.50%{opacity:0} 100.00%{opacity:0}}
+.k4{animation:k4 16.0s linear infinite}
+@keyframes k5{0.00%{opacity:0} 21.25%{opacity:0} 22.50%{opacity:1} 96.25%{opacity:1} 97.50%{opacity:0} 100.00%{opacity:0}}
+.k5{animation:k5 16.0s linear infinite}
+@keyframes k6{0.00%{opacity:0} 21.25%{opacity:0} 22.50%{opacity:1} 96.25%{opacity:1} 97.50%{opacity:0} 100.00%{opacity:0}}
+.k6{animation:k6 16.0s linear infinite}
+@keyframes k7{0.00%{opacity:0} 26.25%{opacity:0} 27.50%{opacity:1} 96.25%{opacity:1} 97.50%{opacity:0} 100.00%{opacity:0}}
+.k7{animation:k7 16.0s linear infinite}
+@keyframes k8{0.00%{opacity:0} 31.25%{opacity:0} 32.50%{opacity:1} 96.25%{opacity:1} 97.50%{opacity:0} 100.00%{opacity:0}}
+.k8{animation:k8 16.0s linear infinite}
+@keyframes k9{0.00%{opacity:0} 31.25%{opacity:0} 32.50%{opacity:1} 96.25%{opacity:1} 97.50%{opacity:0} 100.00%{opacity:0}}
+.k9{animation:k9 16.0s linear infinite}
+@keyframes k10{0.00%{opacity:0} 36.25%{opacity:0} 37.50%{opacity:1} 96.25%{opacity:1} 97.50%{opacity:0} 100.00%{opacity:0}}
+.k10{animation:k10 16.0s linear infinite}
+@keyframes k11{0.00%{opacity:0} 38.12%{opacity:0} 39.38%{opacity:1} 71.25%{opacity:1} 72.50%{opacity:0} 100.00%{opacity:0}}
+.k11{animation:k11 16.0s linear infinite}
+@keyframes k12{0.00%{opacity:0} 72.50%{opacity:0} 73.75%{opacity:1} 96.25%{opacity:1} 97.50%{opacity:0} 100.00%{opacity:0}}
+.k12{animation:k12 16.0s linear infinite}
+@keyframes k13{0.00%{opacity:0} 72.50%{opacity:0} 73.75%{opacity:1} 96.25%{opacity:1} 97.50%{opacity:0} 100.00%{opacity:0}}
+.k13{animation:k13 16.0s linear infinite}
+@keyframes k14{0.00%{opacity:0} 77.50%{opacity:0} 78.75%{opacity:1} 96.25%{opacity:1} 97.50%{opacity:0} 100.00%{opacity:0}}
+.k14{animation:k14 16.0s linear infinite}
+@keyframes k15{0.00%{opacity:0} 77.50%{opacity:0} 78.75%{opacity:1} 96.25%{opacity:1} 97.50%{opacity:0} 100.00%{opacity:0}}
+.k15{animation:k15 16.0s linear infinite}
+@keyframes k16{0.00%{opacity:0} 77.50%{opacity:0} 78.75%{opacity:1} 96.25%{opacity:1} 97.50%{opacity:0} 100.00%{opacity:0}}
+.k16{animation:k16 16.0s linear infinite}
+@keyframes k17{0.00%{opacity:0} 77.50%{opacity:0} 78.75%{opacity:1} 96.25%{opacity:1} 97.50%{opacity:0} 100.00%{opacity:0}}
+.k17{animation:k17 16.0s linear infinite}
+@keyframes k18{0.00%{opacity:0} 40.00%{opacity:0} 41.25%{opacity:1} 96.25%{opacity:1} 97.50%{opacity:0} 100.00%{opacity:0}}
+.k18{animation:k18 16.0s linear infinite}
+@keyframes k19{0.00%{opacity:0} 40.00%{opacity:0} 41.25%{opacity:1} 96.25%{opacity:1} 97.50%{opacity:0} 100.00%{opacity:0}}
+.k19{animation:k19 16.0s linear infinite}
+@keyframes k20{0.00%{opacity:0} 40.00%{opacity:0} 41.25%{opacity:1} 96.25%{opacity:1} 97.50%{opacity:0} 100.00%{opacity:0}}
+.k20{animation:k20 16.0s linear infinite}
+@keyframes k21{0.00%{opacity:0} 40.00%{opacity:0} 41.25%{opacity:1} 96.25%{opacity:1} 97.50%{opacity:0} 100.00%{opacity:0}}
+.k21{animation:k21 16.0s linear infinite}
+@keyframes k22{0.00%{opacity:0} 41.25%{opacity:0} 42.50%{opacity:1} 96.25%{opacity:1} 97.50%{opacity:0} 100.00%{opacity:0}}
+.k22{animation:k22 16.0s linear infinite}
+@keyframes k23{0.00%{opacity:0} 42.50%{opacity:0} 43.75%{opacity:1} 96.25%{opacity:1} 97.50%{opacity:0} 100.00%{opacity:0}}
+.k23{animation:k23 16.0s linear infinite}
+@keyframes k24{0.00%{opacity:0} 66.25%{opacity:0} 66.44%{opacity:1} 96.25%{opacity:1} 96.44%{opacity:0} 100.00%{opacity:0}}
+.k24{animation:k24 16.0s linear infinite}
+@keyframes k25{0.00%{opacity:0} 43.12%{opacity:0} 43.19%{opacity:1} 46.25%{opacity:1} 46.31%{opacity:0} 48.75%{opacity:0} 48.81%{opacity:1} 51.81%{opacity:1} 51.88%{opacity:0} 54.37%{opacity:0} 54.44%{opacity:1} 59.38%{opacity:1} 59.44%{opacity:0} 61.88%{opacity:0} 61.94%{opacity:1} 66.19%{opacity:1} 66.25%{opacity:0} 100.00%{opacity:0}}
+.k25{animation:k25 16.0s linear infinite}
+@keyframes k26{0.00%{opacity:0} 68.75%{opacity:0} 70.00%{opacity:1} 96.25%{opacity:1} 97.50%{opacity:0} 100.00%{opacity:0}}
+.k26{animation:k26 16.0s linear infinite}
+@keyframes k27{0.00%{opacity:0} 43.75%{opacity:0} 44.38%{opacity:1} 66.25%{opacity:1} 66.88%{opacity:0} 100.00%{opacity:0}}
+.k27{animation:k27 16.0s linear infinite}
+@keyframes k28{0.00%{transform:translate(504px,90px);opacity:0} 6.56%{transform:translate(504px,90px);opacity:0} 6.88%{transform:translate(504px,90px);opacity:1} 8.44%{transform:translate(564.0px,90px);opacity:1} 9.38%{transform:translate(564.0px,90px);opacity:0} 100.00%{transform:translate(564.0px,90px);opacity:0}}
+.k28{animation:k28 16.0s linear infinite}
+@keyframes k29{0.00%{transform:translate(564.0px,90px);opacity:0} 9.06%{transform:translate(564.0px,90px);opacity:0} 9.38%{transform:translate(564.0px,90px);opacity:1} 10.94%{transform:translate(504px,108px);opacity:1} 11.88%{transform:translate(504px,108px);opacity:0} 100.00%{transform:translate(504px,108px);opacity:0}}
+.k29{animation:k29 16.0s linear infinite}
+@keyframes k30{0.00%{opacity:0} 8.12%{opacity:0} 8.75%{opacity:1} 15.00%{opacity:1} 15.62%{opacity:0} 100.00%{opacity:0}}
+.k30{animation:k30 16.0s linear infinite}
+@keyframes k31{0.00%{transform:translate(504px,126px);opacity:0} 16.56%{transform:translate(504px,126px);opacity:0} 16.88%{transform:translate(504px,126px);opacity:1} 18.44%{transform:translate(564.0px,126px);opacity:1} 19.38%{transform:translate(564.0px,126px);opacity:0} 100.00%{transform:translate(564.0px,126px);opacity:0}}
+.k31{animation:k31 16.0s linear infinite}
+@keyframes k32{0.00%{transform:translate(564.0px,126px);opacity:0} 19.06%{transform:translate(564.0px,126px);opacity:0} 19.38%{transform:translate(564.0px,126px);opacity:1} 20.94%{transform:translate(504px,144px);opacity:1} 21.88%{transform:translate(504px,144px);opacity:0} 100.00%{transform:translate(504px,144px);opacity:0}}
+.k32{animation:k32 16.0s linear infinite}
+@keyframes k33{0.00%{opacity:0} 18.12%{opacity:0} 18.75%{opacity:1} 25.00%{opacity:1} 25.62%{opacity:0} 100.00%{opacity:0}}
+.k33{animation:k33 16.0s linear infinite}
+@keyframes k34{0.00%{transform:translate(504px,180px);opacity:0} 26.56%{transform:translate(504px,180px);opacity:0} 26.88%{transform:translate(504px,180px);opacity:1} 28.44%{transform:translate(564.0px,180px);opacity:1} 29.38%{transform:translate(564.0px,180px);opacity:0} 100.00%{transform:translate(564.0px,180px);opacity:0}}
+.k34{animation:k34 16.0s linear infinite}
+@keyframes k35{0.00%{transform:translate(564.0px,180px);opacity:0} 29.06%{transform:translate(564.0px,180px);opacity:0} 29.38%{transform:translate(564.0px,180px);opacity:1} 30.94%{transform:translate(504px,198px);opacity:1} 31.88%{transform:translate(504px,198px);opacity:0} 100.00%{transform:translate(504px,198px);opacity:0}}
+.k35{animation:k35 16.0s linear infinite}
+@keyframes k36{0.00%{opacity:0} 28.12%{opacity:0} 28.75%{opacity:1} 35.00%{opacity:1} 35.62%{opacity:0} 100.00%{opacity:0}}
+.k36{animation:k36 16.0s linear infinite}
+@keyframes k37{0.00%{transform:translate(504px,234px);opacity:0} 36.56%{transform:translate(504px,234px);opacity:0} 36.88%{transform:translate(504px,234px);opacity:1} 38.44%{transform:translate(564.0px,234px);opacity:1} 39.38%{transform:translate(564.0px,234px);opacity:0} 100.00%{transform:translate(564.0px,234px);opacity:0}}
+.k37{animation:k37 16.0s linear infinite}
+@keyframes k38{0.00%{transform:translate(564.0px,234px);opacity:0} 38.75%{transform:translate(564.0px,234px);opacity:0} 39.06%{transform:translate(564.0px,234px);opacity:1} 40.62%{transform:translate(624px,126px);opacity:1} 41.56%{transform:translate(624px,126px);opacity:0} 100.00%{transform:translate(624px,126px);opacity:0}}
+.k38{animation:k38 16.0s linear infinite}
+@keyframes k39{0.00%{opacity:0} 37.81%{opacity:0} 38.44%{opacity:1} 68.75%{opacity:1} 69.38%{opacity:0} 100.00%{opacity:0}}
+.k39{animation:k39 16.0s linear infinite}
+@keyframes k40{0.00%{transform:translate(624px,342px);opacity:0} 69.06%{transform:translate(624px,342px);opacity:0} 69.38%{transform:translate(624px,342px);opacity:1} 70.62%{transform:translate(564.0px,270px);opacity:1} 71.56%{transform:translate(564.0px,270px);opacity:0} 100.00%{transform:translate(564.0px,270px);opacity:0}}
+.k40{animation:k40 16.0s linear infinite}
+@keyframes k41{0.00%{transform:translate(564.0px,270px);opacity:0} 70.94%{transform:translate(564.0px,270px);opacity:0} 71.25%{transform:translate(564.0px,270px);opacity:1} 72.50%{transform:translate(504px,270px);opacity:1} 73.44%{transform:translate(504px,270px);opacity:0} 100.00%{transform:translate(504px,270px);opacity:0}}
+.k41{animation:k41 16.0s linear infinite}
+@keyframes k42{0.00%{opacity:0} 70.62%{opacity:0} 71.25%{opacity:1} 96.25%{opacity:1} 96.88%{opacity:0} 100.00%{opacity:0}}
+.k42{animation:k42 16.0s linear infinite}
+@keyframes k43{0.00%{opacity:0} 22.50%{opacity:0} 23.75%{opacity:1} 96.25%{opacity:1} 97.50%{opacity:0} 100.00%{opacity:0}}
+.k43{animation:k43 16.0s linear infinite}
+@keyframes k44{0.00%{opacity:0} 71.25%{opacity:0} 72.50%{opacity:1} 96.25%{opacity:1} 97.50%{opacity:0} 100.00%{opacity:0}}
+.k44{animation:k44 16.0s linear infinite}
+@keyframes k45{0.00%{opacity:0} 0.31%{opacity:0} 1.56%{opacity:1} 34.38%{opacity:1} 35.62%{opacity:0} 100.00%{opacity:0}}
+.k45{animation:k45 16.0s linear infinite}
+@keyframes k46{0.00%{opacity:0} 35.94%{opacity:0} 37.19%{opacity:1} 68.75%{opacity:1} 70.00%{opacity:0} 100.00%{opacity:0}}
+.k46{animation:k46 16.0s linear infinite}
+@keyframes k47{0.00%{opacity:0} 70.31%{opacity:0} 71.56%{opacity:1} 95.00%{opacity:1} 96.25%{opacity:0} 100.00%{opacity:0}}
+.k47{animation:k47 16.0s linear infinite}
+@media (prefers-reduced-motion: reduce){*{animation-delay:-15.0s!important;animation-play-state:paused!important}}</style>
+<rect width="1200" height="620" rx="24" fill="#0b1120"/>
+<rect x="24" y="24" width="500" height="408" rx="12" fill="#020617" stroke="#253047" stroke-width="1.5"/>
+<path d="M24 36 a12 12 0 0 1 12 -12 h476 a12 12 0 0 1 12 12 v18 h-500 z" fill="#0f172a"/>
+<circle cx="42" cy="39" r="5" fill="#f87171" fill-opacity=".7"/>
+<circle cx="58" cy="39" r="5" fill="#facc15" fill-opacity=".7"/>
+<circle cx="74" cy="39" r="5" fill="#4ade80" fill-opacity=".7"/>
+<text x="94.0" y="44" font-family="Inter,-apple-system,'Segoe UI',system-ui,Helvetica,Arial,'DejaVu Sans',sans-serif" font-size="12" fill="#94a3b8" font-weight="600" text-anchor="start" xml:space="preserve">✻ Claude Code</text>
+<text x="510.0" y="44" font-family="Inter,-apple-system,'Segoe UI',system-ui,Helvetica,Arial,'DejaVu Sans',sans-serif" font-size="12" fill="#64748b" font-weight="400" text-anchor="end" xml:space="preserve">its own container · profile staging</text>
+<text x="40" y="76" class="k1" font-family="'JetBrains Mono','SF Mono',Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="11.5" xml:space="preserve"><tspan fill="#64748b">&gt; </tspan><tspan fill="#e2e8f0">when did the PDF errors start on staging?</tspan></text>
+<text x="40" y="94" class="k2" font-family="'JetBrains Mono','SF Mono',Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="11.5" xml:space="preserve"><tspan fill="#4ade80">● </tspan><tspan fill="#e2e8f0">locklog_count</tspan><tspan fill="#94a3b8">(api, last 12h, by 1m, level=error)</tspan></text>
+<text x="40" y="112" class="k3" font-family="'JetBrains Mono','SF Mono',Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="11.5" xml:space="preserve"><tspan fill="#64748b">  └ </tspan><tspan fill="#94a3b8">0/min until 14:01 · </tspan><tspan fill="#facc15">67/min from 14:02</tspan></text>
+<text x="40" y="130" class="k4" font-family="'JetBrains Mono','SF Mono',Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="11.5" xml:space="preserve"><tspan fill="#4ade80">● </tspan><tspan fill="#e2e8f0">locklog_patterns</tspan><tspan fill="#94a3b8">(api, 13:50-14:20, baseline 1h)</tspan></text>
+<text x="40" y="148" class="k5" font-family="'JetBrains Mono','SF Mono',Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="11.5" xml:space="preserve"><tspan fill="#64748b">  └ </tspan><tspan fill="#facc15">new ×1,204: </tspan><tspan fill="#e2e8f0">render pdf for </tspan><tspan fill="#5eead4">⟦email:…⟧</tspan></text>
+<text x="40" y="166" class="k6" font-family="'JetBrains Mono','SF Mono',Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="11.5" xml:space="preserve"><tspan fill="#64748b">    </tspan><tspan fill="#e2e8f0">from </tspan><tspan fill="#5eead4">⟦ip:…⟧</tspan><tspan fill="#e2e8f0"> failed: upstream timed out</tspan></text>
+<text x="40" y="184" class="k7" font-family="'JetBrains Mono','SF Mono',Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="11.5" xml:space="preserve"><tspan fill="#4ade80">● </tspan><tspan fill="#e2e8f0">locklog_trace</tspan><tspan fill="#94a3b8">(order_id 4812, 14:00-14:05)</tspan></text>
+<text x="40" y="202" class="k8" font-family="'JetBrains Mono','SF Mono',Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="11.5" xml:space="preserve"><tspan fill="#64748b">  └ </tspan><tspan fill="#94a3b8">14:02:11.180 nginx  GET /api/orders/4812/pdf 502</tspan></text>
+<text x="40" y="220" class="k9" font-family="'JetBrains Mono','SF Mono',Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="11.5" xml:space="preserve"><tspan fill="#64748b">    </tspan><tspan fill="#94a3b8">14:02:11.204 api    render pdf for </tspan><tspan fill="#5eead4">⟦email:7F3KQ2M9ZD4X⟧</tspan><tspan fill="#94a3b8"> …</tspan></text>
+<text x="40" y="238" class="k10" font-family="'JetBrains Mono','SF Mono',Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="11.5" xml:space="preserve"><tspan fill="#4ade80">● </tspan><tspan fill="#e2e8f0">locklog_unmask</tspan><tspan fill="#94a3b8">(ref Lr1.QW3H…, </tspan><tspan fill="#5eead4">⟦email:7F3KQ2M9ZD4X⟧</tspan><tspan fill="#94a3b8">)</tspan></text>
+<text x="40" y="256" class="k11" font-family="'JetBrains Mono','SF Mono',Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="11.5" xml:space="preserve"><tspan fill="#64748b">  └ </tspan><tspan fill="#facc15">Waiting for approval in the locklog console…</tspan></text>
+<text x="40" y="256" class="k12" font-family="'JetBrains Mono','SF Mono',Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="11.5" xml:space="preserve"><tspan fill="#64748b">  └ </tspan><tspan fill="#e2e8f0">Error: denied by the human; do not retry</tspan></text>
+<text x="40" y="274" class="k13" font-family="'JetBrains Mono','SF Mono',Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="11.5" xml:space="preserve"><tspan fill="#64748b">    </tspan><tspan fill="#e2e8f0">unless asked</tspan></text>
+<text x="40" y="292" class="k14" font-family="'JetBrains Mono','SF Mono',Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="11.5" xml:space="preserve"><tspan fill="#e2e8f0">● </tspan><tspan fill="#e2e8f0">The PDF renderer's upstream has timed out since</tspan></text>
+<text x="40" y="310" class="k15" font-family="'JetBrains Mono','SF Mono',Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="11.5" xml:space="preserve"><tspan fill="#e2e8f0">  </tspan><tspan fill="#e2e8f0">14:02:11 (1,204 requests, order 4812 among them).</tspan></text>
+<text x="40" y="328" class="k16" font-family="'JetBrains Mono','SF Mono',Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="11.5" xml:space="preserve"><tspan fill="#e2e8f0">  </tspan><tspan fill="#e2e8f0">I can't see the customer's address: support can</tspan></text>
+<text x="40" y="346" class="k17" font-family="'JetBrains Mono','SF Mono',Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="11.5" xml:space="preserve"><tspan fill="#e2e8f0">  </tspan><tspan fill="#e2e8f0">reach them through order 4812.</tspan></text>
+<rect x="604" y="24" width="572" height="408" rx="12" fill="#020617" stroke="#253047" stroke-width="1.5"/>
+<path d="M604 36 a12 12 0 0 1 12 -12 h548 a12 12 0 0 1 12 12 v18 h-572 z" fill="#0f172a"/>
+<circle cx="622" cy="39" r="5" fill="#f87171" fill-opacity=".7"/>
+<circle cx="638" cy="39" r="5" fill="#facc15" fill-opacity=".7"/>
+<circle cx="654" cy="39" r="5" fill="#4ade80" fill-opacity=".7"/>
+<text x="674.0" y="44" font-family="Inter,-apple-system,'Segoe UI',system-ui,Helvetica,Arial,'DejaVu Sans',sans-serif" font-size="12" fill="#94a3b8" font-weight="600" text-anchor="start" xml:space="preserve">locklog console</text>
+<text x="1162.0" y="44" font-family="Inter,-apple-system,'Segoe UI',system-ui,Helvetica,Arial,'DejaVu Sans',sans-serif" font-size="12" fill="#64748b" font-weight="400" text-anchor="end" xml:space="preserve">account locklog · its own container</text>
+<text x="620" y="76" font-family="'JetBrains Mono','SF Mono',Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="11" xml:space="preserve"><tspan fill="#64748b">$ </tspan><tspan fill="#e2e8f0">locklog console</tspan></text>
+<text x="620" y="94" font-family="'JetBrains Mono','SF Mono',Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="11" xml:space="preserve"><tspan fill="#4ade80">✓ </tspan><tspan fill="#e2e8f0">profile </tspan><tspan fill="#facc15">staging</tspan><tspan fill="#e2e8f0"> · sources api, nginx, system</tspan></text>
+<text x="620" y="112" font-family="'JetBrains Mono','SF Mono',Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="11" xml:space="preserve"><tspan fill="#38bdf8">› </tspan><tspan fill="#e2e8f0">socket /run/locklog/&lt;project&gt;-staging.sock</tspan></text>
+<g class="k18"><text x="620" y="130" font-family="'JetBrains Mono','SF Mono',Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="11" xml:space="preserve"><tspan fill="#a78bfa">╭─ </tspan><tspan fill="#facc15">STAGING</tspan><tspan fill="#e2e8f0"> · unmask · read-pii </tspan><tspan fill="#a78bfa">──────────────────────────────</tspan></text><text x="620" y="148" font-family="'JetBrains Mono','SF Mono',Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="11" xml:space="preserve"><tspan fill="#a78bfa">│ </tspan><tspan fill="#64748b">uid 10052 (agent) · reason </tspan><tspan fill="#e2e8f0">&quot;contact the customer&quot;</tspan></text><text x="620" y="166" font-family="'JetBrains Mono','SF Mono',Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="11" xml:space="preserve"><tspan fill="#a78bfa">│ </tspan><tspan fill="#e2e8f0">source: api · record: 2026-10-30T14:02:11.204Z</tspan></text><text x="620" y="184" font-family="'JetBrains Mono','SF Mono',Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="11" xml:space="preserve"><tspan fill="#a78bfa">│ </tspan><tspan fill="#e2e8f0">reveal: </tspan><tspan fill="#facc15">⟦email:7F3KQ2M9ZD4X⟧</tspan></text><text x="620" y="202" font-family="'JetBrains Mono','SF Mono',Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="11" xml:space="preserve"><tspan fill="#a78bfa">│ </tspan><tspan fill="#e2e8f0">spans: 1 in this record (marked » «)</tspan></text></g>
+<rect x="750.4" y="208" width="136.4" height="16" rx="3" fill="#fbbf24" fill-opacity=".18" class="k19"/>
+<text x="620" y="220" class="k20" font-family="'JetBrains Mono','SF Mono',Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="11" xml:space="preserve"><tspan fill="#a78bfa">│   </tspan><tspan fill="#e2e8f0">render pdf for </tspan><tspan fill="#fbbf24">»</tspan><tspan fill="#facc15">⟦email:7F3KQ2M9ZD4X⟧</tspan><tspan fill="#fbbf24">«</tspan><tspan fill="#e2e8f0"> from </tspan><tspan fill="#5eead4">⟦ip:K2M9ZDQ81RTA⟧</tspan></text>
+<text x="620" y="238" class="k21" font-family="'JetBrains Mono','SF Mono',Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="11" xml:space="preserve"><tspan fill="#a78bfa">│   </tspan><tspan fill="#e2e8f0">failed: upstream timed out</tspan></text>
+<g class="k22"><text x="620" y="256" font-family="'JetBrains Mono','SF Mono',Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="11" xml:space="preserve"><tspan fill="#a78bfa">│</tspan></text><text x="620" y="274" font-family="'JetBrains Mono','SF Mono',Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="11" xml:space="preserve"><tspan fill="#a78bfa">│ </tspan><tspan fill="#facc15">! the agent receives these clear values, once</tspan></text><text x="620" y="292" font-family="'JetBrains Mono','SF Mono',Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="11" xml:space="preserve"><tspan fill="#a78bfa">│ </tspan><tspan fill="#facc15">! the agent can link this value to every record</tspan></text><text x="620" y="310" font-family="'JetBrains Mono','SF Mono',Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="11" xml:space="preserve"><tspan fill="#a78bfa">│ </tspan><tspan fill="#facc15">  with this pseudonym (in this epoch)</tspan></text></g>
+<text x="620" y="328" class="k23" font-family="'JetBrains Mono','SF Mono',Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="11" xml:space="preserve"><tspan fill="#a78bfa">╰─ </tspan><tspan fill="#e2e8f0">Approve? [y/N] </tspan></text>
+<text x="739.2" y="328" class="k24" font-family="'JetBrains Mono','SF Mono',Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="11" fill="#f87171" font-weight="700" text-anchor="start" xml:space="preserve">n</text>
+<rect x="739.2" y="317" width="6.6" height="14" fill="#e2e8f0" class="k25"/>
+<text x="620" y="346" class="k26" font-family="'JetBrains Mono','SF Mono',Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="11" xml:space="preserve"><tspan fill="#f87171">✗ </tspan><tspan fill="#e2e8f0">denied · the agent gets no clear value</tspan></text>
+<g class="k27"><rect x="980" y="332" width="180" height="22" rx="6" fill="#a78bfa"/><text x="1070.0" y="347" font-family="Inter,-apple-system,'Segoe UI',system-ui,Helvetica,Arial,'DejaVu Sans',sans-serif" font-size="12" fill="#020617" font-weight="700" text-anchor="middle" xml:space="preserve">only you can answer</text></g>
+<rect x="536" y="64" width="56" height="352" rx="8" fill="#0f172a" stroke="#38bdf8" stroke-width="1.5" stroke-dasharray="6 5"/>
+<text x="564.0" y="50" font-family="Inter,-apple-system,'Segoe UI',system-ui,Helvetica,Arial,'DejaVu Sans',sans-serif" font-size="12" fill="#38bdf8" font-weight="700" text-anchor="middle" xml:space="preserve">MCP</text>
+<text x="564.0" y="430" font-family="'JetBrains Mono','SF Mono',Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="11" fill="#94a3b8" font-weight="400" text-anchor="middle" xml:space="preserve">masked</text>
+<circle r="6" cx="0" cy="0" fill="#4ade80" class="k28"/>
+<circle r="6" cx="0" cy="0" fill="#5eead4" class="k29"/>
+<g class="k30"><rect x="540.8" y="62" width="46.4" height="20" rx="5" fill="#4ade80"/><text x="564.0" y="76" font-family="'JetBrains Mono','SF Mono',Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="11.5" fill="#020617" font-weight="700" text-anchor="middle" xml:space="preserve">FREE</text></g>
+<circle r="6" cx="0" cy="0" fill="#4ade80" class="k31"/>
+<circle r="6" cx="0" cy="0" fill="#5eead4" class="k32"/>
+<g class="k33"><rect x="540.8" y="98" width="46.4" height="20" rx="5" fill="#4ade80"/><text x="564.0" y="112" font-family="'JetBrains Mono','SF Mono',Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="11.5" fill="#020617" font-weight="700" text-anchor="middle" xml:space="preserve">FREE</text></g>
+<circle r="6" cx="0" cy="0" fill="#4ade80" class="k34"/>
+<circle r="6" cx="0" cy="0" fill="#5eead4" class="k35"/>
+<g class="k36"><rect x="540.8" y="152" width="46.4" height="20" rx="5" fill="#4ade80"/><text x="564.0" y="166" font-family="'JetBrains Mono','SF Mono',Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="11.5" fill="#020617" font-weight="700" text-anchor="middle" xml:space="preserve">FREE</text></g>
+<circle r="6" cx="0" cy="0" fill="#a78bfa" class="k37"/>
+<circle r="6" cx="0" cy="0" fill="#a78bfa" class="k38"/>
+<g class="k39"><rect x="544.6" y="206" width="38.8" height="20" rx="5" fill="#facc15"/><text x="564.0" y="220" font-family="'JetBrains Mono','SF Mono',Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="11.5" fill="#020617" font-weight="700" text-anchor="middle" xml:space="preserve">ASK</text></g>
+<circle r="6" cx="0" cy="0" fill="#f87171" class="k40"/>
+<circle r="6" cx="0" cy="0" fill="#f87171" class="k41"/>
+<g class="k42"><rect x="548.4" y="278" width="31.2" height="20" rx="5" fill="#f87171"/><text x="564.0" y="292" font-family="'JetBrains Mono','SF Mono',Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="11.5" fill="#020617" font-weight="700" text-anchor="middle" xml:space="preserve">NO</text></g>
+<rect x="24" y="446" width="1152" height="84" rx="10" fill="#020617" stroke="#253047" stroke-width="1.5"/>
+<text x="40.0" y="470" font-family="Inter,-apple-system,'Segoe UI',system-ui,Helvetica,Arial,'DejaVu Sans',sans-serif" font-size="12" fill="#38bdf8" font-weight="700" text-anchor="start" xml:space="preserve">audit</text>
+<text x="86.0" y="470" font-family="Inter,-apple-system,'Segoe UI',system-ui,Helvetica,Arial,'DejaVu Sans',sans-serif" font-size="12" fill="#64748b" font-weight="400" text-anchor="start" xml:space="preserve">chained, one line per call, pseudonyms only: the clear address is in no log</text>
+<text x="40" y="494" class="k43" font-family="'JetBrains Mono','SF Mono',Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="10" xml:space="preserve"><tspan fill="#64748b">{</tspan><tspan fill="#64748b">&quot;event&quot;:</tspan><tspan fill="#e2e8f0">&quot;log.call&quot;</tspan><tspan fill="#64748b">,</tspan><tspan fill="#64748b">&quot;profile&quot;:</tspan><tspan fill="#e2e8f0">&quot;staging&quot;</tspan><tspan fill="#64748b">,</tspan><tspan fill="#64748b">&quot;decision&quot;:</tspan><tspan fill="#4ade80">&quot;ok&quot;</tspan><tspan fill="#64748b">,</tspan><tspan fill="#64748b">…</tspan><tspan fill="#64748b">,</tspan><tspan fill="#64748b">&quot;peer_uid&quot;:</tspan><tspan fill="#e2e8f0">10052</tspan><tspan fill="#64748b">,</tspan><tspan fill="#64748b">…</tspan><tspan fill="#64748b">,</tspan><tspan fill="#64748b">&quot;method&quot;:</tspan><tspan fill="#e2e8f0">&quot;log.patterns&quot;</tspan><tspan fill="#64748b">,</tspan><tspan fill="#64748b">&quot;sources&quot;:</tspan><tspan fill="#94a3b8">[&quot;api&quot;]</tspan><tspan fill="#64748b">}</tspan></text>
+<text x="40" y="514" class="k44" font-family="'JetBrains Mono','SF Mono',Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="10" xml:space="preserve"><tspan fill="#64748b">{</tspan><tspan fill="#64748b">&quot;event&quot;:</tspan><tspan fill="#e2e8f0">&quot;log.call&quot;</tspan><tspan fill="#64748b">,</tspan><tspan fill="#64748b">&quot;profile&quot;:</tspan><tspan fill="#e2e8f0">&quot;staging&quot;</tspan><tspan fill="#64748b">,</tspan><tspan fill="#64748b">&quot;decision&quot;:</tspan><tspan fill="#f87171">&quot;denied&quot;</tspan><tspan fill="#64748b">,</tspan><tspan fill="#64748b">…</tspan><tspan fill="#64748b">,</tspan><tspan fill="#64748b">&quot;peer_uid&quot;:</tspan><tspan fill="#e2e8f0">10052</tspan><tspan fill="#64748b">,</tspan><tspan fill="#64748b">…</tspan><tspan fill="#64748b">,</tspan><tspan fill="#64748b">&quot;method&quot;:</tspan><tspan fill="#e2e8f0">&quot;log.unmask&quot;</tspan><tspan fill="#64748b">}</tspan></text>
+<text x="600.0" y="580" class="k45" font-family="Inter,-apple-system,'Segoe UI',system-ui,Helvetica,Arial,'DejaVu Sans',sans-serif" font-size="23" fill="#e2e8f0" font-weight="650" text-anchor="middle" xml:space="preserve">Counts, patterns and traces are free, and masked before the model sees them.</text>
+<text x="600.0" y="580" class="k46" font-family="Inter,-apple-system,'Segoe UI',system-ui,Helvetica,Arial,'DejaVu Sans',sans-serif" font-size="23" fill="#e2e8f0" font-weight="650" text-anchor="middle" xml:space="preserve">Unmasking a value waits for you, in a console the agent can't reach.</text>
+<text x="600.0" y="580" class="k47" font-family="Inter,-apple-system,'Segoe UI',system-ui,Helvetica,Arial,'DejaVu Sans',sans-serif" font-size="23" fill="#e2e8f0" font-weight="650" text-anchor="middle" xml:space="preserve">You said no. The agent never saw the address, and the audit kept the call.</text>
+</svg>
