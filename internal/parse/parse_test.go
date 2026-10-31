@@ -662,3 +662,72 @@ func TestCapTextKeepsRuneCutByReader(t *testing.T) {
 		t.Fatalf("cut=%v len=%d", cut, len(s))
 	}
 }
+
+func TestJSONOnlyJSONWhitespace(t *testing.T) {
+	p := mustParser(t, Options{Format: "json"})
+	for _, line := range []string{"\f{}", "\v{\"a\":1}", "{\"a\":1} "} {
+		if ev := p.Line(line); ev.Format == "json" {
+			t.Fatalf("%q decoded as json", line)
+		}
+	}
+	if ev := p.Line(" \t{\"a\":1} "); ev.Format != "json" {
+		t.Fatal("JSON whitespace refused")
+	}
+}
+
+// TestFrameCutAtEveryByte reads a growing framed stream cut at every byte,
+// then resumes at Offset on the full stream: prefix + resume equals a full
+// read.
+func TestFrameCutAtEveryByte(t *testing.T) {
+	p := mustParser(t, Options{Format: "testframe"})
+	full := "2026-10-30T14:00:00Z P {\"msg\":\"he\n2026-10-30T14:00:00Z F llo\"}\n2026-10-30T14:00:01Z F next\n"
+	want := readAll(t, p, full)
+	for cut := 0; cut <= len(full); cut++ {
+		r := p.NewReader(strings.NewReader(full[:cut]), 0)
+		var got []Event
+		for {
+			ev, err := r.Next()
+			if err != nil {
+				break
+			}
+			if !ev.Unterminated {
+				got = append(got, ev)
+			}
+		}
+		off := r.Offset()
+		// Keep only events before the resume point.
+		kept := got[:0]
+		for _, e := range got {
+			if e.Offset < off {
+				kept = append(kept, e)
+			}
+		}
+		rest := readAll(t, p, full[off:])
+		for i := range rest {
+			rest[i].Offset += off
+		}
+		all := append(kept, rest...)
+		if len(all) != len(want) {
+			t.Fatalf("cut %d: %d events, want %d", cut, len(all), len(want))
+		}
+		for i := range want {
+			if all[i].Offset != want[i].Offset || all[i].Raw != want[i].Raw || all[i].Format != want[i].Format {
+				t.Fatalf("cut %d: event %d %+v != %+v", cut, i, all[i], want[i])
+			}
+		}
+	}
+}
+
+func TestIndentedLineIsFreeText(t *testing.T) {
+	p := mustParser(t, Options{Format: "json"})
+	if ev := readAll(t, p, "  {\"a\":1}\n")[0]; ev.Format != "plain" || !ev.Fallback {
+		t.Fatalf("%+v", ev)
+	}
+}
+
+func TestExplicitLogfmtOnePair(t *testing.T) {
+	p := mustParser(t, Options{Format: "logfmt"})
+	if ev := p.Line("level=info"); ev.Format != "logfmt" || ev.Fallback {
+		t.Fatalf("%+v", ev)
+	}
+}
