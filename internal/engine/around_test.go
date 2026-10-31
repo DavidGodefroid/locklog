@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +18,9 @@ import (
 	"github.com/DavidGodefroid/locklog/internal/mask"
 	"github.com/DavidGodefroid/locklog/internal/parse"
 	"github.com/DavidGodefroid/locklog/internal/source"
+	"github.com/DavidGodefroid/locklog/internal/source/file"
+	"github.com/DavidGodefroid/locklog/internal/source/journald"
+	"github.com/DavidGodefroid/locklog/internal/source/journald/journal/journaltest"
 )
 
 // rec decodes one output record.
@@ -356,32 +360,160 @@ func TestTailStopsAtMax(t *testing.T) {
 	}
 }
 
-// TestTailNewByPosition: on a local stream, new means written after the
-// start, whatever the timestamps say: records already there (even dated in
-// the future) are not returned; appended ones are, old-dated or untimed.
-func TestTailNewByPosition(t *testing.T) {
-	future := genLog(time.Now().Add(time.Minute), 5, "c@example.org")
-	f := newFixture(t, future, func(o *Options) { o.TailPoll = 50 * time.Millisecond })
+// TestTailNewByTime: new records are those timestamped from the start;
+// records already there are not returned, nor appended ones dated before
+// the start; a line without a time is not tailed.
+func TestTailNewByTime(t *testing.T) {
+	f := newFixture(t, genLog(time.Now().Add(-time.Hour), 5, "c@example.org"), func(o *Options) { o.TailPoll = 50 * time.Millisecond })
 	path := filepath.Join(f.root, "logs", "app.log")
 	go func() {
 		time.Sleep(200 * time.Millisecond)
-		appendLines(t, path, `time=2020-01-01T00:00:00Z level=info msg="old dated"`, `no time at all here`)
+		appendLines(t, path, `time=2020-01-01T00:00:00Z level=info msg="old dated"`, liveLine(1, "x"))
 	}()
 	res, err := f.eng.Tail(ctx, TailQuery{Duration: "1s"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Records) != 2 || !res.Complete {
-		t.Fatalf("%d records, complete %v", len(res.Records), res.Complete)
+	if len(res.Records) != 1 || !res.Complete || !strings.Contains(string(res.Records[0]), "live 1 ") {
+		t.Fatalf("%s, complete %v", res.Records, res.Complete)
 	}
-	if !strings.Contains(string(res.Records[0]), "old dated") || !strings.Contains(string(res.Records[1]), "no time at all") {
-		t.Fatalf("records %s", res.Records)
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		appendLines(t, path, `no time at all here`, liveLine(2, "x"))
+	}()
+	res, err = f.eng.Tail(ctx, TailQuery{Duration: "1s"})
+	if err != nil || len(res.Records) != 1 || !strings.Contains(string(res.Records[0]), "live 2 ") {
+		t.Fatalf("%v %s", err, res.Records)
+	}
+}
+
+// TestTailPartialLine: a line half written when a poll runs is returned
+// whole once complete.
+func TestTailPartialLine(t *testing.T) {
+	f := newFixture(t, genLog(time.Now().Add(-time.Hour), 5, "c@example.org"), func(o *Options) { o.TailPoll = 50 * time.Millisecond })
+	path := filepath.Join(f.root, "logs", "app.log")
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		fh, _ := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+		fh.WriteString(fmt.Sprintf("time=%s level=error msg=\"first half", time.Now().UTC().Format(time.RFC3339Nano)))
+		time.Sleep(300 * time.Millisecond)
+		fh.WriteString(" second half\"\n")
+		fh.Close()
+	}()
+	res, err := f.eng.Tail(ctx, TailQuery{Duration: "1s"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Records) != 1 || !res.Complete || !strings.Contains(string(res.Records[0]), "first half second half") {
+		t.Fatalf("%s, complete %v", res.Records, res.Complete)
+	}
+	// Still unterminated at the end: left out, incomplete.
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		fh, _ := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+		fh.WriteString(fmt.Sprintf("time=%s level=error msg=\"never ends", time.Now().UTC().Format(time.RFC3339Nano)))
+		fh.Close()
+	}()
+	res, err = f.eng.Tail(ctx, TailQuery{Duration: "1s"})
+	if err != nil || len(res.Records) != 0 || res.Complete {
+		t.Fatalf("%v %s, complete %v", err, res.Records, res.Complete)
+	}
+}
+
+// TestTailRotation: a copytruncate rotation under a glob source returns
+// neither the old records of the copy nor the live ones again.
+func TestTailRotation(t *testing.T) {
+	f := newFixture(t, genLog(time.Now().Add(-time.Hour), 50, "c@example.org"), func(o *Options) { o.TailPoll = 50 * time.Millisecond })
+	p, _ := parse.New(parse.Options{})
+	src, err := file.New(file.Options{Name: "app", Paths: []string{f.root + "/logs/app.log*"}, Roots: []string{f.root}, Parser: p,
+		Trusted: []string{"level", "status"}, Index: f.store, Sensitive: func(fl, v string) bool { return f.masker.TrustedValue("app", fl, v) != v }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := f.eng.o
+	o.Sources = map[string]source.Source{"app": src}
+	eng, err := New(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(f.root, "logs", "app.log")
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		appendLines(t, path, liveLine(1, "x"))
+		time.Sleep(300 * time.Millisecond)
+		b, _ := os.ReadFile(path)
+		os.WriteFile(path+".1", b, 0o644)
+		os.Truncate(path, 0)
+		appendLines(t, path, liveLine(2, "x"))
+	}()
+	res, err := eng.Tail(ctx, TailQuery{Duration: "1500ms"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Records) != 2 || !strings.Contains(string(res.Records[0]), "live 1 ") || !strings.Contains(string(res.Records[1]), "live 2 ") {
+		t.Fatalf("%d records: %s", len(res.Records), res.Records)
+	}
+}
+
+// TestTailJournald: journald positions are entries, not bytes: only the
+// entries dated from the start are new.
+func TestTailJournald(t *testing.T) {
+	root := t.TempDir()
+	const mid = "0123456789abcdef0123456789abcdef"
+	os.Mkdir(filepath.Join(root, mid), 0o755)
+	jpath := filepath.Join(root, mid, "system.journal")
+	var es []journaltest.Entry
+	old := uint64(time.Now().Add(-time.Hour).UnixMicro())
+	for i := 0; i < 10; i++ {
+		es = append(es, journaltest.Entry{Realtime: old + uint64(i)*1000, Fields: []string{fmt.Sprintf("MESSAGE=entry %d", i), "PRIORITY=6"}})
+	}
+	if err := os.WriteFile(jpath, journaltest.Build(journaltest.Options{Compact: true, PerArray: 100}, es), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := parse.New(parse.Options{Format: "plain"})
+	js, err := journald.New(journald.Options{Name: "journal", Roots: []string{root}, Parser: p})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := newFixture(t, "", func(o *Options) { o.Sources["journal"] = js; o.TailPoll = 50 * time.Millisecond })
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		now := uint64(time.Now().UnixMicro())
+		es2 := append(slices.Clone(es),
+			journaltest.Entry{Realtime: now, Fields: []string{"MESSAGE=entry 10", "PRIORITY=6"}},
+			journaltest.Entry{Realtime: now + 1000, Fields: []string{"MESSAGE=entry 11", "PRIORITY=6"}})
+		tmp := jpath + ".tmp"
+		os.WriteFile(tmp, journaltest.Build(journaltest.Options{Compact: true, PerArray: 100}, es2), 0o644)
+		os.Rename(tmp, jpath)
+	}()
+	res, err := f.eng.Tail(ctx, TailQuery{Sources: []string{"journal"}, Duration: "1500ms"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Records) != 2 || !strings.Contains(string(res.Records[0]), "entry 10") || !strings.Contains(string(res.Records[1]), "entry 11") {
+		t.Fatalf("%d records: %s", len(res.Records), res.Records)
+	}
+}
+
+// TestTailBudgetOnNewData: admission applies to what a poll scans for new
+// records, not to the whole unindexed file.
+func TestTailBudgetOnNewData(t *testing.T) {
+	content := genLog(time.Now().Add(-30*time.Hour), 80000, "c@example.org") // > 8 MiB, unindexed
+	f := newFixture(t, content, func(o *Options) { o.TailPoll = 50 * time.Millisecond; o.Limits.LocalBytes = 4 << 20 })
+	path := filepath.Join(f.root, "logs", "app.log")
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		appendLines(t, path, liveLine(1, "x"))
+	}()
+	res, err := f.eng.Tail(ctx, TailQuery{Duration: "1s"})
+	if err != nil || len(res.Records) != 1 {
+		t.Fatalf("%v %d", err, len(res.Records))
 	}
 }
 
 // TestTailWorkFollowsNewData: polls scan only what grew, not the stream.
 func TestTailWorkFollowsNewData(t *testing.T) {
-	content := genLog(time.Now().Add(-13*time.Hour), 80000, "c@example.org") // > 8 granules
+	content := genLog(time.Now().Add(-30*time.Hour), 80000, "c@example.org") // > 8 granules
 	f := newFixture(t, content, func(o *Options) { o.TailPoll = 50 * time.Millisecond })
 	path := filepath.Join(f.root, "logs", "app.log")
 	go func() {
@@ -536,5 +668,20 @@ func TestContextEpochAndWork(t *testing.T) {
 	}
 	if res.Scanned.Granules < 2 || res.Scanned.Bytes != int64(res.Scanned.Granules)<<20 {
 		t.Fatalf("scanned %+v: the read-back granule is not counted", res.Scanned)
+	}
+	// Sparse records: 50 before needs the read-back of 16 granules.
+	var b strings.Builder
+	pad := strings.Repeat("p", 200<<10)
+	for i := 0; i < 120; i++ {
+		fmt.Fprintf(&b, "time=%s level=info msg=\"rec %d %s\"\n", t0.Add(time.Duration(i)*time.Second).Format(time.RFC3339), i, pad)
+	}
+	g := newFixture(t, b.String(), nil)
+	ref, _ = firstRef(t, g, func(q *Query) { q.Text = "rec 110 " })
+	res, err = g.eng.Context(ctx, ContextQuery{Ref: ref, Before: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Scanned.Granules < 17 {
+		t.Fatalf("scanned %+v: read-back not counted", res.Scanned)
 	}
 }

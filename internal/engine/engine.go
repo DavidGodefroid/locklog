@@ -810,6 +810,8 @@ type match struct {
 	timed bool
 	out   json.RawMessage
 	kinds []string
+	// digest identifies a tailed record (keyed digest and time).
+	digest string
 }
 
 // Search runs a search (locklog_search).
@@ -853,12 +855,14 @@ func (e *Engine) search(ctx context.Context, q Query, kind string) (_ SearchResu
 	if err := e.validator(maxRange).validate(&q); err != nil {
 		return SearchResult{}, err
 	}
-	digest := e.queryDigest(kind, q)
+	var digest string
 	if q.trace != nil {
 		digest = e.queryDigest(kind, struct {
 			Q  Query
 			ID string
 		}{q, q.trace.id})
+	} else {
+		digest = e.queryDigest(kind, q)
 	}
 	res := SearchResult{Epoch: e.o.Masker.Epoch(), Records: []json.RawMessage{}, Masking: Masking{Kinds: []string{}}}
 
