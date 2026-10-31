@@ -2,8 +2,10 @@ package parse
 
 import (
 	"regexp"
+	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // combinedFormat decodes NCSA common and combined access logs (nginx's
@@ -26,15 +28,169 @@ func (combinedFormat) Detect(line string) bool {
 	if strings.IndexByte(line[:min(len(line), 800)], '[') < 0 {
 		return false
 	}
-	return combinedRe.MatchString(line)
+	return combinedMatch(line) != nil
 }
+
+// combinedMatch returns combinedRe.FindStringSubmatchIndex(text), computed
+// by hand: the expression's NFA dominated the decoding of access logs (and
+// so the local index's backfill). FuzzCombinedMatch holds the two equal.
+func combinedMatch(text string) []int {
+	m := make([]int, 22)
+	for i := range m {
+		m[i] = -1
+	}
+	m[0] = 0
+	i := 0
+	// Three space-separated fields of 1 to 255 non-space runes.
+	for g := 1; g <= 3; g++ {
+		j := i
+		for j < len(text) && text[j] != ' ' {
+			switch text[j] {
+			case '\t', '\n', '\f', '\r':
+				return nil
+			}
+			j++
+		}
+		// Runes as the expression steps them (an invalid byte is one).
+		if n := utf8.RuneCountInString(text[i:j]); n < 1 || n > 255 || j >= len(text) {
+			return nil
+		}
+		m[2*g], m[2*g+1] = i, j
+		i = j + 1
+	}
+	// [dd/Mmm/yyyy:hh:mm:ss +zzzz]
+	const tsLen = 26
+	if len(text) < i+tsLen+2 || text[i] != '[' || text[i+tsLen+1] != ']' {
+		return nil
+	}
+	ts := text[i+1 : i+1+tsLen]
+	for k := 0; k < tsLen; k++ {
+		c := ts[k]
+		var ok bool
+		switch k {
+		case 2, 6:
+			ok = c == '/'
+		case 11, 14, 17:
+			ok = c == ':'
+		case 20:
+			ok = c == ' '
+		case 21:
+			ok = c == '+' || c == '-'
+		case 3:
+			ok = c >= 'A' && c <= 'Z'
+		case 4, 5:
+			ok = c >= 'a' && c <= 'z'
+		default:
+			ok = c >= '0' && c <= '9'
+		}
+		if !ok {
+			return nil
+		}
+	}
+	m[8], m[9] = i+1, i+1+tsLen
+	i += tsLen + 2
+	// "request"
+	if len(text) < i+2 || text[i] != ' ' || text[i+1] != '"' {
+		return nil
+	}
+	j, ok := combinedQuoted(text, i+2)
+	if !ok {
+		return nil
+	}
+	m[10], m[11] = i+2, j
+	i = j + 1
+	// status
+	if i >= len(text) || text[i] != ' ' {
+		return nil
+	}
+	i++
+	switch {
+	case i < len(text) && text[i] == '-':
+		m[12], m[13] = i, i+1
+		i++
+	case i+3 <= len(text) && text[i] >= '1' && text[i] <= '5' && isDigit(text[i+1]) && isDigit(text[i+2]):
+		m[12], m[13] = i, i+3
+		i += 3
+	default:
+		return nil
+	}
+	// bytes
+	if i >= len(text) || text[i] != ' ' {
+		return nil
+	}
+	i++
+	if i < len(text) && text[i] == '-' {
+		m[14], m[15] = i, i+1
+		i++
+	} else {
+		j := i
+		for j < len(text) && isDigit(text[j]) {
+			j++
+		}
+		if j == i || j-i > 20 {
+			return nil
+		}
+		m[14], m[15] = i, j
+		i = j
+	}
+	// The rest: ( "referer" "user agent")? ( extra)? to the end, the
+	// optional groups tried first, as the expression does.
+	rest := func(i int, m []int) bool {
+		switch {
+		case i == len(text):
+			return true
+		case text[i] == ' ' && strings.IndexByte(text[i+1:], '\n') < 0:
+			m[20], m[21] = i+1, len(text)
+			return true
+		}
+		return false
+	}
+	if i+1 < len(text) && text[i] == ' ' && text[i+1] == '"' {
+		a := slices.Clone(m)
+		if j, ok := combinedQuoted(text, i+2); ok && j+2 < len(text) && text[j+1] == ' ' && text[j+2] == '"' {
+			if k, ok := combinedQuoted(text, j+3); ok {
+				a[16], a[17], a[18], a[19] = i+2, j, j+3, k
+				if rest(k+1, a) {
+					a[1] = len(text)
+					return a
+				}
+			}
+		}
+	}
+	if !rest(i, m) {
+		return nil
+	}
+	m[1] = len(text)
+	return m
+}
+
+// combinedQuoted scans a quoted field's content from i: ((?:[^"\\]|\\.)*)
+// then the closing quote, whose index it returns.
+func combinedQuoted(text string, i int) (int, bool) {
+	for i < len(text) {
+		switch text[i] {
+		case '"':
+			return i, true
+		case '\\':
+			if i+1 >= len(text) || text[i+1] == '\n' {
+				return 0, false
+			}
+			i += 2
+		default:
+			i++
+		}
+	}
+	return 0, false
+}
+
+func isDigit(c byte) bool { return c >= '0' && c <= '9' }
 
 func (combinedFormat) Decode(text string, o *Options) (Event, bool) {
 	// Detect's checks, with the expression run once.
 	if strings.IndexByte(text[:min(len(text), 800)], '[') < 0 {
 		return Event{}, false
 	}
-	m := combinedRe.FindStringSubmatchIndex(text)
+	m := combinedMatch(text)
 	if m == nil {
 		return Event{}, false
 	}
