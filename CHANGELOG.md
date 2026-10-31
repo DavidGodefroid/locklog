@@ -44,6 +44,27 @@ uses [Semantic Versioning](https://semver.org/).
   profile needs Landlock or openat2; `:status` shows the Landlock state.
   The mounts are checked again on every call, and a session lost under a
   call ends it with a connection-lost error (the next call reconnects).
+- The MCP server (`locklog mcp`): `locklog_status`, `locklog_sources`,
+  `locklog_search`, `locklog_count` (also `by_pattern`), `locklog_patterns`
+  (the console now serves `log.patterns`), the PII rules and change requests, each
+  a thin adapter over the console; a host agent (the launcher's `mcp`) is
+  refused on production profiles, as the console's status reports them,
+  with the structured refusal `E_PRODUCTION_HOST_AGENT` (and when the
+  status does not say: the guard fails closed). Its status tool never
+  shows that profile's status, and no tool's structured output carries
+  more than its text. Inputs are bounded by their schemas; integers
+  beyond 2^53 come back as decimal strings. The PII tools answer once
+  the console serves PII rules. `locklog_pii_add` is free (it only masks
+  more), on production too for an agent that is not a host agent.
+  `locklog init <agent>` wires Claude Code, Codex, Cursor or Gemini CLI;
+  for Claude Code it merges the free tools (never an approved one such as
+  `locklog_request_change`) into the project's `.claude/settings.local.json`
+  `permissions.allow`, keeping the human's entries; the shared
+  `.claude/settings.json` and the user's own settings are never written.
+  A re-run adds back the entries the human removed, and prints each entry
+  it added (`added to permissions.allow in .claude/settings.local.json:
+  <entry>`); remove an entry again to be asked for it. init warns when git
+  does not ignore `.claude/settings.local.json`.
 - The Docker source: containers' `json-file` logs (rotated `.N[.gz]` files
   included) read by name from the containers root through a name → id map,
   approved globs checked again at read time, console containers never served,

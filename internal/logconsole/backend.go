@@ -40,10 +40,13 @@ const (
 	MethodSources = "log.sources"
 	MethodSearch  = "log.search"
 	MethodCount   = "log.count"
+	// MethodPatterns is the top message templates of a range, optionally
+	// against a baseline window (locklog_patterns).
+	MethodPatterns = "log.patterns"
 )
 
 // Methods lists the methods served, in a fixed order.
-var Methods = []string{MethodStatus, MethodSources, MethodSearch, MethodCount}
+var Methods = []string{MethodStatus, MethodSources, MethodSearch, MethodCount, MethodPatterns}
 
 // Caller is the kernel-verified peer of a call.
 type Caller struct{ UID, PID int }
