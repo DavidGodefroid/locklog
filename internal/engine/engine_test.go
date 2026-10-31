@@ -578,10 +578,12 @@ func TestNoDigestOnTheSocket(t *testing.T) {
 }
 
 func TestCountFromIndexEqualsScan(t *testing.T) {
-	content := genLog(t0, 30000, "c@example.org")
+	// The last granule holds records the masker fails on: the index
+	// counts them by their trusted values, and so must a scan.
+	content := boomLog()
 	// A string value: numeric terms are never served from the index.
 	cq := CountQuery{Query: q(func(q *Query) { q.Where = []Pred{{Field: "status", Op: "!=", Value: raw("200")}} }), Bucket: "1h", By: []string{"level"}}
-	scan := newFixture(t, content, nil)
+	scan := newFixtureMask(t, content, withBoom, nil)
 	want, err := scan.eng.Count(ctx, cq)
 	if err != nil || !want.Complete || want.FromIndex == false && want.Scanned.Granules == 0 {
 		t.Fatalf("%v %+v", err, want.Scanned)
@@ -590,14 +592,17 @@ func TestCountFromIndexEqualsScan(t *testing.T) {
 	if !want.FromIndex || want.IndexedFrom != nil {
 		t.Fatalf("cold count: from_index %v indexed_from %v", want.FromIndex, want.IndexedFrom)
 	}
-	ix := newFixture(t, content, nil)
+	if want.MaskedFailures != 3 || total(want.Groups) != 22503 {
+		t.Fatalf("cold count: %d records, %d masked failures", total(want.Groups), want.MaskedFailures)
+	}
+	ix := newFixtureMask(t, content, withBoom, nil)
 	for i := 0; ; i++ {
 		got, err := ix.eng.Count(ctx, cq)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if !reflect.DeepEqual(strip(got.Groups), strip(want.Groups)) {
-			t.Fatalf("step %d: index + scan differs from scan", i)
+			t.Fatalf("step %d: index + scan differs from scan:\n%v\n%v", i, strip(got.Groups), strip(want.Groups))
 		}
 		if got.Scanned.Granules == 0 {
 			if got.IndexedFrom == nil || !got.IndexedFrom.Equal(t0) {
@@ -612,15 +617,25 @@ func TestCountFromIndexEqualsScan(t *testing.T) {
 			t.Fatal("never fully indexed")
 		}
 	}
-	// A count with text cannot use the index.
+	// A count with text cannot use the index; it withholds the records
+	// masking failed on (a masked predicate cannot be evaluated on
+	// them) and reports them.
 	cq.Text = "upstream"
 	got, _ := ix.eng.Count(ctx, cq)
 	if got.FromIndex || got.Scanned.Granules == 0 {
 		t.Fatal("text count served from the index")
 	}
-	if !reflect.DeepEqual(strip(got.Groups), strip(want.Groups)) {
-		t.Fatal("text count differs")
+	if total(got.Groups) != total(want.Groups)-3 || got.MaskedFailures != 3 {
+		t.Fatalf("text count: %d records, %d masked failures", total(got.Groups), got.MaskedFailures)
 	}
+}
+
+func total(gs []Group) int64 {
+	var n int64
+	for _, g := range gs {
+		n += g.N
+	}
+	return n
 }
 
 func strip(gs []Group) []string {

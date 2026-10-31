@@ -196,7 +196,10 @@ func (q *CountQuery) bucketOf(t time.Time) time.Time {
 // Count runs a count. A trusted-field-only count is answered from the local
 // index where it holds the range, and from a plan-based scan of the rest
 // (continued free); every other count scans its plan, masking every record
-// first.
+// first. A record masking fails on is reported in masked_failures; a
+// trusted-only count still counts it by its trusted values, as the index
+// does (countFailed), while any other count leaves it out, since its masked
+// predicates cannot be evaluated on it.
 func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr error) {
 	cursor := q.Cursor
 	q.Cursor = ""
@@ -300,6 +303,15 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 	sc, failures := Scanned{}, 0
 	var err *Error
 	chunk, gran, sc, failures, err = e.run(ctx, f.plan, chunk, gran, nil, e.callBytes(q.Sources), func(raw source.RawRecord, rec mask.Record) {
+		if rec.Failed() && trustedOnly {
+			// The index counts every record by its trusted values;
+			// a scan of a trusted-only count does the same for a
+			// record masking failed on (still withheld from any
+			// output and reported in masked_failures), so index and
+			// scan answers agree.
+			e.countFailed(&q, raw, rec, a)
+			return
+		}
 		if !q.match(rec) {
 			return
 		}
@@ -371,6 +383,61 @@ func (q *Query) rangeContains(t time.Time, minuteResolution bool) bool {
 		t = t.Truncate(time.Minute)
 	}
 	return !t.Before(q.From) && t.Before(q.To)
+}
+
+// countFailed counts a record masking failed on, in a trusted-only count, by
+// the values the index holds for it: its raw trusted values (index.Lookup),
+// shown through the masker's text path. A value the masker would change is
+// unknown, as in the index (index.Redacted): the record then cannot be
+// counted and is left out, which the index path does too (such a granule
+// goes to the residual scan).
+func (e *Engine) countFailed(q *CountQuery, raw source.RawRecord, rec mask.Record, a *agg) {
+	known := func(v string) (ok bool) {
+		defer func() {
+			if recover() != nil {
+				ok = false
+			}
+		}()
+		return e.o.Masker.Text(v) == v
+	}
+	sel := q.selector(raw.Ref.Source, e.o.Trusted)
+	vals := map[string]string{}
+	for _, f := range append(termFields(sel), q.By...) {
+		v, ok := index.Lookup(raw.Event, f)
+		if !ok {
+			continue
+		}
+		if !known(v) {
+			return
+		}
+		vals[f] = v
+	}
+	if !sel.Match(vals) {
+		return
+	}
+	t, timed := rec.Time()
+	if !timed {
+		a.untimed++
+		return
+	}
+	if !q.Query.rangeContains(t, a.indexed) {
+		return
+	}
+	key := make([]*string, len(q.By))
+	for i, b := range q.By {
+		if v, ok := vals[b]; ok {
+			key[i] = &v
+		}
+	}
+	a.add(q.bucketOf(t), key, 1, t, true)
+}
+
+func termFields(sel source.Selector) []string {
+	var out []string
+	for _, t := range sel.Terms {
+		out = append(out, t.Field)
+	}
+	return out
 }
 
 func (e *Engine) indexable(srcs []string) bool {
