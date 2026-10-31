@@ -177,3 +177,66 @@ func TestSendAuthModes(t *testing.T) {
 		}
 	}
 }
+
+func TestRouteParams(t *testing.T) {
+	a, _ := ElasticRoutes([]string{"logs-*"})
+	v := func(kv ...string) url.Values {
+		q := url.Values{}
+		for i := 0; i < len(kv); i += 2 {
+			q.Add(kv[i], kv[i+1])
+		}
+		return q
+	}
+	for _, tt := range []struct {
+		method, path string
+		q            url.Values
+		ok           bool
+	}{
+		{"POST", "/logs-*/_search", v("expand_wildcards", "open"), true},
+		{"POST", "/logs-*/_search", nil, true},
+		{"POST", "/logs-*/_search", v("q", "user:x"), false},
+		{"POST", "/logs-*/_search", v("scroll", "1m"), false},
+		{"POST", "/logs-*/_search", v("expand_wildcards", "all"), false},
+		{"POST", "/logs-*/_search", v("expand_wildcards", "open", "expand_wildcards", "hidden"), false},
+		{"POST", "/logs-*/_search", v("expand_wildcards", "open", "allow_partial_search_results", "true"), false},
+		{"POST", "/logs-*/_count", v("q", "x"), false},
+		{"GET", "/logs-*/_field_caps", v("expand_wildcards", "open", "fields", "a,b"), true},
+		{"GET", "/logs-*/_field_caps", v("fields", "*", "include_unmapped", "true"), false},
+		{"GET", "/logs-*/_mapping", v("expand_wildcards", "open"), true},
+		{"GET", "/logs-*/_mapping", v("include_defaults", "true"), false},
+		{"GET", "/logs-*/_settings", v("expand_wildcards", "open", "flat_settings", "true", "include_defaults", "true"), true},
+		{"GET", "/logs-*/_settings", v("flat_settings", "false"), false},
+		{"GET", "/logs-*/_settings", v("include_defaults", "yes"), false},
+		{"GET", "/_resolve/index/logs-*", v("expand_wildcards", "open"), true},
+		{"GET", "/_resolve/index/logs-*", v("expand_wildcards", "all"), false},
+		{"GET", "/", v("pretty", "true"), false},
+		{"GET", "/_security/user/_privileges", v("filter_path", "x"), false},
+	} {
+		if got := a.AllowsQuery(tt.method, tt.path, tt.q); got != tt.ok {
+			t.Errorf("%s %s ?%s = %t, want %t", tt.method, tt.path, tt.q.Encode(), got, tt.ok)
+		}
+	}
+	for _, tt := range []struct {
+		path string
+		q    url.Values
+		ok   bool
+	}{
+		{"/loki/api/v1/query_range", v("query", "{a=\"b\"}", "start", "1", "end", "2", "limit", "5", "direction", "forward"), true},
+		{"/loki/api/v1/query_range", v("query", "x", "direction", "backward"), false},
+		{"/loki/api/v1/query_range", v("query", "x", "delay_for", "1"), false},
+		{"/loki/api/v1/query", v("query", "x", "time", "1"), true},
+		{"/loki/api/v1/labels", v("query", "x", "since", "1h"), false},
+		{"/ready", v("x", "1"), false},
+	} {
+		if got := LokiRoutes.AllowsQuery("GET", tt.path, tt.q); got != tt.ok {
+			t.Errorf("loki %s ?%s = %t, want %t", tt.path, tt.q.Encode(), got, tt.ok)
+		}
+	}
+	// The client refuses before sending.
+	var s seen
+	srv := lokiServer(t, &s, nil)
+	c, _ := New(remote(srv.URL, config.AuthBearer, kconfig.TLSVerifyFull), a, Credentials{Secret: "t"}, Options{RootCAs: roots(srv)})
+	if _, err := c.Send(context.Background(), "POST", "/logs-*/_search", v("q", "x"), []byte(`{}`)); !errors.Is(err, ErrNotAllowed) || s.n.Load() != 0 {
+		t.Fatalf("%v, %d requests", err, s.n.Load())
+	}
+}

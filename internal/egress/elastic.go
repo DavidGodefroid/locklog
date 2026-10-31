@@ -47,16 +47,17 @@ func ElasticRoutes(indices []string) (*Allowlist, error) {
 	if err != nil {
 		return nil, err
 	}
+	open := map[string]string{"expand_wildcards": "open"}
 	return NewAllowlist(
-		Route{http.MethodPost, "/" + seg + "/_search"},
-		Route{http.MethodPost, "/" + seg + "/_count"},
-		Route{http.MethodGet, "/" + seg + "/_field_caps"},
-		Route{http.MethodGet, "/" + seg + "/_mapping"},
-		Route{http.MethodGet, "/" + seg + "/_settings"},
-		Route{http.MethodGet, "/"},
-		Route{http.MethodGet, ElasticUserPrivilegesPath},
-		Route{http.MethodGet, "/_resolve/index/" + seg},
-		Route{http.MethodGet, OpenSearchAuthInfoPath},
+		Route{http.MethodPost, "/" + seg + "/_search", open},
+		Route{http.MethodPost, "/" + seg + "/_count", open},
+		Route{http.MethodGet, "/" + seg + "/_field_caps", map[string]string{"expand_wildcards": "open", "fields": ""}},
+		Route{http.MethodGet, "/" + seg + "/_mapping", open},
+		Route{http.MethodGet, "/" + seg + "/_settings", map[string]string{"expand_wildcards": "open", "flat_settings": "true", "include_defaults": "true"}},
+		Route{http.MethodGet, "/", nil},
+		Route{http.MethodGet, ElasticUserPrivilegesPath, nil},
+		Route{http.MethodGet, "/_resolve/index/" + seg, open},
+		Route{http.MethodGet, OpenSearchAuthInfoPath, nil},
 	), nil
 }
 
