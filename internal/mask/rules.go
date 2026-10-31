@@ -258,6 +258,35 @@ func (r *Rules) Find(s string) []pii.Match {
 	return out
 }
 
+// maskRuleMatches is ruleMatches for a mask rule, where "*" also covers
+// a key holding dots ("hosts.*.owner" on hosts → "10.0.0.1" → owner): a
+// mask rule may cover more, never less (an allow rule matches exactly).
+func maskRuleMatches(r Rule, source, clearPath string) bool {
+	if ruleMatches(r, source, clearPath) {
+		return true
+	}
+	if len(r.Sources) > 0 && !slices.Contains(r.Sources, source) || !strings.Contains(r.Field, "*") {
+		return false
+	}
+	ps, fs := strings.Split(clearPath, "."), strings.Split(r.Field, ".")
+	// ok[i][j]: fs[:i] matches ps[:j], "*" taking one or more segments.
+	ok := make([][]bool, len(fs)+1)
+	for i := range ok {
+		ok[i] = make([]bool, len(ps)+1)
+	}
+	ok[0][0] = true
+	for i := 1; i <= len(fs); i++ {
+		for j := 1; j <= len(ps); j++ {
+			if fs[i-1] == "*" {
+				ok[i][j] = ok[i-1][j-1] || ok[i][j-1]
+			} else {
+				ok[i][j] = ok[i-1][j-1] && fs[i-1] == ps[j-1]
+			}
+		}
+	}
+	return ok[len(fs)][len(ps)]
+}
+
 func ruleMatches(r Rule, source, clearPath string) bool {
 	if len(r.Sources) > 0 && !slices.Contains(r.Sources, source) {
 		return false
@@ -279,7 +308,7 @@ func ruleMatches(r Rule, source, clearPath string) bool {
 func (r *Rules) human(source, clearPath string) (Rule, bool) {
 	var pseudo *Rule
 	for i, m := range r.Mask {
-		if ruleMatches(m, source, clearPath) {
+		if maskRuleMatches(m, source, clearPath) {
 			if m.Mode == ModeRedact {
 				return m, true
 			}

@@ -736,3 +736,21 @@ func TestExponentNumbersInvalidBytesAndWithheldKinds(t *testing.T) {
 		t.Errorf("agent redact: Kinds = %v, want [redacted]", k)
 	}
 }
+
+// A glob mask rule also covers keys holding dots (IP addresses, hosts).
+func TestMaskGlobOverDottedKeys(t *testing.T) {
+	rules, err := ParseProjectRules([]byte("[[mask]]\nfield = \"hosts.*.owner\"\n[[mask]]\nfield = \"users.*\"\nmode = \"pseudonym\"\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := newMasker(t, Options{Structured: StructuredDetect, Rules: &rules})
+	for _, line := range []string{
+		`{"hosts":{"web01.example.org":{"owner":"Jean Bon"}}}`,
+		`{"hosts":{"10.0.0.1":{"owner":"Jean Bon"}}}`,
+		`{"users":{"a.b":{"n":"Jean Bon"}}}`,
+	} {
+		if out := encode(t, m.Mask("api", event(t, line))); strings.Contains(out, "Jean") {
+			t.Errorf("%s: %s", line, out)
+		}
+	}
+}

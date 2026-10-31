@@ -125,7 +125,12 @@ func (m *Masker) Mask(source string, ev parse.Event) (rec Record) {
 // causes): secrets, then personal values as pseudonyms. Never pass it
 // text the agent wrote: the pseudonym of a guessed value would answer
 // whether that value is in the logs (design §4.4); use RedactText.
-func (m *Masker) Text(s string) string {
+func (m *Masker) Text(s string) (out string) {
+	defer func() {
+		if recover() != nil {
+			out = Redacted // a failure withholds it all
+		}
+	}()
 	w := &walk{m: m, kinds: map[string]bool{}}
 	return w.text(s)
 }
@@ -133,7 +138,12 @@ func (m *Masker) Text(s string) string {
 // RedactText masks text the agent wrote before it is echoed back (refusal
 // echoes): secrets as ⟦secret⟧, personal values as ⟦redacted⟧, never as a
 // pseudonym (no oracle, design §4.4).
-func (m *Masker) RedactText(s string) string {
+func (m *Masker) RedactText(s string) (out string) {
+	defer func() {
+		if recover() != nil {
+			out = Redacted // a failure withholds it all
+		}
+	}()
 	w := &walk{m: m, kinds: map[string]bool{}}
 	s = cleanSource(s)
 	if len(s) > pii.DetectLimit {
