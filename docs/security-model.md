@@ -57,7 +57,7 @@ the pseudonym keys and decides what leaves.
 | 13 | No egress except the configured backends; production backends authenticated over TLS | network none or a dedicated network; a dialer pinned to host:port; no proxy environment, no redirects off-host; an unauthenticated-read check |
 | 14 | Read-only by construction | read-only binds and root; `O_RDONLY` beneath-root opens; HTTP method and path allowlists |
 | 15 | Pseudonym keys never leave the home volume; old epoch keys are deleted | files 0600, rotation |
-| 16 | Only the clients group, the image's `agent`, the console's own uid and `--allowed-uids` reach the socket (never root or 65534) | kernel peer credentials, lockkit peer check |
+| 16 | Only the clients group, the image's `agent`, the console's own uid and `--allowed-uids` reach the socket (never root or 65534); the launcher does not pass `--allowed-uids` yet ([#102](https://github.com/DavidGodefroid/locklog/issues/102)) | kernel peer credentials, lockkit peer check |
 
 ## Preconditions (not enforced by locklog)
 
@@ -188,7 +188,7 @@ agent does through locklog writes or unmasks without the human.
 
 | Data | Where | Kept |
 |---|---|---|
-| Audit (one chained line per call) | home volume | until you delete it. It holds the method, the source names, the time range, the decision, the peer and the pseudonyms an unmask or lookup named; not the predicates. The **reason the agent typed** for an approval is kept, masked by the detectors: a personal value in a form the detectors miss stays there |
+| Audit (one chained line per call, plus one per approval decision) | home volume | until you delete it. It holds the method, the source names, the time range, the decision, the peer and the pseudonyms an unmask revealed or a lookup resolved; not the predicates. The **reason the agent typed** for an approval is kept, masked by the detectors: a personal value in a form the detectors miss stays there |
 | Plans and approved scans | console memory | until used or expired (an approved scan: 30 minutes); gone when the session ends |
 | Result cache | console memory | ≤ 64 MiB, gone when the session ends (a policy change, the console's exit) |
 | Local index | home volume | per file identity, rebuilt when a file changes; trusted field values masked at answer time |

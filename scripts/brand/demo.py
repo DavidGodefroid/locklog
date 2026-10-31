@@ -110,13 +110,13 @@ D, S, T, G, R, Y, V, TL = C["dim"], C["sub"], C["text"], C["green"], C["red"], C
 
 # --- Agent pane (left) --------------------------------------------------------------------
 AX, AY, AW, AH = 24, 24, 500, 408
-pane(AX, AY, AW, AH, "✻ Claude Code", "host · profile staging")
+pane(AX, AY, AW, AH, "✻ Claude Code", "its own container · profile staging")
 ax, ay = AX + 16, AY + 52
 agent = [
     (0.3, [("> ", D), ("when did the PDF errors start on staging?", T)]),
     (1.0, [("● ", G), ("locklog_count", T), ("(api, last 24h, by 1m, level=error)", S)]),
     (1.8, [("  └ ", D), ("0/min until 14:01 · ", S), ("67/min from 14:02", Y)]),
-    (2.6, [("● ", G), ("locklog_patterns", T), ("(api, 13:50-14:20, baseline 13:00)", S)]),
+    (2.6, [("● ", G), ("locklog_patterns", T), ("(api, 13:50-14:20, baseline 1h)", S)]),
     (3.4, [("  └ ", D), ("new ×1,204: ", Y), ("render pdf for ", T), (EMAIL, TL)]),
     (3.4, [("    ", D), ("from ", T), (IP, TL), (" failed: upstream timed out", T)]),
     (4.2, [("● ", G), ("locklog_trace", T), ("(order_id 4812, 14:00-14:05)", S)]),
@@ -149,15 +149,11 @@ CHW = CS * 0.602  # one character is 0.602 em wide
 con = [
     [("$ ", D), ("locklog console", T)],
     [("✓ ", G), ("profile ", T), ("staging", Y), (" · sources api, nginx, system", T)],
-    [("› ", C["accent"]), ("agent socket /run/locklog/locklog.sock", T)],
+    [("› ", C["accent"]), ("socket /run/locklog/<project>-staging.sock", T)],
 ]
 for i, parts in enumerate(con):
     body.append(spans(cx, cy + i * LH, parts, size=CS))
-# Free calls scroll by as one-line notes.
-notes = [(1.4, "locklog_count", "free · 41 MiB scanned"), (3.0, "locklog_patterns", "free · 12 MiB"),
-         (4.6, "locklog_trace", "free · 2 sources")]
-for i, (t, tool, what) in enumerate(notes):
-    body.append(spans(cx, cy + (3 + i) * LH, [("· ", D), (tool, S), (" " + what, D)], cls=show(t, 6.2), size=CS))
+# Free calls print nothing on the console: they go to the audit only.
 screen = [
     [("╭─ ", V), ("STAGING", Y), (" · unmask · read-pii ", T), ("──────────────────────────────", V)],
     [("│ ", V), ("uid 10052 (agent) · reason ", D), ('"contact the customer"', T)],
@@ -258,7 +254,7 @@ def jline(pairs):
 free = jline([("event", '"log.call"', T), ("profile", '"staging"', T), ("decision", '"ok"', G),
               "…", ("peer_uid", "10052", T), "…", ("method", '"log.patterns"', T), ("sources", '["api"]', S)])
 denied = jline([("event", '"log.call"', T), ("profile", '"staging"', T), ("decision", '"denied"', R),
-                "…", ("peer_uid", "10052", T), "…", ("method", '"log.unmask"', T), ("sources", '["api"]', S)])
+                "…", ("peer_uid", "10052", T), "…", ("method", '"log.unmask"', T)])
 body.append(spans(BX + 16, BY + 48, free, cls=show(3.6), size=10))
 body.append(spans(BX + 16, BY + 68, denied, cls=show(11.4), size=10))
 

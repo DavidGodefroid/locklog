@@ -25,7 +25,7 @@ format = "combined"
 kind = "journald"
 units = ["nginx.service", "shop-*.service"]
 
-# A docker source cannot share a profile with other sources: it runs in a
+# A docker source cannot share a profile with file or journald sources: it runs in a
 # console of its own (setup writes it as <profile>-docker).
 [profiles.staging-docker]
 production = false
@@ -75,7 +75,7 @@ countable), plus per kind:
 | `file` | `paths` (absolute globs; `**` only with `recursive = true`, depth ≤ 4) |
 | `journald` | `units` (globs on `_SYSTEMD_UNIT`), `allow` (extra fields, reviewed; core dumps, command lines, executables, audit and `OBJECT_` fields can never be allowed) |
 | `docker` | `containers` (name globs; a glob matching a locklog console is refused), `attrs` (json-file log-opt attributes to keep) |
-| `loki` | `url`, `selector`, `trusted_labels`, `trusted_metadata`, `auth` (`none` refused on production, `basic`, `bearer`, `mtls`), `org_id`, `credentials` (`ask` or `vault`), `tls`, `tls_ca` |
+| `loki` | `url`, `selector`, `trusted_labels`, `trusted_metadata`, `auth` (`none` refused on production, `basic`, `bearer`, `mtls`), `org_id`, `user` (basic), `credentials` (`ask` or `vault`, with `vault_path`), `tls`, `tls_ca`, `tls_cert` and `tls_key` (mtls) |
 
 The console opens `loki`, `elastic` and `opensearch` sources from the
 profile once [#97](https://github.com/DavidGodefroid/locklog/pull/97) is
@@ -134,7 +134,7 @@ trusted fields.
 ### Query model
 
 ```json
-{ "sources": ["nginx", "api"], "from": "2026-10-30T13:00:00Z", "to": "2026-10-30T15:00:00Z",
+{ "sources": ["nginx", "system"], "from": "2026-10-30T13:00:00Z", "to": "2026-10-30T15:00:00Z",
   "where": [ {"field": "status", "op": ">=", "value": 500},
              {"field": "user.email", "op": "=", "value": "⟦email:7F3KQ2M9ZD4X⟧"} ],
   "text": "upstream timed out", "limit": 100 }
@@ -172,10 +172,11 @@ cursor. The numbers behind these defaults are in
 
 ## The console
 
-`locklog console` shows each call as a one-line note. It opens an
-approval screen for scans, unmasks, approved lookups and change requests,
-and answers `y` or `n` (an unanswered screen times out and the agent is told
-not to retry unless asked).
+`locklog console` prints nothing for a free call (the audit records it). It
+opens an approval screen for scans, unmasks, approved lookups and change
+requests: you answer `y` (on production, the profile's name) or `n`. An
+unanswered screen times out after 5 minutes and the agent is told not to
+retry unless asked.
 
 | Command | What it does |
 |---|---|
