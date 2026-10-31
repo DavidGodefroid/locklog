@@ -7,6 +7,7 @@ import (
 	"math"
 	"slices"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/DavidGodefroid/locklog/internal/index"
@@ -16,7 +17,9 @@ import (
 // IndexStep indexes granules not yet in the local index, newest first:
 // files by mtime, and within a plain file from its last granule backwards,
 // so that "when did it start" over recent data is answered from the index
-// as early as possible. A compressed file is indexed in one forward pass.
+// as early as possible. A compressed file is indexed in one forward pass,
+// which may exceed maxBytes (by up to the decompression ratio cap): the
+// scheduler's token bucket then goes negative and waits it out.
 // It processes about maxBytes (a compressed file may exceed it) and reports
 // the bytes processed and whether nothing is left to index.
 //
@@ -36,7 +39,7 @@ func (s *Source) IndexStep(ctx context.Context, maxBytes int64, upkeep bool) (in
 		_, isize, gs := s.streamIndex(fi)
 		if fi.id.compression != compNone {
 			s.mu.Lock()
-			failed := s.failed[fi.stream]
+			failed := s.failed[failKey(fi)]
 			s.mu.Unlock()
 			if failed || isize >= 0 && complete(gs, isize) || !upkeep && isize >= 0 {
 				continue
@@ -93,7 +96,7 @@ func (s *Source) store(fi fileInfo, size int64, gs []index.Granule) {
 			st.Size = size
 		}
 		for _, g := range gs {
-			st.Put(g)
+			st.PutBuilt(g, s.opts.Trusted)
 		}
 		return st
 	})
@@ -168,7 +171,7 @@ func (s *Source) indexCompressed(ctx context.Context, fi fileInfo) (int64, error
 		}
 		if err != nil {
 			s.mu.Lock()
-			s.failed[fi.stream] = true // not retried: a bomb or a corrupt file
+			s.failed[failKey(fi)] = true // retried only once the file changes
 			s.mu.Unlock()
 			return it.Processed(), err
 		}
@@ -182,6 +185,12 @@ func (s *Source) indexCompressed(ctx context.Context, fi fileInfo) (int64, error
 }
 
 func (s *Source) fields() []string { return s.opts.Trusted }
+
+// failKey identifies a compressed file's state: a failed indexing (a bomb, a
+// file still being written) is retried once its size or mtime changes.
+func failKey(fi fileInfo) string {
+	return fi.stream + "/" + strconv.FormatInt(fi.id.size, 10) + "/" + strconv.FormatInt(fi.id.mtime.UnixNano(), 10)
+}
 
 // ErrNotIndexable, CountQuery, CountRow and CountResult: see package source.
 var ErrNotIndexable = source.ErrNotIndexable
@@ -215,7 +224,8 @@ func (s *Source) IndexCounts(ctx context.Context, q CountQuery) (CountResult, er
 		if err != nil {
 			return CountResult{}, err
 		}
-		fields, _, gs := s.streamIndex(fi)
+		fields, isize, gs := s.streamIndex(fi)
+		size := streamSize(fi, isize)
 		var rest []source.Granule
 		flush := func() {
 			if len(rest) > 0 {
@@ -231,7 +241,9 @@ func (s *Source) IndexCounts(ctx context.Context, q CountQuery) (CountResult, er
 		}
 		for _, g := range c.Granules {
 			ig := gs[g.Start/source.GranuleBytes]
-			if !g.Indexed || ig == nil {
+			// Re-checked on this snapshot: a granule re-indexed since
+			// the plan is used only if it still describes the stream.
+			if !g.Indexed || ig == nil || !usable(ig, size) {
 				rest = append(rest, g)
 				continue
 			}
@@ -288,7 +300,8 @@ func (s *Source) IndexCounts(ctx context.Context, q CountQuery) (CountResult, er
 	if err != nil {
 		return CountResult{}, err
 	}
-	res.IndexedFrom = s.coverage(files).indexedFrom
+	cov := s.coverage(files)
+	res.IndexedFrom, res.IndexedUntil = cov.indexedFrom, cov.indexedUntil
 	return res, nil
 }
 

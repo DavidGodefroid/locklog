@@ -282,6 +282,9 @@ func TestGlobs(t *testing.T) {
 	if got := rels("/logs/*.log", false); !slices.Equal(got, []string{"logs/a.log"}) {
 		t.Fatalf("symlink or fifo matched: %v", got)
 	}
+	if got := rels("/logs/**/*.log", true); !slices.Equal(got, []string{"logs/a.log", "logs/x/1/2/3/a.log", "logs/x/1/a.log"}) {
+		t.Fatalf("** then a wildcard: %v", got)
+	}
 	got := rels("/logs/**/a.log", true)
 	want := []string{"logs/a.log", "logs/x/1/2/3/a.log", "logs/x/1/a.log"}
 	if !slices.Equal(got, want) {
@@ -868,4 +871,94 @@ func TestConcurrentIndexAndQueries(t *testing.T) {
 	}
 	close(stop)
 	wg.Wait()
+}
+
+func TestCardinalityDropAcrossGranules(t *testing.T) {
+	e := newEnv(t)
+	var b strings.Builder
+	for i := 0; b.Len() < 4*source.GranuleBytes; i++ {
+		fmt.Fprintf(&b, "time=%s level=%s status=s%d msg=\"some padding text for the line\"\n",
+			t0.Add(time.Duration(i)*time.Second).Format(time.RFC3339), levels[i%5], i/400)
+	}
+	e.write("logs/app.log", b.String(), time.Time{})
+	s := e.source([]string{e.root + "/logs/app.log"})
+	r := source.Range{From: t0, To: t0.Add(24 * time.Hour)}
+	want := fullCounts(t, s, r, time.Hour)
+	for i := 0; i < 10; i++ {
+		if _, done, err := s.IndexStep(ctx, 1<<20, true); err != nil {
+			t.Fatal(err)
+		} else if done {
+			break
+		}
+	}
+	got, res := indexPlusResidual(t, s, r, time.Hour)
+	if !reflect.DeepEqual(got, want) || res.Residual.Granules() != 0 {
+		t.Fatal("counts after a cardinality drop differ from a scan")
+	}
+	if err := e.store.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	st2, err := index.Open(e.store.Dir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s2 := e.source([]string{e.root + "/logs/app.log"}, func(o *Options) { o.Index = st2 })
+	got, res = indexPlusResidual(t, s2, r, time.Hour)
+	if !reflect.DeepEqual(got, want) || res.Residual.Granules() != 0 {
+		t.Fatal("reloaded index differs after a cardinality drop")
+	}
+}
+
+func TestIndexedFromWithConcurrentFiles(t *testing.T) {
+	e := newEnv(t)
+	now := t0.Add(30000 * time.Second)
+	e.write("logs/a.log", genLines(t0, 20000), now.Add(time.Second))
+	e.write("logs/b.log", genLines(t0, 20000), now)
+	s := e.source([]string{e.root + "/logs/*.log"}, func(o *Options) { o.Now = func() time.Time { return now.Add(time.Hour) } })
+	for i := 0; i < 3; i++ {
+		s.IndexStep(ctx, 1<<20, true)
+	}
+	// The claim holds: every record the index lacks is before
+	// indexed_from (b.log, written at the same time, is partly indexed).
+	sch, _ := s.Describe(ctx)
+	res, _ := s.IndexCounts(ctx, CountQuery{Range: source.Range{From: t0, To: now}, By: []string{"level"}})
+	missing := scanPlan(t, s, res.Residual)
+	if len(missing) == 0 {
+		t.Fatal("test setup: everything indexed already")
+	}
+	for _, r := range missing {
+		if !sch.IndexedFrom.IsZero() && !r.Event.Time.Before(sch.IndexedFrom) {
+			t.Fatalf("record at %v not indexed but indexed_from is %v", r.Event.Time, sch.IndexedFrom)
+		}
+	}
+	for i := 0; i < 20; i++ {
+		s.IndexStep(ctx, 1<<20, true)
+	}
+	if sch, _ = s.Describe(ctx); !sch.IndexedFrom.Equal(t0) || !sch.FullyIndexed {
+		t.Fatalf("fully indexed: %+v", sch)
+	}
+}
+
+func TestBackfillOnlyWithoutUpkeep(t *testing.T) {
+	e := newEnv(t)
+	p := e.write("logs/app.log", genLines(t0, 1000), time.Time{})
+	s := e.source([]string{e.root + "/logs/app.log"})
+	s.IndexStep(ctx, 1<<40, false) // backfill: the never-indexed granule
+	if sch, _ := s.Describe(ctx); !sch.FullyIndexed {
+		t.Fatal("backfill did not run without upkeep")
+	}
+	f, _ := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0)
+	f.WriteString("time=2026-10-30T20:00:00Z level=info msg=x\n")
+	f.Close()
+	if n, done, _ := s.IndexStep(ctx, 1<<40, false); n != 0 || !done {
+		t.Fatalf("upkeep ran without upkeep: %d bytes", n)
+	}
+	sch, _ := s.Describe(ctx)
+	if sch.FullyIndexed || sch.IndexedUntil.IsZero() {
+		t.Fatalf("grown tail: %+v", sch)
+	}
+	s.IndexStep(ctx, 1<<40, true)
+	if sch, _ := s.Describe(ctx); !sch.FullyIndexed || !sch.IndexedUntil.IsZero() {
+		t.Fatalf("after upkeep: %+v", sch)
+	}
 }

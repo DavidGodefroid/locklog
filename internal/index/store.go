@@ -78,6 +78,41 @@ func (s *Stream) Put(g Granule) {
 	}
 }
 
+// PutBuilt stores a granule built over fields (the source's trusted fields,
+// a superset of s.Fields once fields were dropped): its tuples are first
+// projected onto s.Fields, merging tuples that become equal.
+func (s *Stream) PutBuilt(g Granule, fields []string) {
+	if !slices.Equal(fields, s.Fields) {
+		pos := make([]int, len(s.Fields))
+		for i, f := range s.Fields {
+			pos[i] = slices.Index(fields, f)
+		}
+		project := func(cs []Count) []Count {
+			m := map[string]*Count{}
+			for _, c := range cs {
+				vals := make([]string, len(pos))
+				for i, p := range pos {
+					if p >= 0 {
+						vals[i] = c.Vals[p]
+					}
+				}
+				k := tupleKey(vals)
+				if m[k] == nil {
+					m[k] = &Count{Vals: vals}
+				}
+				m[k].N += c.N
+			}
+			return sortedCounts(m)
+		}
+		ms := make([]Minute, len(g.Minutes))
+		for j, m := range g.Minutes {
+			ms[j] = Minute{M: m.M, Counts: project(m.Counts)}
+		}
+		g.Minutes, g.Untimed = ms, project(g.Untimed)
+	}
+	s.Put(g)
+}
+
 // note adds g's values to the distinct sets.
 func (s *Stream) note(g *Granule) {
 	each(g, func(vals []string) {
@@ -256,6 +291,8 @@ func (st *Store) Flush() error {
 		key, source string
 		s           *Stream
 	}
+	st.wmu.Lock() // before the snapshot: flushes land in order
+	defer st.wmu.Unlock()
 	st.mu.Lock()
 	var jobs []job
 	for k, source := range st.dirty {
@@ -273,8 +310,6 @@ func (st *Store) Flush() error {
 		delete(st.dirty, k)
 	}
 	st.mu.Unlock()
-	st.wmu.Lock()
-	defer st.wmu.Unlock()
 	var firstErr error
 	for _, j := range jobs {
 		dir := filepath.Join(st.dir, j.source)

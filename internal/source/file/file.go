@@ -625,7 +625,9 @@ func (it *iter) Close() error {
 	return it.f.Close()
 }
 
-// Reread returns the record at ref.
+// Reread returns the record at ref. A record without a time of its own
+// comes back untimed (the time a scan inherited for it from its granule is
+// not recomputed).
 func (s *Source) Reread(ctx context.Context, ref source.RawRef) (source.RawRecord, error) {
 	if ref.Source != s.opts.Name || ref.Offset < 0 || ref.Length <= 0 {
 		return source.RawRecord{}, source.ErrStale
@@ -733,7 +735,7 @@ func (s *Source) Describe(ctx context.Context) (source.Schema, error) {
 	values := map[string]map[string]bool{}
 	dropped := map[string]bool{}
 	cov := s.coverage(files)
-	sch.IndexedFrom, sch.FullyIndexed = cov.indexedFrom, cov.full
+	sch.IndexedFrom, sch.IndexedUntil, sch.FullyIndexed = cov.indexedFrom, cov.indexedUntil, cov.full
 	for _, fi := range files {
 		fields, isize, gs := s.streamIndex(fi)
 		if size := streamSize(fi, isize); size >= 0 {
@@ -783,38 +785,78 @@ func (s *Source) Describe(ctx context.Context) (source.Schema, error) {
 }
 
 type coverage struct {
-	indexedFrom time.Time
-	full        bool
+	indexedFrom, indexedUntil time.Time
+	full                      bool
 }
 
-// coverage walks the granules newest first (files by mtime, granules from
-// the last) and returns the start of the indexed run that reaches the
-// newest record.
+// coverage walks the granules newest first (files by mtime, a file's
+// granules from the last) and returns the indexed run that reaches the
+// newest record: [indexedFrom, indexedUntil] holds no record the index
+// lacks.
+//
+//   - A granule never indexed ends the run. The older part of its file
+//     holds records up to about the start of the file's indexed run, and
+//     every other file not wholly indexed may hold records up to its
+//     mtime: indexedFrom is clamped to the latest such bound
+//     (with two files written at the same time, nothing is claimed until
+//     both are indexed).
+//   - A grown tail (indexed before it grew) does not end the run, but the
+//     records after its indexed span are not in the index: indexedUntil
+//     stops there (zero: up to the newest record).
 func (s *Source) coverage(files []fileInfo) coverage {
-	var c coverage
-	c.full = true
-	for _, fi := range files {
-		_, isize, gs := s.streamIndex(fi)
-		size := streamSize(fi, isize)
-		if size < 0 {
+	c := coverage{full: true}
+	var bound time.Time // newest possible record not in the index
+	stopped := false
+	for fi := range files {
+		f := files[fi]
+		_, isize, gs := s.streamIndex(f)
+		size := streamSize(f, isize)
+		whole := size >= 0
+		if stopped || !whole {
 			c.full = false
-			return c
+			stopped = true
+			if !whole || !complete(gs, size) {
+				if b := f.id.mtime.Add(mtimeSlack); b.After(bound) {
+					bound = b
+				}
+			}
+			continue
 		}
 		n := (size + source.GranuleBytes - 1) / source.GranuleBytes
+		var fileFrom time.Time // earliest record of this file's indexed run
 		for i := n - 1; i >= 0; i-- {
 			g := gs[i]
 			if g == nil {
-				c.full = false
-				return c
+				// The older, unindexed part of this file holds
+				// records up to about its indexed run's start.
+				c.full, stopped = false, true
+				b := fileFrom
+				if b.IsZero() {
+					b = f.id.mtime.Add(mtimeSlack)
+				}
+				if b.After(bound) {
+					bound = b
+				}
+				break
+			}
+			if from, _, ok := g.Span(); ok && (fileFrom.IsZero() || from.Before(fileFrom)) {
+				fileFrom = from
 			}
 			if !usable(g, size) {
-				// A grown tail (being indexed again) does not end the
-				// run: counts send it to the residual scan.
 				c.full = false
+				if _, to, ok := g.Span(); ok && (c.indexedUntil.IsZero() || to.Before(c.indexedUntil)) {
+					c.indexedUntil = to
+				}
 			}
 			if from, _, ok := g.Span(); ok && (c.indexedFrom.IsZero() || from.Before(c.indexedFrom)) {
 				c.indexedFrom = from
 			}
+		}
+	}
+	if !bound.IsZero() && !c.indexedFrom.IsZero() && !bound.Before(c.indexedFrom) {
+		c.indexedFrom = bound
+		if !c.indexedUntil.IsZero() && c.indexedFrom.After(c.indexedUntil) || c.indexedFrom.After(s.opts.Now()) {
+			c.indexedFrom, c.indexedUntil = time.Time{}, time.Time{}
 		}
 	}
 	return c
