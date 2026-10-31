@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -668,5 +669,34 @@ func TestGluedValuesAndRedactedKinds(t *testing.T) {
 	r := newMasker(t, Options{Structured: StructuredRedactUnknown}).Mask("api", event(t, `{"x":"mail john.doe@example.com","y":"BE71096123456769"}`))
 	if k := r.Kinds(); len(k) != 1 || k[0] != "redacted" {
 		t.Errorf("Kinds = %v, want [redacted]", k)
+	}
+}
+
+func TestRedactedSecretsAndPseudonymOrder(t *testing.T) {
+	sec := "sk_test_" + strings.Repeat("a1", 16)
+	r := newMasker(t, Options{Structured: StructuredRedactUnknown}).Mask("api", event(t, `{"x":"`+sec+`","y":"hello"}`))
+	if k := r.Kinds(); len(k) != 1 || k[0] != "redacted" || r.HadSecret("x") {
+		t.Errorf("a withheld secret is described: Kinds = %v, HadSecret = %v", k, r.HadSecret("x"))
+	}
+	rules, err := ParseProjectRules([]byte("[[mask]]\nfield = \"x\"\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r = newMasker(t, Options{Structured: StructuredDetect, Rules: &rules}).Mask("api", event(t, `{"x":"`+sec+`"}`))
+	if r.HadSecret("x") || slices.Contains(r.Kinds(), "secret") {
+		t.Errorf("a redacted secret is described: %v", r.Kinds())
+	}
+	a := Rule{Field: "user.*", Mode: ModePseudonym, Kind: "customer"}
+	b := Rule{Field: "user.email", Mode: ModePseudonym, Kind: "email"}
+	if l := Change(Rules{Mask: []Rule{a, b}}, Rules{Mask: []Rule{b, a}}); len(l) == 0 {
+		t.Error("reordering pseudonym rules is not reported")
+	}
+	c := Rule{Field: "e", Mode: ModePseudonym, Kind: "customer"}
+	d := Rule{Field: "e", Mode: ModePseudonym, Kind: "email"}
+	if l := Change(Rules{Mask: []Rule{c, d}}, Rules{Mask: []Rule{d}}); len(l) == 0 {
+		t.Error("removing a duplicate pseudonym rule is not reported")
+	}
+	if _, err := ParseProjectRules([]byte("[[mask]]\nfield = \"e\"\nmode = \"pseudonym\"\n[[mask]]\nfield = \"e\"\nmode = \"pseudonym\"\nkind = \"email\"\n")); err == nil {
+		t.Error("duplicate rules accepted")
 	}
 }

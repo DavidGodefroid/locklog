@@ -251,22 +251,32 @@ func (w *walk) value(v parse.Value, name, clearPath, shownPath string, trusted b
 	return w.leaf(v, name, clearPath, shownPath, trusted, inh)
 }
 
-// leaf masks a scalar in the fixed order (design §4.2).
+// leaf masks a scalar in the fixed order (design §4.2). A secret is
+// recorded (Kinds, HadSecret) only when the value is not withheld: a
+// redaction tells nothing of what it held.
 func (w *walk) leaf(v parse.Value, name, clearPath, shownPath string, trusted bool, inh inherited) Value {
+	hadSecret := false
+	out := w.leafMasked(v, name, clearPath, trusted, inh, &hadSecret)
+	if hadSecret && out.text != Redacted {
+		w.kinds["secret"] = true
+		w.secretPaths = append(w.secretPaths, shownPath)
+	}
+	return out
+}
+
+func (w *walk) leafMasked(v parse.Value, name, clearPath string, trusted bool, inh inherited, hadSecret *bool) Value {
 	s := cleanSource(v.Str)
 	if len(s) > pii.DetectLimit {
 		s = pii.CutAt(s, pii.DetectLimit)
 	}
 	// (1) Secrets, first and final.
 	if w.m.o.SecretName != nil && w.m.o.SecretName(name) {
-		w.kinds["secret"] = true
-		w.secretPaths = append(w.secretPaths, shownPath)
+		*hadSecret = true
 		return Value{kind: String, text: Secret}
 	}
 	secrets := w.find(w.m.o.Secrets, s)
 	if len(secrets) > 0 {
-		w.kinds["secret"] = true
-		w.secretPaths = append(w.secretPaths, shownPath)
+		*hadSecret = true
 		s = replace(s, secrets, func(string, pii.Match) string { return Secret })
 	}
 	// Steps 2-5 work on s, the string step 1 produced.
@@ -369,7 +379,7 @@ func (w *walk) whole(s, kind string) Value {
 	}
 	if kind == "" {
 		kind = PersonalKind
-		if ms := w.find(w.m.o.Values, strings.TrimSpace(s)); len(ms) == 1 && ms[0].Start == 0 && ms[0].End == len(strings.TrimSpace(s)) && pii.ValidKind(ms[0].Kind) {
+		if ms := w.find(w.m.o.Values, strings.TrimSpace(s)); len(ms) == 1 && ms[0].Start == 0 && ms[0].End == len(strings.TrimSpace(s)) && pii.ValidKind(ms[0].Kind) && ms[0].Kind != pii.CutKind {
 			kind = ms[0].Kind
 			s = strings.TrimSpace(s)
 		}

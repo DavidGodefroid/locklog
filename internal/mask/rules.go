@@ -103,11 +103,17 @@ func ParseProjectRules(data []byte) (Rules, error) {
 		return Rules{}, fmt.Errorf("pii rules: unknown key %s (rules name fields and modes only)", und[0])
 	}
 	var out Rules
+	seen := map[string]bool{}
 	for i, r := range raw.Mask {
 		rule, err := buildRule(r, true)
 		if err != nil {
 			return Rules{}, fmt.Errorf("pii rules: mask rule %d: %w", i+1, err)
 		}
+		k := strings.Join(rule.Sources, ",") + "\x00" + rule.Field + "\x00" + rule.Mode
+		if seen[k] {
+			return Rules{}, fmt.Errorf("pii rules: mask rule %d: a rule with the same field, sources and mode comes earlier", i+1)
+		}
+		seen[k] = true
 		out.Mask = append(out.Mask, rule)
 	}
 	for i, r := range raw.Allow {
@@ -391,6 +397,24 @@ func Change(old, new Rules) (loosenings []string) {
 			loosenings = append(loosenings, "adds: "+m.text())
 		}
 		// A new redact rule only tightens.
+	}
+	// The first matching pseudonym rule gives the kind: reordering or
+	// removing one can change a field's kind (and open lookup).
+	var oldP, newP []string
+	inOld := map[string]bool{}
+	for _, m := range old.Mask {
+		if m.Mode == ModePseudonym {
+			oldP = append(oldP, m.text())
+			inOld[m.text()] = true
+		}
+	}
+	for _, m := range new.Mask {
+		if m.Mode == ModePseudonym && inOld[m.text()] {
+			newP = append(newP, m.text())
+		}
+	}
+	if !slices.Equal(oldP, newP) {
+		loosenings = append(loosenings, "reorders or removes pseudonym rules")
 	}
 	slices.Sort(loosenings)
 	return loosenings
