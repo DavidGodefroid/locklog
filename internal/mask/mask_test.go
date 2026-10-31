@@ -561,6 +561,34 @@ func FuzzMaskNoLeak(f *testing.F) {
 	})
 }
 
+// Step 1 (and the fuzz oracle) skips a match of placeholders and blanks
+// alone, never one holding a byte of a value; a secret name before a
+// replaced value is masked again until nothing reads as a secret.
+func TestBlankOnlyMatches(t *testing.T) {
+	secrets := SecretDetectors()
+	for _, tt := range []struct {
+		s    string
+		skip bool
+	}{
+		{"pass:{" + Secret, true},
+		{"password={" + Secret + " ", true},
+		{"pass:{" + Secret + " hunter2", false},
+		{"pass:{hunter2", false},
+		{"pass:" + Secret + `":"`, false},
+	} {
+		plain := blankLen(tt.s)
+		ms := secrets.Find(plain)
+		if len(ms) == 0 {
+			t.Fatalf("%q: no match", tt.s)
+		}
+		for _, mt := range ms {
+			if got := blankOnly(plain, mt); got != tt.skip {
+				t.Errorf("%q: onlyPlaceholders(%q) = %v", tt.s, plain[mt.Start:mt.End], got)
+			}
+		}
+	}
+}
+
 func fuzzOneNoLeak(t *testing.T, m *Masker, p *parse.Parser, values, secrets Detectors, line string) {
 	{
 		r := m.Mask("api", p.Line(line))
@@ -596,7 +624,7 @@ func fuzzOneNoLeak(t *testing.T, m *Masker, p *parse.Parser, values, secrets Det
 		for _, s := range texts {
 			plain := blankLen(s)
 			for _, mt := range append(values.Find(plain), secrets.Find(plain)...) {
-				if mt.Kind == pii.CutKind {
+				if mt.Kind == pii.CutKind || blankOnly(plain, mt) {
 					continue
 				}
 				t.Fatalf("%s %q survived in %q (record %s)", mt.Kind, plain[mt.Start:mt.End], s, out)
