@@ -331,9 +331,10 @@ func TestSuiteOracleLatency(t *testing.T) {
 				differ := hi-lo > lo/4+5*time.Millisecond && (z > 4 || z < -4)
 				if tc.prefilter {
 					// The control: the planted values' clear text holds
-					// the needle in A only, so A masks every record and B
-					// none.
-					if ma < 2*mb || z < 4 {
+					// the text needle in A only, so A masks every record
+					// and B none. (Counts never use the pre-filter: the
+					// count call is only logged.)
+					if c.name == "text" && (ma < 2*mb || z < 4) {
 						t.Errorf("%s: the harness does not see the pre-filter's latency: %v vs %v (z %.2f)", c.name, ma, mb, z)
 					}
 					continue
