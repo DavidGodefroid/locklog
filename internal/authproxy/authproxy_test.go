@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"testing"
 
 	"golang.org/x/crypto/bcrypt"
@@ -19,6 +20,12 @@ import (
 func setup(t *testing.T) (Options, string) {
 	t.Helper()
 	base := t.TempDir()
+	os.Chmod(base, 0o700) // t.TempDir follows the umask
+	// t.TempDir is under /tmp (sticky, world-writable): its own ancestors
+	// are not checked; base (0700, ours) and below are.
+	prev := trustedRoot
+	trustedRoot = base
+	t.Cleanup(func() { trustedRoot = prev })
 	project := filepath.Join(base, "project")
 	os.MkdirAll(filepath.Join(project, ".locklog"), 0o755)
 	return Options{Dir: filepath.Join(base, "state", "loki-proxy"), Project: project, Host: "loki-proxy", Upstream: "loki:3100"}, base
@@ -162,5 +169,72 @@ func TestRefusesSymlinksIntoTheProject(t *testing.T) {
 	}
 	if fi, _ := os.Stat(o.Dir); fi.Mode().Perm() != 0o700 {
 		t.Fatalf("mode %v", fi.Mode().Perm())
+	}
+}
+
+func TestRefusesUnsafeAncestors(t *testing.T) {
+	// A group-writable ancestor: someone else could swap what is below.
+	o, base := setup(t)
+	shared := filepath.Join(base, "shared")
+	os.MkdirAll(shared, 0o700)
+	os.Chmod(shared, 0o770)
+	o.Dir = filepath.Join(shared, "proxy")
+	if _, err := Generate(o); err == nil || !strings.Contains(err.Error(), "writable by no one else") {
+		t.Fatalf("group-writable ancestor: %v", err)
+	}
+	// A symlinked ancestor, even to a safe directory outside the project.
+	o, base = setup(t)
+	os.MkdirAll(filepath.Join(base, "real"), 0o700)
+	os.Symlink(filepath.Join(base, "real"), filepath.Join(base, "link"))
+	o.Dir = filepath.Join(base, "link", "proxy")
+	if _, err := Generate(o); err == nil {
+		t.Fatal("symlinked ancestor accepted")
+	}
+	if ents, _ := os.ReadDir(filepath.Join(base, "real")); len(ents) != 0 {
+		t.Fatal("written through the symlink")
+	}
+}
+
+func TestSafeAncestorPredicate(t *testing.T) {
+	euid := 1000
+	for _, tt := range []struct {
+		mode, uid uint32
+		ok        bool
+	}{
+		{syscall.S_IFDIR | 0o755, 0, true},
+		{syscall.S_IFDIR | 0o700, 1000, true},
+		{syscall.S_IFDIR | 0o755, 1001, false}, // another user's
+		{syscall.S_IFDIR | 0o775, 1000, false}, // group-writable
+		{syscall.S_IFDIR | 0o757, 0, false},    // other-writable
+		{syscall.S_IFDIR | 0o1777, 0, false},   // sticky /tmp
+		{syscall.S_IFLNK | 0o777, 1000, false}, // a symlink
+		{syscall.S_IFREG | 0o644, 1000, false}, // not a directory
+	} {
+		if got := safeAncestor(tt.mode, tt.uid, euid); got != tt.ok {
+			t.Errorf("mode %o uid %d: %t", tt.mode, tt.uid, got)
+		}
+	}
+}
+
+func TestSwapCaught(t *testing.T) {
+	// The directory is swapped between its open and the writes: the files
+	// go to the directory opened (never the swapped-in path), are removed,
+	// and Generate fails.
+	o, _ := setup(t)
+	os.MkdirAll(filepath.Dir(o.Dir), 0o700)
+	moved := o.Dir + ".moved"
+	prev := afterOpen
+	afterOpen = func() {
+		os.Rename(o.Dir, moved)
+		os.Mkdir(o.Dir, 0o777)
+	}
+	t.Cleanup(func() { afterOpen = prev })
+	if _, err := Generate(o); err == nil || !strings.Contains(err.Error(), "replaced") {
+		t.Fatalf("swap not caught: %v", err)
+	}
+	for _, d := range []string{o.Dir, moved} {
+		if ents, _ := os.ReadDir(d); len(ents) != 0 {
+			t.Fatalf("%s holds %d files", d, len(ents))
+		}
 	}
 }

@@ -38,10 +38,11 @@ import (
 
 // Options describe the proxy.
 type Options struct {
-	// Dir is where the files go: absolute, outside Project (symlinks
-	// resolved), created 0700. It must not exist yet, or be an empty real
-	// directory (not a symlink) owned by the user. Files are created
-	// exclusively, never through a symlink.
+	// Dir is where the files go: absolute, outside Project (resolved),
+	// created 0700. Every ancestor must be a real directory (no symlink)
+	// owned by root or the user and writable by no one else; Dir must not
+	// exist yet, or be an empty real directory of the user's. The files are
+	// created relative to Dir's descriptor (see writeFiles).
 	Dir string
 	// Project is the project root (agents may read it): Dir must not be
 	// inside it.
@@ -111,42 +112,14 @@ func Generate(o Options) (Result, error) {
 		// The Compose short volume syntax splits on ':'.
 		return Result{}, errors.New("authproxy: the directory path must not hold ':', quotes, backslashes or control characters")
 	}
-	// The same checks on the real paths: a symlinked project, or a parent
-	// of Dir symlinked into the project, must not get the files.
+	// The project through its real path: a Dir inside its target is
+	// inside it. Dir's own ancestors may hold no symlink (writeFiles).
 	project, err := filepath.EvalSymlinks(o.Project)
 	if err != nil {
 		return Result{}, fmt.Errorf("authproxy: the project root: %w", err)
 	}
-	parent, err := filepath.EvalSymlinks(filepath.Dir(o.Dir))
-	if err != nil {
-		return Result{}, fmt.Errorf("authproxy: the directory's parent: %w", err)
-	}
-	if real := filepath.Join(parent, filepath.Base(o.Dir)); inside(real, project) || inside(project, real) {
+	if inside(o.Dir, project) || inside(project, o.Dir) {
 		return Result{}, errors.New("authproxy: the directory must be outside the project (agents can read the project)")
-	}
-	if err := os.Mkdir(o.Dir, 0o700); err != nil {
-		if !errors.Is(err, os.ErrExist) {
-			return Result{}, err
-		}
-		// An existing Dir: a real directory of ours (not a symlink),
-		// empty.
-		fi, err := os.Lstat(o.Dir)
-		if err != nil {
-			return Result{}, err
-		}
-		if fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
-			return Result{}, errors.New("authproxy: the directory exists and is a symlink or not a directory")
-		}
-		if err := checkOwner(fi); err != nil {
-			return Result{}, err
-		}
-		ents, err := os.ReadDir(o.Dir)
-		if err != nil || len(ents) > 0 {
-			return Result{}, errors.New("authproxy: the directory exists and is not empty")
-		}
-	}
-	if err := os.Chmod(o.Dir, 0o700); err != nil {
-		return Result{}, err
 	}
 
 	var raw [32]byte
@@ -187,19 +160,13 @@ https://%s:%d {
 	reverse_proxy %s
 }
 `, o.Host, o.Port, o.User, hash, o.Upstream)
-	for _, f := range []struct {
-		path string
-		data []byte
-		mode os.FileMode
-	}{
-		{r.Caddyfile, []byte(caddy), 0o600},
-		{r.ServerCert, serverCert, 0o600},
-		{r.ServerKey, serverKey, 0o600},
-		{r.CACert, caCert, 0o644},
-	} {
-		if err := createFile(f.path, f.data, f.mode); err != nil {
-			return Result{}, err
-		}
+	if err := writeFiles(o.Dir, []file{
+		{"Caddyfile", []byte(caddy), 0o600},
+		{"server.crt", serverCert, 0o600},
+		{"server.key", serverKey, 0o600},
+		{"ca.crt", caCert, 0o644},
+	}); err != nil {
+		return Result{}, err
 	}
 	r.Compose = fmt.Sprintf(`  %s:
     image: caddy:2.10.2
@@ -209,6 +176,13 @@ https://%s:%d {
     # No published port: only the locklog console's network reaches it.
 `, o.Host, r.Caddyfile, o.Dir)
 	return r, nil
+}
+
+// file is one file Generate writes in Dir.
+type file struct {
+	name string
+	data []byte
+	mode os.FileMode
 }
 
 // certificates makes an internal CA, signs a server certificate for host
