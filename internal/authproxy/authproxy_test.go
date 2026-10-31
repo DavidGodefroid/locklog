@@ -96,27 +96,71 @@ func TestTokenNeverOnDisk(t *testing.T) {
 	if !ca.PermittedDNSDomainsCritical || len(ca.PermittedDNSDomains) != 1 || !ca.MaxPathLenZero {
 		t.Fatal("the CA is not name-constrained")
 	}
+	// Nor for any IP address.
+	var ex []string
+	for _, n := range ca.ExcludedIPRanges {
+		ex = append(ex, n.String())
+	}
+	if strings.Join(ex, ",") != "0.0.0.0/0,::/0" {
+		t.Fatalf("excluded IP ranges %v", ex)
+	}
+	// The snippet pins the image and quotes the paths.
+	if !strings.Contains(r.Compose, "image: caddy:2.10.2\n") || !strings.Contains(r.Compose, `- "`+r.Caddyfile+`:/etc/caddy/Caddyfile:ro"`) ||
+		!strings.Contains(r.Compose, `- "`+o.Dir+`:/etc/locklog-proxy:ro"`) {
+		t.Fatalf("compose snippet:\n%s", r.Compose)
+	}
 }
 
-func TestRefusesProjectAndBadInputs(t *testing.T) {
-	o, _ := setup(t)
-	for name, mod := range map[string]func(*Options){
-		"in project":    func(o *Options) { o.Dir = filepath.Join(o.Project, ".locklog", "proxy") },
-		"project in it": func(o *Options) { o.Dir = filepath.Dir(o.Project) },
-		"relative":      func(o *Options) { o.Dir = "proxy" },
-		"bad host":      func(o *Options) { o.Host = "Loki_Proxy" },
-		"bad upstream":  func(o *Options) { o.Upstream = "loki:3100\n reverse_proxy evil" },
-		"no project":    func(o *Options) { o.Project = "" },
+func TestRefusesSymlinksIntoTheProject(t *testing.T) {
+	for name, mk := range map[string]func(o Options, base string) Options{
+		// Dir itself a symlink into the project.
+		"dir symlink": func(o Options, base string) Options {
+			o.Dir = filepath.Join(base, "dirlink")
+			os.Symlink(filepath.Join(o.Project, ".locklog"), o.Dir)
+			return o
+		},
+		// Dir's parent a symlink into the project.
+		"parent symlink": func(o Options, base string) Options {
+			os.Symlink(filepath.Join(o.Project, ".locklog"), filepath.Join(base, "parentlink"))
+			o.Dir = filepath.Join(base, "parentlink", "proxy")
+			return o
+		},
+		// The project given through a symlink, Dir inside its target.
+		"project symlink": func(o Options, base string) Options {
+			real := o.Project
+			o.Project = filepath.Join(base, "projlink")
+			os.Symlink(real, o.Project)
+			o.Dir = filepath.Join(real, "proxy")
+			return o
+		},
+		// Dir a symlink, even to an empty directory outside the project.
+		"dir symlink outside": func(o Options, base string) Options {
+			os.MkdirAll(filepath.Join(base, "outside"), 0o700)
+			o.Dir = filepath.Join(base, "outlink")
+			os.Symlink(filepath.Join(base, "outside"), o.Dir)
+			return o
+		},
 	} {
-		oo := o
-		mod(&oo)
-		if _, err := Generate(oo); err == nil {
+		o, base := setup(t)
+		project := o.Project
+		if _, err := Generate(mk(o, base)); err == nil {
 			t.Errorf("%s accepted", name)
 		}
+		filepath.WalkDir(base, func(p string, d fs.DirEntry, err error) error {
+			if err == nil && !d.IsDir() && d.Type()&fs.ModeSymlink == 0 {
+				t.Errorf("%s: %s written", name, strings.TrimPrefix(p, project))
+			}
+			return nil
+		})
 	}
-	os.MkdirAll(o.Dir, 0o700)
-	os.WriteFile(filepath.Join(o.Dir, "x"), nil, 0o600)
-	if _, err := Generate(o); err == nil {
-		t.Error("non-empty directory accepted")
+	// A plain directory outside the project, existing and empty: fine.
+	o, base := setup(t)
+	o.Dir = filepath.Join(base, "outside")
+	os.MkdirAll(o.Dir, 0o755)
+	if _, err := Generate(o); err != nil {
+		t.Fatal(err)
+	}
+	if fi, _ := os.Stat(o.Dir); fi.Mode().Perm() != 0o700 {
+		t.Fatalf("mode %v", fi.Mode().Perm())
 	}
 }

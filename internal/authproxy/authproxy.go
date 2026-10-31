@@ -38,8 +38,10 @@ import (
 
 // Options describe the proxy.
 type Options struct {
-	// Dir is where the files go: absolute, outside Project, created 0700
-	// (it must not exist yet, or be empty).
+	// Dir is where the files go: absolute, outside Project (symlinks
+	// resolved), created 0700. It must not exist yet, or be an empty real
+	// directory (not a symlink) owned by the user. Files are created
+	// exclusively, never through a symlink.
 	Dir string
 	// Project is the project root (agents may read it): Dir must not be
 	// inside it.
@@ -105,9 +107,37 @@ func Generate(o Options) (Result, error) {
 		return Result{}, errors.New("authproxy: invalid user name")
 	case o.Port < 1 || o.Port > 65535:
 		return Result{}, errors.New("authproxy: invalid port")
+	case strings.ContainsAny(o.Dir, ":\"\\") || strings.ContainsFunc(o.Dir, func(r rune) bool { return r < 0x20 || r == 0x7f }):
+		// The Compose short volume syntax splits on ':'.
+		return Result{}, errors.New("authproxy: the directory path must not hold ':', quotes, backslashes or control characters")
+	}
+	// The same checks on the real paths: a symlinked project, or a parent
+	// of Dir symlinked into the project, must not get the files.
+	project, err := filepath.EvalSymlinks(o.Project)
+	if err != nil {
+		return Result{}, fmt.Errorf("authproxy: the project root: %w", err)
+	}
+	parent, err := filepath.EvalSymlinks(filepath.Dir(o.Dir))
+	if err != nil {
+		return Result{}, fmt.Errorf("authproxy: the directory's parent: %w", err)
+	}
+	if real := filepath.Join(parent, filepath.Base(o.Dir)); inside(real, project) || inside(project, real) {
+		return Result{}, errors.New("authproxy: the directory must be outside the project (agents can read the project)")
 	}
 	if err := os.Mkdir(o.Dir, 0o700); err != nil {
 		if !errors.Is(err, os.ErrExist) {
+			return Result{}, err
+		}
+		// An existing Dir: a real directory of ours (not a symlink),
+		// empty.
+		fi, err := os.Lstat(o.Dir)
+		if err != nil {
+			return Result{}, err
+		}
+		if fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
+			return Result{}, errors.New("authproxy: the directory exists and is a symlink or not a directory")
+		}
+		if err := checkOwner(fi); err != nil {
 			return Result{}, err
 		}
 		ents, err := os.ReadDir(o.Dir)
@@ -167,18 +197,15 @@ https://%s:%d {
 		{r.ServerKey, serverKey, 0o600},
 		{r.CACert, caCert, 0o644},
 	} {
-		if err := os.WriteFile(f.path, f.data, f.mode); err != nil {
-			return Result{}, err
-		}
-		if err := os.Chmod(f.path, f.mode); err != nil {
+		if err := createFile(f.path, f.data, f.mode); err != nil {
 			return Result{}, err
 		}
 	}
 	r.Compose = fmt.Sprintf(`  %s:
-    image: caddy:2
+    image: caddy:2.10.2
     volumes:
-      - %s:/etc/caddy/Caddyfile:ro
-      - %s:/etc/locklog-proxy:ro
+      - "%s:/etc/caddy/Caddyfile:ro"
+      - "%s:/etc/locklog-proxy:ro"
     # No published port: only the locklog console's network reaches it.
 `, o.Host, r.Caddyfile, o.Dir)
 	return r, nil
@@ -206,9 +233,11 @@ func certificates(host string, validity time.Duration) (caPEM, certPEM, keyPEM [
 		BasicConstraintsValid: true,
 		MaxPathLenZero:        true,
 		KeyUsage:              x509.KeyUsageCertSign,
-		// The CA can only sign for the proxy's name.
+		// The CA can only sign for the proxy's name, and for no IP
+		// address.
 		PermittedDNSDomains:         []string{host},
 		PermittedDNSDomainsCritical: true,
+		ExcludedIPRanges:            []*net.IPNet{{IP: net.IPv4zero.To4(), Mask: net.CIDRMask(0, 32)}, {IP: net.IPv6zero, Mask: net.CIDRMask(0, 128)}},
 	}
 	caDER, err := x509.CreateCertificate(rand.Reader, caTmpl, caTmpl, &caKey.PublicKey, caKey)
 	if err != nil {
@@ -230,9 +259,6 @@ func certificates(host string, validity time.Duration) (caPEM, certPEM, keyPEM [
 		NotAfter:     now.Add(validity),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		tmpl.IPAddresses = []net.IP{ip}
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca, &key.PublicKey, caKey)
 	if err != nil {
