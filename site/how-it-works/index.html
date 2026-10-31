@@ -51,7 +51,7 @@
 
 <section aria-labelledby="layout">
   <h2 id="layout">Where each piece runs</h2>
-  <pre tabindex="0" class="diagram" role="img" aria-label="On the host, the locklog launcher starts the console container, locklog-console-n, as uid 10051 with no capability, a read-only root, CPU and memory limits and no log driver; it has read-only, non-recursive binds of the approved log directories, a home volume only it mounts, and a run volume holding the socket. A map loop follows docker events to name the approved containers. The agent, in a lea container, its own container or on the host for the trial, runs the MCP server locklog mcp, which connects to the socket; the kernel checks the peer uid."><code> host (you)
+  <pre tabindex="0" class="diagram" role="img" aria-label="On the host, the locklog launcher starts the console container, locklog-console-n, as uid 10051 with no capability, a read-only root, CPU and memory limits and no log driver; it has read-only, non-recursive binds of the approved log directories, a home volume only it mounts, and a run volume holding the socket. A map loop follows docker events to name the approved containers. The agent, in its own container or on the host for the trial (lea placement planned), runs the MCP server locklog mcp, which connects to the socket; the kernel checks the peer uid."><code> host (you)
    locklog launcher
      ├─ console container  locklog-console-&lt;n&gt;   uid 10051 "locklog", no capability,
      │    read-only root, --cpus min(2,nproc), --memory 1g, --log-driver none
@@ -61,7 +61,7 @@
      │    network: none, or the backend's network for Loki
      └─ map loop: docker events → container names and ids of the approved globs
 
- agent (yours: lea container, own container, or the host for the trial)
+ agent (yours: your own container, or the host for the trial; lea planned)
    MCP server `locklog mcp` → /run/locklog/locklog.sock (peer uid checked by the kernel)</code></pre>
 </section>
 
