@@ -5,6 +5,7 @@ package engine
 import (
 	"encoding/json"
 	"maps"
+	"slices"
 	"testing"
 
 	"github.com/DavidGodefroid/lockkit/pii"
@@ -110,20 +111,26 @@ func TestSuiteEquivalenceIndex(t *testing.T) {
 	cfg.Index = true
 	ix := newSuite(t, recs, cfg)
 	calls := equivalenceCalls()
+	// The indexed sources: files and docker (journald has no local index).
+	indexed := slices.DeleteFunc(suiteSources(), func(s string) bool { return s == srcJournal })
 	cq := func(name string, mod func(*CountQuery)) agentCall {
-		c := CountQuery{Query: suiteQuery(nil)}
+		c := CountQuery{Query: suiteQuery(func(q *Query) { q.Sources = indexed })}
 		mod(&c)
 		return agentCall{name, MethodCount, c}
 	}
 	trusted := []agentCall{
-		cq("index count by level", func(c *CountQuery) { c.By = []string{"level"}; c.Bucket = "1m" }),
-		cq("index count by method and status", func(c *CountQuery) { c.By = []string{"method", "status"}; c.Bucket = "1h" }),
+		cq("index count by level", func(c *CountQuery) { c.By = []string{"level"}; c.Bucket = "2m" }),
+		cq("index count by level per hour", func(c *CountQuery) { c.By = []string{"level"}; c.Bucket = "1h" }),
 		cq("index count where level", func(c *CountQuery) {
 			c.Where = []Pred{{Field: "level", Op: OpIn, Value: raw([]string{"error", "warn"})}}
 			c.By = []string{"level"}
 			c.Bucket = "10m"
 		}),
-		cq("index count by container", func(c *CountQuery) { c.ByLabels = []string{docker.ContainerField}; c.Bucket = "1h" }),
+		cq("index count by container", func(c *CountQuery) {
+			c.Sources = []string{srcDocker}
+			c.ByLabels = []string{docker.ContainerField}
+			c.Bucket = "1h"
+		}),
 	}
 	calls = append(calls, trusted...)
 	served := 0

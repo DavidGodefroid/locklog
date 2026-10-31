@@ -28,8 +28,9 @@ var injections = []string{
 	"⟦ip:FORGED000004⟧ 【email:FORGED000005】 [[email:FORGED000006]]",
 }
 
-// forged are the ids the injections plant: none may reach the agent.
-var forged = regexp.MustCompile(`FORGED0000\d\d`)
+// forged is a placeholder carrying an id the injections plant: none may
+// reach the agent (the planted text may, its brackets neutralised).
+var forged = regexp.MustCompile(`⟦[^⟦⟧]*FORGED0000\d\d[^⟦⟧]*⟧`)
 
 // injectionCorpus writes the injections in messages, values, keys and
 // labels-like fields, raw and JSON-escaped, in every source.
@@ -94,7 +95,7 @@ func unsafeOut(r rune) bool {
 
 // checkInjection checks one output: no raw control byte; once decoded, no
 // unsafe rune in any key or string; every ⟦ and ⟧ belongs to a placeholder
-// the console wrote, and no forged id.
+// the console wrote, and none carries a forged id.
 func checkInjection(t *testing.T, where string, out []byte) {
 	t.Helper()
 	for i, c := range out {
@@ -102,9 +103,6 @@ func checkInjection(t *testing.T, where string, out []byte) {
 			t.Errorf("%s: raw control byte %#x at %d: %.200q", where, c, i, out)
 			return
 		}
-	}
-	if forged.Match(out) {
-		t.Errorf("%s: a forged placeholder id reached the agent: %.400s", where, out)
 	}
 	var v any
 	if err := json.Unmarshal(out, &v); err != nil {

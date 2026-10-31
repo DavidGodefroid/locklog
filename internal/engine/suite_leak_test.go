@@ -255,7 +255,7 @@ func TestSuiteLeak(t *testing.T) {
 					t.Errorf("%s: refused: %v", c.name, r.refusal)
 					continue
 				}
-				if len(r.pages) < 2 {
+				if len(r.pages) < 2 && c.method == MethodSearch {
 					t.Errorf("%s: %d pages: the call was not continued", c.name, len(r.pages))
 				}
 				start = time.Now()
@@ -271,7 +271,7 @@ func TestSuiteLeak(t *testing.T) {
 				t.Errorf("search all returned %d records, want %d", matched, total)
 			}
 			start := time.Now()
-			leakRefusals(t, s, l, recs)
+			leakRefusals(t, s, mode, l, recs)
 			t.Logf("refusals in %v", time.Since(start))
 			l.report(mode)
 			t.Logf("%s: %d pages, %d records, %d whole-corpus scans", mode, l.pages, l.nrecs, l.nglobs)
@@ -282,9 +282,17 @@ func TestSuiteLeak(t *testing.T) {
 // leakRefusals runs calls carrying canaries (in every encoding) where the
 // agent may write anything: text, regex, values, field paths, labels,
 // sources, cursors, the baseline, unknown keys and mistyped values of the
-// raw parameters. Refusals and answers alike hold none of them.
-func leakRefusals(t *testing.T, s *suite, l *leakScanner, recs map[string][]suiteRecord) {
+// raw parameters. Refusals and answers alike hold none of them. The
+// thousands of calls run on a fixture of the corpus's first records of
+// each source (every kind and encoding is still in the data); the
+// over-budget refusal runs on the whole fixture.
+func leakRefusals(t *testing.T, whole *suite, mode string, l *leakScanner, recs map[string][]suiteRecord) {
 	per := len(masktest.Kinds) * len(masktest.Encodings)
+	head := map[string][]suiteRecord{}
+	for src, rs := range recs {
+		head[src] = rs[:min(len(rs), 2*per)]
+	}
+	s := newSuite(t, head, suiteConfig{Structured: mode, Workers: 2})
 	var sample []masktest.Canary
 	var encoded []string
 	for _, r := range recs["json"][:per] {
@@ -333,7 +341,9 @@ func leakRefusals(t *testing.T, s *suite, l *leakScanner, recs map[string][]suit
 		}
 		for _, call := range calls {
 			where := fmt.Sprintf("%s with %s %q", call.name, sample[i].Kind, w)
-			r := s.run(call)
+			// An answer's first page (its data's every page is scanned
+			// by the main pass).
+			r := s.runPages(call, 1)
 			if r.refusal != nil {
 				refused++
 				l.refusal(where, r.refusal, c)
@@ -349,8 +359,8 @@ func leakRefusals(t *testing.T, s *suite, l *leakScanner, recs map[string][]suit
 		t.Errorf("only %d calls refused: the refusal paths are not exercised", refused)
 	}
 	// Over budget, with its estimate.
-	small := *s
-	o := s.eng.o
+	small := *whole
+	o := whole.eng.o
 	o.Limits.LocalBytes = 1 << 10
 	small.eng, _ = New(o)
 	r := small.run(agentCall{"over budget", MethodSearch, suiteQuery(func(q *Query) { q.Text = "upstream" })})

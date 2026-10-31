@@ -109,7 +109,7 @@ func oracleCalls() []agentCall {
 		{"count by level", MethodCount, CountQuery{Query: suiteQuery(nil), By: []string{"level"}, Bucket: "10m"}},
 		{"count by masked field", MethodCount, CountQuery{Query: suiteQuery(nil), By: []string{"user"}, FirstLast: true}},
 		{"count by pattern", MethodCount, CountQuery{Query: suiteQuery(nil), ByPattern: true}},
-		{"count text", MethodCount, CountQuery{Query: suiteQuery(func(q *Query) { q.Text = "upstream" }), By: []string{"status"}, Bucket: "1m"}},
+		{"count text", MethodCount, CountQuery{Query: suiteQuery(func(q *Query) { q.Text = "upstream" }), By: []string{"status"}, Bucket: "2m"}},
 		{"patterns", MethodPatterns, PatternsQuery{Query: suiteQuery(nil), Top: MaxTop}},
 		{"patterns text", MethodPatterns, PatternsQuery{Query: suiteQuery(func(q *Query) { q.Text = "upstream" })}},
 	}
@@ -145,7 +145,7 @@ func TestSuiteOracle(t *testing.T) {
 			// The planted values are masked whole, as their kind.
 			for _, k := range masktest.Kinds {
 				for _, v := range []string{a[k], b[k]} {
-					if got := sa.masker.Text(v); !anyToken.MatchString(got) || strings.Contains(got, v) {
+					if got := sa.masker.Text(v); !placeholder.MatchString(got) || strings.Contains(got, v) {
 						t.Fatalf("%s %q masks as %q", k, v, got)
 					}
 				}

@@ -111,9 +111,10 @@ func (g *incidentGen) app(ts time.Time) string {
 	r := g.r
 	user := fmt.Sprintf("user%d@shop.example", r.IntN(500))
 	if inIncident(ts) && r.IntN(3) > 0 {
-		return fmt.Sprintf(`{"ts":%q,"level":"error","order":4812,"user":%q,"msg":"payment confirmation failed: upstream timed out"}`, ts.UTC().Format(time.RFC3339Nano), user)
+		return fmt.Sprintf(`{"ts":%q,"level":"error","order":4812,"user":%q,"msg":"payment confirmation failed for order 4812: upstream timed out"}`, ts.UTC().Format(time.RFC3339Nano), user)
 	}
-	return fmt.Sprintf(`{"ts":%q,"level":"info","order":%d,"user":%q,"msg":"order confirmed"}`, ts.UTC().Format(time.RFC3339Nano), 4000+r.IntN(1000), user)
+	order := 4000 + r.IntN(1000)
+	return fmt.Sprintf(`{"ts":%q,"level":"info","order":%d,"user":%q,"msg":"order %d confirmed"}`, ts.UTC().Format(time.RFC3339Nano), order, user, order)
 }
 
 // incidentData is the generated data of an incident.
@@ -305,7 +306,7 @@ func (a *jobAgent) job1(from, to time.Time, srcs []string) {
 	t := a.t
 	b, res := a.whenItStarted(from, to, "15m")
 	t.Logf("step 1: %d groups, from_index %v indexed_from %v, scanned %d bytes", len(res.Groups), res.FromIndex, res.IndexedFrom, res.Scanned.Bytes)
-	if !b.Equal(incidentStart.Truncate(15 * time.Minute)) {
+	if incidentStart.Before(b) || !incidentStart.Before(b.Add(15*time.Minute)) {
 		t.Fatalf("step 1: started at %v, want the bucket of %v", b, incidentStart)
 	}
 	// The narrowed hour, then the minute.

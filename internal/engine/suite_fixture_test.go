@@ -401,7 +401,11 @@ type callResult struct {
 }
 
 // run runs a call through Handle and follows its cursors to completion.
-func (s *suite) run(c agentCall) callResult {
+func (s *suite) run(c agentCall) callResult { return s.runPages(c, 0) }
+
+// runPages runs a call through Handle and follows its cursors to
+// completion or until it has max pages (0: no maximum).
+func (s *suite) runPages(c agentCall, max int) callResult {
 	s.t.Helper()
 	var params map[string]any
 	switch p := c.params.(type) {
@@ -445,7 +449,7 @@ func (s *suite) run(c agentCall) callResult {
 			Cursor   string `json:"cursor"`
 		}
 		json.Unmarshal(page, &st)
-		if st.Complete {
+		if st.Complete || max > 0 && len(out.pages) >= max {
 			return out
 		}
 		if st.Cursor == "" {
@@ -512,7 +516,7 @@ func suiteCalls() []agentCall {
 			q.Fields = []string{"level", "msg", "detail", "req.user.contact", "tags", "cust", "meta.note", "REQUEST_NOTE"}
 			q.Limit = 150
 		}),
-		cq("count by level", func(c *CountQuery) { c.By = []string{"level"}; c.Bucket = "1m" }),
+		cq("count by level", func(c *CountQuery) { c.By = []string{"level"}; c.Bucket = "2m" }),
 		cq("count by masked field", func(c *CountQuery) { c.By = []string{"detail"}; c.FirstLast = true }),
 		cq("count by pattern", func(c *CountQuery) { c.ByPattern = true }),
 		cq("count by label", func(c *CountQuery) { c.ByLabels = []string{docker.ContainerField} }),
