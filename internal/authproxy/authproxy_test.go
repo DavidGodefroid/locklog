@@ -238,3 +238,28 @@ func TestSwapCaught(t *testing.T) {
 		}
 	}
 }
+
+func TestProjectCheckResolvesBothSides(t *testing.T) {
+	// As on macOS (/var -> /private/var): the project given by its real
+	// path, Dir through a symlinked ancestor that the ancestor walk does
+	// not see (above its root). The containment check must still refuse.
+	_, base := setup(t)
+	real := filepath.Join(base, "real")
+	os.MkdirAll(filepath.Join(real, "project"), 0o700)
+	alias := filepath.Join(base, "alias")
+	os.Symlink(real, alias)
+	trustedRoot = filepath.Join(alias, "project")
+	o := Options{Project: filepath.Join(real, "project"), Dir: filepath.Join(alias, "project", "proxy"), Host: "loki-proxy", Upstream: "loki:3100"}
+	if _, err := Generate(o); err == nil {
+		t.Fatal("a Dir inside the project through a symlink accepted")
+	}
+	// And the other way round: the project through the alias.
+	o = Options{Project: filepath.Join(alias, "project"), Dir: filepath.Join(real, "project", "proxy2"), Host: "loki-proxy", Upstream: "loki:3100"}
+	trustedRoot = filepath.Join(real, "project")
+	if _, err := Generate(o); err == nil {
+		t.Fatal("a Dir inside the project given through a symlink accepted")
+	}
+	if ents, _ := os.ReadDir(filepath.Join(real, "project")); len(ents) != 0 {
+		t.Fatalf("%d entries written in the project", len(ents))
+	}
+}

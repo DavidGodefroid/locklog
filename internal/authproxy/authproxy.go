@@ -112,13 +112,19 @@ func Generate(o Options) (Result, error) {
 		// The Compose short volume syntax splits on ':'.
 		return Result{}, errors.New("authproxy: the directory path must not hold ':', quotes, backslashes or control characters")
 	}
-	// The project through its real path: a Dir inside its target is
-	// inside it. Dir's own ancestors may hold no symlink (writeFiles).
+	// Both sides by their real paths (a symlinked project, or a symlinked
+	// ancestor of Dir such as macOS's /var -> /private/var, must not hide
+	// that Dir is inside the project). writeFiles then refuses any symlink
+	// among Dir's ancestors.
 	project, err := filepath.EvalSymlinks(o.Project)
 	if err != nil {
 		return Result{}, fmt.Errorf("authproxy: the project root: %w", err)
 	}
-	if inside(o.Dir, project) || inside(project, o.Dir) {
+	parent, err := filepath.EvalSymlinks(filepath.Dir(o.Dir))
+	if err != nil {
+		return Result{}, fmt.Errorf("authproxy: the directory's parent: %w", err)
+	}
+	if real := filepath.Join(parent, filepath.Base(o.Dir)); inside(real, project) || inside(project, real) {
 		return Result{}, errors.New("authproxy: the directory must be outside the project (agents can read the project)")
 	}
 
