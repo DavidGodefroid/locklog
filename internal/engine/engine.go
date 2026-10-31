@@ -279,10 +279,10 @@ func (e *Engine) planQuery(ctx context.Context, q *Query, remoteBudget, localBud
 // stream's chunks and granules in reverse. A descending chunk is split into
 // one chunk per granule, each costing what reading that granule alone costs
 // (for a compressed stream, decompressing everything before it, charged at
-// decompression cost). Granules
-// of unknown bytes (an unmeasured compressed stream, a remote slice) stay
-// as planned. Streams of several sources are not merged by time across
-// calls: each call's matches are sorted, streams follow each other.
+// decompression cost); a remote slice, of unknown bytes, stays so. An
+// unmeasured compressed stream (open-ended) stays as planned. Streams of
+// several sources are not merged by time across calls: each call's matches
+// are sorted, streams follow each other.
 //
 // It also returns the most bytes reading one descending granule of a
 // compressed stream processes (decompressing from the start), which
@@ -320,10 +320,22 @@ func orderPlan(plan source.Byteplan, order string) (source.Byteplan, int64) {
 const decompressShare = 64
 
 // descGranules splits a chunk into single-granule chunks, last first, and
-// returns the most bytes reading one of a compressed stream processes.
+// returns the most bytes reading one of a compressed stream processes. A
+// chunk of granules of unknown bytes (remote slices, each read on its own)
+// is split too, each granule of unknown bytes still; an open-ended granule
+// (an unmeasured compressed stream) stays as planned.
 func descGranules(c source.Chunk) ([]source.Chunk, int64) {
-	if len(c.Granules) < 2 || c.Bytes == 0 || c.End() == math.MaxInt64 {
-		return []source.Chunk{c}, 0 // unknown bytes: as planned
+	if len(c.Granules) < 2 || c.End() == math.MaxInt64 {
+		return []source.Chunk{c}, 0
+	}
+	if c.Bytes == 0 {
+		out := make([]source.Chunk, 0, len(c.Granules))
+		for i := len(c.Granules) - 1; i >= 0; i-- {
+			one := c
+			one.Granules = []source.Granule{c.Granules[i]}
+			out = append(out, one)
+		}
+		return out, 0
 	}
 	var maxRead int64
 	var sum int64
@@ -508,6 +520,11 @@ func (e *Engine) run(ctx context.Context, plan source.Byteplan, chunk, gran int,
 		// object between entries) make them exceed the bytes
 		// processed.
 		hard := deadline.Add(e.o.Limits.Deadline / 2)
+		if limit == 0 {
+			// Unknown bytes and no call budget: what can be masked
+			// before the hard deadline bounds the fetch.
+			limit = max(e.o.Cost.Budget(time.Until(hard)), 1)
+		}
 		recLimit := min(limit, max(e.o.Cost.Budget(time.Until(hard)), 1))
 		// A compressed stream decompresses from its start: the bytes
 		// before the group are processed (and discarded) too. Admission
@@ -670,14 +687,22 @@ var errFetchCap = errors.New("engine: group past its byte limit")
 // record whose clear text cannot contain every needle is dropped before
 // masking (non-production only).
 //
-// A positive limit bounds the bytes the group may process, a positive
-// recLimit the bytes of its records: past either, fetch stops with
-// errFetchCap.
+// A positive limit bounds the bytes the group may process (also passed to
+// the source, source.WithByteLimit), a positive recLimit the bytes of its
+// records: past either, fetch stops with errFetchCap.
 //
 // It also returns the bytes of the records read (before the pre-filter),
 // what masking them costs.
 func (e *Engine) fetch(ctx context.Context, c source.Chunk, needles []string, limit, recLimit int64) ([]source.RawRecord, int, int64, int64, error) {
+	if limit > 0 {
+		// A source that buffers before it yields (a remote slice)
+		// stops its fetch there (source.ErrByteLimit).
+		ctx = source.WithByteLimit(ctx, limit)
+	}
 	it, err := e.o.Sources[c.Source].Scan(ctx, c)
+	if errors.Is(err, source.ErrByteLimit) {
+		return nil, 0, 0, 0, errFetchCap
+	}
 	if err != nil {
 		return nil, 0, 0, 0, err
 	}
@@ -689,6 +714,9 @@ func (e *Engine) fetch(ctx context.Context, c source.Chunk, needles []string, li
 		raw, err := it.Next()
 		if errors.Is(err, io.EOF) {
 			return raws, total, it.Processed(), recBytes, nil
+		}
+		if errors.Is(err, source.ErrByteLimit) {
+			return nil, total, it.Processed(), recBytes, errFetchCap
 		}
 		if err != nil {
 			return nil, total, it.Processed(), recBytes, err

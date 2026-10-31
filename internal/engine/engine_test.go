@@ -2071,3 +2071,157 @@ func TestDescCompressedTailAdmission(t *testing.T) {
 		}
 	}
 }
+
+// remoteSlices is a fake remote source (as Loki): its plan is one chunk of
+// n time slices of unknown bytes, each holding per records of about 1 KiB
+// (the first of each at level error); its iterators count the bytes of the
+// records they yield, as they yield them, and fail with source.ErrByteLimit
+// past the byte limit of their context (as the Loki source does).
+type remoteSlices struct {
+	n, per int
+	p      *parse.Parser
+	mu     sync.Mutex
+	// limits are the byte limits the scans' contexts carried, processed
+	// the bytes each scan processed.
+	limits    []int64
+	processed []int64
+}
+
+func (s *remoteSlices) Name() string                                    { return "rem" }
+func (s *remoteSlices) Kind() string                                    { return "loki" }
+func (s *remoteSlices) Describe(context.Context) (source.Schema, error) { return source.Schema{}, nil }
+func (s *remoteSlices) Plan(_ context.Context, r source.Range, _ source.Selector) (source.Byteplan, error) {
+	w := r.To.Sub(r.From) / time.Duration(s.n)
+	var gs []source.Granule
+	for i := 0; i < s.n; i++ {
+		from := r.From.Add(time.Duration(i) * w)
+		gs = append(gs, source.Granule{Start: from.UnixNano(), End: from.Add(w).UnixNano(), From: from, To: from.Add(w)})
+	}
+	return source.Byteplan{Chunks: []source.Chunk{{Source: "rem", Stream: "s", Granules: gs}}}, nil
+}
+
+func (s *remoteSlices) records(g source.Granule) []source.RawRecord {
+	var out []source.RawRecord
+	step := (g.End - g.Start) / int64(s.per)
+	for j := 0; j < s.per; j++ {
+		ts := time.Unix(0, g.Start+int64(j)*step).UTC()
+		lvl := "info"
+		if j == 0 {
+			lvl = "error"
+		}
+		ev := s.p.Line(fmt.Sprintf("time=%s level=%s msg=\"slice %d record %d\" pad=%s", ts.Format(time.RFC3339Nano), lvl, g.Start, j, strings.Repeat("x", 1000)))
+		ev.SetTime(ts)
+		out = append(out, source.RawRecord{Ref: source.RawRef{Source: "rem", Stream: "s", Offset: ts.UnixNano(), Length: int64(j + 1)}, Event: ev})
+	}
+	return out
+}
+
+func (s *remoteSlices) Scan(ctx context.Context, c source.Chunk) (source.Iterator, error) {
+	s.mu.Lock()
+	s.limits = append(s.limits, source.ByteLimitFrom(ctx))
+	s.processed = append(s.processed, 0)
+	i := len(s.processed) - 1
+	s.mu.Unlock()
+	var recs []source.RawRecord
+	for _, g := range c.Granules {
+		recs = append(recs, s.records(g)...)
+	}
+	return &remoteIter{s: s, i: i, recs: recs, limit: source.ByteLimitFrom(ctx)}, nil
+}
+
+func (s *remoteSlices) Reread(context.Context, source.RawRef) (source.RawRecord, error) {
+	return source.RawRecord{}, source.ErrStale
+}
+func (s *remoteSlices) Around(context.Context, source.RawRef, int, int) ([]source.RawRecord, error) {
+	return nil, source.ErrStale
+}
+
+type remoteIter struct {
+	s     *remoteSlices
+	i     int
+	recs  []source.RawRecord
+	n     int64
+	limit int64
+}
+
+func (it *remoteIter) Next() (source.RawRecord, error) {
+	if len(it.recs) == 0 {
+		return source.RawRecord{}, io.EOF
+	}
+	r := it.recs[0]
+	it.recs = it.recs[1:]
+	it.n += int64(len(r.Event.Raw))
+	it.s.mu.Lock()
+	it.s.processed[it.i] = it.n
+	it.s.mu.Unlock()
+	if it.limit > 0 && it.n > it.limit {
+		return source.RawRecord{}, fmt.Errorf("fake: %w", source.ErrByteLimit)
+	}
+	return r, nil
+}
+func (it *remoteIter) Processed() int64 { return it.n }
+func (it *remoteIter) Close() error     { return nil }
+
+// TestRemoteSlicesPaged: a remote plan of many slices of unknown bytes whose
+// total exceeds the call's byte budget is served in pages, each stopping on
+// a slice boundary with a cursor, each scan bounded by what is left of the
+// budget (never the whole plan buffered); ascending and descending.
+func TestRemoteSlicesPaged(t *testing.T) {
+	const n, per = 40, 16
+	const budget = 64 << 10
+	for _, order := range []string{"asc", "desc"} {
+		t.Run(order, func(t *testing.T) {
+			p, _ := parse.New(parse.Options{})
+			rem := &remoteSlices{n: n, per: per, p: p}
+			f := newFixture(t, "x\n", func(o *Options) {
+				o.Sources["rem"] = rem
+				o.Limits.RemoteBytes = budget
+			})
+			sliceBytes := int64(0)
+			for _, r := range rem.records(source.Granule{Start: 0, End: 1 << 30}) {
+				sliceBytes += int64(len(r.Event.Raw))
+			}
+			if n*sliceBytes < 4*budget {
+				t.Fatalf("fixture: %d bytes for a %d budget", n*sliceBytes, budget)
+			}
+			qq := q(func(q *Query) {
+				q.Sources = []string{"rem"}
+				q.Where = []Pred{{Field: "level", Op: OpEq, Value: raw("error")}}
+				q.Limit = 200
+				q.Order = order
+			})
+			first, err := f.eng.Search(ctx, qq)
+			if err != nil {
+				t.Fatalf("first call: %v", err)
+			}
+			if first.Complete || first.Cursor == "" || first.Scanned.Granules < 1 || first.Scanned.Granules >= n {
+				t.Fatalf("first call: complete %t, cursor %t, %+v", first.Complete, first.Cursor != "", first.Scanned)
+			}
+			if first.Scanned.Bytes > budget+sliceBytes || len(first.Records) != first.Scanned.Granules {
+				t.Fatalf("first call: %d records, %+v", len(first.Records), first.Scanned)
+			}
+			// Each scan is one slice, bounded by what is left of the
+			// budget; the call processed at most its budget and a slice.
+			var callBytes int64
+			for i, l := range rem.limits {
+				if l <= 0 || l > budget || rem.processed[i] > l+sliceBytes {
+					t.Fatalf("scan %d: limit %d, processed %d", i, l, rem.processed[i])
+				}
+				callBytes += rem.processed[i]
+			}
+			if callBytes > budget+2*sliceBytes {
+				t.Fatalf("the call processed %d bytes for a %d budget", callBytes, budget)
+			}
+			ts := recordTimes(t, first.Records)
+			newest := t0.Add(24 * time.Hour).Add(-24 * time.Hour / n)
+			if order == "desc" && !ts[0].Equal(newest) || order == "asc" && !ts[0].Equal(t0) {
+				t.Fatalf("%s: the first page starts at %v", order, ts[0])
+			}
+			recs, pages := allRecords(t, f.eng, qq)
+			if len(pages) < 4 {
+				t.Fatalf("%d pages", len(pages))
+			}
+			checkOrder(t, recordTimes(t, recs), n, order == "desc")
+		})
+	}
+}
