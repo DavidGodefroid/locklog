@@ -1869,6 +1869,55 @@ func TestOrderAcrossCalls(t *testing.T) {
 		recs, _ := allRecords(t, f.eng, desc)
 		checkOrder(t, recordTimes(t, recs), 6000, true)
 	})
+	t.Run("desc compressed proportionate", func(t *testing.T) {
+		// Reading granules newest first re-decompresses what precedes
+		// each one, charged at decompression cost: a budget of twice
+		// the stream admits it as it admits an ascending read.
+		plain := genLog(t0, 40000, "c@example.org")
+		var gz bytes.Buffer
+		w := gzip.NewWriter(&gz)
+		w.Write([]byte(plain))
+		w.Close()
+		f := newFixture(t, gz.String(), func(o *Options) {
+			oneGranulePerCall(o)
+			o.Limits.LocalBytes = 2 * int64(len(plain))
+		})
+		for i := 0; ; i++ {
+			_, done, err := f.src.IndexStep(ctx, 64<<20, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if done || i > 20 {
+				break
+			}
+		}
+		recs, pages := allRecords(t, f.eng, desc)
+		if len(pages) < 3 {
+			t.Fatalf("%d pages: the stream fits one call", len(pages))
+		}
+		checkOrder(t, recordTimes(t, recs), 8000, true)
+		// A count reads its plan in stream order, whatever its order.
+		count := func(order string) string {
+			cq := CountQuery{Query: q(func(q *Query) { q.Order = order }), By: []string{"level"}}
+			var groups []Group
+			for i := 0; ; i++ {
+				c, err := f.eng.Count(ctx, cq)
+				if err != nil {
+					t.Fatalf("count %s: %v", order, err)
+				}
+				groups = append(groups, c.Groups...)
+				if c.Complete || i > 1000 {
+					break
+				}
+				cq.Cursor = c.Cursor
+			}
+			js, _ := json.Marshal(groups)
+			return string(js)
+		}
+		if a, d := count("asc"), count("desc"); a != d {
+			t.Fatalf("counts differ by order:\n%s\n%s", a, d)
+		}
+	})
 	t.Run("asc pruned", func(t *testing.T) {
 		var b strings.Builder
 		for i := 0; i < 45000; i++ {

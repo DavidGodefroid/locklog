@@ -342,7 +342,11 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 						Estimate: &Estimate{Range: q.To.Sub(q.From)}}
 				}
 			}
-			p, err := e.planQuery(ctx, &q.Query, e.o.Limits.RemoteBytes, e.o.Limits.LocalBytes)
+			// A count does not depend on order: its plan is read in
+			// stream order (the cheapest).
+			pq := q.Query
+			pq.Order = "asc"
+			p, err := e.planQuery(ctx, &pq, e.o.Limits.RemoteBytes, e.o.Limits.LocalBytes)
 			if err != nil {
 				return CountResult{}, err
 			}

@@ -276,7 +276,8 @@ func (e *Engine) planQuery(ctx context.Context, q *Query, remoteBudget, localBud
 // stream's chunks in stream order; descending, newest stream first and every
 // stream's chunks and granules in reverse. A descending chunk is split into
 // one chunk per granule, each costing what reading that granule alone costs
-// (for a compressed stream, decompressing everything before it). Granules
+// (for a compressed stream, decompressing everything before it, charged at
+// decompression cost). Granules
 // of unknown bytes (an unmeasured compressed stream, a remote slice) stay
 // as planned. Streams of several sources are not merged by time across
 // calls: each call's matches are sorted, streams follow each other.
@@ -304,6 +305,11 @@ func orderPlan(plan source.Byteplan, order string) source.Byteplan {
 	return out
 }
 
+// decompressShare is how many bytes decompressed and discarded cost as
+// much as one masked byte (gzip and zstd decompress hundreds of MB/s; worst
+// case masking about 1 MB/s per core).
+const decompressShare = 64
+
 // descGranules splits a chunk into single-granule chunks, last first.
 func descGranules(c source.Chunk) []source.Chunk {
 	if len(c.Granules) < 2 || c.Bytes == 0 || c.End() == math.MaxInt64 {
@@ -313,7 +319,7 @@ func descGranules(c source.Chunk) []source.Chunk {
 	for _, g := range c.Granules {
 		sum += granuleBytes(g, c)
 	}
-	prefix := max(c.Bytes-sum, 0) // a compressed stream's bytes read and discarded
+	prefix := max(c.Bytes-sum, 0) // a compressed stream's bytes decompressed and discarded
 	out := make([]source.Chunk, 0, len(c.Granules))
 	for i := len(c.Granules) - 1; i >= 0; i-- {
 		g := c.Granules[i]
@@ -321,7 +327,10 @@ func descGranules(c source.Chunk) []source.Chunk {
 		one.Granules = []source.Granule{g}
 		one.Bytes = granuleBytes(g, c)
 		if prefix > 0 {
-			one.Bytes += prefix + g.Start - c.Start()
+			// Re-decompressing what precedes the granule is charged at
+			// decompression cost, a fraction of masking's: a descending
+			// read stays proportionate to an ascending one.
+			one.Bytes += (prefix + g.Start - c.Start() + decompressShare - 1) / decompressShare
 		}
 		out = append(out, one)
 	}
@@ -480,7 +489,7 @@ func (e *Engine) run(ctx context.Context, plan source.Byteplan, chunk, gran int,
 		if callBytes > 0 {
 			limit = max(limit, callBytes-sc.Bytes)
 		}
-		raws, total, fetched, err := e.fetch(groupCtx, sub, needles, limit)
+		raws, total, fetched, recBytes, err := e.fetch(groupCtx, sub, needles, limit)
 		if errors.Is(err, errFetchCap) {
 			cancel()
 			if sc.Granules > 0 {
@@ -488,7 +497,10 @@ func (e *Engine) run(ctx context.Context, plan source.Byteplan, chunk, gran int,
 			}
 			return chunk, gran, sc, failures, &Error{Code: EOverBudget, Message: "a log stream holds more data than this call's byte budget (a compressed file expands more than estimated): narrow the range or the sources, or ask for locklog_scan"}
 		}
-		if err == nil && sc.Granules > 0 && e.o.Cost.Time(fetched) > time.Until(deadline) {
+		// Masking costs the records' bytes (a compressed stream's
+		// discarded prefix is decompressed, not masked), counted before
+		// the pre-filter.
+		if err == nil && sc.Granules > 0 && e.o.Cost.Time(recBytes) > time.Until(deadline) {
 			// Fetched more than the time left can mask: drop the group
 			// unmasked; the next call fetches it again.
 			cancel()
@@ -516,7 +528,7 @@ func (e *Engine) run(ctx context.Context, plan source.Byteplan, chunk, gran int,
 			}
 			return chunk, gran, sc, failures, sourceError(err)
 		}
-		if took := time.Since(maskStart); took > e.o.Cost.Time(fetched)*3/2 && took > 100*time.Millisecond {
+		if took := time.Since(maskStart); took > e.o.Cost.Time(recBytes)*3/2 && took > 100*time.Millisecond {
 			e.o.Cost.Recalibrate() // overrun: recalibrate at once
 		}
 		// With the pre-filter on, only the records whose clear text
@@ -599,26 +611,31 @@ var errFetchCap = errors.New("engine: group past its byte limit")
 //
 // A positive limit bounds the bytes the group may process: past it, fetch
 // stops with errFetchCap.
-func (e *Engine) fetch(ctx context.Context, c source.Chunk, needles []string, limit int64) ([]source.RawRecord, int, int64, error) {
+//
+// It also returns the bytes of the records read (before the pre-filter),
+// what masking them costs.
+func (e *Engine) fetch(ctx context.Context, c source.Chunk, needles []string, limit int64) ([]source.RawRecord, int, int64, int64, error) {
 	it, err := e.o.Sources[c.Source].Scan(ctx, c)
 	if err != nil {
-		return nil, 0, 0, err
+		return nil, 0, 0, 0, err
 	}
 	defer it.Close()
 	var raws []source.RawRecord
 	total := 0
+	var recBytes int64
 	for {
 		raw, err := it.Next()
 		if errors.Is(err, io.EOF) {
-			return raws, total, it.Processed(), nil
+			return raws, total, it.Processed(), recBytes, nil
 		}
 		if err != nil {
-			return nil, total, it.Processed(), err
+			return nil, total, it.Processed(), recBytes, err
 		}
 		if limit > 0 && it.Processed() > limit {
-			return nil, total, it.Processed(), errFetchCap
+			return nil, total, it.Processed(), recBytes, errFetchCap
 		}
 		total++
+		recBytes += int64(len(raw.Event.Raw))
 		if e.o.Prefilter && len(needles) > 0 && !prefilterPass(raw.Event, needles) {
 			continue
 		}
