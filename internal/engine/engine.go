@@ -368,7 +368,7 @@ func (e *Engine) run(ctx context.Context, plan source.Byteplan, chunk, gran int,
 				// The group overran far past its estimate: drop it
 				// (stopping points are group boundaries),
 				// recalibrate and stop.
-				e.o.Cost.Calibrate()
+				e.o.Cost.Recalibrate()
 				if sc.Granules == 0 {
 					return chunk, gran, sc, failures, &Error{Code: ESource, Message: "the first plan granule did not finish in time; try again"}
 				}
@@ -383,7 +383,7 @@ func (e *Engine) run(ctx context.Context, plan source.Byteplan, chunk, gran int,
 			return chunk, gran, sc, failures, &Error{Code: ESource, Message: e.o.Masker.Text(err.Error())}
 		}
 		if took := time.Since(maskStart); took > e.o.Cost.Time(fetched)*3/2 && took > 100*time.Millisecond {
-			e.o.Cost.Calibrate() // overrun: recalibrate at once
+			e.o.Cost.Recalibrate() // overrun: recalibrate at once
 		}
 		for i := range raws {
 			if recs[i].Failed() {

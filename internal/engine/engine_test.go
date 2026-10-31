@@ -14,6 +14,8 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -548,5 +550,42 @@ func TestHandle(t *testing.T) {
 	}
 	if _, ref, _ := f.eng.Handle(ctx, "log.write", nil); ref == nil {
 		t.Fatal("unknown method accepted")
+	}
+}
+
+// TestCalibrationInBackground: a stale model never makes a query wait for a
+// calibration, and concurrent queries start only one.
+func TestCalibrationInBackground(t *testing.T) {
+	p, _ := parse.New(parse.Options{})
+	var calls atomic.Int32
+	release := make(chan struct{})
+	c := &CostModel{nsPerByte: 7, now: time.Now, parser: p, corpus: []string{"x"}, workers: 1,
+		mask: func(parse.Event) { calls.Add(1); <-release }}
+	// at is zero: stale.
+	start := time.Now()
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if ns := c.NsPerByte(); ns != 7 {
+				t.Errorf("ns %v", ns)
+			}
+			c.Recalibrate()
+		}()
+	}
+	wg.Wait()
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("queries waited %v for a calibration", d)
+	}
+	close(release)
+	for deadline := time.Now().Add(5 * time.Second); c.running.Load(); {
+		if time.Now().After(deadline) {
+			t.Fatal("calibration never finished")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("%d calibrations ran", n)
 	}
 }
