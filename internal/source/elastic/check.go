@@ -65,29 +65,113 @@ func (s *Source) detect(ctx context.Context) (string, string, error) {
 	return "", "", errors.New("elasticsearch source: unknown backend distribution")
 }
 
-// Privileges whose grant makes a key more than a reader. Elasticsearch
-// refuses names it does not know, so the lists hold 8.x names only.
+// The privileges a read-only key may hold: everything else, on any
+// pattern, makes it more than a reader (an allowlist: a privilege
+// Elasticsearch adds later is refused until listed here).
 var (
-	writeCluster = []string{"all", "manage", "manage_security", "manage_api_key", "manage_own_api_key", "manage_index_templates",
-		"manage_ilm", "manage_pipeline", "manage_ingest_pipelines", "manage_slm", "manage_transform", "manage_ml", "manage_watcher",
-		"manage_ccr", "manage_enrich", "manage_rollup", "manage_token"}
-	writeIndex = []string{"all", "write", "index", "create", "create_doc", "delete", "delete_index", "create_index", "manage",
-		"manage_ilm", "manage_follow_index", "maintenance", "auto_configure"}
+	readCluster = []string{"monitor", "read_ilm", "read_slm", "read_pipeline", "read_ccr"}
+	readIndex   = []string{"read", "view_index_metadata", "monitor", "read_cross_cluster"}
 	// readOnlyRoles are the OpenSearch built-in roles that grant no write
 	// or manage permission.
 	readOnlyRoles = []string{"readall", "readall_and_monitor"}
 )
 
+func readOnlyCluster(p string) bool {
+	return slices.Contains(readCluster, p) || strings.HasPrefix(p, "monitor_")
+}
+
 var errCannotRead = errors.New("elasticsearch source: the key cannot read")
 
 type hasPrivilegesResponse struct {
-	Cluster map[string]bool            `json:"cluster"`
-	Index   map[string]map[string]bool `json:"index"`
+	Index map[string]map[string]bool `json:"index"`
 }
 
+// userPrivileges is GET /_security/user/_privileges: every grant of the
+// user, on every pattern.
+type userPrivileges struct {
+	Cluster []string `json:"cluster"`
+	Global  []json.RawMessage
+	Indices []struct {
+		Names      []string `json:"names"`
+		Privileges []string `json:"privileges"`
+	} `json:"indices"`
+	Applications []json.RawMessage `json:"applications"`
+	RunAs        []string          `json:"run_as"`
+	// Remote grants (cross-cluster): judged as local ones.
+	RemoteIndices []struct {
+		Names      []string `json:"names"`
+		Privileges []string `json:"privileges"`
+	} `json:"remote_indices"`
+	RemoteCluster []struct {
+		Privileges []string `json:"privileges"`
+	} `json:"remote_cluster"`
+}
+
+// knownPrivilegeKeys are the members of a _privileges answer locklog
+// judges; any other non-empty member is refused (fail closed).
+var knownPrivilegeKeys = []string{"cluster", "global", "indices", "applications", "run_as", "remote_indices", "remote_cluster"}
+
+// esWrite lists every grant of a _privileges answer beyond the read-only
+// allowlist.
+func esWrite(body []byte) ([]string, error) {
+	var raw map[string]json.RawMessage
+	if json.Unmarshal(body, &raw) != nil || raw["cluster"] == nil || raw["indices"] == nil {
+		return nil, errResponse
+	}
+	var write []string
+	for k, v := range raw {
+		if !slices.Contains(knownPrivilegeKeys, k) {
+			if t := strings.TrimSpace(string(v)); t != "[]" && t != "{}" && t != "null" {
+				write = append(write, "unknown:"+k)
+			}
+		}
+	}
+	var u userPrivileges
+	if json.Unmarshal(body, &u) != nil {
+		return nil, errResponse
+	}
+	if err := json.Unmarshal(raw["global"], &u.Global); raw["global"] != nil && err != nil {
+		return nil, errResponse
+	}
+	for _, p := range u.Cluster {
+		if !readOnlyCluster(p) {
+			write = append(write, "cluster:"+p)
+		}
+	}
+	for _, rc := range u.RemoteCluster {
+		for _, p := range rc.Privileges {
+			if !readOnlyCluster(p) {
+				write = append(write, "remote_cluster:"+p)
+			}
+		}
+	}
+	for _, g := range append(slices.Clone(u.Indices), u.RemoteIndices...) {
+		for _, p := range g.Privileges {
+			if !slices.Contains(readIndex, p) {
+				write = append(write, strings.Join(g.Names, ",")+":"+p)
+			}
+		}
+	}
+	if len(u.Global) > 0 {
+		write = append(write, "global privileges")
+	}
+	if len(u.Applications) > 0 {
+		write = append(write, "application privileges")
+	}
+	if len(u.RunAs) > 0 {
+		write = append(write, "run_as:"+strings.Join(u.RunAs, ","))
+	}
+	sort.Strings(write)
+	return slices.Compact(write), nil
+}
+
+// esPrivileges checks the key reads every index of the source
+// (has_privileges), then lists its grants beyond the read-only allowlist
+// on any pattern (_privileges): a write grant on a concrete index a
+// read-only pattern matches is listed too.
 func (s *Source) esPrivileges(ctx context.Context) ([]string, error) {
-	b, err := marshalChecked(PrivilegesBody{Cluster: writeCluster,
-		Index: []IndexPrivileges{{Names: strings.Split(s.seg, ","), Privileges: append([]string{"read"}, writeIndex...)}}})
+	names := strings.Split(s.seg, ",")
+	b, err := marshalChecked(PrivilegesBody{Cluster: []string{"monitor"}, Index: []IndexPrivileges{{Names: names, Privileges: []string{"read"}}}})
 	if err != nil {
 		return nil, err
 	}
@@ -96,16 +180,10 @@ func (s *Source) esPrivileges(ctx context.Context) ([]string, error) {
 		return nil, err
 	}
 	var r hasPrivilegesResponse
-	if json.Unmarshal(body, &r) != nil || r.Cluster == nil || r.Index == nil {
+	if json.Unmarshal(body, &r) != nil || r.Index == nil {
 		return nil, errResponse
 	}
-	var write []string
-	for _, p := range writeCluster {
-		if r.Cluster[p] {
-			write = append(write, "cluster:"+p)
-		}
-	}
-	for _, name := range strings.Split(s.seg, ",") {
+	for _, name := range names {
 		privs, ok := r.Index[name]
 		if !ok {
 			return nil, errResponse
@@ -113,13 +191,12 @@ func (s *Source) esPrivileges(ctx context.Context) ([]string, error) {
 		if !privs["read"] {
 			return nil, fmt.Errorf("%w %s", errCannotRead, name)
 		}
-		for _, p := range writeIndex {
-			if privs[p] {
-				write = append(write, name+":"+p)
-			}
-		}
 	}
-	return write, nil
+	body, err = s.do(ctx, http.MethodGet, egress.ElasticUserPrivilegesPath, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	return esWrite(body)
 }
 
 type authInfoResponse struct {

@@ -28,6 +28,8 @@ func TestElasticRoutes(t *testing.T) {
 		{"GET", "/logs-a*,logs-b/_mapping", true},
 		{"GET", "/", true},
 		{"GET", "/_security/user/_has_privileges", true},
+		{"GET", "/_security/user/_privileges", true},
+		{"GET", "/_resolve/index/logs-a*", false},
 		{"GET", "/_plugins/_security/authinfo", true},
 		{"GET", "/logs-a*,logs-b/_search", false},
 		{"POST", "/logs-b/_search", false},

@@ -57,15 +57,18 @@ func ElasticRoutes(indices []string) (*Allowlist, error) {
 		Route{http.MethodGet, "/" + seg + "/_mapping"},
 		Route{http.MethodGet, "/"},
 		Route{http.MethodGet, ElasticPrivilegesPath},
+		Route{http.MethodGet, ElasticUserPrivilegesPath},
 		Route{http.MethodGet, OpenSearchAuthInfoPath},
 	), nil
 }
 
 // The privilege checks: Elasticsearch's has_privileges (a GET with a
-// body), the OpenSearch security plugin's authinfo.
+// body) and the user's own grants, the OpenSearch security plugin's
+// authinfo.
 const (
-	ElasticPrivilegesPath  = "/_security/user/_has_privileges"
-	OpenSearchAuthInfoPath = "/_plugins/_security/authinfo"
+	ElasticPrivilegesPath     = "/_security/user/_has_privileges"
+	ElasticUserPrivilegesPath = "/_security/user/_privileges"
+	OpenSearchAuthInfoPath    = "/_plugins/_security/authinfo"
 )
 
 // ElasticProbePath is the data endpoint the unauthenticated-read check

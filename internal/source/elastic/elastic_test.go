@@ -533,6 +533,22 @@ func TestCountsOverflowAndMultiValues(t *testing.T) {
 	}
 }
 
+// grants replaces members of the read-only _privileges answer.
+func grants(members string) func(*fakeES) {
+	return func(f *fakeES) {
+		var base, over map[string]json.RawMessage
+		_ = json.Unmarshal([]byte(readOnlyGrants), &base)
+		if err := json.Unmarshal([]byte("{"+members+"}"), &over); err != nil {
+			panic(err)
+		}
+		for k, v := range over {
+			base[k] = v
+		}
+		b, _ := json.Marshal(base)
+		f.grants = string(b)
+	}
+}
+
 func TestCheckPrivileges(t *testing.T) {
 	for _, tt := range []struct {
 		name       string
@@ -541,10 +557,21 @@ func TestCheckPrivileges(t *testing.T) {
 		ok         bool
 	}{
 		{"read-only key on production", nil, true, true},
-		{"write key on production", func(f *fakeES) { f.privs["write"] = true }, true, false},
-		{"manage cluster key on production", func(f *fakeES) { f.privs["cluster:manage"] = true }, true, false},
-		{"api key manager on production", func(f *fakeES) { f.privs["cluster:manage_own_api_key"] = true }, true, false},
-		{"write key off production", func(f *fakeES) { f.privs["write"] = true }, false, true},
+		{"write key on production", grants(`"indices":[{"names":["logs-*"],"privileges":["read","write"]}]`), true, false},
+		{"manage cluster key on production", grants(`"cluster":["monitor","manage"]`), true, false},
+		{"api key manager on production", grants(`"cluster":["manage_own_api_key"]`), true, false},
+		{"unlisted cluster privilege", grants(`"cluster":["some_future_privilege"]`), true, false},
+		{"manage_* variant", grants(`"cluster":["manage_data_stream_global_retention"]`), true, false},
+		{"cross_cluster_* privilege", grants(`"cluster":["cross_cluster_replication"]`), true, false},
+		{"remote write", grants(`"remote_indices":[{"names":["*"],"privileges":["all"],"clusters":["*"]}]`), true, false},
+		{"run_as", grants(`"run_as":["admin"]`), true, false},
+		{"application privileges", grants(`"applications":[{"application":"kibana-.kibana","privileges":["all"],"resources":["*"]}]`), true, false},
+		{"global privileges", grants(`"global":[{"application":{"manage":{"applications":["*"]}}}]`), true, false},
+		{"an unknown member", grants(`"future_grants":["x"]`), true, false},
+		{"write on a concrete index a read-only pattern matches", grants(`"indices":[{"names":["logs-*"],"privileges":["read"]},{"names":["logs-app"],"privileges":["index"]}]`), true, false},
+		{"write on another index", grants(`"indices":[{"names":["logs-*"],"privileges":["read"]},{"names":["*"],"privileges":["create_doc"]}]`), true, false},
+		{"monitor_* and read_* cluster privileges", grants(`"cluster":["monitor","monitor_ml","read_ilm"]`), true, true},
+		{"write key off production", grants(`"indices":[{"names":["logs-*"],"privileges":["read","write"]}]`), false, true},
 		{"no read", func(f *fakeES) { f.privs["read"] = false }, false, false},
 		{"security disabled on production", func(f *fakeES) { f.security = false }, true, false},
 		{"security disabled off production", func(f *fakeES) { f.security = false }, false, true},

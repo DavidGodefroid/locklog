@@ -15,6 +15,10 @@ import (
 	"time"
 )
 
+// readOnlyGrants is the _privileges answer of a read-only role (recorded
+// from Elasticsearch 8.15).
+const readOnlyGrants = `{"cluster":["monitor"],"global":[],"indices":[{"names":["logs-*"],"privileges":["read","view_index_metadata"],"allow_restricted_indices":false}],"applications":[],"run_as":[]}`
+
 var t0 = time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
 
 // fakeDoc is one document: its time (milliseconds, as a date field) and
@@ -39,6 +43,7 @@ type fakeES struct {
 	docs      []fakeDoc
 	flavour   string // "" (Elasticsearch) or "opensearch"
 	privs     map[string]bool
+	grants    string // the _privileges answer
 	roles     []string
 	security  bool // privilege endpoints answer
 	requests  []string
@@ -52,7 +57,7 @@ type fakeES struct {
 }
 
 func newFake(docs []fakeDoc) *fakeES {
-	return &fakeES{seg: "logs-*", docs: docs, security: true, privs: map[string]bool{"read": true},
+	return &fakeES{seg: "logs-*", docs: docs, security: true, privs: map[string]bool{"read": true}, grants: readOnlyGrants,
 		types: map[string]string{"@timestamp": "date", "app": "keyword", "level": "keyword", "pod": "keyword", "event.id": "keyword", "message": "text", "user_email": "keyword"}}
 }
 
@@ -115,6 +120,12 @@ func (f *fakeES) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"username": "reader", "has_all_requested": false, "cluster": cl, "index": idx, "application": map[string]any{}})
+	case r.Method == "GET" && r.URL.Path == "/_security/user/_privileges":
+		if !f.security || f.flavour == "opensearch" {
+			f.fail(w, 400, "security is not enabled")
+			return
+		}
+		_, _ = w.Write([]byte(f.grants))
 	case r.Method == "GET" && r.URL.Path == "/_plugins/_security/authinfo":
 		if !f.security || f.flavour != "opensearch" {
 			f.fail(w, 404, "no handler")
