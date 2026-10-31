@@ -112,7 +112,9 @@ type Chunk struct {
 	Source string
 	// Stream identifies the stream (a file identity, a remote stream).
 	Stream string
-	// Granules are consecutive and in stream order.
+	// Granules are consecutive and in stream order (the engine's split of
+	// a descending remote slice holds its parts newest first: remote
+	// granules are read one at a time).
 	Granules []Granule
 	// Bytes is the number of bytes processing the chunk costs: the
 	// granules' bytes, plus for a compressed stream the decompressed bytes
@@ -230,6 +232,17 @@ type Source interface {
 	// Around returns up to before records before ref, the record itself
 	// and up to after records after it, from ref's stream.
 	Around(ctx context.Context, ref RawRef, before, after int) ([]RawRecord, error)
+}
+
+// Splitter is implemented by a source whose granules of unknown bytes
+// (remote time slices, Granule.Bytes 0) can be cut into narrower ones: the
+// engine splits a slice holding more than one call's byte budget, so that
+// it can be paged with a cursor on sub-slice boundaries.
+type Splitter interface {
+	// Split returns the granules g is cut into, in stream order, covering
+	// exactly [g.Start, g.End) (their bounds a function of g only), or nil
+	// when g is at the narrowest width the source pages.
+	Split(g Granule) []Granule
 }
 
 // Errors of sources. Their text never holds log content.
