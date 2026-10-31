@@ -144,15 +144,79 @@ var (
 	orgIDRe      = regexp.MustCompile(`^[A-Za-z0-9_.!*'()|-]{1,150}$`)
 )
 
-// consoleNames are names a locklog console container can have: a
-// container glob matching any of them is refused.
-var consoleNames = []string{"locklog-console", "locklog-console-0", "locklog-console-0123456789ab"}
+// ConsolePrefix starts the name of every locklog console container. A
+// container glob that can match any name with this prefix is refused; the
+// docker source also skips console containers by label and id when it
+// reads, whatever the glob.
+const ConsolePrefix = "locklog-console"
 
-// neverAllowed reports a journald field no allow rule can name: core
-// dumps, command lines, executables and audit records.
+// canMatchPrefix reports whether the container glob g (literals, '*' and
+// '?' only, as containerRe allows) matches at least one name that starts
+// with prefix. It runs the glob as an automaton over the prefix: once the
+// prefix is consumed, any remaining pattern still matches some suffix.
+func canMatchPrefix(g, prefix string) bool {
+	states := closure(g, map[int]bool{0: true})
+	for i := 0; i < len(prefix) && len(states) > 0; i++ {
+		next := map[int]bool{}
+		for st := range states {
+			if st >= len(g) {
+				continue
+			}
+			switch g[st] {
+			case '*':
+				next[st] = true // '*' absorbs the character
+			case '?':
+				next[st+1] = true
+			default:
+				if g[st] == prefix[i] {
+					next[st+1] = true
+				}
+			}
+		}
+		states = closure(g, next)
+	}
+	return len(states) > 0
+}
+
+// closure adds, for every state on a '*', the state after it ('*' matching
+// the empty string).
+func closure(g string, states map[int]bool) map[int]bool {
+	for changed := true; changed; {
+		changed = false
+		for st := range states {
+			if st < len(g) && g[st] == '*' && !states[st+1] {
+				states[st+1] = true
+				changed = true
+			}
+		}
+	}
+	return states
+}
+
+// neverAllowed reports a journald field no allow or trusted rule can name:
+// core dumps, command lines, executables, audit records, and every OBJECT_
+// field (the process a core dump or a log record is about).
 func neverAllowed(f string) bool {
-	return strings.HasPrefix(f, "COREDUMP") || strings.HasPrefix(f, "_AUDIT_") ||
-		strings.HasPrefix(f, "_COREDUMP") || f == "_CMDLINE" || f == "_EXE"
+	for _, p := range []string{"COREDUMP", "_COREDUMP", "_AUDIT_", "AUDIT_", "OBJECT_"} {
+		if strings.HasPrefix(f, p) {
+			return true
+		}
+	}
+	return strings.HasSuffix(f, "CMDLINE") || strings.HasSuffix(f, "_EXE") || f == "EXE"
+}
+
+// checkJournaldField validates a journald field name an allow or trusted
+// list names.
+func checkJournaldField(key, f string) error {
+	switch {
+	case !journalRe.MatchString(f):
+		return fmt.Errorf("%s: invalid journald field name %q (upper-case letters, digits and '_')", key, f)
+	case neverAllowed(f):
+		return fmt.Errorf("%s: %s can never be served (core dumps, command lines, executables, audit records and OBJECT_ fields stay dropped)", key, f)
+	case f == "MESSAGE":
+		return fmt.Errorf("%s: MESSAGE is always served as masked text; it cannot be listed", key)
+	}
+	return nil
 }
 
 func buildSource(name string, r rawSource, production bool) (Source, error) {
@@ -179,6 +243,11 @@ func buildSource(name string, r rawSource, production bool) (Source, error) {
 		return Source{}, errf("multiline: want one of %s", strings.Join(Multilines, ", "))
 	}
 	for _, f := range r.Trusted {
+		if s.Kind == KindJournald {
+			if err := checkJournaldField("trusted", f); err != nil {
+				return Source{}, errf("%v", err)
+			}
+		}
 		if !fieldNameRe.MatchString(f) {
 			return Source{}, errf("trusted: invalid field name %q", f)
 		}
@@ -238,13 +307,10 @@ func buildSource(name string, r rawSource, production bool) (Source, error) {
 			}
 		}
 		for _, f := range r.Allow {
-			if !journalRe.MatchString(f) {
-				return Source{}, errf("allow: invalid journald field name %q (upper-case letters, digits and '_')", f)
+			if err := checkJournaldField("allow", f); err != nil {
+				return Source{}, errf("%v", err)
 			}
-			if neverAllowed(f) {
-				return Source{}, errf("allow: %s can never be allowed (core dumps, command lines, executables and audit records stay dropped)", f)
-			}
-			if f == "MESSAGE" || slices.Contains(JournaldTrusted, f) {
+			if slices.Contains(JournaldTrusted, f) {
 				return Source{}, errf("allow: %s is always served; remove it", f)
 			}
 		}
@@ -258,10 +324,8 @@ func buildSource(name string, r rawSource, production bool) (Source, error) {
 			if !containerRe.MatchString(c) {
 				return Source{}, errf("containers: invalid container name or glob %q", c)
 			}
-			for _, n := range consoleNames {
-				if ok, _ := path.Match(c, n); ok {
-					return Source{}, errf("containers: %q matches a locklog console container, whose logs are never served", c)
-				}
+			if canMatchPrefix(c, ConsolePrefix) {
+				return Source{}, errf("containers: %q can match a locklog console container (%s*), whose logs are never served", c, ConsolePrefix)
 			}
 		}
 		for _, a := range r.Attrs {

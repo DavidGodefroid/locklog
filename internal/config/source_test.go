@@ -87,10 +87,17 @@ allow = ["MY_REQUEST_ID"]`))["staging"]
 	if !slices.Contains(s.TrustedFields(), "_SYSTEMD_UNIT") || !slices.Contains(s.TrustedFields(), "PRIORITY") || slices.Contains(s.TrustedFields(), "MESSAGE") {
 		t.Errorf("journald trusted = %v", s.TrustedFields())
 	}
-	for _, f := range []string{"COREDUMP_ENVIRON", "COREDUMP", "_CMDLINE", "_EXE", "_AUDIT_SESSION", "_COREDUMP_X"} {
-		wantErr(t, src(`kind = "journald"`+"\n"+`allow = ["`+f+`"]`), "can never be allowed")
+	for _, f := range []string{"COREDUMP_ENVIRON", "COREDUMP", "_CMDLINE", "_EXE", "_AUDIT_SESSION", "_COREDUMP_X",
+		"OBJECT_CMDLINE", "OBJECT_EXE", "OBJECT_AUDIT_LOGINUID", "OBJECT_COMM", "OBJECT_PID", "AUDIT_FIELD_X", "MY_CMDLINE", "CHILD_EXE"} {
+		for _, key := range []string{"allow", "trusted"} {
+			wantErr(t, src(`kind = "journald"`+"\n"+key+` = ["`+f+`"]`), "can never be served")
+		}
 	}
-	wantErr(t, src(`kind = "journald"`+"\n"+`allow = ["MESSAGE"]`), "always served")
+	wantErr(t, src(`kind = "journald"`+"\n"+`allow = ["MESSAGE"]`), "always served as masked text")
+	wantErr(t, src(`kind = "journald"`+"\n"+`trusted = ["MESSAGE"]`), "always served as masked text")
+	wantErr(t, src(`kind = "journald"`+"\n"+`trusted = ["lower"]`), "invalid journald field name")
+	wantErr(t, src(`kind = "journald"`+"\n"+`allow = ["_PID"]`), "always served; remove it")
+	mustParse(t, src(`kind = "journald"`+"\n"+`trusted = ["MY_SERVICE_VERSION"]`))
 	wantErr(t, src(`kind = "journald"`+"\n"+`allow = ["lower"]`), "invalid journald field name")
 	wantErr(t, src(`kind = "journald"`+"\n"+`units = ["a b"]`), "invalid unit name")
 	wantErr(t, src(`kind = "journald"`+"\n"+`units = ["user@1000.service"]`), "need user_journals = true")
@@ -106,12 +113,36 @@ format = "json"`))["staging"]
 	if s := p.Sources[0]; !slices.Equal(s.Containers, []string{"shop-api-1", "shop-worker-*"}) {
 		t.Errorf("containers = %v", s.Containers)
 	}
-	for _, g := range []string{"*", "locklog-*", "locklog-console*", "*-console-*", "locklog-console-?"} {
-		wantErr(t, src(`kind = "docker"`+"\n"+`containers = ["`+g+`"]`), "matches a locklog console container")
+	for _, g := range []string{"*", "locklog-*", "locklog-console*", "*-console-*", "locklog-console-?", "locklog-c*e-x*",
+		"*console-x*", "l?cklog-console", "locklog-console", "*g-c*", "????????????????*", "l*", "*e"} {
+		wantErr(t, src(`kind = "docker"`+"\n"+`containers = ["`+g+`"]`), "can match a locklog console container")
+	}
+	for _, g := range []string{"shop-*", "locklog-consolx*", "x*", "locklog-cons", "?", "locklog-console-*-x-[a]"} {
+		if g == "locklog-console-*-x-[a]" {
+			// Classes are refused by the name check before the console check.
+			wantErr(t, src(`kind = "docker"`+"\n"+`containers = ["`+g+`"]`), "invalid container name")
+			continue
+		}
+		mustParse(t, src(`kind = "docker"`+"\n"+`containers = ["`+g+`"]`))
 	}
 	wantErr(t, src(`kind = "docker"`+"\n"+`containers = ["a/b"]`), "invalid container name")
 	wantErr(t, src(`kind = "docker"`), "at least one container")
 	wantErr(t, src(`kind = "docker"`+"\n"+`containers = ["a"]`+"\n"+`attrs = ["a b"]`), "invalid attribute name")
+}
+
+func TestCanMatchPrefix(t *testing.T) {
+	for _, tt := range []struct {
+		glob string
+		want bool
+	}{
+		{"locklog-console", true}, {"locklog-console-abc", true}, {"locklog-consol", false}, {"*", true},
+		{"?", false}, {"???????????????", true}, {"??????????????", false}, {"l*e", true}, {"l*x", true},
+		{"x*", false}, {"locklog-console?x", true}, {"*-console*", true}, {"*-consolx*", true}, {"lockl0g*", false},
+	} {
+		if got := canMatchPrefix(tt.glob, ConsolePrefix); got != tt.want {
+			t.Errorf("canMatchPrefix(%q) = %t, want %t", tt.glob, got, tt.want)
+		}
+	}
 }
 
 func TestLokiSource(t *testing.T) {
