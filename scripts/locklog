@@ -151,6 +151,12 @@ perm() {
 # has_acl PATH: PATH carries an access control list ("+" after the mode
 # in ls -ld): its mode bits do not say who can write it.
 has_acl() {
+	if [ "$(uname -s)" = Darwin ]; then
+		# macOS prints "@" over "+" when there are xattrs too: ls -le lists
+		# the ACL entries themselves, after the first line.
+		[ -n "$(ls -lde "$1" 2>/dev/null | sed -n 2p)" ]
+		return
+	fi
 	case "$(ls -ld "$1" 2>/dev/null | cut -c11)" in
 	+) return 0 ;;
 	esac
