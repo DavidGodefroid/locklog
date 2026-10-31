@@ -586,7 +586,7 @@ type match struct {
 }
 
 // Search runs a search (locklog_search).
-func (e *Engine) Search(ctx context.Context, q Query) (SearchResult, error) {
+func (e *Engine) Search(ctx context.Context, q Query) (_ SearchResult, retErr error) {
 	cursor := q.Cursor
 	q.Cursor = ""
 	maxRange := e.o.Limits.LocalRange
@@ -626,11 +626,18 @@ func (e *Engine) Search(ctx context.Context, q Query) (SearchResult, error) {
 		}
 		chunk, gran = st.Chunk, st.Granule
 		if st.Cache != "" {
-			cached, ok := e.cache.take(st.Cache)
+			cached, ok := e.cache.get(st.Cache)
 			if !ok {
 				return SearchResult{}, &Error{Code: EStale, Span: "cursor", Message: "the cursor expired: run the query again"}
 			}
-			pending = cached
+			// Dropped only once this call succeeds: a failed
+			// continuation can be retried with the same cursor.
+			pending = slices.Clip(cached)
+			defer func() {
+				if retErr == nil {
+					e.cache.drop(st.Cache)
+				}
+			}()
 		}
 	} else {
 		plan, err := e.planQuery(ctx, &q, e.o.Limits.RemoteBytes, e.o.Limits.LocalBytes)

@@ -59,13 +59,22 @@ func (c *resultCache) put(ms []match) string {
 	return id
 }
 
-// take removes and returns the matches of id.
-func (c *resultCache) take(id string) ([]match, bool) {
+// get returns the matches of id, leaving them in place: a continuation
+// drops them only once it succeeded, so a failed one can be retried.
+func (c *resultCache) get(id string) ([]match, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.entries[id]
+	return e.ms, ok
+}
+
+// drop removes the matches of id.
+func (c *resultCache) drop(id string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	e, ok := c.entries[id]
 	if !ok {
-		return nil, false
+		return
 	}
 	delete(c.entries, id)
 	for i, o := range c.order {
@@ -75,5 +84,4 @@ func (c *resultCache) take(id string) ([]match, bool) {
 		}
 	}
 	c.size -= e.size
-	return e.ms, true
 }

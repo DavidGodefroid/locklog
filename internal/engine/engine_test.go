@@ -883,3 +883,80 @@ func TestLastCursorsContinue(t *testing.T) {
 		t.Fatalf("count: %d in %d continuations", total, pages)
 	}
 }
+
+// TestFailedContinuationKeepsItsState: a continuation that fails leaves its
+// cached page and partial count in place; retrying the cursor completes.
+func TestFailedContinuationKeepsItsState(t *testing.T) {
+	content := genLog(t0, 30000, "c@example.org")
+	flaky := func(f *fixture) {
+		calls := 0
+		es := errSource{countingSource: f.eng.o.Sources["app"].(countingSource)}
+		es.scan = func() error {
+			calls++
+			if calls == 2 {
+				return errors.New("transient")
+			}
+			return nil
+		}
+		f.eng.o.Sources["app"] = es
+	}
+	// Search: the first page leaves matches in the cache, the
+	// continuation scans more and fails.
+	f := newFixture(t, content, oneGranulePerCall)
+	flaky(f)
+	qq := q(func(q *Query) {
+		q.Where = []Pred{{Field: "level", Op: "=", Value: raw("error")}, {Field: "status", Op: "=", Value: raw(500)}}
+		q.Limit = 200
+		q.Fields = []string{"level"}
+	})
+	n, failed := 0, 0
+	for i := 0; ; i++ {
+		res, err := f.eng.Search(ctx, qq)
+		if err != nil {
+			// Retry the same cursor: its cached page is still there.
+			if failed++; code(err) != ESource || failed > 1 || qq.Cursor == "" {
+				t.Fatal(err)
+			}
+			continue
+		}
+		n += len(res.Records)
+		if res.Complete {
+			break
+		}
+		qq.Cursor = res.Cursor
+		if i > 100 {
+			t.Fatal("never completes")
+		}
+	}
+	if failed != 1 || n != 1500 {
+		t.Fatalf("search: %d records after %d failed continuations, want 1500", n, failed)
+	}
+	// Count: the partial aggregate survives the failed continuation.
+	f = newFixture(t, content, oneGranulePerCall)
+	flaky(f)
+	cq := CountQuery{Query: q(func(q *Query) { q.Text = "upstream" }), By: []string{"level"}}
+	c, err := f.eng.Count(ctx, cq)
+	if err != nil || c.Complete {
+		t.Fatal(err)
+	}
+	cq.Cursor = c.Cursor
+	if _, err := f.eng.Count(ctx, cq); code(err) != ESource {
+		t.Fatalf("injected failure: %v", err)
+	}
+	for i := 0; !c.Complete; i++ {
+		if c, err = f.eng.Count(ctx, cq); err != nil {
+			t.Fatal(err)
+		}
+		cq.Cursor = c.Cursor
+		if i > 100 {
+			t.Fatal("never completes")
+		}
+	}
+	var total int64
+	for _, g := range c.Groups {
+		total += g.N
+	}
+	if total != 30000 {
+		t.Fatalf("count: %d after a failed continuation, want 30000", total)
+	}
+}
