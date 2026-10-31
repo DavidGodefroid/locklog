@@ -93,7 +93,9 @@ func TestElasticProbe(t *testing.T) {
 		handler http.HandlerFunc
 		ok      bool // passes the production check
 	}{
-		{"open", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(`{"logs-a":{"mappings":{"properties":{}}}}`)) }, false},
+		{"open", func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`{"logs-a":{"mappings":{"properties":{}}}}`))
+		}, false},
 		{"open, nothing matched", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(`{}`)) }, false},
 		{"security on", func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(401)

@@ -186,7 +186,7 @@ func TestStreamRoundTripsAndRefusesForeignStreams(t *testing.T) {
 	}
 	for _, bad := range []string{
 		`{"in":[{"f":"env","v":["prod"]},{"f":"pod","v":["x"]}]}`, // untrusted
-		`{"in":[{"f":"env","v":["prod"]}],"script":1}`,             // unknown key
+		`{"in":[{"f":"env","v":["prod"]}],"script":1}`,            // unknown key
 		`{"in":[{"f":"level","v":["b","a"]},{"f":"env","v":["prod"]}]}`,
 		`garbage`,
 	} {
