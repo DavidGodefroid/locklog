@@ -240,12 +240,14 @@ type jobAgent struct {
 // scripted agent stops there and the gate fails).
 func (a *jobAgent) ask(c agentCall) []json.RawMessage {
 	a.t.Helper()
+	first, waits := time.Now(), a.waits
 	for {
 		start := time.Now()
 		r := a.s.run(c)
 		a.calls++
-		a.log = append(a.log, fmt.Sprintf("%s: %d pages in %v", c.name, len(r.pages), time.Since(start).Round(time.Millisecond)))
 		if r.refusal == nil {
+			a.log = append(a.log, fmt.Sprintf("%s: %d pages in %v (%d waits before, %v in all)", c.name, len(r.pages),
+				time.Since(start).Round(time.Millisecond), a.waits-waits, time.Since(first).Round(time.Millisecond)))
 			return r.pages
 		}
 		if time.Now().Before(a.deadline) {
