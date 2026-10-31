@@ -1,6 +1,7 @@
 package elastic
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -343,6 +344,8 @@ func mustScan(t *testing.T, s *Source, c source.Chunk) source.Iterator {
 // judged by its target), never a runtime field; ignore_above on the field
 // or the index keeps its terms local; a field missing from one index is
 // refused on production.
+const stdDefaults = `"defaults":{"index.mode":"standard","index.mapping.ignore_above":"2147483647"}`
+
 func TestCheckMappings(t *testing.T) {
 	both := func(a, b string) string {
 		return `{"logs-a":{"mappings":` + a + `},"logs-b":{"mappings":` + b + `}}`
@@ -364,7 +367,15 @@ func TestCheckMappings(t *testing.T) {
 		{"field missing in one index off production", both(good, `{"properties":{"@timestamp":{"type":"date"},"app":{"type":"keyword"}}}`), "", false, true, false},
 		{"text in one index", both(good, `{"properties":{"@timestamp":{"type":"date"},"app":{"type":"keyword"},"level":{"type":"text"}}}`), "", false, false, false},
 		{"ignore_above on the field", both(good, `{"properties":{"@timestamp":{"type":"date"},"app":{"type":"keyword"},"level":{"type":"keyword","ignore_above":1024}}}`), "", true, true, true},
-		{"index-level ignore_above", both(good, good), `{"logs-a":{"settings":{}},"logs-b":{"settings":{"index.mapping.ignore_above":"256"}}}`, true, true, true},
+		{"index-level ignore_above", both(good, good), `{"logs-a":{"settings":{},` + stdDefaults + `},"logs-b":{"settings":{"index.mapping.ignore_above":"256"},` + stdDefaults + `}}`, true, true, true},
+		// Recorded shape of a logsdb index (Elasticsearch 8.17): no
+		// explicit ignore_above, the mode among the settings.
+		{"logsdb index", both(good, good), `{"logs-a":{"settings":{},` + stdDefaults + `},"logs-b":{"settings":{"index.mode":"logsdb"},"defaults":{"index.mapping.ignore_above":"8191"}}}`, true, true, true},
+		{"logsdb mode, ignore_above defaults unread", both(good, good), `{"logs-a":{"settings":{},` + stdDefaults + `},"logs-b":{"settings":{"index.mode":"logsdb"}}}`, true, true, true},
+		{"time_series index", both(good, good), `{"logs-a":{"settings":{},` + stdDefaults + `},"logs-b":{"settings":{"index.mode":"time_series","index.routing_path":["app"]},"defaults":{}}}`, true, true, true},
+		{"unknown mode", both(good, good), `{"logs-a":{"settings":{},` + stdDefaults + `},"logs-b":{"settings":{},"defaults":{"index.mode":"future_mode"}}}`, true, true, true},
+		{"mode absent (Elasticsearch)", both(good, good), `{"logs-a":{"settings":{},` + stdDefaults + `},"logs-b":{"settings":{},"defaults":{}}}`, true, true, true},
+		{"mode not a string", both(good, good), `{"logs-a":{"settings":{},` + stdDefaults + `},"logs-b":{"settings":{"index.mode":1},"defaults":{}}}`, true, true, true},
 	} {
 		f := newFake(nil)
 		f.mapping, f.settings = tt.mapping, tt.settings
@@ -382,6 +393,36 @@ func TestCheckMappings(t *testing.T) {
 			if app := s.pushable(source.Term{Field: "app", Label: true, Op: "=", Values: []string{"api"}}); app != (tt.settings == "") {
 				t.Errorf("%s: app pushable %t", tt.name, app)
 			}
+		}
+	}
+}
+
+func TestIndexIgnoresAbove(t *testing.T) {
+	j := func(s string) map[string]json.RawMessage {
+		var m map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(s), &m); err != nil {
+			t.Fatal(err)
+		}
+		return m
+	}
+	for _, tt := range []struct {
+		settings, defaults, flavour string
+		want                        bool
+	}{
+		{`{}`, `{"index.mode":"standard","index.mapping.ignore_above":"2147483647"}`, FlavourElasticsearch, false},
+		{`{"index.mode":"standard"}`, `{}`, FlavourElasticsearch, false},
+		{`{}`, `{}`, FlavourElasticsearch, true},
+		{`{}`, `{}`, FlavourOpenSearch, false},
+		{`{"index.mode":"logsdb"}`, `{}`, FlavourOpenSearch, true},
+		{`{"index.mode":"logsdb"}`, `{}`, FlavourElasticsearch, true},
+		{`{"index.mode":"time_series"}`, `{}`, FlavourElasticsearch, true},
+		{`{}`, `{"index.mode":"lookup"}`, FlavourElasticsearch, true},
+		{`{"index.mapping.ignore_above":"512"}`, `{"index.mode":"standard"}`, FlavourElasticsearch, true},
+		{`{}`, `{"index.mode":"standard","index.mapping.ignore_above":"8191"}`, FlavourElasticsearch, true},
+		{`{"index.mapping.ignore_above":512}`, `{"index.mode":"standard"}`, FlavourElasticsearch, true},
+	} {
+		if got := indexIgnoresAbove(j(tt.settings), j(tt.defaults), tt.flavour); got != tt.want {
+			t.Errorf("%s %s %s: %t", tt.settings, tt.defaults, tt.flavour, got)
 		}
 	}
 }

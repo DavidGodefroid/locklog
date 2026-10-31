@@ -28,7 +28,8 @@ const resolvedLogs = `{"indices":[{"name":"logs-a","aliases":["logs-current"],"a
 const (
 	mappedFields    = `{"@timestamp":{"type":"date"},"message":{"type":"text"},"app":{"type":"keyword"},"level":{"type":"keyword"},"pod":{"type":"keyword"},"env":{"type":"keyword"},"user_email":{"type":"keyword"},"event":{"properties":{"id":{"type":"keyword"}}}}`
 	defaultMapping  = `{"logs-a":{"mappings":{"properties":` + mappedFields + `}},"logs-b":{"mappings":{"properties":` + mappedFields + `}}}`
-	defaultSettings = `{"logs-a":{"settings":{"index.number_of_shards":"1","index.uuid":"a"}},"logs-b":{"settings":{"index.number_of_shards":"1","index.uuid":"b"}}}`
+	defaultSettings = `{"logs-a":{"settings":{"index.number_of_shards":"1","index.uuid":"a"},"defaults":{"index.mode":"standard","index.mapping.ignore_above":"2147483647"}},` +
+		`"logs-b":{"settings":{"index.number_of_shards":"1","index.uuid":"b"},"defaults":{"index.mode":"standard","index.mapping.ignore_above":"2147483647"}}}`
 )
 
 var t0 = time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
@@ -145,7 +146,7 @@ func (f *fakeES) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		_, _ = w.Write([]byte(defaultMapping))
 	case r.Method == "GET" && r.URL.Path == pre+"/_settings":
-		if r.URL.Query().Get("flat_settings") != "true" {
+		if r.URL.Query().Get("flat_settings") != "true" || r.URL.Query().Get("include_defaults") != "true" {
 			f.fail(w, 400, "flat_settings")
 			return
 		}

@@ -484,7 +484,7 @@ func (s *Source) Check(ctx context.Context, production bool) (Info, error) {
 	// values unindexed: terms on such a field are kept local (pushable).
 	// A field missing from an index, or mappings or settings that cannot
 	// be read, are refused on production only.
-	m, err := s.mappingFacts(ctx)
+	m, err := s.mappingFacts(ctx, info.Flavour)
 	switch {
 	case err != nil && production:
 		return info, fmt.Errorf("elasticsearch source: reading the mappings and settings (the key needs view_index_metadata), which a production profile requires: %w", err)
@@ -549,7 +549,7 @@ type mappingFacts struct {
 }
 
 // mappingFacts reads GET /{indices}/_mapping and GET /{indices}/_settings.
-func (s *Source) mappingFacts(ctx context.Context) (mappingFacts, error) {
+func (s *Source) mappingFacts(ctx context.Context, flavour string) (mappingFacts, error) {
 	body, err := s.do(ctx, http.MethodGet, "/"+s.seg+"/_mapping", readParams(), nil)
 	if err != nil {
 		return mappingFacts{}, err
@@ -565,12 +565,14 @@ func (s *Source) mappingFacts(ctx context.Context) (mappingFacts, error) {
 	}
 	q := readParams()
 	q.Set("flat_settings", "true")
+	q.Set("include_defaults", "true")
 	body, err = s.do(ctx, http.MethodGet, "/"+s.seg+"/_settings", q, nil)
 	if err != nil {
 		return mappingFacts{}, err
 	}
 	var settings map[string]struct {
 		Settings map[string]json.RawMessage `json:"settings"`
+		Defaults map[string]json.RawMessage `json:"defaults"`
 	}
 	if json.Unmarshal(body, &settings) != nil || settings == nil {
 		return mappingFacts{}, errResponse
@@ -595,10 +597,45 @@ func (s *Source) mappingFacts(ctx context.Context) (mappingFacts, error) {
 		if !ok {
 			return mappingFacts{}, errResponse // every index's settings are read
 		}
-		_, ix.ignoreAbove = st.Settings["index.mapping.ignore_above"]
+		ix.ignoreAbove = indexIgnoresAbove(st.Settings, st.Defaults, flavour)
 		m.indices[name] = ix
 	}
 	return m, nil
+}
+
+// noLimit is the default of index.mapping.ignore_above on a standard
+// index: no value is ignored.
+const noLimit = "2147483647"
+
+// indexIgnoresAbove reports whether an index may leave long keyword values
+// unindexed whatever the field's mapping says: index.mapping.ignore_above
+// set or defaulted below noLimit, or an index mode other than standard
+// (logsdb and time_series default ignore_above; an unknown mode is assumed
+// to). Elasticsearch reports index.mode among the defaults: absent there,
+// it is not known to be standard (fail closed). OpenSearch 2.x has no index
+// modes: absent, the index is standard.
+func indexIgnoresAbove(settings, defaults map[string]json.RawMessage, flavour string) bool {
+	get := func(k string) (string, bool) {
+		for _, m := range []map[string]json.RawMessage{settings, defaults} {
+			if raw, ok := m[k]; ok {
+				var v string
+				if json.Unmarshal(raw, &v) != nil {
+					return "?", true // not a string: unknown
+				}
+				return v, true
+			}
+		}
+		return "", false
+	}
+	if v, ok := get("index.mapping.ignore_above"); ok && v != noLimit {
+		return true
+	}
+	switch mode, ok := get("index.mode"); {
+	case ok:
+		return mode != "standard"
+	default:
+		return flavour != FlavourOpenSearch
+	}
 }
 
 // mappingDef is one field of a mapping, as far as Check reads it.
