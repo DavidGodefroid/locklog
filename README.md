@@ -42,10 +42,12 @@ hit. Emails, IPs, card numbers, national ids and the other values locklog
 detects become **pseudonyms** (`⟦email:7F3KQ2M9ZD4X⟧`), and secrets become
 `⟦secret⟧`, before anything leaves the console. Reads are free. Handing a
 clear value to the agent waits for your approval at the console and is off
-on production.
+by default on production.
 
 > [!NOTE]
-> **Pre-release.** Built on [lockkit](https://github.com/DavidGodefroid/lockkit).
+> **Pre-release.** No release is published yet, so `install.sh` has nothing
+> to install and the Quick start below works from v0.1.0 on.
+> Built on [lockkit](https://github.com/DavidGodefroid/lockkit).
 > The design is public in [docs/security-model.md](docs/security-model.md);
 > what the spikes measured is in [docs/sources.md](docs/sources.md) and
 > [docs/performance.md](docs/performance.md).
@@ -104,8 +106,9 @@ curl -fsSL https://locklog.dev/install.sh | sh
 #    and wires the detected agents (Claude Code, Codex, Cursor, Gemini CLI)
 locklog setup --agent host     # or wire one agent: locklog init claude
 
-# 3. The console, in a terminal you keep in view
-locklog console
+# 3. The console, in a terminal you keep in view (setup prints the line;
+#    containers get a profile of their own, <profile>-docker)
+locklog console --profile <profile>
 ```
 
 Then, in another terminal, ask your agent: *"when did the 502s start?"*.
@@ -215,7 +218,7 @@ locklog masks the values it **detects**. It does not detect:
 - person names unless you enable the opt-in `person_name` detector (and
   names outside its heuristics when you do), usernames and logins in free
   text, postal addresses;
-- private and loopback IPs (infrastructure; configurable), user agents and
+- private and loopback IPs (infrastructure, never detected), user agents and
   other quasi-identifiers;
 - business ids (order and customer ids, kept so `trace` works);
 - base64 or hex-encoded content;
@@ -232,7 +235,7 @@ It also leaks, by design:
 Pseudonymised data is still personal data under the GDPR: the model
 provider receives pseudonyms, timestamps and the fields locklog does not
 mask. Tighten with `redact-unknown` (the production default for structured
-logs), the `template` text mode, your own rules, and `lookup = "approved"`.
+logs), your own rules, and `lookup = "approved"`.
 
 ## Sources
 
@@ -246,8 +249,8 @@ logs), the `template` text mode, your own rules, and `lookup = "approved"`.
 
 The console opens Loki, Elasticsearch and OpenSearch sources from the
 profile once [#97](https://github.com/DavidGodefroid/locklog/pull/97) is
-merged; until then the console cannot open them
-(`unsupported source kind`).
+merged; until then the console refuses a profile that holds one (this build
+"does not read yet" that kind) before it opens anything.
 
 `docker compose up` deletes a recreated container's `json-file` logs: use
 the journald driver or Loki for history across deploys.
@@ -261,8 +264,8 @@ Loki 3 users: see [docs/loki.md](docs/loki.md) on the default
 The leak harness plants canaries of every detected kind, in every format
 and position and in encoded forms (percent, JSON `\u`, HTML entities,
 look-alikes, zero-width characters), and checks every byte that leaves the
-console: **0 leaks** is a release gate. `person_name` recall and false
-positives are reported per release. Throughput and the budgets derived from
+console: **0 leaks**, checked on every pull request (CI job `suites`, with
+the oracle and equivalence suites). Throughput and the budgets derived from
 it are in [docs/performance.md](docs/performance.md).
 
 ## Install

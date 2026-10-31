@@ -11,8 +11,8 @@ without the address. The console's audit (bottom) keeps every call, with no clea
 GitHub, on the site and in any browser; every animation shares one clock of LOOP seconds, and
 prefers-reduced-motion shows the final frame.
 
-The tool names, the pseudonym format and the refusal text follow the code; the demo test
-(scripts/brand/demo_test.py) checks the committed SVG is this script's output and that its
+The tool names, the pseudonym format and the refusal text follow the code (the approval screen is a simplified rendering of the console's); the demo test
+(scripts/brand/check_demo.py) checks the committed SVG is this script's output and that its
 strings stay in step. The demo profile is labelled staging: unmask is off by default on
 production.
 
@@ -255,9 +255,9 @@ def jline(pairs):
     return out
 
 
-free = jline([("event", '"call"', T), ("profile", '"staging"', T), ("decision", '"ok"', G),
+free = jline([("event", '"log.call"', T), ("profile", '"staging"', T), ("decision", '"ok"', G),
               "…", ("peer_uid", "1000", T), "…", ("method", '"log.patterns"', T), ("sources", '["api"]', S)])
-denied = jline([("event", '"call"', T), ("profile", '"staging"', T), ("decision", '"denied"', R),
+denied = jline([("event", '"log.call"', T), ("profile", '"staging"', T), ("decision", '"denied"', R),
                 "…", ("peer_uid", "1000", T), "…", ("method", '"log.unmask"', T), ("sources", '["api"]', S)])
 body.append(spans(BX + 16, BY + 48, free, cls=show(3.6), size=10))
 body.append(spans(BX + 16, BY + 68, denied, cls=show(11.4), size=10))

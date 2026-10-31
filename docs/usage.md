@@ -14,22 +14,32 @@ copy. A change that loosens the policy waits for you at the console's
 version = 1
 
 [profiles.staging]
-production = false          # setup asks; unanswered means true
+production = false          # setup asks; an unanswered question means true
 
 [profiles.staging.sources.nginx]
 kind = "file"
 paths = ["/var/log/nginx/access.log*"]   # rotated and .gz/.zst files included
 format = "combined"
 
-[profiles.staging.sources.api]
-kind = "docker"
-containers = ["shop-api-*"]
-format = "json"
-
 [profiles.staging.sources.system]
 kind = "journald"
 units = ["nginx.service", "shop-*.service"]
 
+# A docker source cannot share a profile with other sources: it runs in a
+# console of its own (setup writes it as <profile>-docker).
+[profiles.staging-docker]
+production = false
+
+[profiles.staging-docker.sources.api]
+kind = "docker"
+containers = ["shop-api-*"]
+format = "json"
+```
+
+A Loki source, once the console opens remote sources
+([#97](https://github.com/DavidGodefroid/locklog/pull/97)):
+
+```toml
 [profiles.staging.sources.loki]
 kind = "loki"
 url = "https://loki.internal:3100"
@@ -43,13 +53,13 @@ credentials = "ask"          # typed at the console, never written to disk
 
 | Key | Default | Meaning |
 |---|---|---|
-| `production` | `true` when unanswered | Turns on the production rules: `redact-unknown`, unmask never, authenticated backends over TLS, tighter rolling budgets, `prefilter` refused, the host-agent trial refused |
+| `production` | `false` when the key is absent; `locklog setup` asks, and an unanswered question means `true` | Turns on the production rules: `redact-unknown`, unmask `never` by default, authenticated backends over TLS, tighter rolling budgets, `prefilter` refused, the host-agent trial refused |
 | `structured` | `redact-unknown` on production, else `detect` | How structured leaves are masked: `redact-unknown` redacts every leaf that is neither trusted nor allowed |
-| `text` | `detect` | Free text: `detect`, or `template` (every variable token of a clustered template masked too) |
+| `text` | `detect` | Free text: `detect`, or `template`. Accepted and reviewed, but not applied yet: free text is masked by the detectors in both |
 | `detectors` | all default detectors | Value detectors to run |
 | `unmask` | `never` on production, else `approved` | Whether the agent may ask you to unmask a value |
 | `lookup` | `free` | `locklog_lookup` free and rate-limited, or `approved` (a ticket each time) |
-| `strict` | `false` | Every search and count becomes a ticket |
+| `strict` | `false` | Accepted and reviewed, but not applied yet (planned: every search and count becomes a ticket) |
 | `prefilter` | `false` | Opt-in speed-up for non-production; reveals through latency how many records hold a clear substring |
 | `user_journals` | `false` | Also serve `user-*.journal` files |
 | `pseudonym_rotation` | `7d` | Epoch length (`session` or a duration; `never` is refused on production) |
@@ -69,8 +79,8 @@ countable), plus per kind:
 
 The console opens `loki`, `elastic` and `opensearch` sources from the
 profile once [#97](https://github.com/DavidGodefroid/locklog/pull/97) is
-merged; until then the console cannot open them
-(`unsupported source kind`).
+merged; until then the console refuses a profile that holds one (this build
+"does not read yet" that kind) before it opens anything.
 
 ## Wiring an agent
 
@@ -110,7 +120,7 @@ it back and says so.
 | `locklog_pii_list`, `locklog_pii_add` | the masking rules; add masking (never remove it). Until the console serves PII rules ([#64](https://github.com/DavidGodefroid/locklog/issues/64)) they answer that there are none | free, capped |
 | `locklog_request_change` | ask for a loosening | you decide at `:review` |
 | `locklog_scan` | one call over a budget, approved for its whole plan | you approve |
-| `locklog_unmask` | the clear value of up to 8 exact pseudonyms of one record, once, with a reason | you approve at the console, never automatically; off on production |
+| `locklog_unmask` | the clear value of up to 8 exact pseudonyms of one record, once, with a reason | you approve at the console, never automatically; off by default on production |
 
 Every result carries the pseudonym `epoch`. A result with
 `complete: false` has a `cursor`: passing it back continues the same plan
