@@ -430,6 +430,13 @@ func (s *Source) fieldCaps(ctx context.Context, fields []string) (fieldCapsRespo
 // key with any write or manage privilege, or one whose privileges cannot
 // be read (security disabled, an unknown OpenSearch role). Trusted fields
 // must be keyword fields; the time field a date.
+//
+// Re-Check policy expected from the wiring: on a production profile, no
+// Plan, Scan, count or Describe before Check has succeeded (the source is
+// not served otherwise); Check may run again at any time (on reconnect,
+// on a timer): while it runs, and after it fails, the source pushes no
+// trusted term and serves no count, and streams planned under an earlier
+// state that pushed a term now kept local are stale (source.ErrStale).
 func (s *Source) Check(ctx context.Context, production bool) (Info, error) {
 	var info Info
 	var err error
@@ -521,6 +528,23 @@ func (s *Source) Check(ctx context.Context, production bool) (Info, error) {
 			local[f] = true
 		}
 	default:
+		for _, ix := range m.indices {
+			if ix.dynamicRisk != "" {
+				return info, fmt.Errorf("elasticsearch source: %s in some index: new fields could be copied into, or computed as, the source's fields; refused", ix.dynamicRisk)
+			}
+			// The time field too: neither copied into nor computed.
+			_, tpath, _ := ix.field(s.o.TimeField)
+			for _, r := range ix.runtime {
+				if related(r, s.o.TimeField) || related(r, tpath) {
+					return info, fmt.Errorf("elasticsearch source: the time field %s is (under) a runtime field in some index", s.o.TimeField)
+				}
+			}
+			for _, t := range ix.copyTo {
+				if related(t, s.o.TimeField) || related(t, tpath) {
+					return info, fmt.Errorf("elasticsearch source: a copy_to writes into the time field %s in some index", s.o.TimeField)
+				}
+			}
+		}
 		for _, f := range keywords {
 			for _, ix := range m.indices {
 				d, path, ok := ix.field(f)
@@ -571,6 +595,10 @@ type indexMapping struct {
 	// included), copyTo every copy_to target.
 	runtime, copyTo []string
 	ignoreAbove     bool
+	// dynamicRisk names what lets new fields reach the source's ones:
+	// a dynamic template with copy_to or a runtime mapping, or dynamic:
+	// runtime at some level ("" when none).
+	dynamicRisk string
 }
 
 // field returns the definition of f and its concrete path, an alias
@@ -610,6 +638,8 @@ func (s *Source) mappingFacts(ctx context.Context, flavour string) (mappingFacts
 			Runtime    map[string]struct {
 				Fields map[string]json.RawMessage `json:"fields"`
 			} `json:"runtime"`
+			Dynamic          json.RawMessage              `json:"dynamic"`
+			DynamicTemplates []map[string]json.RawMessage `json:"dynamic_templates"`
 		} `json:"mappings"`
 	}
 	if json.Unmarshal(body, &idx) != nil || idx == nil {
@@ -638,6 +668,9 @@ func (s *Source) mappingFacts(ctx context.Context, flavour string) (mappingFacts
 			for n, d := range props {
 				full := prefix + n
 				ix.fields[full] = d
+				if dynamicRuntime(d.Dynamic) {
+					ix.dynamicRisk = "dynamic: runtime on " + full
+				}
 				if d.CopyTo != nil {
 					ts, ok := stringOrArray(d.CopyTo)
 					if !ok {
@@ -653,6 +686,33 @@ func (s *Source) mappingFacts(ctx context.Context, flavour string) (mappingFacts
 		if bad != nil {
 			return mappingFacts{}, bad
 		}
+		if dynamicRuntime(i.Mappings.Dynamic) {
+			ix.dynamicRisk = "dynamic: runtime"
+		}
+		for _, tmpl := range i.Mappings.DynamicTemplates {
+			if len(tmpl) != 1 {
+				return mappingFacts{}, errResponse
+			}
+			for name, raw := range tmpl {
+				var t struct {
+					Mapping map[string]json.RawMessage `json:"mapping"`
+					Runtime json.RawMessage            `json:"runtime"`
+				}
+				if json.Unmarshal(raw, &t) != nil {
+					return mappingFacts{}, errResponse
+				}
+				var typ string
+				_ = json.Unmarshal(t.Mapping["type"], &typ)
+				switch {
+				case t.Runtime != nil || typ == "runtime":
+					ix.dynamicRisk = "the dynamic template " + strconv.Quote(name) + " maps new fields as runtime fields"
+				case t.Mapping["copy_to"] != nil:
+					ix.dynamicRisk = "the dynamic template " + strconv.Quote(name) + " has a copy_to"
+				case dynamicRuntime(t.Mapping["dynamic"]):
+					ix.dynamicRisk = "the dynamic template " + strconv.Quote(name) + " sets dynamic: runtime"
+				}
+			}
+		}
 		for n, r := range i.Mappings.Runtime {
 			ix.runtime = append(ix.runtime, n)
 			for sub := range r.Fields {
@@ -667,6 +727,13 @@ func (s *Source) mappingFacts(ctx context.Context, flavour string) (mappingFacts
 		m.indices[name] = ix
 	}
 	return m, nil
+}
+
+// dynamicRuntime reports a "dynamic" mapping parameter of "runtime": new
+// fields under it become runtime fields.
+func dynamicRuntime(raw json.RawMessage) bool {
+	var v string
+	return raw != nil && json.Unmarshal(raw, &v) == nil && v == "runtime"
 }
 
 // stringOrArray decodes a string or an array of strings.
@@ -734,6 +801,7 @@ type mappingDef struct {
 	Script      json.RawMessage       `json:"script"`
 	NullValue   json.RawMessage       `json:"null_value"`
 	CopyTo      json.RawMessage       `json:"copy_to"`
+	Dynamic     json.RawMessage       `json:"dynamic"`
 	IgnoreAbove *json.Number          `json:"ignore_above"`
 	Properties  map[string]mappingDef `json:"properties"`
 	Fields      map[string]mappingDef `json:"fields"`

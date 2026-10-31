@@ -379,6 +379,16 @@ func TestCheckMappings(t *testing.T) {
 		{"script on a keyword field", both(good, `{"properties":{"@timestamp":{"type":"date"},"app":{"type":"keyword"},"level":{"type":"keyword","script":{"source":"emit('a')"}}}}`), "", false, false, false},
 		{"null_value on a trusted field", both(good, `{"properties":{"@timestamp":{"type":"date"},"app":{"type":"keyword"},"level":{"type":"keyword","null_value":"none"}}}`), "", true, true, true},
 		{"nested settings object", both(good, good), `{"logs-a":{"settings":{},` + stdDefaults + `},"logs-b":{"settings":{"index":{"mode":"standard"}},` + stdDefaults + `}}`, true, true, true},
+		{"dynamic template with copy_to", both(good, `{"dynamic_templates":[{"strings":{"match_mapping_type":"string","mapping":{"type":"keyword","copy_to":"env"}}}],"properties":{"@timestamp":{"type":"date"},"app":{"type":"keyword"},"level":{"type":"keyword"}}}`), "", true, false, false},
+		{"dynamic template mapping runtime", both(good, `{"dynamic_templates":[{"r":{"match":"*","runtime":{"type":"keyword"}}}],"properties":{"@timestamp":{"type":"date"},"app":{"type":"keyword"},"level":{"type":"keyword"}}}`), "", false, false, false},
+		{"dynamic template of type runtime", both(good, `{"dynamic_templates":[{"r":{"match":"*","mapping":{"type":"runtime"}}}],"properties":{"@timestamp":{"type":"date"},"app":{"type":"keyword"},"level":{"type":"keyword"}}}`), "", false, false, false},
+		{"harmless dynamic template", both(good, `{"dynamic_templates":[{"strings":{"match_mapping_type":"string","mapping":{"type":"keyword","ignore_above":1024}}}],"properties":{"@timestamp":{"type":"date"},"app":{"type":"keyword"},"level":{"type":"keyword"}}}`), "", true, true, false},
+		{"dynamic templates not single-key", both(good, `{"dynamic_templates":[{"a":{},"b":{}}],"properties":{"@timestamp":{"type":"date"},"app":{"type":"keyword"},"level":{"type":"keyword"}}}`), "", true, false, false},
+		{"dynamic runtime at the top", both(good, `{"dynamic":"runtime","properties":{"@timestamp":{"type":"date"},"app":{"type":"keyword"},"level":{"type":"keyword"}}}`), "", false, false, false},
+		{"dynamic runtime on an object", both(good, `{"properties":{"@timestamp":{"type":"date"},"app":{"type":"keyword"},"level":{"type":"keyword"},"o":{"dynamic":"runtime","properties":{}}}}`), "", false, false, false},
+		{"dynamic true", both(good, `{"dynamic":true,"properties":{"@timestamp":{"type":"date"},"app":{"type":"keyword"},"level":{"type":"keyword"}}}`), "", true, true, false},
+		{"copy_to into the time field", both(good, `{"properties":{"@timestamp":{"type":"date"},"app":{"type":"keyword"},"level":{"type":"keyword"},"t":{"type":"date","copy_to":"@timestamp"}}}`), "", false, false, false},
+		{"runtime time field", both(good, `{"runtime":{"@timestamp":{"type":"date"}},"properties":{"app":{"type":"keyword"},"level":{"type":"keyword"}}}`), "", false, false, false},
 		{"index-level ignore_above", both(good, good), `{"logs-a":{"settings":{},` + stdDefaults + `},"logs-b":{"settings":{"index.mapping.ignore_above":"256"},` + stdDefaults + `}}`, true, true, true},
 		// A logsdb index's settings, in the shape Elasticsearch
 		// documents (not recorded from a server): no explicit
@@ -508,5 +518,127 @@ func TestNothingServerSideBeforeCheck(t *testing.T) {
 	}
 	if s.pushable(lv) || s.pushable(source.Term{Field: "app", Label: true, Op: "=", Values: []string{"api"}}) {
 		t.Fatal("pushable with unreadable mappings")
+	}
+}
+
+// TestStreamsStaleAfterReCheck: a stream planned with a pushed term is
+// stale once the current state keeps that field local (a re-Check found
+// it so, or a Check is running or failed); the selector's own term is
+// always accepted.
+func TestStreamsStaleAfterReCheck(t *testing.T) {
+	f := newFake(dataset(40))
+	f.types["env"] = "keyword"
+	s := newChecked(t, f, func(o *Options) { o.Selector = map[string]string{"app": "api"} })
+	r := source.Range{From: t0, To: t0.Add(time.Hour)}
+	sel := source.Selector{Terms: []source.Term{{Field: "level", Label: true, Op: "!=", Values: []string{"info"}}}}
+	plan, err := s.Plan(ctx, r, sel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pushed := plan.Chunks[0]
+	if !strings.Contains(pushed.Stream, "level") {
+		t.Fatalf("not pushed: %s", pushed.Stream)
+	}
+	selOnly, _ := s.Plan(ctx, r, source.Selector{})
+	// Now level is kept local.
+	f.mapping = `{"logs-a":{"mappings":{"properties":{"@timestamp":{"type":"date"},"app":{"type":"keyword"},"level":{"type":"keyword","ignore_above":10}}}}}`
+	if _, err := s.Check(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Scan(ctx, pushed); !errors.Is(err, source.ErrStale) {
+		t.Fatalf("scan of a stale stream: %v", err)
+	}
+	ref := source.RawRef{Source: "es", Stream: pushed.Stream, Offset: t0.UnixNano(), Length: 1}
+	if _, err := s.Reread(ctx, ref); !errors.Is(err, source.ErrStale) {
+		t.Fatalf("reread: %v", err)
+	}
+	if _, err := s.Around(ctx, ref, 1, 1); !errors.Is(err, source.ErrStale) {
+		t.Fatalf("around: %v", err)
+	}
+	if _, err := s.Scan(ctx, selOnly.Chunks[0]); err != nil {
+		t.Fatalf("the selector's stream: %v", err)
+	}
+	// A failed Check: every pushed term is stale.
+	f.mapping = "nope"
+	if _, err := s.Check(ctx, true); err == nil {
+		t.Fatal("check passed")
+	}
+	if _, err := s.Scan(ctx, pushed); !errors.Is(err, source.ErrStale) {
+		t.Fatalf("scan after a failed Check: %v", err)
+	}
+}
+
+// TestCountsUnderConcurrentReCheck: a count with a pushed term, run while
+// Check runs again and again, is exact or not served, never the
+// unfiltered total.
+func TestCountsUnderConcurrentReCheck(t *testing.T) {
+	f := newFake(dataset(40))
+	s := newChecked(t, f, nil)
+	r := source.Range{From: t0, To: t0.Add(time.Hour)}
+	q := source.CountQuery{Range: r, Selector: source.Selector{Terms: []source.Term{{Field: "level", Label: true, Op: "=", Values: []string{"error"}}}}}
+	var want int64
+	for _, d := range f.docs {
+		if d.fields["level"] == "error" {
+			want++
+		}
+	}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				_, _ = s.Check(ctx, false)
+				time.Sleep(200 * time.Microsecond)
+			}
+		}
+	}()
+	served := 0
+	for i := 0; i < 300; i++ {
+		res, err := s.IndexCounts(ctx, q)
+		if errors.Is(err, source.ErrNotIndexable) {
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		var n int64
+		for _, row := range res.Rows {
+			n += row.N
+		}
+		if n != want {
+			t.Fatalf("count %d, want %d (the term was dropped)", n, want)
+		}
+		served++
+	}
+	close(stop)
+	<-done
+	t.Logf("%d of 300 counts served, the others refused", served)
+
+	// Deterministically: a Check that starts (and fails) between the
+	// validation and the filter's build changes nothing in this count.
+	if _, err := s.Check(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	testHookCountFilter = func() {
+		f.mu.Lock()
+		f.types["level"] = "text"
+		f.mu.Unlock()
+		_, _ = s.Check(ctx, false)
+	}
+	defer func() { testHookCountFilter = nil }()
+	res, err := s.IndexCounts(ctx, q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var n int64
+	for _, row := range res.Rows {
+		n += row.N
+	}
+	if n != want {
+		t.Fatalf("count %d across a re-Check, want %d", n, want)
 	}
 }

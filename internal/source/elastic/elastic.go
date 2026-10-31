@@ -228,35 +228,51 @@ func readParams() url.Values { return url.Values{"expand_wildcards": {"open"}} }
 // depends on the mapping (a normalizer, ignore_above, null_value), and an
 // absent and an empty field must not be confused. Until Check has
 // completed, and for a field it found with ignore_above, null_value or a
-// non-standard index mode in some index, terms are kept local too. The engine evaluates every term again after masking: a
-// term not pushed only costs bytes.
-func (s *Source) pushable(t source.Term) bool {
-	if !s.serverSide(t.Field) {
-		return false
-	}
-	return t.Label && (t.Op == "=" || t.Op == "in" || t.Op == "!=") && s.trusted(t.Field) &&
-		len(t.Values) > 0 && !slices.Contains(t.Values, "")
+// non-standard index mode in some index, terms are kept local too. The
+// engine evaluates every term again after masking: a term not pushed
+// only costs bytes.
+//
+// pushable reads the current state; a call that judges terms and then
+// builds a filter takes one snapshot (state) and uses it for both.
+func (s *Source) pushable(t source.Term) bool { return s.state().pushable(s, t) }
+
+// pushState is what Check last found, as one snapshot: whether it has
+// completed, and the fields whose terms stay local.
+type pushState struct {
+	checked bool
+	local   map[string]bool // never written after it is set
 }
 
-// serverSide reports whether the backend may answer for field f: Check
-// has completed, and found nothing on f that makes its indexed terms
-// differ from its documents' values.
-func (s *Source) serverSide(f string) bool {
+// state returns the current snapshot.
+func (s *Source) state() pushState {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.checked && !s.local[f]
+	return pushState{checked: s.checked, local: s.local}
+}
+
+// serverSide reports whether the backend may answer for field f under st:
+// Check has completed, and found nothing on f that makes its indexed terms
+// differ from its documents' values.
+func (st pushState) serverSide(f string) bool { return st.checked && !st.local[f] }
+
+func (st pushState) pushable(s *Source, t source.Term) bool {
+	return st.serverSide(t.Field) && t.Label && (t.Op == "=" || t.Op == "in" || t.Op == "!=") && s.trusted(t.Field) &&
+		len(t.Values) > 0 && !slices.Contains(t.Values, "")
 }
 
 // filter builds the server-side filter: the profile's selector, plus the
 // pushable terms. Other terms are ignored here (the engine evaluates every
 // term after masking).
-func (s *Source) filter(sel source.Selector) Filter {
+func (s *Source) filter(sel source.Selector) Filter { return s.filterIn(s.state(), sel) }
+
+// filterIn is filter under the snapshot st.
+func (s *Source) filterIn(st pushState, sel source.Selector) Filter {
 	var f Filter
 	for k, v := range s.o.Selector {
 		f.In = append(f.In, FieldValues{Field: k, Values: []string{v}})
 	}
 	for _, t := range sel.Terms {
-		if !s.pushable(t) {
+		if !st.pushable(s, t) {
 			continue
 		}
 		switch t.Op {
@@ -630,9 +646,20 @@ func (s *Source) streamFilter(stream string) (Filter, error) {
 	if err != nil {
 		return Filter{}, fmt.Errorf("elasticsearch source: %w", err)
 	}
-	for _, x := range append(slices.Clone(f.In), f.NotIn...) {
-		if _, ok := s.o.Selector[x.Field]; !ok && !s.trusted(x.Field) {
+	// A pushed term (any but the selector's own) must still be one the
+	// backend may answer under the current state: a stream planned
+	// before a Check that keeps the field local, or before any Check, is
+	// stale.
+	st := s.state()
+	for i, x := range append(slices.Clone(f.In), f.NotIn...) {
+		if v, sel := s.o.Selector[x.Field]; sel && i < len(f.In) && slices.Equal(x.Values, []string{v}) {
+			continue
+		}
+		if !s.trusted(x.Field) {
 			return Filter{}, errors.New("elasticsearch source: the stream names an untrusted field")
+		}
+		if !st.serverSide(x.Field) {
+			return Filter{}, source.ErrStale
 		}
 	}
 	for k, v := range s.o.Selector {

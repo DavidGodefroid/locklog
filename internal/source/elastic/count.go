@@ -64,6 +64,10 @@ func termsChain(by []string, i int) map[string]Agg {
 	return map[string]Agg{termsName(i): {Terms: &TermsAgg{Field: by[i], Size: MaxTermsSize, Missing: &absent}, Aggs: termsChain(by, i+1)}}
 }
 
+// testHookCountFilter runs between the terms' validation and the filter's
+// build (tests: a re-Check there must not change the filter).
+var testHookCountFilter func()
+
 // IndexCounts answers a trusted-field count on the server: a _count for a
 // selector-only question, else a search of size 0 with a date_histogram
 // (at most MaxHistogramBuckets buckets) and nested terms aggregations (at
@@ -77,19 +81,19 @@ func (s *Source) IndexCounts(ctx context.Context, q source.CountQuery) (source.C
 	if len(q.By) > 0 || len(q.ByLabels) > MaxCountBy {
 		return source.CountResult{}, source.ErrNotIndexable
 	}
-	s.mu.Lock()
-	checked := s.checked
-	s.mu.Unlock()
-	if !checked {
+	// One snapshot of Check's state judges the terms and builds the
+	// filter: a re-Check in between cannot drop a term silently.
+	st := s.state()
+	if !st.checked {
 		return source.CountResult{}, source.ErrNotIndexable // Check first
 	}
 	for _, b := range q.ByLabels {
-		if !s.trusted(b) || !s.serverSide(b) {
+		if !s.trusted(b) || !st.serverSide(b) {
 			return source.CountResult{}, source.ErrNotIndexable
 		}
 	}
 	for _, t := range q.Selector.Terms {
-		if !s.pushable(t) {
+		if !st.pushable(s, t) {
 			return source.CountResult{}, source.ErrNotIndexable
 		}
 	}
@@ -106,7 +110,10 @@ func (s *Source) IndexCounts(ctx context.Context, q source.CountQuery) (source.C
 			return source.CountResult{}, source.ErrNotIndexable
 		}
 	}
-	qry, err := s.filter(q.Selector).query(s.o.TimeField, r.From, r.To)
+	if testHookCountFilter != nil {
+		testHookCountFilter()
+	}
+	qry, err := s.filterIn(st, q.Selector).query(s.o.TimeField, r.From, r.To)
 	if err != nil {
 		return source.CountResult{}, fmt.Errorf("elasticsearch source: %w", err)
 	}
