@@ -75,7 +75,10 @@ func writeFiles(dir string, files []file) error {
 	if err := unix.Fstat(pfd, &st); err != nil || st.Dev != pst.Dev || st.Ino != pst.Ino {
 		return errors.New("authproxy: the parent directory changed while it was checked")
 	}
-	if err := unix.Mkdirat(pfd, base, 0o700); err != nil && !errors.Is(err, unix.EEXIST) {
+	created := true
+	if err := unix.Mkdirat(pfd, base, 0o700); errors.Is(err, unix.EEXIST) {
+		created = false
+	} else if err != nil {
 		return fmt.Errorf("authproxy: %s: %w", dir, err)
 	}
 	dfd, err := unix.Openat(pfd, base, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
@@ -88,22 +91,31 @@ func writeFiles(dir string, files []file) error {
 	if err := unix.Fstat(dfd, &dst); err != nil {
 		return err
 	}
-	if dst.Mode&unix.S_IFMT != unix.S_IFDIR || int(dst.Uid) != os.Geteuid() {
-		return errors.New("authproxy: the directory is not a directory of yours")
-	}
-	if names, err := d.Readdirnames(-1); err != nil || len(names) > 0 {
-		return errors.New("authproxy: the directory exists and is not empty")
-	}
-	if err := unix.Fchmod(dfd, 0o700); err != nil {
-		return err
-	}
-	afterOpen()
 	var written []string
+	// cleanup removes the files written and, when this call created the
+	// directory and its name still is that directory, the directory.
 	cleanup := func() {
 		for _, n := range written {
 			unix.Unlinkat(dfd, n, 0)
 		}
+		var cur unix.Stat_t
+		if created && unix.Fstatat(pfd, base, &cur, unix.AT_SYMLINK_NOFOLLOW) == nil && cur.Dev == dst.Dev && cur.Ino == dst.Ino {
+			unix.Unlinkat(pfd, base, unix.AT_REMOVEDIR)
+		}
 	}
+	if dst.Mode&unix.S_IFMT != unix.S_IFDIR || int(dst.Uid) != os.Geteuid() {
+		cleanup()
+		return errors.New("authproxy: the directory is not a directory of yours")
+	}
+	if names, err := d.Readdirnames(-1); err != nil || len(names) > 0 {
+		cleanup()
+		return errors.New("authproxy: the directory exists and is not empty")
+	}
+	if err := unix.Fchmod(dfd, 0o700); err != nil {
+		cleanup()
+		return err
+	}
+	afterOpen()
 	for _, f := range files {
 		fd, err := unix.Openat(dfd, f.name, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
 		if err != nil {

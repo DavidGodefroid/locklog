@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -261,5 +262,36 @@ func TestProjectCheckResolvesBothSides(t *testing.T) {
 	}
 	if ents, _ := os.ReadDir(filepath.Join(real, "project")); len(ents) != 0 {
 		t.Fatalf("%d entries written in the project", len(ents))
+	}
+}
+
+func TestFailureRemovesTheDirectoryItCreated(t *testing.T) {
+	for _, existing := range []bool{false, true} {
+		o, _ := setup(t)
+		os.MkdirAll(filepath.Dir(o.Dir), 0o700)
+		if existing {
+			os.Mkdir(o.Dir, 0o700)
+		}
+		// A write that fails once the directory is open.
+		prev := afterOpen
+		afterOpen = func() { os.Chmod(o.Dir, 0o500) }
+		_, err := Generate(o)
+		afterOpen = prev
+		os.Chmod(o.Dir, 0o700)
+		if err == nil {
+			t.Fatal("generated in a read-only directory")
+		}
+		_, serr := os.Lstat(o.Dir)
+		switch {
+		case !existing && !errors.Is(serr, fs.ErrNotExist):
+			t.Fatalf("the directory this call created is left: %v", serr)
+		case existing && serr != nil:
+			t.Fatalf("the user's directory removed: %v", serr)
+		}
+		if existing {
+			if ents, _ := os.ReadDir(o.Dir); len(ents) != 0 {
+				t.Fatalf("%d files left", len(ents))
+			}
+		}
 	}
 }
