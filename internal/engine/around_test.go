@@ -1024,16 +1024,13 @@ func TestTailIdenticalAcrossCopy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var s []string
-	for _, r := range res.Records {
-		s = append(s, string(r))
-	}
 	if len(res.Records) != 4 || !res.Complete {
-		t.Fatalf("want 4 got %d complete=%v", len(res.Records), res.Complete)
+		t.Fatalf("want 4 got %d complete=%v: %s", len(res.Records), res.Complete, res.Records)
 	}
 }
 
-// waits until we are early in a second so two writes 200ms apart share it.
+// nextSecondHalf waits until early in a second, so that two writes 200 ms
+// apart share it.
 func nextSecondHalf() {
 	now := time.Now()
 	if now.Sub(now.Truncate(time.Second)) > 300*time.Millisecond {
@@ -1064,12 +1061,8 @@ func TestTailDoubleCopytruncate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var s []string
-	for _, r := range res.Records {
-		s = append(s, string(r))
-	}
 	if len(res.Records) != 4 || !res.Complete {
-		t.Fatalf("want 4 got %d complete=%v", len(res.Records), res.Complete)
+		t.Fatalf("want 4 got %d complete=%v: %s", len(res.Records), res.Complete, res.Records)
 	}
 }
 
