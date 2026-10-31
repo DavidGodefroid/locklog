@@ -509,8 +509,8 @@ ensure_map_dir() {
 }
 
 # write_map: write the next version of the containers map into map_dir,
-# atomically (a temporary file in the same directory, then mv), and keep
-# the last two versions. Sets map_version, map_c (containers mapped), map_x
+# atomically (a temporary file in the same directory, then mv), under the
+# directory's writer lock, and keep the last two versions. Sets map_version, map_c (containers mapped), map_x
 # (console containers excluded) and map_skip (matching containers skipped:
 # not json-file, or a record that does not parse).
 #
@@ -520,13 +520,54 @@ ensure_map_dir() {
 # the label as a fixed token from a template conditional, the free-text
 # fields validated token by token, the name last; a record of another line
 # or field count, or another id, is excluded too (fail closed: an x line).
+lock_held=
+
+# map_lock: take the map directory's writer lock (mkdir is atomic), so that
+# refresh and the loop never race on N or on each other's temporary file.
+# A lock older than a minute is a killed writer's: broken. Waits up to 15 s.
+map_lock() {
+	i=0
+	while ! mkdir "$map_dir/.lock" 2>/dev/null; do
+		if [ -n "$(find "$map_dir/.lock" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
+			rmdir "$map_dir/.lock" 2>/dev/null || :
+			continue
+		fi
+		i=$((i + 1))
+		[ "$i" -le 15 ] || return 1
+		sleep 1
+	done
+	lock_held=1
+}
+
+map_unlock() {
+	rmdir "$map_dir/.lock" 2>/dev/null || :
+	lock_held=
+}
+
+# lock_traps: release the writer lock when this shell exits or is
+# signalled while holding it.
+lock_traps() {
+	trap '[ -z "$lock_held" ] || rmdir "$map_dir/.lock" 2>/dev/null || :' EXIT
+	trap 'exit 129' HUP
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
+}
+
 write_map() {
 	if [ ! -d "$map_dir" ]; then
 		{ mkdir -p "$map_dir" && chmod 0755 "$map_dir"; } || return 1
 	fi
+	map_lock || return 1
+	wm_rc=0
+	write_map_locked || wm_rc=$?
+	map_unlock
+	return "$wm_rc"
+}
+
+write_map_locked() {
 	set +f
-	# Temporary files a killed writer left behind.
-	rm -f "$map_dir"/.map.tmp.*
+	# Temporary files a killed writer left behind (older than a minute).
+	find "$map_dir" -maxdepth 1 -name '.map.tmp.*' -type f -mmin +1 -exec rm -f {} + 2>/dev/null || :
 	ids=$(docker ps -a -q --no-trunc) || return 1
 	cs=
 	xs=
@@ -655,19 +696,27 @@ EOF
 	map_version=$n
 }
 
-# map_loop SINCE PID: keep the map current while the process PID (the
-# console's docker run, which replaced the launcher) lives: every container
-# create, rename and destroy from SINCE (seconds since the epoch) on marks
-# the map dirty, and one rewrite a second at most drains the mark (a burst
-# of events costs one rewrite). When docker events exits it is restarted,
-# from the time it exited, and the map rewritten then. Once PID is gone,
-# docker events and the reader are killed and the fifo removed, also when
-# the launcher itself was killed. Failures are reported on stderr.
+# map_loop SINCE PID NAME: keep the map current while the console lives:
+# its docker run (PID, which replaced the launcher) or, once that pid is
+# gone (the CLI killed), its container NAME while it still runs (checked
+# every 5 s). Every container create, rename and destroy from SINCE
+# (seconds since the epoch) on marks the map dirty, and one rewrite a
+# second at most drains the mark (a burst of events costs one rewrite).
+# When docker events exits it is restarted, from the time it exited, after
+# a backoff doubling up to 30 s, and the map rewritten then. Once the
+# console is gone, docker events and the reader are killed and the fifo
+# removed. Failures are reported on stderr, once per streak.
 map_loop() {
 	since=$1
 	ppid=$2
+	cname=$3
 	ev_pid=
 	rd_pid=
+	cl_checked=
+	cl_alive=1
+	warned_events=
+	warned_map=
+	backoff=1
 	fifo_dir=$(mktemp -d) || {
 		say "warning: mktemp failed: the containers map will not follow container changes (locklog refresh rewrites it)"
 		exit 1
@@ -679,8 +728,8 @@ map_loop() {
 		rm -rf "$fifo_dir"
 		exit 1
 	fi
-	trap loop_end TERM
-	while kill -0 "$ppid" 2>/dev/null; do
+	trap loop_end TERM HUP INT
+	while console_alive; do
 		# The reader and docker events are started from subshells that
 		# exit at once: they are not this shell's children, so kill -0
 		# tells when they are gone (no zombie). The reader opens the fifo
@@ -689,33 +738,74 @@ map_loop() {
 			while IFS= read -r _; do : >"$dirty"; done
 		} >/dev/null <"$fifo" &
 			echo $!)
+		started=$(date +%s)
 		ev_pid=$(docker events --since "$since" --filter type=container --filter event=create \
 			--filter event=rename --filter event=destroy --format '{{.Action}}' 2>/dev/null >"$fifo" &
 			echo $!)
 		while kill -0 "$ev_pid" 2>/dev/null; do
-			kill -0 "$ppid" 2>/dev/null || loop_end
+			console_alive || loop_end
 			flush_map
 			sleep 1
 		done
-		kill -0 "$ppid" 2>/dev/null || loop_end
-		since=$(date +%s)
-		say "warning: docker events stopped; restarting it and rewriting the containers map"
-		sleep 1
+		# Gone: their pids may be reused from here on. The reader ends on
+		# the fifo's end of file.
+		ev_pid=
+		rd_pid=
+		console_alive || loop_end
+		now=$(date +%s)
+		since=$now
+		if [ $((now - started)) -ge 30 ]; then
+			# It ran a while: a new streak.
+			backoff=1
+			warned_events=
+		fi
+		if [ -z "$warned_events" ]; then
+			say "warning: docker events stopped; restarting it (backoff up to 30 s) and rewriting the containers map"
+			warned_events=1
+		fi
+		sleep "$backoff"
+		backoff=$((backoff * 2))
+		[ "$backoff" -le 30 ] || backoff=30
 		rm -f "$dirty"
-		write_map || say "warning: could not rewrite the containers map (docker ps, docker inspect)"
+		checked_write
 	done
 	loop_end
+}
+
+# console_alive: the console's docker run lives, or else its container
+# still runs (asked at most every 5 s).
+console_alive() {
+	kill -0 "$ppid" 2>/dev/null && return 0
+	now=$(date +%s)
+	if [ -n "$cl_checked" ] && [ $((now - cl_checked)) -lt 5 ]; then
+		return "$cl_alive"
+	fi
+	cl_checked=$now
+	cl_alive=1
+	[ "$(docker inspect -f '{{.State.Running}}' "$cname" 2>/dev/null)" = true ] && cl_alive=0
+	return "$cl_alive"
 }
 
 # flush_map: rewrite the map once when events marked it dirty.
 flush_map() {
 	[ -e "$dirty" ] || return 0
 	rm -f "$dirty"
-	write_map || say "warning: could not rewrite the containers map (docker ps, docker inspect)"
+	checked_write
+}
+
+# checked_write: write_map, warning once per streak of failures.
+checked_write() {
+	if write_map; then
+		warned_map=
+	elif [ -z "$warned_map" ]; then
+		say "warning: could not rewrite the containers map (docker ps, docker inspect); retrying on the next change"
+		warned_map=1
+	fi
 }
 
 loop_end() {
-	kill $ev_pid $rd_pid 2>/dev/null || :
+	[ -z "$ev_pid$rd_pid" ] || kill $ev_pid $rd_pid 2>/dev/null || :
+	[ -z "$lock_held" ] || rmdir "$map_dir/.lock" 2>/dev/null || :
 	rm -rf "$fifo_dir"
 	exit 0
 }
@@ -942,6 +1032,7 @@ EOF
 		# The time before the snapshot: the events loop replays from it, so
 		# that nothing between the snapshot and its subscription is lost.
 		t0=$(date +%s)
+		lock_traps
 		write_map || die "could not write the containers map (docker ps, docker inspect)"
 		mount_args="$mount_args --mount type=bind,src=$map_dir,dst=/run/locklog-map,readonly"
 		docker_args="-e LOCKLOG_DOCKER_ROOT=$docker_root"
@@ -993,7 +1084,7 @@ EOF
 	# this pid: docker run replaces the launcher as on the plain path, so
 	# signals, the terminal and the exit status are the console's, and the
 	# loop ends with it (also when this process is killed).
-	map_loop "$t0" "$$" &
+	map_loop "$t0" "$$" "$name" &
 	exec docker "$@"
 }
 
@@ -1011,6 +1102,7 @@ $lines
 EOF
 	[ -n "$docker_globs" ] || die "the profile has no docker source: there is no containers map to write"
 	ensure_map_dir "$name"
+	lock_traps
 	write_map || die "could not write the containers map (docker ps, docker inspect)"
 	printf 'locklog: containers map v%s of %s (%s): %s mapped, %s console containers excluded, %s skipped (not json-file, or not a valid name)\n' \
 		"$map_version" "$name" "$map_dir" "$map_c" "$map_x" "$map_skip"

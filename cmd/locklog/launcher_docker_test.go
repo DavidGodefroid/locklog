@@ -340,15 +340,52 @@ func TestLauncherRefresh(t *testing.T) {
 	if !slices.Equal(vs, []int{2, 3}) || !slices.Equal(ls, wantMap) {
 		t.Errorf("versions %v (want the last two), map\n%s", vs, strings.Join(ls, "\n"))
 	}
-	// A temporary file a killed writer left is removed.
-	if err := os.WriteFile(filepath.Join(mapDir(t, base), ".map.tmp.stale"), []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
+	// A temporary file a killed writer left a while ago is removed, a
+	// fresh one (another writer's) is not.
+	md := mapDir(t, base)
+	old := time.Now().Add(-2 * time.Minute)
+	for _, n := range []string{".map.tmp.stale", ".map.tmp.fresh"} {
+		if err := os.WriteFile(filepath.Join(md, n), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
+	os.Chtimes(filepath.Join(md, ".map.tmp.stale"), old, old)
 	if out, _, err := f.run(t, f.project, env, "refresh"); err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}
-	if vs, _ := mapVersions(t, mapDir(t, base)); !slices.Equal(vs, []int{3, 4}) {
+	if _, err := os.Stat(filepath.Join(md, ".map.tmp.stale")); err == nil {
+		t.Error("a stale temporary file was kept")
+	}
+	if err := os.Remove(filepath.Join(md, ".map.tmp.fresh")); err != nil {
+		t.Errorf("a fresh temporary file was removed: %v", err)
+	}
+	if vs, _ := mapVersions(t, md); !slices.Equal(vs, []int{3, 4}) {
 		t.Errorf("versions %v", vs)
+	}
+	// Writers are serialised by a lock: a held one is waited for, a stale
+	// one (a killed writer's) broken.
+	lock := filepath.Join(md, ".lock")
+	if err := os.Mkdir(lock, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		time.Sleep(1500 * time.Millisecond)
+		os.Remove(lock)
+	}()
+	start := time.Now()
+	if out, _, err := f.run(t, f.project, env, "refresh"); err != nil || time.Since(start) < time.Second {
+		t.Fatalf("refresh did not wait for the lock: %v %v\n%s", err, time.Since(start), out)
+	}
+	if err := os.Mkdir(lock, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	os.Chtimes(lock, old, old)
+	start = time.Now()
+	if out, _, err := f.run(t, f.project, env, "refresh"); err != nil || time.Since(start) > 5*time.Second {
+		t.Fatalf("a stale lock was not broken: %v %v\n%s", err, time.Since(start), out)
+	}
+	if vs, _ := mapVersions(t, md); !slices.Equal(vs, []int{5, 6}) {
+		t.Errorf("versions %v (lock left behind?)", vs)
 	}
 	// Without a runtime directory: under ~/.local/state.
 	home := filepath.Join(f.root, "home")
@@ -365,13 +402,11 @@ func TestLauncherRefresh(t *testing.T) {
 		t.Errorf("refresh without a docker source: %v\n%s", err, out)
 	}
 	// An engine that does not answer: the map is not rewritten.
-	b, _ := os.ReadFile(filepath.Join(f.bin, "docker"))
-	writeExec(t, filepath.Join(f.bin, "docker"), strings.Replace(string(b), "ps) printf '%b' \"${DOCKER_PS:-}\" ;;", "ps) exit 1 ;;", 1))
-	out, _, err = f.run(t, f.project, env, "refresh")
+	out, _, err = f.run(t, f.project, append(slices.Clone(env), "PS_FAIL_AFTER=0"), "refresh")
 	if err == nil || !strings.Contains(out, "could not write the containers map") {
 		t.Errorf("failing docker ps: %v\n%s", err, out)
 	}
-	if vs, _ := mapVersions(t, mapDir(t, base)); !slices.Equal(vs, []int{3, 4}) {
+	if vs, _ := mapVersions(t, mapDir(t, base)); !slices.Equal(vs, []int{5, 6}) {
 		t.Errorf("versions after a failure: %v", vs)
 	}
 }
@@ -383,7 +418,7 @@ func TestLauncherMapLoopRestarts(t *testing.T) {
 	f := newLauncherFixture(t)
 	env, _, xdg := dockerEnv(t, f)
 	base := filepath.Join(xdg, "locklog", "map")
-	env = append(env, "EVENTS_EXIT=1", "CONSOLE_WAIT="+filepath.Join(base, "*", "map.v4"))
+	env = append(env, "EVENTS_EXIT=1", "CONSOLE_WAIT="+filepath.Join(f.root, "events.3"))
 	out, calls, err := f.run(t, f.project, env, "console")
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)
@@ -398,7 +433,7 @@ func TestLauncherMapLoopRestarts(t *testing.T) {
 	if len(since) < 2 || since[1] < since[0] {
 		t.Errorf("events not restarted: --since %v", since)
 	}
-	if vs, _ := mapVersions(t, mapDir(t, base)); len(vs) != 2 || vs[1] < 4 {
+	if vs, _ := mapVersions(t, mapDir(t, base)); len(vs) != 2 || vs[1] < 3 {
 		t.Errorf("versions %v", vs)
 	}
 }
@@ -467,7 +502,7 @@ func eventsGone(t *testing.T, f *launcherFixture) {
 		t.Fatal(err)
 	}
 	pid, _ := strconv.Atoi(strings.TrimSpace(string(b)))
-	for i := 0; i < 100; i++ {
+	for i := 0; i < 200; i++ {
 		if syscall.Kill(pid, 0) != nil {
 			return
 		}
@@ -516,5 +551,46 @@ func TestLauncherMapLoopCoalesces(t *testing.T) {
 	}
 	if vs, _ := mapVersions(t, mapDir(t, base)); vs[len(vs)-1] > 3 {
 		t.Errorf("200 events gave versions %v", vs)
+	}
+}
+
+// After the docker CLI is killed, the console container may still run: the
+// loop goes on while it does, and ends once it stopped.
+func TestLauncherMapLoopFollowsTheContainer(t *testing.T) {
+	consoleHost(t)
+	f := newLauncherFixture(t)
+	env, _, _ := dockerEnv(t, f)
+	running := filepath.Join(f.root, "running")
+	cmd := startConsole(t, f, append(env, "CONSOLE_WAIT="+filepath.Join(f.root, "never"), "CONSOLE_RUNNING_FILE="+running))
+	if err := os.WriteFile(running, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd.Process.Kill()
+	cmd.Wait()
+	time.Sleep(2500 * time.Millisecond)
+	b, _ := os.ReadFile(filepath.Join(f.root, "events.pid"))
+	pid, _ := strconv.Atoi(strings.TrimSpace(string(b)))
+	if syscall.Kill(pid, 0) != nil {
+		t.Fatal("the loop ended while the console container still runs")
+	}
+	os.Remove(running)
+	eventsGone(t, f)
+}
+
+// Loop failures are reported on stderr, once per streak.
+func TestLauncherMapLoopReportsFailuresOnce(t *testing.T) {
+	consoleHost(t)
+	f := newLauncherFixture(t)
+	env, _, _ := dockerEnv(t, f)
+	env = append(env, "EVENTS_EXIT=1", "PS_FAIL_AFTER=1", "CONSOLE_WAIT="+filepath.Join(f.root, "events.3"))
+	out, _, err := f.run(t, f.project, env, "console")
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if n := strings.Count(out, "docker events stopped"); n != 1 {
+		t.Errorf("events warning %d times:\n%s", n, out)
+	}
+	if n := strings.Count(out, "could not rewrite the containers map"); n != 1 {
+		t.Errorf("map warning %d times:\n%s", n, out)
 	}
 }

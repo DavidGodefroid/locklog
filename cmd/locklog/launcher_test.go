@@ -22,7 +22,7 @@ type launcherFixture struct {
 
 var launcherTools = []string{"sh", "dirname", "mkdir", "id", "cat", "printf", "awk", "sha256sum", "shasum", "tar",
 	"gzip", "install", "mktemp", "rm", "uname", "sed", "tr", "tail", "grep", "stat", "cksum", "getconf", "nproc", "cut", "ls",
-	"mv", "chmod", "date", "sleep", "mkfifo"}
+	"mv", "chmod", "date", "sleep", "mkfifo", "find", "rmdir"}
 
 func newLauncherFixture(t *testing.T) *launcherFixture {
 	t.Helper()
@@ -69,7 +69,13 @@ info)
 	*DockerRootDir*) printf '%s\n' "${DOCKER_ROOT_DIR:-/var/lib/docker}" ;;
 	*) printf '%s\n' "${DOCKER_INFO:-[name=seccomp,profile=builtin]}" ;;
 	esac ;;
-ps) printf '%b' "${DOCKER_PS:-}" ;;
+ps)
+	# PS_FAIL_AFTER=N: every call after the N-th fails.
+	if [ -n "${PS_FAIL_AFTER:-}" ]; then
+		echo x >> '`+filepath.Join(root, "ps.calls")+`'
+		[ "$(grep -c x '`+filepath.Join(root, "ps.calls")+`')" -le "$PS_FAIL_AFTER" ] || exit 1
+	fi
+	printf '%b' "${DOCKER_PS:-}" ;;
 inspect)
 	# docker inspect --type container --format F ID: the record in I_<ID>.
 	if [ "$2" = --type ]; then
@@ -81,9 +87,14 @@ inspect)
 		eval "rec=\${I_$6:-}"
 		[ -n "$rec" ] || exit 1
 		printf '%b\n' "$rec"
+	elif [ "$3" = '{{.State.Running}}' ] && [ -n "${CONSOLE_RUNNING_FILE:-}" ] && [ -e "$CONSOLE_RUNNING_FILE" ]; then
+		echo true
 	fi ;;
 events)
 	echo $$ > '`+filepath.Join(root, "events.pid")+`'
+	n=1
+	while [ -e '`+filepath.Join(root, "events.")+`'$n ]; do n=$((n + 1)); done
+	: > '`+filepath.Join(root, "events.")+`'$n
 	printf '%b' "${EVENTS_OUT:-}"
 	[ -z "${EVENTS_EXIT:-}" ] || exit 0
 	exec sleep 30 ;;
