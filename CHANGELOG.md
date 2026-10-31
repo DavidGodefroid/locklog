@@ -128,6 +128,16 @@ uses [Semantic Versioning](https://semver.org/).
   finding; residuals: Landlock, containers with `IpcMode` shareable, swarm
   mode. On a production profile the findings are red and doctor exits 1.
   The launcher runs it as the agent account with the host's network.
+- `locklog setup --only DIR,...`: detect only the log files under those
+  directories (no journal, no container), for scripted runs.
+- CI end to end on the LL-09b harness: `five-minutes` (the launcher on
+  PATH, `setup --yes --no-production --agent host`, the console, and an
+  MCP client spawning the server the written `.mcp.json` names: an exact
+  count and a masked search under 300 s, and the written allow list equal
+  to the free tools), `own-container recipe (e2e)` (an agent image built
+  from the printed snippet calls the console as uid 10052, not root, no
+  sudo), and `production guard (e2e)` (the launcher's `mcp` against a
+  production console is refused with `E_PRODUCTION_HOST_AGENT`).
 
 ### Fixed
 

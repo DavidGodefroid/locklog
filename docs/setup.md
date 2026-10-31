@@ -28,7 +28,16 @@ Questions:
   agent's MCP server refuses production profiles with
   `E_PRODUCTION_HOST_AGENT`), `container` (an image of its own), or `lea`.
 
-For scripts: `locklog setup --yes --no-production --agent host`.
+For scripts: `locklog setup --yes --no-production --agent host`, with
+`--only /srv/app/logs` to propose only the log files under that directory
+(no journal, no container).
+
+CI checks this path end to end (job `five-minutes`): from `setup` to the
+first masked answer of an MCP client spawned from the written `.mcp.json`
+in under 300 s, with the allow list holding the free tools only. The jobs
+`own-container recipe (e2e)` and `production guard (e2e)` build an agent
+image from the printed snippet and check that a host agent is refused on a
+production profile.
 
 ### The own-container recipe
 
