@@ -12,6 +12,9 @@ const (
 	MethodSearch   = "log.search"
 	MethodCount    = "log.count"
 	MethodPatterns = "log.patterns"
+	MethodContext  = "log.context"
+	MethodTrace    = "log.trace"
+	MethodTail     = "log.tail"
 )
 
 // Handle decodes the params of an agent method and runs it. A refusal is
@@ -43,16 +46,53 @@ func (e *Engine) Handle(ctx context.Context, method string, params json.RawMessa
 			return nil, r, nil
 		}
 		res, err = e.Count(ctx, q)
+	case MethodContext:
+		var q ContextQuery
+		if r := decode(&q); r != nil {
+			return nil, r, nil
+		}
+		res, err = e.Context(ctx, q)
+	case MethodTrace:
+		var q TraceQuery
+		if r := decode(&q); r != nil {
+			return nil, r, nil
+		}
+		res, err = e.Trace(ctx, q)
+	case MethodTail:
+		var q TailQuery
+		if r := decode(&q); r != nil {
+			return nil, r, nil
+		}
+		res, err = e.Tail(ctx, q)
 	case MethodPatterns:
 		var q PatternsQuery
 		if r := decode(&q); r != nil {
 			return nil, r, nil
 		}
 		res, err = e.Patterns(ctx, q)
+	case MethodScan:
+		var q ScanQuery
+		if r := decode(&q); r != nil {
+			return nil, r, nil
+		}
+		res, err = e.Scan(ctx, q)
+	case MethodUnmask:
+		var q UnmaskQuery
+		if r := decode(&q); r != nil {
+			return nil, r, nil
+		}
+		res, err = e.Unmask(ctx, q)
+	case MethodLookup:
+		var q LookupQuery
+		if r := decode(&q); r != nil {
+			return nil, r, nil
+		}
+		res, err = e.Lookup(ctx, q)
 	default:
 		return nil, refuse(EBadQuery, "", "unknown method"), nil
 	}
-	if r, ok := err.(*Error); ok {
+	var r *Error
+	if errors.As(err, &r) {
 		return nil, r, nil
 	}
 	return res, nil, err

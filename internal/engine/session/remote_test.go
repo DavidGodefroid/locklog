@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -336,28 +335,6 @@ func TestRemoteWrongSecret(t *testing.T) {
 	}
 }
 
-func TestRateLimiter(t *testing.T) {
-	if newRateLimiter(0, nil) != nil {
-		t.Error("a limiter without a rate")
-	}
-	l := newRateLimiter(60, nil) // one a second, a burst of 60
-	ctx := context.Background()
-	start := time.Now()
-	for i := 0; i < 60; i++ {
-		if err := l.Wait(ctx); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if time.Since(start) > 500*time.Millisecond {
-		t.Errorf("the burst waited %v", time.Since(start))
-	}
-	cctx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
-	defer cancel()
-	if err := l.Wait(cctx); err == nil {
-		t.Error("past the burst without waiting")
-	}
-}
-
 // A trusted-only count on a remote source that answers counts is bounded
 // by limits.remote.count_range, not the local one; a scanned one by the
 // remote range.
@@ -387,43 +364,110 @@ count_range = "2h"
 	}
 }
 
-// countingLimiter counts the tokens taken.
-type countingLimiter struct{ n atomic.Int64 }
-
-func (c *countingLimiter) Wait(context.Context) error { c.n.Add(1); return nil }
-
-// Every method that reaches the backend is paced, log.sources included,
-// and one remote request takes exactly one token.
-func TestRemoteRequestsPaced(t *testing.T) {
-	fake := &lokitest.Server{Entries: lokiEntries(), User: "reader", Password: remoteSecret}
-	srv := httptest.NewServer(fake)
-	defer srv.Close()
-	f := newFixture(t, lokiCfg(srv.URL, false, ""), "")
-	s := open(t, remoteOptions(f))
-	lim := &countingLimiter{}
-	s.requests = lim
-	for _, c := range []struct{ method, params string }{
-		{logconsole.MethodSources, `{}`},
-		{logconsole.MethodSearch, `{` + hour + `}`},
-		{logconsole.MethodCount, `{` + hour + `,"where":[{"label":"level","op":"=","value":"error"}]}`},
-	} {
-		before, tokens := len(fake.Requests()), lim.n.Load()
-		if _, ref := call(t, s, c.method, c.params); ref != nil {
-			t.Fatalf("%s refused: %+v", c.method, ref)
-		}
-		reqs, took := len(fake.Requests())-before, lim.n.Load()-tokens
-		if reqs == 0 || took != int64(reqs) {
-			t.Errorf("%s: %d requests, %d tokens", c.method, reqs, took)
-		}
+// remoteBudget is the remote class of :status's rolling budgets.
+func remoteBudget(t *testing.T, s *Session) engine.ClassBudget {
+	t.Helper()
+	b := s.Status(context.Background()).(Status).Budgets.Remote
+	if b == nil || b.RequestsLeft == nil || b.MetricLeft == nil {
+		t.Fatalf("no remote budget: %+v", b)
 	}
-	// A spent budget refuses log.sources' requests too.
-	s.requests = newRateLimiter(1, nil)
-	call(t, s, logconsole.MethodStatus, `{}`)
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
-	_ = s.requests.Wait(ctx) // the one token
-	res, _, _ := s.Handle(ctx, logconsole.MethodSources, json.RawMessage(`{}`), logconsole.Caller{})
-	if out, _ := json.Marshal(res); !strings.Contains(string(out), "could not be described") {
-		t.Errorf("sources past the budget: %s", out)
+	return *b
+}
+
+// One remote request takes exactly one token of the per-minute request
+// budget (the engine's, Engine.Paced and the query path: no double
+// pacing), log.sources included; a server-side count's requests are each
+// one metric query too.
+func TestRemoteRequestsPaced(t *testing.T) {
+	lk := &lokitest.Server{Entries: lokiEntries(), User: "reader", Password: remoteSecret}
+	ls := httptest.NewServer(lk)
+	defer ls.Close()
+	es := &elastictest.Server{Docs: esDocs(), User: "reader", Password: remoteSecret}
+	ess := httptest.NewServer(es)
+	defer ess.Close()
+	for _, c := range []struct {
+		name string
+		cfg  func(string) string
+		reqs func() int
+	}{
+		{"loki", lokiCfg(ls.URL, false, ""), func() int { return len(lk.Requests()) }},
+		{"elastic", esCfg("elastic", ess.URL, false, ""), func() int { return len(es.Requests()) }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newFixture(t, c.cfg, "")
+			s := open(t, remoteOptions(f))
+			for _, m := range []struct {
+				method, params string
+				metric         bool
+			}{
+				{logconsole.MethodSources, `{}`, false},
+				{logconsole.MethodSearch, `{` + hour + `}`, false},
+				{logconsole.MethodCount, `{` + hour + `,"where":[{"label":"level","op":"=","value":"error"}]}`, true},
+			} {
+				before, b := c.reqs(), remoteBudget(t, s)
+				if _, ref := call(t, s, m.method, m.params); ref != nil {
+					t.Fatalf("%s refused: %+v", m.method, ref)
+				}
+				a := remoteBudget(t, s)
+				reqs, took := c.reqs()-before, *b.RequestsLeft-*a.RequestsLeft
+				if reqs == 0 || took != reqs {
+					t.Errorf("%s: %d requests, %d tokens", m.method, reqs, took)
+				}
+				if metric := *b.MetricLeft - *a.MetricLeft; m.metric && metric != reqs || !m.metric && metric != 0 {
+					t.Errorf("%s: %d requests, %d metric queries", m.method, reqs, metric)
+				}
+			}
+		})
+	}
+}
+
+// A spent hourly budget refuses the call: server-side metric queries
+// (limits.remote.metric_queries_per_hour) and bytes fetched
+// (limits.remote.bytes_per_hour), for Loki and Elasticsearch.
+func TestRemoteHourlyBudgets(t *testing.T) {
+	lk := httptest.NewServer(&lokitest.Server{Entries: lokiEntries(), User: "reader", Password: remoteSecret})
+	defer lk.Close()
+	es := httptest.NewServer(&elastictest.Server{Docs: esDocs(), User: "reader", Password: remoteSecret})
+	defer es.Close()
+	for _, c := range []struct {
+		name string
+		cfg  func(string) string
+	}{
+		{"loki", lokiCfg(lk.URL, false, "")},
+		{"elastic", esCfg("elastic", es.URL, false, "")},
+	} {
+		t.Run(c.name+"/metric", func(t *testing.T) {
+			f := newFixture(t, func(l string) string {
+				return c.cfg(l) + "[profiles.staging.limits.remote]\nmetric_queries_per_hour = 1\n"
+			}, "")
+			s := open(t, remoteOptions(f))
+			var ref *logconsole.Refusal
+			for i := 0; i < 3 && ref == nil; i++ {
+				// A new window each time: no cached answer.
+				_, ref = call(t, s, logconsole.MethodCount, fmt.Sprintf(`{"from":"2026-10-30T13:0%d:00Z","to":"2026-10-30T14:00:00Z","where":[{"label":"level","op":"=","value":"error"}]}`, i))
+			}
+			if ref == nil || ref.Info.Code != "E_OVER_BUDGET" || !strings.Contains(ref.Message, "metric queries per hour") {
+				t.Errorf("past the metric budget: %+v", ref)
+			}
+			if left := *remoteBudget(t, s).MetricLeft; left != 0 {
+				t.Errorf("metric left %d", left)
+			}
+		})
+		t.Run(c.name+"/bytes", func(t *testing.T) {
+			f := newFixture(t, func(l string) string {
+				return c.cfg(l) + "[profiles.staging.limits.remote]\nmax_bytes = \"1KiB\"\nbytes_per_hour = \"1KiB\"\n"
+			}, "")
+			s := open(t, remoteOptions(f))
+			var ref *logconsole.Refusal
+			n := 0
+			for i := 0; i < 10 && ref == nil; i++ {
+				n++
+				_, ref = call(t, s, logconsole.MethodSearch, fmt.Sprintf(`{"from":"2026-10-30T13:0%d:00Z","to":"2026-10-30T14:00:00Z"}`, i))
+			}
+			// The first call is served; a later one finds the hour spent.
+			if n < 2 || ref == nil || ref.Info.Code != "E_OVER_BUDGET" || !strings.Contains(ref.Message, "bytes processed per hour") {
+				t.Errorf("past the byte budget: %+v", ref)
+			}
+		})
 	}
 }

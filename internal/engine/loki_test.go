@@ -413,3 +413,91 @@ func TestLokiSplitFullPlans(t *testing.T) {
 		}
 	}
 }
+
+// edgeLoki is bigLoki serving, on every page, an entry before the page's
+// start and one at its end as well: entries a slice drops as out of its
+// range, though they were fetched.
+type edgeLoki struct{ bigLoki }
+
+func (b *edgeLoki) GetWith(ctx context.Context, path string, q url.Values, h map[string]string) (egress.Response, error) {
+	resp, err := b.bigLoki.GetWith(ctx, path, q, h)
+	if err != nil || path != "/loki/api/v1/query_range" {
+		return resp, err
+	}
+	var v struct {
+		Data struct {
+			Result []struct {
+				Stream map[string]string `json:"stream"`
+				Values [][]string        `json:"values"`
+			} `json:"result"`
+		} `json:"data"`
+	}
+	if json.Unmarshal(resp.Body, &v) != nil || len(v.Data.Result) == 0 {
+		return resp, nil
+	}
+	start, _ := strconv.ParseInt(q.Get("start"), 10, 64)
+	end, _ := strconv.ParseInt(q.Get("end"), 10, 64)
+	vals := append([][]string{{strconv.FormatInt(start-1, 10), "time=x level=error msg=\"before\""}}, v.Data.Result[0].Values...)
+	vals = append(vals, []string{strconv.FormatInt(end, 10), "time=x level=error msg=\"at the end\""})
+	body, _ := json.Marshal(map[string]any{"status": "success", "data": map[string]any{
+		"resultType": "streams", "encodingFlags": []string{"categorize-labels"},
+		"result": []map[string]any{{"stream": v.Data.Result[0].Stream, "values": vals}}}})
+	b.mu.Lock()
+	b.served += int64(len(body)) - int64(len(resp.Body))
+	b.mu.Unlock()
+	return egress.Response{Status: 200, Body: body}, nil
+}
+
+// TestLokiScannedIsFetched (#67): Scanned.Bytes is the bytes the source
+// fetched, entries out of a slice's range and pages fetched past a call's
+// byte limit (dropped, fetched again by the next call) included; and it
+// is what the rolling budget is charged.
+func TestLokiScannedIsFetched(t *testing.T) {
+	bl := &edgeLoki{bigLoki{every: 5 * time.Second, pad: 2 << 10}}
+	p, _ := parse.New(parse.Options{})
+	src, err := loki.New(loki.Options{Name: "lk", Client: bl, Parser: p, Selector: map[string]string{"env": "prod"},
+		InFlight: 2, Limit: 4, Now: func() time.Time { return t0.Add(2 * time.Hour) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := newFixture(t, "x\n", func(o *Options) {
+		o.Sources["lk"] = src
+		o.Limits.RemoteBytes = 40 << 10
+	})
+	qq := q(func(q *Query) {
+		q.From, q.To = t0, t0.Add(30*time.Minute)
+		q.Sources = []string{"lk"}
+		q.Where = []Pred{{Field: "level", Op: OpEq, Value: raw("error")}}
+		q.Limit = 200
+	})
+	var scanned int64
+	calls, n := 0, 0
+	for {
+		res, err := f.eng.Search(ctx, qq)
+		if err != nil {
+			t.Fatalf("call %d: %v", calls, err)
+		}
+		calls++
+		scanned += res.Scanned.Bytes
+		n += len(res.Records)
+		if res.Complete {
+			break
+		}
+		qq.Cursor = res.Cursor
+		if calls > 500 {
+			t.Fatal("does not end")
+		}
+	}
+	bl.mu.Lock()
+	served := bl.served
+	bl.mu.Unlock()
+	if n != 30 || calls < 3 {
+		t.Fatalf("%d records in %d calls", n, calls)
+	}
+	if scanned != served {
+		t.Fatalf("scanned %d, the source fetched %d", scanned, served)
+	}
+	if left := f.eng.ledger.bytesLeft("lk", true); f.eng.ledger.b.RemoteBytesPerHour-left != served {
+		t.Fatalf("charged %d, fetched %d", f.eng.ledger.b.RemoteBytesPerHour-left, served)
+	}
+}

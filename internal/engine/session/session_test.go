@@ -5,14 +5,19 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/DavidGodefroid/lockkit/console"
+
 	"github.com/DavidGodefroid/locklog/internal/config"
+	"github.com/DavidGodefroid/locklog/internal/engine"
 	"github.com/DavidGodefroid/locklog/internal/landlock"
 	"github.com/DavidGodefroid/locklog/internal/logconsole"
 	"github.com/DavidGodefroid/locklog/internal/mask"
@@ -332,6 +337,43 @@ func TestLimitsAndNames(t *testing.T) {
 	}
 }
 
+// TestAroundMethodsServed: the console serves every engine method, and
+// log.patterns, log.context, log.trace and log.tail reach the engine, masked.
+func TestAroundMethodsServed(t *testing.T) {
+	for _, m := range []string{engine.MethodSearch, engine.MethodCount, engine.MethodPatterns, engine.MethodContext, engine.MethodTrace, engine.MethodTail} {
+		if !slices.Contains(logconsole.Methods, m) {
+			t.Errorf("%s not served", m)
+		}
+	}
+	f := newFixture(t, fileProfile, appLog)
+	s := open(t, f.options(nil))
+	res, ref := call(t, s, logconsole.MethodSearch, `{"from":"2026-10-30T13:00:00Z","to":"2026-10-30T14:00:00Z","limit":1}`)
+	if ref != nil {
+		t.Fatalf("refused: %+v", ref)
+	}
+	sr := res.(engine.SearchResult)
+	if len(sr.Records) == 0 {
+		t.Fatal("no record")
+	}
+	var r struct{ Ref string }
+	json.Unmarshal(sr.Records[0], &r)
+	for _, c := range []struct{ method, params string }{
+		{logconsole.MethodPatterns, `{"from":"2026-10-30T13:00:00Z","to":"2026-10-30T14:00:00Z"}`},
+		{logconsole.MethodContext, `{"ref":"` + r.Ref + `","before":1,"after":1}`},
+		{logconsole.MethodTrace, `{"id":"order-1","from":"2026-10-30T13:00:00Z","to":"2026-10-30T14:00:00Z"}`},
+		{logconsole.MethodTail, `{"duration":"1s","max":1}`},
+	} {
+		res, ref := call(t, s, c.method, c.params)
+		if ref != nil {
+			t.Fatalf("%s refused: %+v", c.method, ref)
+		}
+		out, _ := json.Marshal(res)
+		if strings.Contains(string(out), "jane") || strings.Contains(string(out), "Jane") {
+			t.Fatalf("%s unmasked: %s", c.method, out)
+		}
+	}
+}
+
 // log.patterns is served by an opened session: masked templates only.
 func TestOpenPatternsMasked(t *testing.T) {
 	f := newFixture(t, fileProfile, appLog)
@@ -353,3 +395,62 @@ func TestOpenPatternsMasked(t *testing.T) {
 		t.Errorf("top over the maximum: %+v", ref)
 	}
 }
+
+// TestSessionValueTools: the session serves log.lookup, log.unmask and
+// log.scan with the call's approver and peer; log.status shows the
+// budgets left; unmask = "never" refuses.
+func TestSessionValueTools(t *testing.T) {
+	f := newFixture(t, fileProfile, appLog)
+	s := open(t, f.options(nil))
+	st, _ := call(t, s, logconsole.MethodStatus, `{}`)
+	if b := st.(Status).Budgets; b.Local == nil || b.Local.BytesLeft != 40<<30 || b.LookupsLeft != 50 || b.Remote != nil {
+		t.Errorf("budgets = %+v", b)
+	}
+	res, _ := call(t, s, logconsole.MethodSearch, `{"from":"2026-10-30T13:00:00Z","to":"2026-10-30T14:00:00Z","where":[{"field":"level","op":"=","value":"error"}]}`)
+	sr := res.(engine.SearchResult)
+	var rec map[string]any
+	json.Unmarshal(sr.Records[0], &rec)
+	tok := regexpEmail.FindString(rec["msg"].(string))
+	lres, ref := call(t, s, logconsole.MethodLookup, `{"kind":"email","values":["jane.doe@example.com"]}`)
+	if ref != nil || lres.(engine.LookupResult).Pseudonyms[0] != tok {
+		t.Fatalf("lookup %+v %+v, want %s", lres, ref, tok)
+	}
+	um := `{"ref":"` + rec["ref"].(string) + `","pseudonyms":["` + tok + `"],"reason":"the user asked"}`
+	if _, ref := call(t, s, logconsole.MethodUnmask, um); ref == nil || ref.Info.Code != engine.EApproval || ref.Info.Retry != "ask_user" {
+		t.Fatalf("no approver: %+v", ref)
+	}
+	var screens []console.Screen
+	ctx := logconsole.WithApprove(context.Background(), func(_ context.Context, sc console.Screen) console.Approval {
+		screens = append(screens, sc)
+		return console.Approval{Approved: true}
+	})
+	out, rf, err := s.Handle(ctx, logconsole.MethodUnmask, json.RawMessage(um), logconsole.Caller{UID: 1000, PID: 7})
+	if err != nil || rf != nil {
+		t.Fatalf("unmask: %v %+v", err, rf)
+	}
+	if v := out.(engine.UnmaskResult).Values; len(v) != 1 || v[0].Value != "jane.doe@example.com" {
+		t.Fatalf("unmask = %+v", v)
+	}
+	if len(screens) != 1 || !screens[0].NeverAuto || !screens[0].Red || screens[0].Header != "unmask · read-pii" {
+		t.Fatalf("screens %+v", screens)
+	}
+	// A denial is the console's answer, passed back as is.
+	deny := logconsole.WithApprove(context.Background(), func(context.Context, console.Screen) console.Approval {
+		return console.Approval{Refusal: console.ErrResp(0, 1, "no")}
+	})
+	_, _, err = s.Handle(deny, logconsole.MethodScan, json.RawMessage(`{"tool":"search","query":{"from":"2026-10-30T13:00:00Z","to":"2026-10-30T14:00:00Z"}}`), logconsole.Caller{UID: 1000})
+	var d *logconsole.Declined
+	if !errors.As(err, &d) || d.Resp.Error == nil || d.Resp.Error.Message != "no" {
+		t.Fatalf("denied scan: %v", err)
+	}
+
+	g := newFixture(t, func(logs string) string {
+		return strings.Replace(fileProfile(logs), "structured = \"redact-unknown\"", "structured = \"redact-unknown\"\nunmask = \"never\"", 1)
+	}, appLog)
+	s2 := open(t, g.options(nil))
+	if _, rf, _ := s2.Handle(ctx, logconsole.MethodUnmask, json.RawMessage(um), logconsole.Caller{}); rf == nil || rf.Info.Code != engine.EUnmaskNever {
+		t.Fatalf("never: %+v", rf)
+	}
+}
+
+var regexpEmail = regexp.MustCompile(`⟦email:[A-Z0-9]+⟧`)

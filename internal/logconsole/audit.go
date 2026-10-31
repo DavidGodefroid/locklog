@@ -21,6 +21,11 @@ type Record struct {
 	Sources []string `json:"sources,omitempty"`
 	From    string   `json:"from,omitempty"`
 	To      string   `json:"to,omitempty"`
+	// Tool is the tool an approved scan runs (log.scan).
+	Tool string `json:"tool,omitempty"`
+	// Pseudonyms name what an unmask revealed or a lookup resolved, by
+	// pseudonym only (never the clear values).
+	Pseudonyms []string `json:"pseudonyms,omitempty"`
 }
 
 // AuditEvent implements audit.Record.
@@ -42,6 +47,9 @@ func newRecord(ctx context.Context, env console.Env, method string, params json.
 		Sources []string `json:"sources"`
 		From    string   `json:"from"`
 		To      string   `json:"to"`
+		// A scan's tool and its parameters (the same scope inside).
+		Tool  string          `json:"tool"`
+		Query json.RawMessage `json:"query"`
 	}
 	known := map[string]bool{}
 	if p, ok := env.Policy().(Policy); ok {
@@ -49,7 +57,17 @@ func newRecord(ctx context.Context, env console.Env, method string, params json.
 			known[s.Name] = true
 		}
 	}
-	if json.Unmarshal(params, &scope) == nil {
+	ok := json.Unmarshal(params, &scope) == nil
+	if ok && method == MethodScan {
+		switch scope.Tool {
+		case "search", "count", "patterns", "trace":
+			r.Tool = scope.Tool
+		}
+		inner := scope.Query
+		scope.Sources, scope.From, scope.To = nil, "", ""
+		ok = json.Unmarshal(inner, &scope) == nil
+	}
+	if ok {
 		// Only names of the profile's sources: anything else the agent
 		// typed is its text, and may be a value.
 		for _, s := range scope.Sources {

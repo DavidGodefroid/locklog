@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"sync"
-	"time"
 
 	"github.com/DavidGodefroid/locklog/internal/config"
 	"github.com/DavidGodefroid/locklog/internal/egress"
@@ -111,56 +109,4 @@ func (s *Session) openRemote(ctx context.Context, c config.Source, o Options) (s
 // refused is the refusal of a profile by a connection check.
 func refused(err error) error {
 	return fmt.Errorf("the connection checks refuse this profile: %w", err)
-}
-
-// rateLimiter paces the remote requests of the agent's calls, the
-// rolling budget limits.remote.requests_per_minute: a token bucket that
-// refills perMinute tokens a minute and holds at most a minute of them.
-// It implements source.Limiter.
-type rateLimiter struct {
-	mu     sync.Mutex
-	rate   float64 // tokens per second
-	burst  float64
-	tokens float64
-	last   time.Time
-	now    func() time.Time
-}
-
-func newRateLimiter(perMinute int, now func() time.Time) *rateLimiter {
-	if perMinute <= 0 {
-		return nil
-	}
-	if now == nil {
-		now = time.Now
-	}
-	burst := float64(perMinute)
-	return &rateLimiter{rate: float64(perMinute) / 60, burst: burst, tokens: burst, now: now}
-}
-
-// Wait implements source.Limiter.
-func (l *rateLimiter) Wait(ctx context.Context) error {
-	for {
-		l.mu.Lock()
-		now := l.now()
-		if !l.last.IsZero() && now.After(l.last) {
-			l.tokens = min(l.burst, l.tokens+now.Sub(l.last).Seconds()*l.rate)
-		}
-		if l.last.IsZero() || now.After(l.last) {
-			l.last = now
-		}
-		if l.tokens >= 1 {
-			l.tokens--
-			l.mu.Unlock()
-			return nil
-		}
-		wait := time.Duration((1 - l.tokens) / l.rate * float64(time.Second))
-		l.mu.Unlock()
-		t := time.NewTimer(max(wait, time.Millisecond))
-		select {
-		case <-ctx.Done():
-			t.Stop()
-			return ctx.Err()
-		case <-t.C:
-		}
-	}
 }

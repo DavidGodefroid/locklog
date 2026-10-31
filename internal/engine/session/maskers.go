@@ -60,6 +60,18 @@ func (ms *maskers) TrustedValue(src, path, v string) string {
 	return ms.of(src).TrustedValue(src, path, v)
 }
 
+// MaskClear implements engine.ClearMasker.
+func (ms *maskers) MaskClear(src string, ev parse.Event) (mask.Record, map[string]string) {
+	return ms.of(src).MaskClear(src, ev)
+}
+
+// Lookup implements engine.Lookuper: a value is looked up as free text,
+// with the base masker (a pseudonym is the same in every source).
+func (ms *maskers) Lookup(kind, value string) (string, error) { return ms.base.Lookup(kind, value) }
+
+// DetectorKinds implements engine.Lookuper.
+func (ms *maskers) DetectorKinds() []string { return ms.base.DetectorKinds() }
+
 // Epoch implements engine.Masker.
 func (ms *maskers) Epoch() string { return ms.base.Epoch() }
 
