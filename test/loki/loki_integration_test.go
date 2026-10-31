@@ -178,10 +178,26 @@ func TestLokiSourceAgainstLoki(t *testing.T) {
 			}
 		}
 	}
-	// Server-side selection on a trusted label and trusted metadata.
+	// Server-side selection on a trusted label; the trusted metadata term
+	// is not pushed down (a | filter also matches stream labels): it
+	// matches locally, on the categorized metadata.
 	sel := source.Selector{Terms: []source.Term{{Field: "level", Op: "=", Values: []string{"error"}}, {Field: "trace_id", Op: "=", Values: []string{"t7"}}}}
-	if got := scan(t, s, r, sel); len(got) != 2 { // entries 35 and 39
-		t.Fatalf("selected %d records, want 2", len(got))
+	got := scan(t, s, r, sel)
+	if len(got) != n/4 {
+		t.Fatalf("selected %d records, want the %d errors", len(got), n/4)
+	}
+	matched := 0
+	for _, rec := range got {
+		vals := map[string]string{}
+		for _, a := range rec.Event.Attrs {
+			vals[a.Key] = a.Value.Str
+		}
+		if sel.Match(vals) {
+			matched++
+		}
+	}
+	if matched != 2 { // entries 35 and 39
+		t.Fatalf("%d records match locally, want 2", matched)
 	}
 	// Metric counts are exactly the engine's buckets, [b, b+5m) from From:
 	// From in, To out, an edge entry in the bucket it starts.
@@ -218,8 +234,8 @@ func TestLokiSourceAgainstLoki(t *testing.T) {
 		t.Fatalf("instant count %+v, want %d at %v", one.Rows, inRange, r.From)
 	}
 	// Reread.
-	got, err := s.Reread(context.Background(), recs[100].Ref)
-	if err != nil || got.Event.Raw != recs[100].Event.Raw {
+	again, err := s.Reread(context.Background(), recs[100].Ref)
+	if err != nil || again.Event.Raw != recs[100].Event.Raw {
 		t.Fatalf("reread: %v", err)
 	}
 	sch, err := s.Describe(context.Background())

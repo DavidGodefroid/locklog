@@ -1,9 +1,9 @@
 // Package loki is the Loki log source. It sends only allowlisted read
 // requests through the egress client, selects server-side by time and by
-// trusted labels and structured metadata only (text is matched locally,
-// after masking), drops every untrusted label and metadata field from what
-// it returns, and plans fixed time slices whose cost is the bytes actually
-// fetched.
+// trusted stream labels only (trusted structured metadata and text are
+// matched locally, after masking), drops every untrusted label and metadata
+// field from what it returns, and plans fixed time slices whose cost is the
+// bytes actually fetched.
 package loki
 
 import (
@@ -125,17 +125,23 @@ func (s *Source) Kind() string { return Kind }
 func (s *Source) trustedLabel(n string) bool { return slices.Contains(s.o.TrustedLabels, n) }
 func (s *Source) trustedMeta(n string) bool  { return slices.Contains(s.o.TrustedMetadata, n) }
 
-// pushable reports whether a term means the same in Loki as locally: one
-// on a trusted label or metadata field, without an empty value (Loki's
-// x="" also matches an absent x, and x!="" means "present", where
+// pushable reports whether a term means the same in Loki as locally: a
+// term on a trusted stream label, without an empty value (Loki's x="" also
+// matches an absent x, and x!="" means "present", where
 // source.Selector.Match needs x present and empty for = "").
+//
+// Terms on trusted structured metadata are never pushed: a LogQL
+// | name="v" filter matches a stream label of that name as well as the
+// metadata, and anyone who writes to Loki can add such a label to a
+// stream. They are evaluated locally, on the metadata the categorized
+// response returns apart from the labels.
 func (s *Source) pushable(t source.Term) bool {
-	return (s.trustedLabel(t.Field) || s.trustedMeta(t.Field)) && len(t.Values) > 0 && !slices.Contains(t.Values, "")
+	return s.trustedLabel(t.Field) && len(t.Values) > 0 && !slices.Contains(t.Values, "")
 }
 
 // selector builds the server-side selector: the profile's, plus the
-// pushable terms. Other terms are ignored here (the engine evaluates every
-// term after masking).
+// pushable terms as stream matchers. Other terms are ignored here (the
+// engine evaluates every term after masking).
 func (s *Source) selector(sel source.Selector) Selector {
 	var out Selector
 	for k, v := range s.o.Selector {
@@ -145,26 +151,19 @@ func (s *Source) selector(sel source.Selector) Selector {
 		if !s.pushable(t) {
 			continue
 		}
-		var m Matcher
 		switch t.Op {
 		case "=", "in":
-			m = Matcher{Name: t.Field, Op: "=~", Values: t.Values}
+			m := Matcher{Name: t.Field, Op: "=~", Values: t.Values}
 			if len(t.Values) == 1 {
-				m = Matcher{Name: t.Field, Op: "=", Values: t.Values}
+				m.Op = "="
 			}
-		case "!=":
-			m = Matcher{Name: t.Field, Op: "!~", Values: t.Values}
-			if len(t.Values) == 1 {
-				m = Matcher{Name: t.Field, Op: "!=", Values: t.Values}
-			}
-		default:
-			continue
-		}
-		switch {
-		case s.trustedLabel(t.Field):
 			out.Stream = append(out.Stream, m)
-		case s.trustedMeta(t.Field):
-			out.Meta = append(out.Meta, m)
+		case "!=":
+			m := Matcher{Name: t.Field, Op: "!~", Values: t.Values}
+			if len(t.Values) == 1 {
+				m.Op = "!="
+			}
+			out.Stream = append(out.Stream, m)
 		}
 	}
 	return out
@@ -660,7 +659,7 @@ type vectorResponse struct {
 // one asked for) makes the count not served (source.ErrNotIndexable).
 //
 // Also not served: a count by an untrusted label or by structured metadata,
-// a term on an untrusted field or with an empty value, a bucket that is
+// a term on anything but a trusted stream label or with an empty value, a bucket that is
 // not whole seconds or that cuts the range into more than 11000 points, and
 // a bucketed range whose ends are not multiples of the bucket since the
 // epoch.

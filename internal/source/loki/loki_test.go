@@ -78,6 +78,14 @@ func matches(ms [][3]string, l map[string]string) bool {
 	return true
 }
 
+// merged is what a LogQL | name=... filter sees: the stream labels and the
+// structured metadata of an entry (metadata wins on a shared name).
+func merged(e fakeEntry) map[string]string {
+	m := maps.Clone(e.labels)
+	maps.Copy(m, e.meta)
+	return m
+}
+
 var metricRe = regexp.MustCompile(`^sum by \(([^)]*)\) \(count_over_time\((.*) \[(\d+)s\]( offset ([0-9a-z]+))?\)\)$`)
 
 func (f *fakeLoki) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -180,7 +188,7 @@ func (f *fakeLoki) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		limit, _ := strconv.Atoi(q.Get("limit"))
 		var hits []fakeEntry
 		for _, e := range f.entries {
-			if e.ts >= start && e.ts <= end && matches(sel.stream, e.labels) && matches(sel.meta, e.meta) {
+			if e.ts >= start && e.ts <= end && matches(sel.stream, e.labels) && matches(sel.meta, merged(e)) {
 				hits = append(hits, e)
 			}
 		}
@@ -265,7 +273,7 @@ func (f *fakeLoki) metric(w http.ResponseWriter, m []string, start, end int64, s
 		counts := map[string]int{}
 		metrics := map[string]map[string]string{}
 		for _, e := range f.entries {
-			if e.ts > t-off-rng && e.ts <= t-off && matches(sel.stream, e.labels) && matches(sel.meta, e.meta) {
+			if e.ts > t-off-rng && e.ts <= t-off && matches(sel.stream, e.labels) && matches(sel.meta, merged(e)) {
 				mm := map[string]string{}
 				for _, l := range by {
 					if v, ok := e.labels[l]; ok {
@@ -492,8 +500,8 @@ func TestTrustedTermsGoServerSide(t *testing.T) {
 	s := newSource(t, f, nil)
 	sel := source.Selector{Terms: []source.Term{
 		{Field: "level", Op: "in", Values: []string{"error", "warn"}},
-		{Field: "trace_id", Op: "=", Values: []string{"t3"}},
-		{Field: "status", Op: "=", Values: []string{"500"}}, // not a label: evaluated locally
+		{Field: "trace_id", Op: "=", Values: []string{"t3"}}, // metadata: evaluated locally
+		{Field: "status", Op: "=", Values: []string{"500"}},  // not a label: evaluated locally
 	}}
 	recs := scanAll(t, s, source.Range{From: t0, To: t0.Add(time.Hour)}, sel)
 	for _, r := range recs {
@@ -509,7 +517,7 @@ func TestTrustedTermsGoServerSide(t *testing.T) {
 	}
 	want := 0
 	for _, e := range f.entries {
-		if (e.labels["level"] == "error" || e.labels["level"] == "warn") && e.meta["trace_id"] == "t3" {
+		if e.labels["level"] == "error" || e.labels["level"] == "warn" {
 			want++
 		}
 	}
@@ -517,12 +525,58 @@ func TestTrustedTermsGoServerSide(t *testing.T) {
 		t.Fatalf("%d records, want %d", len(recs), want)
 	}
 	for _, q := range f.queries {
-		if strings.Contains(q, "status") || strings.Contains(q, "500") {
-			t.Fatalf("an untrusted term reached Loki: %s", q)
+		if strings.Contains(q, "status") || strings.Contains(q, "500") || strings.Contains(q, "trace_id") {
+			t.Fatalf("a term other than a trusted label reached Loki: %s", q)
 		}
 		if !strings.Contains(q, `env="prod"`) {
 			t.Fatalf("the profile selector is missing: %s", q)
 		}
+	}
+}
+
+func TestStreamLabelShadowingMetadata(t *testing.T) {
+	// Anyone who writes to Loki can add a stream label named like trusted
+	// metadata; a | trace_id="x" filter would match it. Metadata terms are
+	// never pushed down, so it cannot select records or counts, and a
+	// record's trace_id is its metadata only.
+	f := &fakeLoki{entries: dataset(40)}
+	for i := 0; i < 5; i++ {
+		f.entries = append(f.entries, fakeEntry{ts: t0.Add(time.Duration(i) * time.Second).UnixNano(),
+			labels: map[string]string{"env": "prod", "app": "api", "level": "info", "trace_id": "t3"},
+			meta:   map[string]string{"trace_id": "forged"}, line: "shadow"})
+		f.entries = append(f.entries, fakeEntry{ts: t0.Add(time.Duration(i) * time.Second).UnixNano(),
+			labels: map[string]string{"env": "prod", "app": "api", "level": "info", "trace_id": "t3"}, line: "shadow, no metadata"})
+	}
+	s := newSource(t, f, nil)
+	r := source.Range{From: t0, To: t0.Add(time.Hour)}
+	sel := source.Selector{Terms: []source.Term{{Field: "trace_id", Op: "=", Values: []string{"t3"}}}}
+	recs := scanAll(t, s, r, sel)
+	if len(recs) != len(f.entries) {
+		t.Fatalf("%d records, want all %d (the engine filters)", len(recs), len(f.entries))
+	}
+	matched := 0
+	for _, rec := range recs {
+		vals := map[string]string{}
+		for _, a := range rec.Event.Attrs {
+			vals[a.Key] = a.Value.Str
+		}
+		if strings.HasPrefix(rec.Event.Raw, "shadow") && vals["trace_id"] == "t3" {
+			t.Fatalf("a stream label passed for trusted metadata: %+v", rec.Event.Attrs)
+		}
+		if sel.Match(vals) {
+			matched++
+		}
+	}
+	if matched != 5 { // dataset entries 15..19
+		t.Fatalf("%d records match trace_id=t3 locally, want 5", matched)
+	}
+	for _, q := range f.queries {
+		if strings.Contains(q, "trace_id") {
+			t.Fatalf("a metadata term reached Loki: %s", q)
+		}
+	}
+	if _, err := s.IndexCounts(ctx, source.CountQuery{Range: source.Range{From: t0, To: t0.Add(20 * time.Minute)}, Bucket: 5 * time.Minute, Selector: sel}); !errors.Is(err, source.ErrNotIndexable) {
+		t.Fatalf("a count on metadata served by Loki: %v", err)
 	}
 }
 

@@ -20,8 +20,9 @@ type Matcher struct {
 }
 
 // Selector is what locklog sends Loki: stream matchers (the profile's
-// selector ANDed with trusted-label terms) and filters on trusted structured
-// metadata. Text never goes to Loki.
+// selector ANDed with trusted-label terms) and, in the grammar, | filters
+// on structured metadata. The source sends no Meta filters (a | filter also
+// matches stream labels: see Source.pushable). Text never goes to Loki.
 type Selector struct {
 	Stream []Matcher
 	Meta   []Matcher
