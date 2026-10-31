@@ -46,6 +46,8 @@ type fakeLoki struct {
 	inflight int32
 	maxIn    int32
 	delay    time.Duration
+	// metaQueries are the query parameters of the label requests.
+	metaQueries []string
 	// ignoreOffset evaluates metric queries without their offset (a
 	// backend whose grid is not the one asked for).
 	ignoreOffset bool
@@ -90,10 +92,29 @@ func (f *fakeLoki) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.mu.Unlock()
 	q := r.URL.Query()
 	categorize := r.Header.Get("X-Loki-Response-Encoding-Flags") == "categorize-labels"
+	// The label endpoints describe the streams their query selects (all
+	// of them without one).
+	var metaSel [][3]string
+	if strings.HasPrefix(r.URL.Path, "/loki/api/v1/label") {
+		f.mu.Lock()
+		f.metaQueries = append(f.metaQueries, q.Get("query"))
+		f.mu.Unlock()
+		if qq := q.Get("query"); qq != "" {
+			sel, err := parseQuery(qq)
+			if err != nil {
+				http.Error(w, "parse error", 400)
+				return
+			}
+			metaSel = sel.stream
+		}
+	}
 	switch {
 	case r.URL.Path == "/loki/api/v1/labels":
 		set := map[string]bool{"__stream_shard__": true}
 		for _, e := range f.entries {
+			if !matches(metaSel, e.labels) {
+				continue
+			}
 			for k := range e.labels {
 				set[k] = true
 			}
@@ -108,7 +129,7 @@ func (f *fakeLoki) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		name := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/loki/api/v1/label/"), "/values")
 		set := map[string]bool{}
 		for _, e := range f.entries {
-			if v, ok := e.labels[name]; ok {
+			if v, ok := e.labels[name]; ok && matches(metaSel, e.labels) {
 				set[v] = true
 			}
 		}
@@ -608,11 +629,22 @@ func TestMetricCounts(t *testing.T) {
 }
 
 func TestDescribeAsksValuesOfTrustedLabelsOnly(t *testing.T) {
-	f := &fakeLoki{entries: dataset(50)}
+	// Another profile's stream: neither its label names nor its values
+	// are described.
+	f := &fakeLoki{entries: append(dataset(50), fakeEntry{ts: t0.UnixNano(), labels: map[string]string{"env": "dev", "level": "dev-only", "dev_secret_label": "x"}, line: "x"})}
 	s := newSource(t, f, nil)
 	sch, err := s.Describe(ctx)
 	if err != nil {
 		t.Fatal(err)
+	}
+	want, _ := s.selector(source.Selector{}).Render()
+	if len(f.metaQueries) < 2 {
+		t.Fatalf("%d label requests", len(f.metaQueries))
+	}
+	for _, q := range f.metaQueries {
+		if q != want {
+			t.Fatalf("a label request carries query %q, want the profile selector %q", q, want)
+		}
 	}
 	for _, p := range f.requests {
 		if strings.HasPrefix(p, "/loki/api/v1/label/") && !strings.HasPrefix(p, "/loki/api/v1/label/app/") && !strings.HasPrefix(p, "/loki/api/v1/label/level/") {
@@ -625,6 +657,9 @@ func TestDescribeAsksValuesOfTrustedLabelsOnly(t *testing.T) {
 	}
 	if _, ok := names["__stream_shard__"]; ok {
 		t.Fatal("Loki's shard label shown")
+	}
+	if _, ok := names["dev_secret_label"]; ok {
+		t.Fatal("a label of another profile's streams described")
 	}
 	if !slices.Equal(names["level"].Values, []string{"error", "info", "warn"}) || names["pod"].Values != nil || names["pod"].Trusted {
 		t.Fatalf("%+v", sch.Fields)

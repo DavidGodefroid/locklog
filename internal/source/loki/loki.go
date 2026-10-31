@@ -539,11 +539,18 @@ type labelsResponse struct {
 
 // Describe lists the trusted labels and metadata fields with the trusted
 // labels' values (asked only for trusted labels), the names of other labels
-// (masked by the caller), and the source kind.
+// (masked by the caller), and the source kind. Every label request carries
+// the profile's selector as its query: only the profile's streams are
+// described.
 func (s *Source) Describe(ctx context.Context) (source.Schema, error) {
 	sch := source.Schema{Kind: Kind, Format: s.o.Parser.Options().Format, Streams: 1}
+	sel, err := s.selector(source.Selector{}).Render()
+	if err != nil {
+		return sch, err
+	}
 	end := s.o.Now()
 	v := url.Values{}
+	v.Set("query", sel)
 	v.Set("start", strconv.FormatInt(end.Add(-24*time.Hour).UnixNano(), 10))
 	v.Set("end", strconv.FormatInt(end.UnixNano(), 10))
 	body, err := s.do(ctx, "/loki/api/v1/labels", v)
