@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/DavidGodefroid/lockkit/audit"
 	"github.com/DavidGodefroid/lockkit/console"
@@ -133,9 +134,10 @@ func TestConnectChecksMounts(t *testing.T) {
 			"LOCKLOG_EXPECT_ROOTS": devInoOf(t, logs) + " " + logs + ";",
 		}[k]
 	})
-	if !good.InContainer {
-		t.Fatal("FromEnv: not in the container")
+	if good.InContainer {
+		t.Fatal("FromEnv decided InContainer")
 	}
+	good.InContainer = true
 	b := New(good)
 	pol, err := b.LoadPolicy()
 	if err != nil {
@@ -163,6 +165,8 @@ func TestConnectChecksMounts(t *testing.T) {
 		{"malformed", func(o *Options) { o.ExpectRoots = "garbage;" }, "malformed entry"},
 		{"relative", func(o *Options) { o.ExpectRoots = "1:2 rel;" }, "malformed entry"},
 		{"missing root", func(o *Options) { o.ExpectRoots = "1:2 /nonexistent-locklog-root;" }, "nonexistent"},
+		{"empty path", func(o *Options) { o.ExpectRoots = "1:2 ;" }, "malformed entry"},
+		{"no project", func(o *Options) { o.Root = "" }, "no project"},
 	} {
 		o := good
 		tt.mod(&o)
@@ -179,6 +183,26 @@ func TestConnectChecksMounts(t *testing.T) {
 	o.ExpectRoots = devInoOf(t, logs) + " " + link + ";"
 	if _, err := New(o).Connect(context.Background(), console.Credentials{Policy: pol}); err == nil || !strings.Contains(err.Error(), "not a directory") {
 		t.Errorf("link: %v", err)
+	}
+	// LoadPolicy checks before it reads the file.
+	o = good
+	o.ExpectDir = "1:2"
+	if _, err := New(o).LoadPolicy(); err == nil || !strings.Contains(err.Error(), "not the directory the launcher checked") {
+		t.Errorf("LoadPolicy before the check: %v", err)
+	}
+	// A .locklog swapped for a link.
+	lroot := t.TempDir()
+	if err := os.Symlink(filepath.Join(root, ".locklog"), filepath.Join(lroot, ".locklog")); err != nil {
+		t.Fatal(err)
+	}
+	o = good
+	o.Root = lroot
+	if err := CheckMounts(o); err == nil || !strings.Contains(err.Error(), "not a directory") {
+		t.Errorf(".locklog link: %v", err)
+	}
+	// Not a locklog policy.
+	if _, err := New(good).Connect(context.Background(), console.Credentials{}); err == nil {
+		t.Error("Connect without a policy")
 	}
 	// Outside the container (tests, a developer's build) nothing is checked.
 	if _, err := New(Options{Profile: "staging", Root: root, Open: open}).Connect(context.Background(), console.Credentials{Policy: pol}); err != nil {
@@ -206,11 +230,12 @@ func TestChecksNetwork(t *testing.T) {
 		{"local profile with LOCKLOG_NETWORK", localCfg, "shop", false},
 		{"remote source", localCfg + lokiCfg, "loki_net", false},
 	} {
-		b := New(Options{Profile: "staging", Root: project(t, tt.cfg), Network: tt.network, InContainer: true, SysClassNet: net, Open: open})
+		b := New(Options{Profile: "staging", Root: project(t, tt.cfg), Network: tt.network, SysClassNet: net, Open: open})
 		pol, err := b.LoadPolicy()
 		if err != nil {
 			t.Fatal(err)
 		}
+		b.o.InContainer = true
 		s := &session{engine: eng, policy: pol.(Policy)}
 		f := b.Checks(context.Background(), s)
 		if (len(f) > 0 && f[0].Refuse) != tt.refuse {
@@ -226,7 +251,18 @@ type fakeEnv struct {
 	policy   console.Policy
 	records  []audit.Record
 	failSave bool
+	leveled  int
+	lines    []string
 }
+
+func (e *fakeEnv) Level(context.Context, time.Time) { e.leveled++ }
+func (e *fakeEnv) Println(l string)                 { e.lines = append(e.lines, l) }
+func (e *fakeEnv) Safe(s string) string             { return s }
+
+// noAuditEnv is a console without WriteAudit.
+type noAuditEnv struct{ *fakeEnv }
+
+func (noAuditEnv) WriteAudit() {}
 
 func (e *fakeEnv) Session(context.Context) (console.Session, error) { return e.sess, nil }
 func (e *fakeEnv) Policy() console.Policy                           { return e.policy }
@@ -254,7 +290,7 @@ func TestHandlers(t *testing.T) {
 			t.Errorf("method %s not served", m)
 		}
 	}
-	params := json.RawMessage(`{"sources":["nginx","BAD NAME"],"from":"2026-10-30T13:00:00Z","to":"2026-10-30T15:00:00Z","text":"jane@example.com"}`)
+	params := json.RawMessage(`{"sources":["nginx","BAD NAME","jane-doe"],"from":"2026-10-30T13:00:00Z","to":"+32470123456","text":"jane@example.com"}`)
 	ctx := console.WithPeer(context.Background(), ipc.Cred{UID: 1000, PID: 42})
 	resp := ms[MethodSearch](ctx, ipc.Request{ID: 7, Method: MethodSearch, Params: params}, env)
 	if resp.Error != nil || !strings.Contains(string(resp.Result), "⟦email:7F3KQ2M9ZD4X⟧") {
@@ -273,7 +309,7 @@ func TestHandlers(t *testing.T) {
 		t.Errorf("record = %s", raw)
 	}
 	// The agent's predicates and values never reach the audit.
-	if strings.Contains(string(raw), "jane") || strings.Contains(string(raw), "BAD NAME") || strings.Contains(string(raw), "⟦") {
+	if strings.Contains(string(raw), "jane") || strings.Contains(string(raw), "BAD NAME") || strings.Contains(string(raw), "⟦") || strings.Contains(string(raw), "32470") {
 		t.Errorf("record holds call content: %s", raw)
 	}
 
@@ -291,13 +327,19 @@ func TestHandlers(t *testing.T) {
 	}
 
 	// An engine failure: internal, sanitised.
-	eng.refuse, eng.err = nil, errors.New("dial https://reader:hunter2@loki.example.com: refused")
+	eng.refuse, eng.err = nil, errors.New(`dial https://reader:hunter2@loki.example.com: parsing "jane@example.com": refused`)
 	resp = ms[MethodStatus](ctx, ipc.Request{ID: 9, Method: MethodStatus}, env)
-	if resp.Error == nil || resp.Error.Code != ipc.CodeInternal || strings.Contains(resp.Error.Message, "hunter2") {
+	if resp.Error == nil || resp.Error.Code != ipc.CodeInternal || resp.Error.Message != errEngineText {
 		t.Errorf("failure: %+v", resp.Error)
 	}
-	if r := env.records[2].(Record); r.Decision != "failed" || strings.Contains(r.Error, "hunter2") {
+	if r := env.records[2].(Record); r.Decision != "failed" || r.Error != errEngineText {
 		t.Errorf("failure record: %+v", r)
+	}
+	if len(env.lines) != 1 || strings.Contains(env.lines[0], "hunter2") || !strings.Contains(env.lines[0], "jane@example.com") {
+		t.Errorf("console line: %q", env.lines)
+	}
+	if env.leveled != 3 {
+		t.Errorf("Level called %d times, want 3", env.leveled)
 	}
 
 	// No answer leaves unaudited.
@@ -306,6 +348,45 @@ func TestHandlers(t *testing.T) {
 	resp = ms[MethodSources](ctx, ipc.Request{ID: 10, Method: MethodSources}, env)
 	if resp.Error == nil || resp.Result != nil || !strings.Contains(resp.Error.Message, "could not be audited") {
 		t.Errorf("unaudited: %+v", resp)
+	}
+	// A console without the fail-closed write refuses too.
+	env.failSave = false
+	resp = ms[MethodSources](ctx, ipc.Request{ID: 11, Method: MethodSources}, noAuditEnv{env})
+	if resp.Error == nil || resp.Result != nil {
+		t.Errorf("no WriteAudit: %+v", resp)
+	}
+}
+
+func TestInImageAndProfileHost(t *testing.T) {
+	none := func(string) (os.FileInfo, error) { return nil, os.ErrNotExist }
+	some := func(string) (os.FileInfo, error) { return nil, nil }
+	if !InImage(10051, none) || InImage(1000, none) || !InImage(1000, some) {
+		t.Error("InImage")
+	}
+	p, err := New(Options{Profile: "staging", Root: project(t, localCfg+strings.Replace(lokiCfg, "https://loki.example.com", "https://loki.example.com:3101", 1)), Network: "n"}).LoadPolicy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pr := p.Profile(); pr.Host != "loki.example.com" || pr.Port != 3101 || pr.DefaultPort != 443 {
+		t.Errorf("host/port = %q %d %d", pr.Host, pr.Port, pr.DefaultPort)
+	}
+}
+
+func TestChecksInterfacesError(t *testing.T) {
+	b := New(Options{Profile: "staging", Root: project(t, localCfg), InContainer: true, SysClassNet: "/nonexistent-sys-class-net"})
+	if _, err := b.LoadPolicy(); err == nil {
+		// InContainer without EXPECT_DIR: LoadPolicy refuses already.
+		t.Fatal("LoadPolicy in the container without LOCKLOG_EXPECT_DIR")
+	}
+	b2 := New(Options{Profile: "staging", Root: project(t, localCfg)})
+	pol, err := b2.LoadPolicy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.o.InContainer = true
+	f := b.Checks(context.Background(), &session{engine: &fakeEngine{}, policy: pol.(Policy)})
+	if len(f) != 1 || !f[0].Refuse {
+		t.Errorf("findings = %+v", f)
 	}
 }
 

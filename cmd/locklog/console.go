@@ -52,10 +52,26 @@ func consoleCmd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "locklog console:", err)
 		return 1
 	}
-	root, ok := kconfig.FindProjectRoot(product.P, cwd)
-	if !ok {
-		fmt.Fprintln(stderr, "locklog console: no .locklog/ here or above: run locklog setup first")
-		return 1
+	o := logconsole.FromEnv(logconsole.Options{Open: openEngine}, os.Getenv)
+	o.InContainer = logconsole.InImage(os.Getuid(), os.Stat)
+	var root string
+	if o.InContainer {
+		// The launcher starts the console in the project it checked: the
+		// project is this directory, never an ancestor a walk would find,
+		// and it is checked before anything in it is read.
+		root = cwd
+		o.Root = root
+		if err := logconsole.CheckMounts(o); err != nil {
+			fmt.Fprintln(stderr, "locklog console:", err)
+			return 1
+		}
+	} else {
+		var ok bool
+		if root, ok = kconfig.FindProjectRoot(product.P, cwd); !ok {
+			fmt.Fprintln(stderr, "locklog console: no .locklog/ here or above: run locklog setup first")
+			return 1
+		}
+		o.Root = root
 	}
 	ps, err := config.LoadFile(kconfig.ProjectConfigPath(product.P, root))
 	if err != nil {
@@ -76,7 +92,8 @@ func consoleCmd(args []string, stdout, stderr io.Writer) int {
 	defer stop()
 	kp := product.P
 	kp.Version = strings.TrimPrefix(version, "v")
-	be := logconsole.New(logconsole.FromEnv(logconsole.Options{Profile: p.Name, Root: root, Open: openEngine}, os.Getenv))
+	o.Profile = p.Name
+	be := logconsole.New(o)
 	var iso *console.IsolationEnv
 	if len(uids) > 0 {
 		// Set by whoever starts the console (the human, the launcher, lock
