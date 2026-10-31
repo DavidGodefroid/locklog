@@ -3,6 +3,7 @@
 package landlock
 
 import (
+	"debug/elf"
 	"errors"
 	"fmt"
 	"os"
@@ -17,10 +18,24 @@ import (
 
 const childEnv = "LOCKLOG_LANDLOCK_TEST_CHILD"
 
-// TestRestrict restricts a re-executed child (Landlock cannot be undone):
-// writes beneath a read-only root fail with EACCES, reads there still
-// work, writes beneath the read-write root work, and paths outside every
-// rule are refused.
+// TestRestrict restricts a re-executed child (Landlock cannot be undone).
+// Beneath the read-only root, each write right is exercised alone and must
+// give EACCES: append write (WRITE_FILE), mknod of a regular file
+// (MAKE_REG), of a character and a block device (MAKE_CHAR, MAKE_BLOCK:
+// Landlock refuses before the CAP_MKNOD check), remove (REMOVE_FILE),
+// mkdir (MAKE_DIR), rmdir (REMOVE_DIR), symlink (MAKE_SYM), mkfifo
+// (MAKE_FIFO), unix socket bind (MAKE_SOCK), exec (EXECUTE, when the
+// binary is static, with a positive control under the exec root),
+// truncate (TRUNCATE, ABI >= 3) and a device ioctl on a read-only device
+// rule (IOCTL_DEV, ABI >= 5). Beneath the read-write root, writes, renames
+// across directories and sockets work, while exec, FIFOs, symbolic links,
+// devices and device ioctls are refused. Reads beneath the read-only root
+// work; paths outside every rule are refused. The same writes are refused
+// beneath the exec root. Adding any one of these rights to the read-only
+// rule fails the test, except REFER, which allows nothing without a MAKE_*
+// right there; so does adding any write right to the exec rule, and
+// EXECUTE, MAKE_SYM, MAKE_FIFO, MAKE_CHAR, MAKE_BLOCK or IOCTL_DEV to the
+// read-write rule (its other rights are granted already).
 func TestRestrict(t *testing.T) {
 	if os.Getenv(childEnv) != "" {
 		return // the child runs TestRestrictChild only
@@ -30,7 +45,8 @@ func TestRestrict(t *testing.T) {
 	}
 	base := t.TempDir()
 	ro, rw, out := filepath.Join(base, "ro"), filepath.Join(base, "rw"), filepath.Join(base, "outside")
-	for _, d := range []string{ro, rw, out, filepath.Join(ro, "d"), filepath.Join(ro, "s"), filepath.Join(rw, "a"), filepath.Join(rw, "b")} {
+	ex := filepath.Join(base, "ex")
+	for _, d := range []string{ro, rw, out, ex, filepath.Join(ro, "d"), filepath.Join(ro, "s"), filepath.Join(rw, "a"), filepath.Join(rw, "b"), filepath.Join(ex, "d")} {
 		if err := os.Mkdir(d, 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -38,14 +54,19 @@ func TestRestrict(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	os.Remove(filepath.Join(ro, "d", "f")) // an empty directory to remove
-	// A copy of this (static, cgo-free) test binary, to execute.
+	// Empty directories to remove.
+	os.Remove(filepath.Join(ro, "d", "f"))
+	os.Remove(filepath.Join(ex, "d", "f"))
+	// Copies of this test binary, to execute: refused beneath the
+	// read-only root, run beneath the exec root.
 	bin, err := os.ReadFile(os.Args[0])
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(ro, "bin"), bin, 0o755); err != nil {
-		t.Fatal(err)
+	for _, d := range []string{ro, rw, ex} {
+		if err := os.WriteFile(filepath.Join(d, "bin"), bin, 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 	cmd := exec.Command(os.Args[0], "-test.run=^TestRestrictChild$", "-test.v")
 	cmd.Env = append(os.Environ(), childEnv+"="+base)
@@ -64,8 +85,9 @@ func TestRestrictChild(t *testing.T) {
 	if base == "" {
 		t.Skip("run by TestRestrict")
 	}
-	ro, rw, out := filepath.Join(base, "ro"), filepath.Join(base, "rw"), filepath.Join(base, "outside")
-	st, err := Restrict(Rules{ReadOnly: []string{ro}, ReadWrite: []string{rw}, Exec: []string{"/nonexistent"}})
+	ro, rw, out, ex := filepath.Join(base, "ro"), filepath.Join(base, "rw"), filepath.Join(base, "outside"), filepath.Join(base, "ex")
+	// Device file rules: /dev/null read-only, /dev/zero read-write.
+	st, err := Restrict(Rules{ReadOnly: []string{ro, "/dev/null"}, ReadWrite: []string{rw, "/dev/zero"}, Exec: []string{ex}})
 	if errors.Is(err, syscall.ENOTSUP) {
 		fmt.Println("SKIP-CHILD: built with cgo: AllThreadsSyscall is unavailable")
 		return
@@ -74,9 +96,8 @@ func TestRestrictChild(t *testing.T) {
 		t.Fatalf("restrict: %+v %v", st, err)
 	}
 	// Beneath the read-only root, every kind of write is refused, each
-	// by its own right (a mutation that adds any one of them to the
-	// read-only set fails one of these).
-	refused := func(what string, err error, want ...error) {
+	// by its own right.
+	refusedIn := func(where, what string, err error, want ...error) {
 		t.Helper()
 		if len(want) == 0 {
 			want = []error{syscall.EACCES}
@@ -86,31 +107,66 @@ func TestRestrictChild(t *testing.T) {
 				return
 			}
 		}
-		t.Errorf("%s beneath the read-only root: %v", what, err)
+		t.Errorf("%s beneath the %s root: %v, want %v", what, where, err, want)
 	}
-	f, err := os.OpenFile(filepath.Join(ro, "f"), os.O_WRONLY|os.O_APPEND, 0)
-	if err == nil {
-		f.Close()
+	refused := func(what string, err error, want ...error) {
+		t.Helper()
+		refusedIn("read-only", what, err, want...)
 	}
-	refused("an append write (WRITE_FILE)", err)
-	refused("a create (MAKE_REG)", unix.Mknod(filepath.Join(ro, "new"), unix.S_IFREG|0o644, 0))
-	refused("a remove (REMOVE_FILE)", os.Remove(filepath.Join(ro, "f")))
-	refused("a mkdir (MAKE_DIR)", os.Mkdir(filepath.Join(ro, "nd"), 0o755))
-	refused("a rmdir (REMOVE_DIR)", os.Remove(filepath.Join(ro, "d")))
-	refused("a symlink (MAKE_SYM)", os.Symlink("f", filepath.Join(ro, "sym")))
-	refused("a mkfifo (MAKE_FIFO)", syscall.Mkfifo(filepath.Join(ro, "fifo"), 0o644))
-	refused("a unix socket bind (MAKE_SOCK)", bindUnix(filepath.Join(ro, "sock")))
-	// Its own standard files: os/exec would open /dev/null, outside every
-	// rule.
-	cmd := exec.Command(filepath.Join(ro, "bin"), "-test.run=^$")
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stderr, os.Stderr
-	refused("an exec (EXECUTE)", cmd.Run())
-	// A file linked from a read-only directory into another one: Landlock
-	// answers EXDEV when REFER is missing, EACCES for the missing MAKE_REG.
-	refused("a cross-directory link (REFER)", os.Link(filepath.Join(ro, "f"), filepath.Join(ro, "s", "g")), syscall.EXDEV, syscall.EACCES)
-	refused("a cross-directory rename (REFER)", os.Rename(filepath.Join(ro, "s", "f"), filepath.Join(ro, "d", "f")), syscall.EXDEV, syscall.EACCES)
-	if st.ABI >= 3 {
-		refused("a truncate (TRUNCATE)", os.Truncate(filepath.Join(ro, "f"), 0))
+	// The same writes are refused beneath the read-only and the exec
+	// roots.
+	for where, dir := range map[string]string{"read-only": ro, "exec": ex} {
+		f, err := os.OpenFile(filepath.Join(dir, "f"), os.O_WRONLY|os.O_APPEND, 0)
+		if err == nil {
+			f.Close()
+		}
+		refusedIn(where, "an append write (WRITE_FILE)", err)
+		refusedIn(where, "a create (MAKE_REG)", unix.Mknod(filepath.Join(dir, "new"), unix.S_IFREG|0o644, 0))
+		refusedIn(where, "a remove (REMOVE_FILE)", os.Remove(filepath.Join(dir, "f")))
+		refusedIn(where, "a mkdir (MAKE_DIR)", os.Mkdir(filepath.Join(dir, "nd"), 0o755))
+		refusedIn(where, "a rmdir (REMOVE_DIR)", os.Remove(filepath.Join(dir, "d")))
+		refusedIn(where, "a symlink (MAKE_SYM)", os.Symlink("f", filepath.Join(dir, "sym")))
+		refusedIn(where, "a mkfifo (MAKE_FIFO)", syscall.Mkfifo(filepath.Join(dir, "fifo"), 0o644))
+		refusedIn(where, "a unix socket bind (MAKE_SOCK)", bindUnix(filepath.Join(dir, "sock")))
+		// Exactly EACCES: EPERM would be the missing CAP_MKNOD, checked
+		// after Landlock.
+		refusedIn(where, "a character device (MAKE_CHAR)", unix.Mknod(filepath.Join(dir, "chr"), unix.S_IFCHR|0o644, int(unix.Mkdev(1, 3))))
+		refusedIn(where, "a block device (MAKE_BLOCK)", unix.Mknod(filepath.Join(dir, "blk"), unix.S_IFBLK|0o644, int(unix.Mkdev(7, 0))))
+		if st.ABI >= 3 {
+			refusedIn(where, "a truncate (TRUNCATE)", os.Truncate(filepath.Join(dir, "f"), 0))
+		}
+	}
+	if static(t, filepath.Join(ro, "bin")) {
+		run := func(p string) error {
+			// Its own standard files: os/exec would open /dev/null
+			// for them, a rule without exec rights here.
+			cmd := exec.Command(p, "-test.run=^$")
+			cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stderr, os.Stderr
+			return cmd.Run()
+		}
+		refused("an exec (EXECUTE)", run(filepath.Join(ro, "bin")))
+		refusedIn("read-write", "an exec (EXECUTE)", run(filepath.Join(rw, "bin")))
+		if err := run(filepath.Join(ex, "bin")); err != nil {
+			t.Errorf("exec beneath the exec root (control): %v", err)
+		}
+	}
+	// Links and renames between read-only directories are refused (EXDEV
+	// without REFER, EACCES without MAKE_REG or REMOVE_FILE).
+	refused("a cross-directory link", os.Link(filepath.Join(ro, "f"), filepath.Join(ro, "s", "g")), syscall.EXDEV, syscall.EACCES)
+	refused("a cross-directory rename", os.Rename(filepath.Join(ro, "s", "f"), filepath.Join(ro, "d", "f")), syscall.EXDEV, syscall.EACCES)
+	if st.ABI >= 5 {
+		// A device ioctl: EACCES from Landlock, not ENOTTY from the
+		// device, on a read-only and on a read-write device rule.
+		for where, dev := range map[string]string{"read-only": "/dev/null", "read-write": "/dev/zero"} {
+			fd, err := unix.Open(dev, unix.O_RDONLY|unix.O_CLOEXEC, 0)
+			if err != nil {
+				t.Errorf("open %s: %v", dev, err)
+				continue
+			}
+			_, err = unix.IoctlGetTermios(fd, unix.TCGETS)
+			unix.Close(fd)
+			refusedIn(where, "a device ioctl (IOCTL_DEV) on "+dev, err)
+		}
 	}
 	if b, err := os.ReadFile(filepath.Join(ro, "f")); err != nil || string(b) != "content" {
 		t.Errorf("read beneath a read-only root: %q %v", b, err)
@@ -133,12 +189,10 @@ func TestRestrictChild(t *testing.T) {
 		t.Errorf("unix socket beneath the read-write root: %v", err)
 	}
 	// Never granted, even read-write: FIFOs, symbolic links, devices.
-	if err := syscall.Mkfifo(filepath.Join(rw, "fifo"), 0o644); !errors.Is(err, syscall.EACCES) {
-		t.Errorf("a FIFO beneath the read-write root: %v", err)
-	}
-	if err := os.Symlink("h", filepath.Join(rw, "sym")); !errors.Is(err, syscall.EACCES) {
-		t.Errorf("a symbolic link beneath the read-write root: %v", err)
-	}
+	refusedIn("read-write", "a FIFO (MAKE_FIFO)", syscall.Mkfifo(filepath.Join(rw, "fifo"), 0o644))
+	refusedIn("read-write", "a symbolic link (MAKE_SYM)", os.Symlink("h", filepath.Join(rw, "sym")))
+	refusedIn("read-write", "a character device (MAKE_CHAR)", unix.Mknod(filepath.Join(rw, "chr"), unix.S_IFCHR|0o644, int(unix.Mkdev(1, 3))))
+	refusedIn("read-write", "a block device (MAKE_BLOCK)", unix.Mknod(filepath.Join(rw, "blk"), unix.S_IFBLK|0o644, int(unix.Mkdev(7, 0))))
 	if _, err := os.ReadFile(filepath.Join(out, "f")); !errors.Is(err, syscall.EACCES) {
 		t.Errorf("read outside every rule: %v", err)
 	}
@@ -192,6 +246,8 @@ func TestRestrictRefusesReadOnlyBeneathReadWrite(t *testing.T) {
 		{ReadOnly: []string{rw + "/./logs/"}, ReadWrite: []string{rw}},
 		{ReadOnly: []string{filepath.Join(base, "alias")}, ReadWrite: []string{rw}},
 		{Exec: []string{rw}, ReadWrite: []string{rw}},
+		{Exec: []string{base}, ReadWrite: []string{rw}},
+		{Exec: []string{rw}, ReadWrite: []string{filepath.Join(rw, "logs")}},
 		{ReadOnly: []string{"relative"}},
 	} {
 		if _, err := Restrict(r); err == nil {
@@ -202,4 +258,23 @@ func TestRestrictRefusesReadOnlyBeneathReadWrite(t *testing.T) {
 	if _, err := (Rules{ReadOnly: []string{base, filepath.Join(base, "missing")}, ReadWrite: []string{rw}}).resolve(); err != nil {
 		t.Errorf("a read-only parent refused: %v", err)
 	}
+}
+
+// static reports whether the ELF file at p has no interpreter (a static
+// binary runs without reading ld.so, outside every rule).
+func static(t *testing.T, p string) bool {
+	t.Helper()
+	f, err := elf.Open(p)
+	if err != nil {
+		t.Logf("exec checks skipped: %v", err)
+		return false
+	}
+	defer f.Close()
+	for _, ph := range f.Progs {
+		if ph.Type == elf.PT_INTERP {
+			t.Log("exec checks skipped: the test binary is dynamically linked")
+			return false
+		}
+	}
+	return true
 }

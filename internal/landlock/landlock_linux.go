@@ -81,10 +81,14 @@ func ABI() (int, string) {
 }
 
 // Restrict applies r to the whole process (no_new_privs first, as Landlock
-// requires without CAP_SYS_ADMIN). Without Landlock it confines nothing
-// and returns Unsupported with a nil error; an error means Landlock exists
-// but the ruleset could not be applied (nothing was restricted then,
-// except no_new_privs).
+// requires without CAP_SYS_ADMIN). Invalid rules (a relative path, a
+// read-only or exec path at or beneath a read-write one, a read-write path
+// at or beneath an exec one, an unresolvable path) return an error first,
+// on every system and whether or not Landlock is available; nothing is
+// restricted then. Without Landlock it confines nothing and returns
+// Unsupported with a nil error. Any other error means Landlock exists but
+// the ruleset could not be applied (nothing was restricted then, except
+// possibly no_new_privs).
 func Restrict(r Rules) (Status, error) {
 	r, err := r.resolve()
 	if err != nil {

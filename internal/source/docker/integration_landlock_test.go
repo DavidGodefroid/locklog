@@ -76,6 +76,13 @@ func TestIntegrationLandlockShm(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer unix.Close(rfd)
+	// Control: up to the mount point, the same resolution succeeds.
+	if fd, err := unix.Openat2(rfd, shmID+"/mounts", &unix.OpenHow{Flags: unix.O_PATH | unix.O_CLOEXEC,
+		Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_XDEV}); err != nil {
+		t.Errorf("control: openat2 RESOLVE_NO_XDEV of %s/mounts: %v", shmID[:12], err)
+	} else {
+		unix.Close(fd)
+	}
 	rel := shmID + "/mounts/shm/ll11-probe"
 	if fd, err := unix.Openat2(rfd, rel, &unix.OpenHow{Flags: unix.O_RDONLY | unix.O_CLOEXEC,
 		Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_XDEV}); !errors.Is(err, unix.EXDEV) {

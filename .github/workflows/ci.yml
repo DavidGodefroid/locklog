@@ -304,7 +304,7 @@ jobs:
           test -e "$sync/ready" || { docker logs "$R-reader"; exit 1; }
           # A probe anyone may write (0666 in the 1777 tmpfs): only Landlock
           # can refuse the reader's writes.
-          docker run -d --name "$R-shm" --ipc=shareable "$IMG" sh -c 'echo probe > /dev/shm/ll11-probe && chmod 0666 /dev/shm/ll11-probe && sleep 300'
+          docker run -d --name "$R-shm" --ipc=shareable "$IMG" sh -c 'echo probe > /dev/shm/.ll11-tmp && chmod 0666 /dev/shm/.ll11-tmp && mv /dev/shm/.ll11-tmp /dev/shm/ll11-probe && sleep 300'
           timeout 30 sh -c "until docker exec '$R-shm' test -e /dev/shm/ll11-probe; do sleep 0.2; done"
           docker inspect --format '{{.Id}}' "$R-shm" > "$sync/shm-id"
           rc=$(docker wait "$R-reader")

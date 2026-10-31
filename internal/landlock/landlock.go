@@ -85,7 +85,8 @@ func (s Status) String() string {
 // Rules are the paths granted: anything else is refused once restricted.
 // A missing path is skipped. Rules on nested paths add up, so a ReadOnly or
 // Exec path at or beneath a ReadWrite one is refused (it would be
-// writable).
+// writable), and so is a ReadWrite path at or beneath an Exec one (write
+// and execute).
 type Rules struct {
 	ReadOnly  []string
 	ReadWrite []string
@@ -124,10 +125,16 @@ func (r Rules) resolve() (Rules, error) {
 	if out.Exec, err = res(r.Exec); err != nil {
 		return Rules{}, err
 	}
+	beneath := func(p, d string) bool { return p == d || strings.HasPrefix(p, strings.TrimSuffix(d, "/")+"/") }
 	for _, w := range out.ReadWrite {
 		for _, p := range append(append([]string{}, out.ReadOnly...), out.Exec...) {
-			if p == w || strings.HasPrefix(p, strings.TrimSuffix(w, "/")+"/") {
+			if beneath(p, w) {
 				return Rules{}, fmt.Errorf("landlock: %s is beneath the read-write %s: it would be writable", p, w)
+			}
+		}
+		for _, x := range out.Exec {
+			if beneath(w, x) {
+				return Rules{}, fmt.Errorf("landlock: the read-write %s is beneath the exec %s: it could write what it runs", w, x)
 			}
 		}
 	}
