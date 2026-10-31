@@ -102,11 +102,9 @@ type held struct {
 // granule of a stream's held record is read again once the stream grows.
 // Journal entries are atomic and never held. A
 // stream first seen during the tail is scanned from its start (its records
-// still need a time from the start on). The first poll reads each stream's
-// last granule again, so a record dated from the start's second that was
-// already there is returned. Residuals: a record dated in the future that
-// was already in a stream's last granule at the start is returned; one
-// written with a time before the start is not.
+// still need a time from the start on). A record that was already there at
+// the start is never new, whatever its date; one written after it with a
+// time before the start (its second, for a byte stream) is not returned.
 //
 // Every record of a scanned granule is masked before evaluation, as in a
 // search; a poll's matches are kept only when it completes (stopping points
@@ -128,22 +126,21 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 	case tq.Max < 0 || tq.Max > e.o.Limits.MaxRecords:
 		return TailResult{}, refuse(EBadQuery, "max", "want 1 to %d", e.o.Limits.MaxRecords)
 	}
-	start := e.o.Now().UTC().Truncate(time.Second)
+	// New records are the ones written after the call starts: a byte
+	// stream's records past its end at the start (baseEnd), dated from
+	// the start's second (second-precision logs); a journal's entries,
+	// timestamped on receipt, dated from the start itself.
+	startExact := e.o.Now().UTC()
+	start := startExact.Truncate(time.Second)
 	q := Query{Sources: tq.Sources, Where: slices.Clone(tq.Where), Text: tq.Text, Regex: tq.Regex, Fields: tq.Fields,
 		Limit: tq.Max, From: start, To: start.Add(dur + time.Second)}
 	if err := e.validator(e.o.Limits.LocalRange).validate(&q); err != nil {
 		return TailResult{}, err
 	}
+	// No pre-filter: the held and frontier records must follow every
+	// record of a stream, not only the ones that may match.
 	var needles []string
-	if q.Text != "" {
-		needles = append(needles, q.Text)
-	}
-	for _, p := range q.Where {
-		if p.Op == OpContains {
-			needles = append(needles, p.needle)
-		}
-	}
-	filtered := e.o.Prefilter && len(needles) > 0
+	const filtered = false
 	poll := e.o.TailPoll
 	if poll <= 0 {
 		poll = DefaultTailPoll
@@ -189,6 +186,7 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 			done[k] = end
 		}
 	}
+	baseEnd := maps.Clone(done)
 
 	// known are the local streams seen at the start or in a completed
 	// poll; a stream first seen later may be a copy of one of them.
@@ -212,7 +210,6 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 	// rotated: a local stream appeared, went or shrank during the tail
 	// (rotation, truncation, a new file).
 	rotated := false
-	covering := false // a poll completed
 	type rkey struct {
 		k streamKey
 		p pos
@@ -238,6 +235,13 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 		k := keyOf(raw.Ref)
 		if t.Before(start) {
 			return
+		}
+		if e.o.Sources[raw.Ref.Source].Kind() == "journald" {
+			if t.Before(startExact) {
+				return
+			}
+		} else if be, ok := baseEnd[k]; ok && raw.Ref.Offset+raw.Ref.Length <= be {
+			return // there whole at the start
 		}
 		// Counted once per record; with the pre-filter on, not
 		// counted, as in run.
@@ -340,6 +344,7 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 			if d, ok := done[k]; ok && end != math.MaxInt64 && end < d {
 				rotated = true
 				done[k] = 0
+				delete(baseEnd, k)
 				delete(anchor, k)
 				delete(frontier, k)
 				delete(heldAll, k)
@@ -357,18 +362,6 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 				bound[k] = d
 				if h := heldAll[k]; h != nil {
 					bound[k] = min(d, h.raw.Ref.Offset)
-				}
-			}
-			// The first poll reads each stream's last granule at
-			// the start again: records dated from the start's
-			// second that were there already are returned whether
-			// or not the stream grows (an indexed granule dated
-			// before the start is not planned).
-			if d, ok := done[k]; ok && !covering && d > 0 && !e.remote(c.Source) && c.End() != math.MaxInt64 {
-				if b, set := bound[k]; set {
-					bound[k] = min(b, d-1)
-				} else {
-					bound[k] = d - 1
 				}
 			}
 		}
@@ -556,7 +549,6 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 		for k := range present {
 			known[k] = true
 		}
-		covering = true
 		// The held record of an original that is no longer planned
 		// is its copy's to evaluate.
 		for _, sk := range link {
