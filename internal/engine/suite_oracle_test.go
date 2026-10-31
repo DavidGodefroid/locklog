@@ -5,6 +5,7 @@ package engine
 import (
 	"fmt"
 	"maps"
+	"math"
 	"os"
 	"runtime"
 	"slices"
@@ -238,15 +239,7 @@ func mannWhitneyZ(a, b []time.Duration) float64 {
 	n1, n2 := float64(len(a)), float64(len(b))
 	mu := n1 * n2 / 2
 	sigma := (n1 * n2 * (n1 + n2 + 1) / 12)
-	return (u - mu) / sqrt(sigma)
-}
-
-func sqrt(x float64) float64 {
-	z := x
-	for range 50 {
-		z = (z + x/z) / 2
-	}
-	return z
+	return (u - mu) / math.Sqrt(sigma)
 }
 
 // latencySamples times a call on two fixtures, interleaved (a, b, a, b,
@@ -270,9 +263,10 @@ func latencySamples(sa, sb *suite, c agentCall, n int) ([]time.Duration, []time.
 // TestSuiteOracleLatency compares the time of calls whose needle is found
 // in the clear form of one set of planted values only (in every record),
 // on the production defaults (redact-unknown) and the non-production ones
-// (detect), both with mask-all, idle and under a CPU hog: the medians of
-// interleaved runs agree within a generous tolerance (25% + 5 ms) and a
-// Mann-Whitney test finds no difference (|z| < 4). The opt-in pre-filter
+// (detect), both with mask-all, idle and under a CPU hog, over 25
+// interleaved runs each: a call fails when its medians are more than 5% +
+// 5 ms apart and a Mann-Whitney test finds a difference (|z| > 4). The
+// opt-in pre-filter
 // (refused on production) is the control: there the needle's clear-text
 // matches decide what is masked, and the harness must see it.
 func TestSuiteOracleLatency(t *testing.T) {
@@ -301,7 +295,7 @@ func TestSuiteOracleLatency(t *testing.T) {
 			q.Where = []Pred{{Field: "msg", Op: OpContains, Value: raw("shop.example")}}
 		}), By: []string{"level"}}},
 	}
-	const n = 15
+	const n = 25
 	for _, tc := range []struct {
 		name       string
 		structured string
@@ -328,7 +322,7 @@ func TestSuiteOracleLatency(t *testing.T) {
 				ma, mb := median(slices.Clone(xa)), median(slices.Clone(xb))
 				t.Logf("%s: median %v vs %v, Mann-Whitney z %.2f", c.name, ma, mb, z)
 				lo, hi := min(ma, mb), max(ma, mb)
-				differ := hi-lo > lo/4+5*time.Millisecond && (z > 4 || z < -4)
+				differ := hi-lo > lo/20+5*time.Millisecond && (z > 4 || z < -4)
 				if tc.prefilter {
 					// The control: the planted values' clear text holds
 					// the text needle in A only, so A masks every record

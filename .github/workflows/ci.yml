@@ -195,7 +195,7 @@ jobs:
   suites:
     name: suites (leak, oracle, equivalence, latency)
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 65
     env:
       CGO_ENABLED: "0"
     steps:
@@ -210,8 +210,8 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          GOMAXPROCS=2 LOCKLOG_SUITES=1 LOCKLOG_SUITE_FULL=1 LOCKLOG_SUITE_TIMING=1 go test -count=1 -timeout 40m -v \
-            -run '^TestSuite' ./internal/engine/ 2>&1 |
+          GOMAXPROCS=2 LOCKLOG_SUITES=1 LOCKLOG_SUITE_FULL=1 LOCKLOG_SUITE_TIMING=1 go test -count=1 -timeout 60m -v \
+            -run '^(TestSuite|TestLeakScanner)' ./internal/engine/ 2>&1 |
             grep -v -E '^=== (RUN|PAUSE|CONT)|: [0-9]+ pages in |: scanned in ' | tee suites.log
 
   # Local incident (b) at realistic volume (R6-P1): 7 days x 1 GiB/day of

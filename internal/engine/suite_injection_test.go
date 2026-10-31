@@ -123,6 +123,11 @@ func checkInjection(t *testing.T, where string, out []byte) {
 		if forged.MatchString(s) {
 			t.Errorf("%s: forged id in %q", where, s)
 		}
+		// The fixed placeholders as the injections plant them, in a row:
+		// the console never writes them so, only log content could.
+		if strings.Contains(s, "⟦redacted⟧ ⟦secret⟧ ⟦other⟧") {
+			t.Errorf("%s: planted placeholders reached the agent in %q", where, s)
+		}
 	}
 	walk = func(v any) {
 		switch x := v.(type) {

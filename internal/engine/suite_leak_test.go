@@ -116,22 +116,36 @@ func views(s string) []string {
 	return texts
 }
 
-// Sealed values (cursors, refs) are AEAD ciphertext and well-formed
-// pseudonyms are ids: neither is log content, and over thousands of pages
-// their random letters would match the 6- to 8-character canary forms
-// (digit runs, secret heads) by chance. The whole-corpus scan blanks them;
-// a record is scanned whole, with its own canaries only (masktest.Scan).
+// Sealed values (a page's cursor, a record's ref) are AEAD ciphertext and
+// well-formed pseudonyms are ids: neither is log content, and over
+// thousands of pages their random letters would match the 6- to
+// 8-character canary forms (digit runs, secret heads) by chance. The
+// whole-corpus scan blanks exactly those (the page's top-level "cursor",
+// each record's top-level "ref", and well-formed pseudonyms); a record is
+// also scanned whole with its own canaries (masktest.Scan).
 var (
-	sealedRe    = regexp.MustCompile(`"(cursor|ref)":"[^"]*"`)
 	wellFormed  = regexp.MustCompile(`⟦[a-z_]+:[A-Z0-9]+⟧`)
 	recordTSKey = []byte(`"ts":"`)
 )
 
+// blankKey returns obj (a JSON object) with its top-level key blanked.
+func blankKey(t testing.TB, obj []byte, key string) []byte {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(obj, &m); err != nil {
+		t.Fatalf("not a JSON object: %v", err)
+	}
+	if _, ok := m[key]; !ok {
+		return obj
+	}
+	m[key] = json.RawMessage(`""`)
+	b, _ := json.Marshal(m)
+	return b
+}
+
 // global scans text for every canary of the corpus.
 func (l *leakScanner) global(where string, out []byte) {
 	l.nglobs++
-	s := sealedRe.ReplaceAllString(string(out), `"$1":""`)
-	s = wellFormed.ReplaceAllString(s, "⟦x⟧")
+	s := wellFormed.ReplaceAllString(string(out), "⟦x⟧")
 	vs := views(s)
 	found := map[int]bool{}
 	hit := func(fi int) {
@@ -164,13 +178,16 @@ func (l *leakScanner) global(where string, out []byte) {
 	}
 }
 
-// page scans one page: its records with their own canaries, the rest
-// against the corpus.
+// page scans one page: each record with its own canaries and against the
+// corpus, the rest against the corpus.
 func (l *leakScanner) page(where string, page []byte) {
 	l.pages++
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal(page, &m); err != nil {
 		l.t.Fatalf("%s: page is not a JSON object: %v", where, err)
+	}
+	if _, ok := m["cursor"]; ok {
+		m["cursor"] = json.RawMessage(`""`)
 	}
 	if rs, ok := m["records"]; ok {
 		var recs []json.RawMessage
@@ -179,8 +196,8 @@ func (l *leakScanner) page(where string, page []byte) {
 			l.record(where, r)
 		}
 		delete(m, "records")
-		page, _ = json.Marshal(m)
 	}
+	page, _ = json.Marshal(m)
 	l.global(where, page)
 }
 
@@ -202,6 +219,7 @@ func (l *leakScanner) record(where string, rec []byte) {
 		return
 	}
 	l.hits = append(l.hits, masktest.Scan(where, rec, cs)...)
+	l.global(where+" (record)", blankKey(l.t, rec, "ref"))
 }
 
 // refusal scans a refusal for the canaries the call carried, and the
@@ -223,6 +241,65 @@ func (l *leakScanner) report(label string) {
 	}
 	if len(l.hits) > 0 {
 		l.t.Fatalf("%s: %d leaks", label, len(l.hits))
+	}
+}
+
+// TestLeakScannerFires is the scanner's positive control: every canary of
+// the corpus's first records (every kind in every encoding and position)
+// is found in its raw line by the whole-corpus scan, in another source's
+// record (a record carrying a canary not its own), and under a nested
+// "cursor" or "ref" key; a page's top-level cursor and a record's ref are
+// the only values blanked.
+func TestLeakScannerFires(t *testing.T) {
+	recs := leakCorpus(16)
+	l := newLeakScanner(t, recs)
+	per := len(masktest.Kinds) * len(masktest.Encodings)
+	missed := 0
+	for i, r := range recs["json"][:2*per] {
+		for _, c := range r.Canaries {
+			found := func(where string, out []byte) bool {
+				l.hits = nil
+				l.global(where, out)
+				for _, h := range l.hits {
+					if h.Canary.Value == c.Value || h.Canary.Kind == "person_name" && c.Kind == "person_name" {
+						return true
+					}
+				}
+				return false
+			}
+			raw := r.payload(false)
+			if !found("raw", []byte(raw)) {
+				missed++
+				t.Errorf("record %d: %s %q not found in its raw line %.200q", i, c.Kind, c.Value, raw)
+				continue
+			}
+			// The line as another record's text, under nested
+			// "cursor" and "ref" keys, and in a page.
+			other := recs["logfmt"][(i+1)%len(recs["logfmt"])]
+			rec, _ := json.Marshal(map[string]any{"source": "logfmt", "ts": other.TS.Format(time.RFC3339Nano), "ref": "x",
+				"msg": raw, "fields": map[string]any{"cursor": raw, "ref": raw}})
+			l.hits = nil
+			l.record("cross-record", rec)
+			if len(l.hits) == 0 {
+				t.Errorf("record %d: %s %q in another record's message not found", i, c.Kind, c.Value)
+			}
+			nested, _ := json.Marshal(map[string]any{"cursor": "", "groups": []any{map[string]any{"cursor": raw}}})
+			if !found("nested cursor", nested) {
+				t.Errorf("record %d: %s %q under a nested cursor key not found", i, c.Kind, c.Value)
+			}
+		}
+	}
+	if missed > 0 {
+		t.Fatalf("%d canaries the scanner cannot see", missed)
+	}
+	// Blanked from the whole-corpus scan: a page's cursor and a record's
+	// ref (a record is still scanned whole for its own canaries).
+	c := recs["json"][0].Canaries[0]
+	l.hits = nil
+	l.page("blanked", []byte(`{"cursor":`+jsonString(c.Value)+`,"complete":false}`))
+	l.global("blanked ref", blankKey(t, []byte(`{"source":"json","ref":`+jsonString(c.Value)+`}`), "ref"))
+	if len(l.hits) != 0 {
+		t.Errorf("a blanked value was scanned: %+v", l.hits)
 	}
 }
 

@@ -135,8 +135,7 @@ func TestSuiteEquivalenceIndex(t *testing.T) {
 		}),
 	}
 	calls = append(calls, trusted...)
-	served := 0
-	for _, c := range calls {
+	for i, c := range calls {
 		pa := scan.mustRun(c)
 		pb := ix.mustRun(c)
 		x, y := answer(t, scan.eng, pa), answer(t, ix.eng, pb)
@@ -144,15 +143,12 @@ func TestSuiteEquivalenceIndex(t *testing.T) {
 			d := firstDiff([]string{x}, []string{y})
 			t.Errorf("%s: the index changes the answer: %s", c.name, d)
 		}
-		if c.method == MethodCount {
+		if i >= len(calls)-len(trusted) {
 			var r CountResult
 			json.Unmarshal(pb[len(pb)-1], &r)
-			if r.FromIndex {
-				served++
+			if !r.FromIndex {
+				t.Errorf("%s: not served from the index", c.name)
 			}
 		}
-	}
-	if served < len(trusted) {
-		t.Errorf("only %d counts served from the index", served)
 	}
 }
