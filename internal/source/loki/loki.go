@@ -45,6 +45,16 @@ const (
 // epoch, so a plan is a function of the range and the selector only.
 var sliceWidths = []time.Duration{time.Minute, 5 * time.Minute, 15 * time.Minute, time.Hour, 6 * time.Hour, 24 * time.Hour}
 
+// subWidths are the widths a slice holding more than one call's byte
+// budget is split into (Split), narrowest first: the next narrower one than
+// the slice's, down to MinSlice. Each one divides the next, so sub-slices
+// stay epoch-aligned.
+var subWidths = append([]time.Duration{MinSlice, 10 * time.Second}, sliceWidths...)
+
+// MinSlice is the narrowest slice: one holding more than a call's budget is
+// refused.
+const MinSlice = time.Second
+
 // hiddenLabels are labels Loki adds that locklog never shows.
 var hiddenLabels = map[string]bool{"__stream_shard__": true}
 
@@ -271,6 +281,29 @@ func (s *Source) Plan(ctx context.Context, r source.Range, sel source.Selector) 
 		gs = append(gs, source.Granule{Start: t.UnixNano(), End: t.Add(w).UnixNano(), From: t, To: t.Add(w)})
 	}
 	return source.Byteplan{Chunks: []source.Chunk{{Source: s.o.Name, Stream: q, Granules: gs}}}, nil
+}
+
+// Split cuts slice g into the epoch-aligned slices of the next narrower
+// width of subWidths (clipped to g), or returns nil when g is no wider than
+// MinSlice. Entries of one nanosecond stay in one slice, so refs (a
+// timestamp and an ordinal within it) are unchanged.
+func (s *Source) Split(g source.Granule) []source.Granule {
+	w := time.Duration(g.End - g.Start)
+	var sw time.Duration
+	for _, x := range subWidths {
+		if x < w {
+			sw = x
+		}
+	}
+	if sw == 0 {
+		return nil
+	}
+	var out []source.Granule
+	for t := time.Unix(0, g.Start).UTC().Truncate(sw); t.UnixNano() < g.End; t = t.Add(sw) {
+		a, b := max(t.UnixNano(), g.Start), min(t.Add(sw).UnixNano(), g.End)
+		out = append(out, source.Granule{Start: a, End: b, From: time.Unix(0, a).UTC(), To: time.Unix(0, b).UTC()})
+	}
+	return out
 }
 
 // entry is one log entry of a response.

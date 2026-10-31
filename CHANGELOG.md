@@ -100,6 +100,10 @@ uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- A Loki time slice holding more than one call's byte budget is split into
+  narrower epoch-aligned slices (down to 1 s) and paged with a cursor, in
+  both orders, instead of being refused; a slice still over the budget at
+  1 s is refused with a message that no longer speaks of compressed files.
 - The launcher chooses the non-recursive bind option from the Docker CLI
   version, which parses it (`bind-recursive=disabled` from CLI 25), not from
   the engine's.

@@ -1356,3 +1356,41 @@ func TestDescribeLookback(t *testing.T) {
 		}
 	}
 }
+
+// TestSplit: a slice is cut into the epoch-aligned slices of the next
+// narrower width, covering it exactly, down to MinSlice.
+func TestSplit(t *testing.T) {
+	s := &Source{}
+	base := time.Date(2026, 10, 31, 0, 0, 0, 0, time.UTC) // epoch-aligned to every width
+	g := func(from time.Time, w time.Duration) source.Granule {
+		return source.Granule{Start: from.UnixNano(), End: from.Add(w).UnixNano(), From: from, To: from.Add(w)}
+	}
+	for _, tc := range []struct {
+		w, sub time.Duration
+	}{{24 * time.Hour, 6 * time.Hour}, {6 * time.Hour, time.Hour}, {time.Hour, 15 * time.Minute}, {15 * time.Minute, 5 * time.Minute}, {5 * time.Minute, time.Minute}, {time.Minute, 10 * time.Second}, {10 * time.Second, time.Second}} {
+		parent := g(base, tc.w)
+		parts := s.Split(parent)
+		if len(parts) != int(tc.w/tc.sub) {
+			t.Fatalf("%v: %d parts, want %d", tc.w, len(parts), tc.w/tc.sub)
+		}
+		at := parent.Start
+		for _, p := range parts {
+			if p.Start != at || p.End-p.Start != int64(tc.sub) || p.Start%int64(tc.sub) != 0 || p.Bytes != 0 || !p.From.Equal(time.Unix(0, p.Start)) {
+				t.Fatalf("%v: part %+v", tc.w, p)
+			}
+			at = p.End
+		}
+		if at != parent.End {
+			t.Fatalf("%v: parts end at %d, want %d", tc.w, at, parent.End)
+		}
+	}
+	if parts := s.Split(g(base, time.Second)); parts != nil {
+		t.Fatalf("a 1 s slice split into %d", len(parts))
+	}
+	// A clipped (unaligned) slice is covered exactly.
+	odd := source.Granule{Start: base.Add(1500 * time.Millisecond).UnixNano(), End: base.Add(4 * time.Second).UnixNano()}
+	parts := s.Split(odd)
+	if len(parts) != 3 || parts[0].Start != odd.Start || parts[0].End != base.Add(2*time.Second).UnixNano() || parts[2].End != odd.End {
+		t.Fatalf("unaligned: %+v", parts)
+	}
+}

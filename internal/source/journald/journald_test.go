@@ -742,7 +742,7 @@ func TestSharedLargeObjectsDecodedOnceAndCounted(t *testing.T) {
 			t.Fatalf("%s: processed %d for a %d-byte file: shared objects decoded again", comp, processed, len(raw))
 		}
 		// Without the cache, xz alone took minutes for this file.
-		if d := time.Since(start); d > 10*time.Second {
+		if d := time.Since(start); d > 10*time.Second*raceSlowdown {
 			t.Fatalf("%s: scan took %v", comp, d)
 		}
 	}
