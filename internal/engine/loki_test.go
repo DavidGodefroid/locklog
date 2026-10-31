@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -142,5 +143,215 @@ func TestLokiPagedUnderBudget(t *testing.T) {
 				t.Fatalf("%d requests in flight", bl.maxIn)
 			}
 		})
+	}
+}
+
+// denseLoki is a fake Loki client: an entry every `every` from t0, except
+// in [dense, dense+denseFor) where there is one every denseEvery, padded to
+// pad bytes. Every entry is at level error and unique by its timestamp.
+type denseLoki struct {
+	every, denseEvery, denseFor time.Duration
+	dense                       time.Time
+	pad                         int
+	mu                          sync.Mutex
+	served, maxPage             int64
+}
+
+// next returns the first entry timestamp at or after ts.
+func (d *denseLoki) next(ts int64) int64 {
+	ds, de := d.dense.UnixNano(), d.dense.Add(d.denseFor).UnixNano()
+	step := int64(d.every)
+	base := t0.UnixNano()
+	if ts >= ds && ts < de {
+		base, step = ds, int64(d.denseEvery)
+	}
+	n := base + max((ts-base+step-1)/step, 0)*step
+	if ts < ds && n > ds {
+		return ds
+	}
+	if n >= de && ts < de {
+		// back on the sparse grid after the dense span
+		return d.next(de)
+	}
+	return n
+}
+
+func (d *denseLoki) GetWith(_ context.Context, path string, q url.Values, _ map[string]string) (egress.Response, error) {
+	if path != "/loki/api/v1/query_range" {
+		return egress.Response{Status: 200, Body: []byte(`{"status":"success","data":[]}`)}, nil
+	}
+	start, _ := strconv.ParseInt(q.Get("start"), 10, 64)
+	end, _ := strconv.ParseInt(q.Get("end"), 10, 64)
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	var values [][]string
+	for ts := d.next(start); ts < end && len(values) < limit; ts = d.next(ts + 1) {
+		tm := time.Unix(0, ts).UTC()
+		line := fmt.Sprintf("time=%s level=error msg=\"entry %d\"", tm.Format(time.RFC3339Nano), ts)
+		if ts >= d.dense.UnixNano() && ts < d.dense.Add(d.denseFor).UnixNano() {
+			line += " pad=" + strings.Repeat("x", d.pad)
+		}
+		values = append(values, []string{strconv.FormatInt(ts, 10), line})
+	}
+	body, _ := json.Marshal(map[string]any{"status": "success", "data": map[string]any{
+		"resultType": "streams", "encodingFlags": []string{"categorize-labels"},
+		"result": []map[string]any{{"stream": map[string]string{"env": "prod"}, "values": values}}}})
+	d.mu.Lock()
+	d.served += int64(len(body))
+	d.maxPage = max(d.maxPage, int64(len(body)))
+	d.mu.Unlock()
+	return egress.Response{Status: 200, Body: body}, nil
+}
+
+func denseFixture(t *testing.T, d *denseLoki, budget int64) *fixture {
+	t.Helper()
+	p, _ := parse.New(parse.Options{})
+	src, err := loki.New(loki.Options{Name: "lk", Client: d, Parser: p, Selector: map[string]string{"env": "prod"},
+		TrustedLabels: []string{"level"}, InFlight: 2, Limit: 8, Now: func() time.Time { return t0.Add(2 * time.Hour) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return newFixture(t, "x\n", func(o *Options) {
+		o.Sources["lk"] = src
+		o.Limits.RemoteBytes = budget
+	})
+}
+
+// TestLokiDenseSliceSplit: a 1-minute slice holding about ten times one
+// call's byte budget is split into narrower slices and paged with a
+// cursor, ascending and descending: every record of the range is returned
+// once, in order, each call fetching about its budget; a continuation
+// cursor replayed returns the same page.
+func TestLokiDenseSliceSplit(t *testing.T) {
+	const budget = 256 << 10
+	for _, order := range []string{"asc", "desc"} {
+		t.Run(order, func(t *testing.T) {
+			d := &denseLoki{every: 5 * time.Second, denseEvery: 100 * time.Millisecond, denseFor: time.Minute,
+				dense: t0.Add(3 * time.Minute), pad: 4 << 10}
+			f := denseFixture(t, d, budget)
+			qq := q(func(q *Query) {
+				q.From, q.To = t0, t0.Add(10*time.Minute)
+				q.Sources = []string{"lk"}
+				q.Limit = 200
+				q.Order = order
+			})
+			var recs []json.RawMessage
+			calls, empty, replayed := 0, 0, false
+			for {
+				d.mu.Lock()
+				d.served = 0
+				d.mu.Unlock()
+				res, err := f.eng.Search(ctx, qq)
+				if err != nil {
+					t.Fatalf("call %d: %v", calls, err)
+				}
+				calls++
+				d.mu.Lock()
+				served, page := d.served, d.maxPage
+				d.mu.Unlock()
+				if bound := int64(budget) + 3*page; served > bound {
+					t.Fatalf("call %d fetched %d bytes, bound %d", calls, served, bound)
+				}
+				if len(res.Records) == 0 {
+					empty++
+				}
+				if !replayed && qq.Cursor != "" && len(res.Records) > 0 && empty > 0 {
+					// Replay the cursor of this page: the same records.
+					again, err := f.eng.Search(ctx, qq)
+					if err != nil {
+						t.Fatalf("replay: %v", err)
+					}
+					if a, b := recordTimes(t, again.Records), recordTimes(t, res.Records); !slices.Equal(a, b) {
+						t.Fatalf("replayed cursor: %d records, first call %d", len(a), len(b))
+					}
+					replayed = true
+				}
+				recs = append(recs, res.Records...)
+				if res.Complete {
+					break
+				}
+				if res.Cursor == "" || calls > 400 {
+					t.Fatalf("call %d: incomplete without a cursor", calls)
+				}
+				qq.Cursor = res.Cursor
+			}
+			if empty == 0 {
+				t.Fatal("no call split a slice: the dense minute fitted a call's budget")
+			}
+			if !replayed {
+				t.Fatal("no cursor replayed after a split")
+			}
+			ts := recordTimes(t, recs)
+			checkOrder(t, ts, 9*12+600, order == "desc")
+			seen := map[time.Time]bool{}
+			for _, x := range ts {
+				if seen[x] {
+					t.Fatalf("record at %v returned twice", x)
+				}
+				seen[x] = true
+			}
+		})
+	}
+}
+
+// TestLokiSliceOverAtNarrowest: a stream holding more than one call's
+// budget in one second is refused, with a message that does not speak of
+// local files.
+func TestLokiSliceOverAtNarrowest(t *testing.T) {
+	d := &denseLoki{every: 5 * time.Second, denseEvery: time.Millisecond, denseFor: 2 * time.Second,
+		dense: t0.Add(30 * time.Second), pad: 4 << 10}
+	f := denseFixture(t, d, 256<<10)
+	qq := q(func(q *Query) {
+		q.From, q.To = t0, t0.Add(2*time.Minute)
+		q.Sources = []string{"lk"}
+		q.Limit = 200
+	})
+	for calls := 0; ; calls++ {
+		res, err := f.eng.Search(ctx, qq)
+		if err != nil {
+			if code(err) != EOverBudget {
+				t.Fatalf("call %d: %v", calls, err)
+			}
+			if msg := err.Error(); strings.Contains(msg, "compressed") || strings.Contains(msg, "file") {
+				t.Fatalf("remote refusal speaks of files: %s", msg)
+			}
+			return
+		}
+		if res.Complete || calls > 20 {
+			t.Fatalf("call %d: the over-dense second was not refused", calls)
+		}
+		qq.Cursor = res.Cursor
+	}
+}
+
+// TestLokiDenseSliceCount: a count by pattern (never served by Loki's
+// metric queries) over a dense slice pages through the split slices and
+// counts every record once.
+func TestLokiDenseSliceCount(t *testing.T) {
+	d := &denseLoki{every: 5 * time.Second, denseEvery: 100 * time.Millisecond, denseFor: time.Minute,
+		dense: t0.Add(3 * time.Minute), pad: 4 << 10}
+	f := denseFixture(t, d, 256<<10)
+	cq := CountQuery{Query: q(func(q *Query) {
+		q.From, q.To = t0, t0.Add(10*time.Minute)
+		q.Sources = []string{"lk"}
+	}), ByPattern: true}
+	var total int64
+	for calls := 0; ; calls++ {
+		res, err := f.eng.Count(ctx, cq)
+		if err != nil {
+			t.Fatalf("call %d: %v", calls, err)
+		}
+		if res.Complete {
+			for _, g := range res.Groups {
+				total += g.N
+			}
+			break
+		}
+		if res.Cursor == "" || calls > 400 {
+			t.Fatalf("call %d: incomplete without a cursor", calls)
+		}
+		cq.Cursor = res.Cursor
+	}
+	if total != 9*12+600 {
+		t.Fatalf("counted %d records, want %d", total, 9*12+600)
 	}
 }

@@ -109,9 +109,12 @@ type Engine struct {
 // frozen is a plan frozen at the first call of a query: continuations scan
 // exactly it.
 type frozen struct {
-	id      string
-	query   string // keyed digest of the normalised query
-	plan    source.Byteplan
+	id    string
+	query string // keyed digest of the normalised query
+	plan  source.Byteplan
+	// desc is set for the plan of a descending query: a split slice's
+	// sub-slices are read newest first (splitSlice).
+	desc    bool
 	lastUse time.Time
 }
 
@@ -394,10 +397,10 @@ func (e *Engine) callBytes(srcs []string) int64 {
 }
 
 // freeze stores a plan for continuations and returns its id.
-func (e *Engine) freeze(query string, plan source.Byteplan) *frozen {
+func (e *Engine) freeze(query string, plan source.Byteplan, desc bool) *frozen {
 	var b [12]byte
 	rand.Read(b[:])
-	f := &frozen{id: hex.EncodeToString(b[:]), query: query, plan: plan, lastUse: e.o.Now()}
+	f := &frozen{id: hex.EncodeToString(b[:]), query: query, plan: plan, desc: desc, lastUse: e.o.Now()}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if len(e.plans) >= maxPlans {
@@ -457,6 +460,29 @@ func (e *Engine) resume(st cursorState, query string) (*frozen, *Error) {
 	return f, nil
 }
 
+// splitSlice returns a frozen plan like f's, with granule gran of chunk
+// replaced by parts (descending: newest first, the chunk's granules then in
+// reverse time order). f itself is never changed: cursors on it still
+// resume where they point. The number of chunks is kept (patterns sort
+// records into window and baseline by chunk index).
+func (e *Engine) splitSlice(f *frozen, chunk, gran int, parts []source.Granule) *frozen {
+	parts = slices.Clone(parts)
+	if f.desc {
+		slices.Reverse(parts)
+	}
+	plan := source.Byteplan{Chunks: slices.Clone(f.plan.Chunks)}
+	c := plan.Chunks[chunk]
+	c.Granules = slices.Concat(c.Granules[:gran], parts, c.Granules[gran+1:])
+	plan.Chunks[chunk] = c
+	return e.freeze(f.query, plan, f.desc)
+}
+
+// errSliceOver refuses a remote slice holding more than one call's budget
+// that its source cannot split further.
+func errSliceOver() *Error {
+	return &Error{Code: EOverBudget, Message: "a remote log stream holds more data in its narrowest time slice than one call can process: narrow the sources or the trusted-label terms, or ask for locklog_scan"}
+}
+
 // run executes a frozen plan from (chunk, granule) until the plan ends, the
 // call's byte budget is used, or the next group of granules would not fit
 // before the deadline. Each group is first fetched (read, decompressed or
@@ -473,8 +499,15 @@ func (e *Engine) resume(st cursorState, query string) (*frozen, *Error) {
 // group's bytes for the evaluation of its text predicates. visit evaluates
 // under the budget it is passed: once that is exceeded (the group's hard
 // deadline, or ctx cancelled) the call is refused.
-func (e *Engine) run(ctx context.Context, plan source.Byteplan, chunk, gran int, needles []string, callBytes, factor int64,
+//
+// A remote slice (a granule of unknown bytes) that holds more than the
+// call's budget when it is the call's first group is split by its source
+// (source.Splitter) into narrower slices: *fp is then a new frozen plan
+// holding them and the call stops before the first of them (the next call
+// has a whole budget for it). One the source cannot split is refused.
+func (e *Engine) run(ctx context.Context, fp **frozen, chunk, gran int, needles []string, callBytes, factor int64,
 	visit func(raw source.RawRecord, rec mask.Record, b *budget)) (int, int, Scanned, int, *Error) {
+	plan := (*fp).plan
 	factor = max(factor, 1)
 	// Deadlines are wall-clock (Options.Now is the query clock).
 	start := time.Now()
@@ -548,6 +581,19 @@ func (e *Engine) run(ctx context.Context, plan source.Byteplan, chunk, gran int,
 			cancel()
 			if sc.Granules > 0 {
 				return chunk, gran, sc, failures, nil // the next call has a whole budget
+			}
+			if planned == 0 && len(sub.Granules) == 1 {
+				// A remote slice: split it, or refuse it at its
+				// narrowest.
+				var parts []source.Granule
+				if sp, ok := e.o.Sources[c.Source].(source.Splitter); ok {
+					parts = sp.Split(sub.Granules[0])
+				}
+				if len(parts) < 2 {
+					return chunk, gran, sc, failures, errSliceOver()
+				}
+				*fp = e.splitSlice(*fp, chunk, gran, parts)
+				return chunk, gran, sc, failures, nil
 			}
 			return chunk, gran, sc, failures, &Error{Code: EOverBudget, Message: "a log stream holds more data than one call can process (a compressed file expanding more than estimated, or large repeated records): narrow the range or the sources, or ask for locklog_scan"}
 		}
@@ -916,7 +962,7 @@ func (e *Engine) Search(ctx context.Context, q Query) (_ SearchResult, retErr er
 		if err != nil {
 			return SearchResult{}, err
 		}
-		f = e.freeze(digest, plan)
+		f = e.freeze(digest, plan, q.Order == "desc")
 	}
 
 	var needles []string
@@ -938,7 +984,7 @@ func (e *Engine) Search(ctx context.Context, q Query) (_ SearchResult, retErr er
 		var err *Error
 		var found []match
 		size, over, outFailed := matchesSize(pending), false, false
-		chunk, gran, sc, failures, err = e.run(ctx, f.plan, chunk, gran, needles, e.callBytes(q.Sources), q.evalFactor(), func(raw source.RawRecord, rec mask.Record, b *budget) {
+		chunk, gran, sc, failures, err = e.run(ctx, &f, chunk, gran, needles, e.callBytes(q.Sources), q.evalFactor(), func(raw source.RawRecord, rec mask.Record, b *budget) {
 			// Granules hold records around the range: keep the
 			// range's (and the untimed ones).
 			if t, ok := rec.Time(); ok && !q.rangeContains(t, false) {

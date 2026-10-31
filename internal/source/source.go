@@ -232,6 +232,17 @@ type Source interface {
 	Around(ctx context.Context, ref RawRef, before, after int) ([]RawRecord, error)
 }
 
+// Splitter is implemented by a source whose granules of unknown bytes
+// (remote time slices, Granule.Bytes 0) can be cut into narrower ones: the
+// engine splits a slice holding more than one call's byte budget, so that
+// it can be paged with a cursor on sub-slice boundaries.
+type Splitter interface {
+	// Split returns the granules g is cut into, in stream order, covering
+	// exactly [g.Start, g.End) (their bounds a function of g only), or nil
+	// when g is at the narrowest width the source pages.
+	Split(g Granule) []Granule
+}
+
 // Errors of sources. Their text never holds log content.
 var (
 	ErrStale    = errors.New("source: the stream changed since the plan or reference was made")
