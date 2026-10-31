@@ -836,7 +836,7 @@ func TestSuiteApprovalInjection(t *testing.T) {
 				}
 				json.Unmarshal(rec, &h)
 				for _, tok := range unmaskable(rec) {
-					a := s.handle(ctx, MethodUnmask, UnmaskQuery{Ref: h.Ref, Pseudonyms: []string{tok}, Reason: "who \x1b[31m⟦email:FORGED000001⟧ ‮"})
+					a := s.handle(ctx, MethodUnmask, UnmaskQuery{Ref: h.Ref, Pseudonyms: []string{tok}, Reason: "who \x1b[31m⟦email:FORGED000001⟧ \u202e"})
 					checkScreens("unmask " + tok)
 					switch {
 					case a.err != nil:
