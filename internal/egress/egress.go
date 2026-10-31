@@ -442,7 +442,8 @@ func (c *Client) probeOnce(ctx context.Context, path string, hdr http.Header, re
 		}
 		// A server that demands a client certificate refuses the probe's
 		// handshake: closed.
-		// (crypto/tls exports no type for a remote alert: its text.)
+		// (crypto/tls exports no type for a remote alert: its text. Should
+		// the text change, the probe errs, and the check fails closed.)
 		if m := err.Error(); strings.Contains(m, "remote error: tls: certificate required") || strings.Contains(m, "remote error: tls: bad certificate") {
 			return false, nil
 		}
@@ -455,6 +456,9 @@ func (c *Client) probeOnce(ctx context.Context, path string, hdr http.Header, re
 	body, err := io.ReadAll(io.LimitReader(resp.Body, c.maxBody+1))
 	if err != nil {
 		return false, fmt.Errorf("egress: probe %s: reading the response: %w", req.URL.Path, err)
+	}
+	if int64(len(body)) > c.maxBody {
+		return false, ErrResponseTooLarge // cannot tell: fails closed
 	}
 	switch {
 	case resp.StatusCode >= 200 && resp.StatusCode <= 299:
