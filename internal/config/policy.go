@@ -40,7 +40,7 @@ func NewPolicy(p Profile, network string, extraRoots []string) (Policy, error) {
 		return Policy{}, fmt.Errorf("LOCKLOG_NETWORK: name a network of your own, not %s", network)
 	}
 	for _, r := range extraRoots {
-		if !path.IsAbs(r) || path.Clean(r) == "/" || strings.IndexFunc(r, kconfig.UnsafeRune) >= 0 || strings.ContainsAny(r, ",=:\"'`\\\n") {
+		if !path.IsAbs(r) || path.Clean(r) == "/" || strings.Contains(r, "..") || strings.IndexFunc(r, kconfig.UnsafeRune) >= 0 || strings.ContainsAny(r, ",=:\"'`\\\n") {
 			return Policy{}, fmt.Errorf("LOCKLOG_EXTRA_ROOTS: %q is not an absolute directory other than /, without the characters a mount cannot carry", r)
 		}
 	}

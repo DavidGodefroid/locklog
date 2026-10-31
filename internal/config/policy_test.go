@@ -52,7 +52,7 @@ func TestNewPolicyEnvironment(t *testing.T) {
 	for _, tt := range []struct {
 		net   string
 		roots []string
-	}{{"host", nil}, {"bridge", nil}, {"none", nil}, {"a b", nil}, {"-x", nil}, {"", []string{"rel"}}, {"", []string{"/"}}, {"", []string{"/a,b"}}, {"", []string{"/a=b"}}} {
+	}{{"host", nil}, {"bridge", nil}, {"none", nil}, {"a b", nil}, {"-x", nil}, {"", []string{"rel"}}, {"", []string{"/"}}, {"", []string{"/a,b"}}, {"", []string{"/a=b"}}, {"", []string{"/opt/../etc"}}} {
 		if _, err := NewPolicy(p, tt.net, tt.roots); err == nil {
 			t.Errorf("NewPolicy(%q, %q) accepted", tt.net, tt.roots)
 		}

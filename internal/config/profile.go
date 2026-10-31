@@ -317,7 +317,7 @@ func buildProfile(name string, r rawProfile, detectorsSet bool) (Profile, error)
 			return Profile{}, errf("%v", err)
 		}
 		if s.Kind == KindJournald && !p.UserJournals && slices.ContainsFunc(s.Units, func(u string) bool { return canMatchPrefix(u, "user@") }) {
-			return Profile{}, errf("source %q: units of user sessions (user@...) need user_journals = true", sn)
+			return Profile{}, errf("source %q: units that can match user sessions (user@..., so also globs such as *.service) need user_journals = true; name the system units instead", sn)
 		}
 		p.Sources = append(p.Sources, s)
 	}

@@ -452,6 +452,9 @@ func buildRemote(r rawSource, production bool, errf func(string, ...any) error) 
 		if !labelRe.MatchString(l) {
 			return nil, errf("trusted_labels / trusted_metadata: invalid name %q", l)
 		}
+		if messageField(l) {
+			return nil, errf("trusted_labels / trusted_metadata: %s is message text, always served masked; it cannot be trusted", l)
+		}
 		if pii.LooksPersonal(l) || pii.LooksQuasi(l) {
 			return nil, errf("trusted_labels / trusted_metadata: %q looks like personal data and cannot be trusted", l)
 		}
