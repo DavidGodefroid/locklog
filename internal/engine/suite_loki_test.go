@@ -12,14 +12,21 @@ package engine
 // untrusted metadata field holding its payload (both dropped by the
 // source), and a trusted metadata field holding it too (shown after the
 // detectors).
+//
+// With LOCKLOG_SUITE_LOKI_URL set (the CI suites job), the same entries are
+// pushed to that real Loki instead, under a stream label of their own, and
+// the source reads them there.
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"regexp"
 	"slices"
 	"sort"
@@ -62,16 +69,24 @@ type suiteLoki struct {
 	entries []lokiEntry
 }
 
+// lokiLabelMax bounds the payload an entry's untrusted label carries
+// (Loki's max_label_value_length is 2048 bytes).
+const lokiLabelMax = 1024
+
 // lokiEntries renders the records of the Loki source: the line in the
-// json source's form, the payload also in an untrusted label, an untrusted
-// metadata field and a trusted one.
-func lokiEntries(rs []suiteRecord) []lokiEntry {
+// json source's form, the payload also in an untrusted label (its first
+// lokiLabelMax bytes), an untrusted metadata field and a trusted one.
+func lokiEntries(rs []suiteRecord, run string) []lokiEntry {
 	out := make([]lokiEntry, 0, len(rs))
 	for i, r := range rs {
 		p := r.payload(false)
+		lp := p
+		for len(lp) > lokiLabelMax {
+			lp = strings.ToValidUTF8(lp[:lokiLabelMax], "")
+		}
 		out = append(out, lokiEntry{
 			ts:     r.TS.UnixNano(),
-			labels: map[string]string{"env": "suite", "app": lokiApps[i%len(lokiApps)], lokiUntrustedLabel: p},
+			labels: map[string]string{"env": "suite", "run": run, "app": lokiApps[i%len(lokiApps)], lokiUntrustedLabel: lp},
 			meta:   map[string]string{lokiTrustedMeta: p, lokiUntrustedMeta: p},
 			line:   render("json", r),
 		})
@@ -83,16 +98,26 @@ func lokiEntries(rs []suiteRecord) []lokiEntry {
 // reading it through the egress client.
 func newSuiteLoki(t testing.TB, rs []suiteRecord) *loki.Source {
 	t.Helper()
-	f := &suiteLoki{entries: lokiEntries(rs)}
-	srv := httptest.NewServer(f)
-	t.Cleanup(srv.Close)
-	cl, err := egress.New(&config.Remote{URL: srv.URL, Auth: config.AuthNone}, egress.LokiRoutes, egress.Credentials{},
+	var id [8]byte
+	rand.Read(id[:])
+	run := hex.EncodeToString(id[:])
+	es := lokiEntries(rs, run)
+	url := os.Getenv("LOCKLOG_SUITE_LOKI_URL")
+	if url == "" {
+		srv := httptest.NewServer(&suiteLoki{entries: es})
+		t.Cleanup(srv.Close)
+		url = srv.URL
+	} else {
+		url = strings.TrimSuffix(url, "/")
+		pushSuiteLoki(t, url, es)
+	}
+	cl, err := egress.New(&config.Remote{URL: url, Auth: config.AuthNone}, egress.LokiRoutes, egress.Credentials{},
 		egress.Options{Headers: egress.LokiHeaders})
 	if err != nil {
 		t.Fatal(err)
 	}
 	p, _ := parse.New(parse.Options{})
-	src, err := loki.New(loki.Options{Name: srcLoki, Client: cl, Parser: p, Selector: map[string]string{"env": "suite"},
+	src, err := loki.New(loki.Options{Name: srcLoki, Client: cl, Parser: p, Selector: map[string]string{"env": "suite", "run": run},
 		TrustedLabels: []string{"app"}, TrustedMetadata: []string{lokiTrustedMeta}, InFlight: 2, Limit: lokiPage,
 		Now: func() time.Time { return suiteNow }})
 	if err != nil {
@@ -383,4 +408,44 @@ func (f *suiteLoki) metric(m []string, start, end int64, stepS string) ([]lokiSe
 		out = append(out, *series[k])
 	}
 	return out, nil
+}
+
+// pushSuiteLoki writes the entries to a real Loki (its push API) and waits
+// until it serves them all.
+func pushSuiteLoki(t testing.TB, base string, es []lokiEntry) {
+	t.Helper()
+	streams := map[string]*pushStream{}
+	var order []*pushStream
+	for _, e := range es {
+		k := lokiLabelsKey(e.labels)
+		if streams[k] == nil {
+			streams[k] = &pushStream{Stream: e.labels}
+			order = append(order, streams[k])
+		}
+		streams[k].Values = append(streams[k].Values, []any{strconv.FormatInt(e.ts, 10), e.line, e.meta})
+	}
+	for i := 0; i < len(order); i += 200 {
+		if err := lokiPush(base, order[i:min(i+200, len(order))]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(es) == 0 {
+		return
+	}
+	run := es[0].labels["run"]
+	lo, hi := es[0].ts, es[0].ts
+	for _, e := range es {
+		lo, hi = min(lo, e.ts), max(hi, e.ts)
+	}
+	from, to := time.Unix(0, lo).Truncate(time.Second), time.Unix(0, hi).Truncate(time.Second).Add(2*time.Second)
+	for i := 0; ; i++ {
+		n := lokiCount(t, base, `{run="`+run+`"}`, from, to)
+		if n == int64(len(es)) {
+			return
+		}
+		if i > 100 {
+			t.Fatalf("Loki serves %d of the %d entries pushed", n, len(es))
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }

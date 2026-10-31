@@ -188,6 +188,15 @@ type suiteConfig struct {
 	// stand in for the records of those sources (the volume incident).
 	Files       map[string][]string
 	JournalRoot string
+	// Sources are sources built by the test (a Loki source over a real
+	// Loki); Trusted, when set, replaces the fixture's trusted names.
+	Sources map[string]source.Source
+	Trusted func(src, name string, label bool) bool
+	// Now replaces the suite clock; Calibrated sizes calls with the
+	// console's cost model, calibrated on this host (default: a fixed
+	// one).
+	Now        func() time.Time
+	Calibrated bool
 }
 
 type suite struct {
@@ -339,6 +348,9 @@ func newSuite(t testing.TB, recs map[string][]suiteRecord, cfg suiteConfig) *sui
 	if rs, ok := recs[srcLoki]; ok {
 		srcs[srcLoki] = newSuiteLoki(t, rs)
 	}
+	for name, src := range cfg.Sources {
+		srcs[name] = src
+	}
 	// The agent rule the corpus's "meta" positions assume, per source.
 	if !cfg.NoAgentMeta {
 		p, _ := parse.New(parse.Options{})
@@ -353,8 +365,16 @@ func newSuite(t testing.TB, recs map[string][]suiteRecord, cfg suiteConfig) *sui
 	rand.Read(key)
 	sealer, _ := NewSealer(key)
 	cost := cfg.Cost
-	if cost == nil {
+	switch {
+	case cost == nil && cfg.Calibrated:
+		p, _ := parse.New(parse.Options{})
+		cost = NewCostModel(p, func(ev parse.Event) { m.Mask("", ev) }, max(cfg.Workers, 1), time.Now)
+	case cost == nil:
 		cost = fixedCost(1)
+	}
+	now := cfg.Now
+	if now == nil {
+		now = func() time.Time { return suiteNow }
 	}
 	o := Options{
 		Sources: srcs,
@@ -371,7 +391,7 @@ func newSuite(t testing.TB, recs map[string][]suiteRecord, cfg suiteConfig) *sui
 		Limits:     DefaultLimits(),
 		Prefilter:  cfg.Prefilter,
 		Workers:    cfg.Workers,
-		Now:        func() time.Time { return suiteNow },
+		Now:        now,
 		Budgets:    DefaultBudgets(),
 	}
 	// The suites are not about the request pacing (budget_test.go is):
@@ -380,6 +400,9 @@ func newSuite(t testing.TB, recs map[string][]suiteRecord, cfg suiteConfig) *sui
 	o.Budgets.RemoteRequestsPerMinute, o.Budgets.MetricQueriesPerHour = 1<<30, 1<<30
 	if cfg.Budgets != nil {
 		cfg.Budgets(&o.Budgets)
+	}
+	if cfg.Trusted != nil {
+		o.Trusted = cfg.Trusted
 	}
 	if cfg.Limits != nil {
 		cfg.Limits(&o.Limits)
