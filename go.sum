@@ -1,7 +1,7 @@
 github.com/BurntSushi/toml v1.6.0 h1:dRaEfpa2VI55EwlIW72hMRHdWouJeRF7TPYhI+AUQjk=
 github.com/BurntSushi/toml v1.6.0/go.mod h1:ukJfTF/6rtPPRCnwkur4qwRxa8vTRFBF0uk2lLoLwho=
-github.com/DavidGodefroid/lockkit v0.7.3-0.20261031042755-2fe998d4b5af h1:ww24oudFFvdTUn2Mi+0jm8hgDBfGjZ5WZMikbxhdjHc=
-github.com/DavidGodefroid/lockkit v0.7.3-0.20261031042755-2fe998d4b5af/go.mod h1:E4k9vDNBj9yEE3a9AQarl3PI8J6V4NtKxt28TZ/vB/A=
+github.com/DavidGodefroid/lockkit v0.8.0 h1:26ORr9QIFU9xVOKLBsqh1PlT6PZSXY7/UynLvoKRbrc=
+github.com/DavidGodefroid/lockkit v0.8.0/go.mod h1:E4k9vDNBj9yEE3a9AQarl3PI8J6V4NtKxt28TZ/vB/A=
 github.com/klauspost/compress v1.20.3 h1:zWNoFqq/lSuYQRim3dUXlXeA0IqwuZGicdG5ZTfY5j4=
 github.com/klauspost/compress v1.20.3/go.mod h1:LUdAzn7YLVvxLpc7y3V1m40wESHTgc1422pwwBSKYuI=
 github.com/pierrec/lz4/v4 v4.1.33 h1:GjG1TJ1V4IzKP8L96muuuDNpTwd7D+l2ccXrjAbe014=

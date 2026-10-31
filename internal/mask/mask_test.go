@@ -37,16 +37,24 @@ func newMasker(t testing.TB, o Options) *Masker {
 		o.Pseudonyms = epoch(t)
 	}
 	if o.Values == nil {
-		o.Values = Detectors(pii.AllDetectors())
-	}
-	if o.Secrets == nil {
-		o.Secrets = masktest.SecretFinder{}
+		o.Values = corpusValues(t)
 	}
 	m, err := New(o)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return m
+}
+
+// corpusValues are the value detectors covering every corpus kind (the
+// default set, ip and the opt-in person_name).
+func corpusValues(t testing.TB) Detectors {
+	t.Helper()
+	ds, err := ValueDetectors(masktest.ValueDetectors)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ds
 }
 
 func event(t testing.TB, line string) parse.Event {
@@ -130,7 +138,7 @@ func TestMaskSecretFirst(t *testing.T) {
 		Rules: &Rules{Mask: []Rule{{Field: "auth", Mode: ModePseudonym}}}})
 	r := m.Mask("api", event(t, `{"auth":"token `+secret+`","password":"jean@example.com","detail":"key `+secret+` for a@example.com"}`))
 	got := encode(t, r)
-	if strings.Contains(got, secret) || strings.Contains(got, strings.TrimPrefix(secret, masktest.SecretPrefix)) {
+	if strings.Contains(got, secret) || strings.Contains(got, masktest.SecretBody(secret)) {
 		t.Fatalf("secret leaked: %s", got)
 	}
 	id, _ := m.o.Pseudonyms.ID(PersonalKind, "token "+Secret)
@@ -407,6 +415,79 @@ func TestLeakHarnessCorpus(t *testing.T) {
 	}
 }
 
+// Canary on the kinds lockkit v0.8.0 added: secrets of every shape
+// (step 1), public IP addresses and person names, in every position and
+// encoding, never leak; with their detector off, the harness sees them.
+func TestLeakHarnessNewKinds(t *testing.T) {
+	lines := masktest.New(7).Lines(10_000)
+	p, _ := parse.New(parse.Options{})
+	for _, kind := range []string{"secret", "ip", "person_name"} {
+		var own []masktest.Line
+		for _, l := range lines {
+			if l.Canaries[0].Kind == kind {
+				own = append(own, l)
+			}
+		}
+		if len(own) < masktest.Positions*len(masktest.Encodings) {
+			t.Fatalf("%s: %d lines, want every position and encoding", kind, len(own))
+		}
+		var without []string
+		for _, n := range masktest.ValueDetectors {
+			if n != kind {
+				without = append(without, n)
+			}
+		}
+		values, err := ValueDetectors(without)
+		if err != nil {
+			t.Fatal(err)
+		}
+		off := Options{Structured: StructuredDetect, Values: values}
+		if kind == "secret" {
+			off = Options{Structured: StructuredDetect, Secrets: noFinder{}, SecretName: func(string) bool { return false }}
+		}
+		for _, mode := range []string{StructuredDetect, StructuredRedactUnknown} {
+			m := newMasker(t, Options{Structured: mode, Trusted: []string{"ts", "level", "status"}})
+			for _, l := range own {
+				out, _ := json.Marshal(m.Mask("api", p.Line(l.Text)))
+				for _, h := range masktest.Scan(l.Text, out, l.Canaries) {
+					t.Errorf("%s: %s %q leaked as %q in %q", mode, kind, h.Canary.Value, h.Form, h.Where)
+				}
+				for _, h := range masktest.Scan(l.Text, []byte(m.Text(l.Text)), l.Canaries) {
+					t.Errorf("text: %s %q leaked as %q in %q", kind, h.Canary.Value, h.Form, h.Where)
+				}
+			}
+		}
+		m := newMasker(t, off)
+		leaked := 0
+		for _, l := range own {
+			out, _ := json.Marshal(m.Mask("api", p.Line(l.Text)))
+			if len(masktest.Scan("", out, l.Canaries)) > 0 {
+				leaked++
+			}
+		}
+		if leaked < len(own)*80/100 {
+			t.Errorf("%s detector off: %d of %d lines leaked; the canary does not exercise it", kind, leaked, len(own))
+		}
+	}
+}
+
+// A masker left without finders still masks secrets (lockkit's detector,
+// pii.LooksSecret names) and the default value detectors.
+func TestMaskerDefaultsFailClosed(t *testing.T) {
+	m, err := New(Options{Pseudonyms: epoch(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := m.Mask("api", event(t, `{"client_secret":"plain words here","detail":"auth with ghp_0123456789abcdefghijABCDEFGHIJ012345 by jean@example.com"}`))
+	got := encode(t, r)
+	if strings.Contains(got, "plain words") || strings.Contains(got, "ghp_") || strings.Contains(got, "jean@") {
+		t.Fatalf("defaults leaked: %s", got)
+	}
+	if _, err := ValueDetectors([]string{"email", SecretDetectorName}); err == nil {
+		t.Error("the secret detector accepted as a value detector")
+	}
+}
+
 type noFinder struct{}
 
 func (noFinder) Find(string) []pii.Match { return nil }
@@ -431,7 +512,7 @@ func TestLeakHarnessFindsLeaks(t *testing.T) {
 }
 
 // FuzzMaskNoLeak: whatever the line, no value the detectors (or the
-// secret finder) recognise survives in the masked record.
+// secret detector) recognise survives in the masked record.
 func FuzzMaskNoLeak(f *testing.F) {
 	for _, l := range masktest.New(3).Lines(200) {
 		f.Add(l.Text)
@@ -448,18 +529,19 @@ func FuzzMaskNoLeak(f *testing.F) {
 		newMasker(f, Options{Structured: StructuredDetect, Rules: &rules, SecretName: masktest.SecretNameForCorpus}),
 	}
 	p, _ := parse.New(parse.Options{})
-	values := Detectors(pii.AllDetectors())
+	values := corpusValues(f)
+	secrets := SecretDetectors()
 	f.Fuzz(func(t *testing.T, line string) {
 		if len(line) > 4096 {
 			return
 		}
 		for _, m := range ms {
-			fuzzOneNoLeak(t, m, p, values, line)
+			fuzzOneNoLeak(t, m, p, values, secrets, line)
 		}
 	})
 }
 
-func fuzzOneNoLeak(t *testing.T, m *Masker, p *parse.Parser, values Detectors, line string) {
+func fuzzOneNoLeak(t *testing.T, m *Masker, p *parse.Parser, values, secrets Detectors, line string) {
 	{
 		r := m.Mask("api", p.Line(line))
 		out, err := json.Marshal(r)
@@ -493,7 +575,7 @@ func fuzzOneNoLeak(t *testing.T, m *Masker, p *parse.Parser, values Detectors, l
 		texts = append(texts, r.Message())
 		for _, s := range texts {
 			plain := blankLen(s)
-			for _, mt := range append(values.Find(plain), masktest.SecretFinder{}.Find(plain)...) {
+			for _, mt := range append(values.Find(plain), secrets.Find(plain)...) {
 				if mt.Kind == pii.CutKind {
 					continue
 				}

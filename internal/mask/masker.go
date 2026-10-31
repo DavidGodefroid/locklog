@@ -39,14 +39,46 @@ type Detectors []pii.Detector
 // Find implements Finder.
 func (ds Detectors) Find(s string) []pii.Match { return pii.FindInViews(s, ds) }
 
+// SecretDetectorName is lockkit's secret detector: step 1, always on,
+// never a value detector a profile names.
+const SecretDetectorName = "secret"
+
+// SecretDetectors finds secrets with lockkit's secret detector
+// (credentials, token shapes, private keys, URL userinfo), in the text and
+// in its detection views. It is what a masker uses when Options.Secrets is
+// nil.
+func SecretDetectors() Detectors {
+	ds, err := pii.Detectors([]string{SecretDetectorName})
+	if err != nil || len(ds) != 1 {
+		panic(fmt.Sprintf("mask: lockkit has no secret detector: %v", err))
+	}
+	return Detectors(ds)
+}
+
+// ValueDetectors returns the value detectors a profile names (step 4).
+// The secret detector is refused: secrets are step 1, always on.
+func ValueDetectors(names []string) (Detectors, error) {
+	if slices.Contains(names, SecretDetectorName) {
+		return nil, fmt.Errorf("mask: %q is not a value detector (secret detection is always on)", SecretDetectorName)
+	}
+	ds, err := pii.Detectors(names)
+	if err != nil {
+		return nil, fmt.Errorf("mask: %w", err)
+	}
+	return Detectors(ds), nil
+}
+
 // Options configure a Masker.
 type Options struct {
 	// Structured is StructuredRedactUnknown (default) or StructuredDetect.
 	Structured string
-	// Values are the value detectors of step 4 (personal data).
+	// Values are the value detectors of step 4 (personal data); left
+	// nil, lockkit's default set (pii.AllDetectors).
 	Values Finder
 	// Secrets finds secret values (step 1); SecretName reports a field
-	// name whose value is a secret whole.
+	// name whose value is a secret whole. Left nil, they are lockkit's
+	// secret detector (SecretDetectors) and pii.LooksSecret: a masker
+	// never runs without secret detection.
 	Secrets    Finder
 	SecretName func(name string) bool
 	// Trusted are the clear paths of trusted fields: shown after the
@@ -82,6 +114,15 @@ func New(o Options) (*Masker, error) {
 	}
 	if o.Rules == nil {
 		o.Rules = &Rules{}
+	}
+	if o.Values == nil {
+		o.Values = Detectors(pii.AllDetectors())
+	}
+	if o.Secrets == nil {
+		o.Secrets = SecretDetectors()
+	}
+	if o.SecretName == nil {
+		o.SecretName = pii.LooksSecret
 	}
 	m := &Masker{o: o, trusted: map[string]bool{}, names: newNameBook()}
 	for _, t := range o.Trusted {

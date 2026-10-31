@@ -129,17 +129,28 @@ func DefaultLimits(production bool) Limits {
 	return l
 }
 
-// DefaultDetectors is the detector set of a profile that sets none: every
-// lockkit value detector but the opt-in ones. Secret detection is not a
-// detector setting: it is always on.
+// DefaultDetectors is the detector set of a profile that sets none:
+// lockkit's default value detectors (pii.AllDetectors) and ip (public
+// addresses; private and loopback ones are infrastructure, never found).
+// person_name and phone_loose are opt-in for their false positives
+// (OptInDetectors). Secret detection is not a detector setting: it is
+// always on, and a profile naming "secret" is refused.
 func DefaultDetectors() []string {
 	ds := pii.AllDetectors()
-	out := make([]string, len(ds))
-	for i, d := range ds {
-		out[i] = d.Name()
+	out := make([]string, 0, len(ds)+1)
+	for _, d := range ds {
+		out = append(out, d.Name())
 	}
-	return out
+	return append(out, "ip")
 }
+
+// OptInDetectors are the value detectors a profile may add to the
+// default set by naming them in `detectors`.
+func OptInDetectors() []string { return []string{"person_name", "phone_loose"} }
+
+// SecretDetector is lockkit's secret detector: always on, never named in
+// a profile.
+const SecretDetector = "secret"
 
 // DefaultStructured is redact-unknown on production, detect elsewhere.
 func DefaultStructured(production bool) string {

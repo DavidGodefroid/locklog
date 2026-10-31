@@ -208,6 +208,9 @@ func buildProfile(name string, r rawProfile, detectorsSet bool) (Profile, error)
 	if !detectorsSet {
 		p.Detectors = DefaultDetectors()
 	}
+	if slices.Contains(p.Detectors, SecretDetector) {
+		return Profile{}, errf("detectors: %q is not a value detector (secret detection is always on)", SecretDetector)
+	}
 	if _, err := pii.Detectors(p.Detectors); err != nil {
 		return Profile{}, errf("detectors: %v", err)
 	}

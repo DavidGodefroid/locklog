@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"net/url"
-	"regexp"
 	"strconv"
 	"strings"
 
@@ -28,9 +27,21 @@ type Line struct {
 	Canaries []Canary
 }
 
-// Kinds the generator plants. Every one is covered by a detector (or by
-// SecretFinder, for "secret").
-var Kinds = []string{"email", "phone", "iban", "card", "be_niss", "fr_nir", "nl_bsn", "us_ssn", "secret"}
+// Kinds the generator plants. Every one is covered by a lockkit detector
+// ("secret" by the secret detector of step 1; "ip" and "person_name" by
+// the value detectors of the same names, which a test must enable).
+var Kinds = []string{"email", "phone", "iban", "card", "be_niss", "fr_nir", "nl_bsn", "us_ssn", "secret", "ip", "person_name"}
+
+// ValueDetectors are the value detectors that cover every kind of Kinds
+// but "secret".
+var ValueDetectors = []string{"email", "phone", "iban", "card", "be_niss", "fr_nir", "nl_bsn", "us_ssn", "ip", "person_name"}
+
+// Given names and surnames of the synthetic people (all in lockkit's
+// gazetteer).
+var (
+	givenNames = []string{"Jean", "Marie", "Pieter", "Sophie", "Emma"}
+	surnames   = []string{"Dupont", "Janssens", "Peeters", "Lefebvre", "Dubois", "Claes"}
+)
 
 // Gen generates canaries and lines from a seed.
 type Gen struct{ r *rand.Rand }
@@ -99,16 +110,55 @@ func (g *Gen) Value(kind string) string {
 	case "us_ssn":
 		return fmt.Sprintf("%03d-%02d-%04d", 100+g.r.IntN(565), 1+g.r.IntN(98), 1+g.r.IntN(9998))
 	case "secret":
-		return SecretPrefix + g.hex(32)
+		return g.secret()
+	case "ip":
+		if g.r.IntN(2) == 0 {
+			return fmt.Sprintf("%d.%d.%d.%d", []int{81, 91, 145, 185, 212}[g.r.IntN(5)], g.r.IntN(256), g.r.IntN(256), 1+g.r.IntN(254))
+		}
+		return fmt.Sprintf("2a02:%x:%x::%x", 0x1000+g.r.IntN(0xefff), 1+g.r.IntN(0xfffe), 1+g.r.IntN(0xfffe))
+	case "person_name":
+		return givenNames[g.r.IntN(len(givenNames))] + " " + surnames[g.r.IntN(len(surnames))]
 	}
 	panic("masktest: unknown kind " + kind)
 }
 
-func (g *Gen) hex(n int) string {
-	const h = "0123456789abcdef"
+// secretShapes are the synthetic secrets: token shapes lockkit's secret
+// detector knows, each with its fixed prefix (the scan also looks for
+// the part after it).
+var secretShapes = []struct {
+	prefix, alphabet string
+	n                int
+}{
+	{"sk_test_", "0123456789abcdef", 32},                                                            // Stripe
+	{"ghp_", "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789", 36},                  // GitHub
+	{"AKIA", "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567", 16},                                                // AWS
+	{"glpat-", "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789", 20},                // GitLab
+	{"eyJhbGciOiJIUzI1NiJ9.", "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789", 24}, // JWT
+}
+
+func (g *Gen) secret() string {
+	sh := secretShapes[g.r.IntN(len(secretShapes))]
+	v := sh.prefix + g.from(sh.alphabet, sh.n)
+	if strings.HasPrefix(sh.prefix, "eyJ") {
+		v += "." + g.from(sh.alphabet, 43)
+	}
+	return v
+}
+
+// SecretBody is the part of a synthetic secret after its fixed prefix.
+func SecretBody(v string) string {
+	for _, sh := range secretShapes {
+		if strings.HasPrefix(v, sh.prefix) {
+			return v[len(sh.prefix):]
+		}
+	}
+	return v
+}
+
+func (g *Gen) from(alphabet string, n int) string {
 	var b strings.Builder
 	for range n {
-		b.WriteByte(h[g.r.IntN(16)])
+		b.WriteByte(alphabet[g.r.IntN(len(alphabet))])
 	}
 	return b.String()
 }
@@ -140,31 +190,6 @@ func luhnDigit(d string) string {
 		sum += n
 	}
 	return strconv.Itoa((10 - sum%10) % 10)
-}
-
-// SecretPrefix starts every synthetic secret; SecretFinder finds them.
-// (A stand-in for lockkit's secret detectors, wired by a later change.)
-const SecretPrefix = "sk_test_"
-
-var secretRe = regexp.MustCompile(`sk_test_[0-9a-f]{32}`)
-
-// SecretFinder finds the synthetic secrets, also through detection views.
-type SecretFinder struct{}
-
-// Find implements mask.Finder.
-func (SecretFinder) Find(s string) []pii.Match {
-	var out []pii.Match
-	add := func(t string, src func(a, b int) (int, int)) {
-		for _, loc := range secretRe.FindAllStringIndex(t, -1) {
-			a, b := src(loc[0], loc[1])
-			out = append(out, pii.Match{Start: a, End: b, Kind: "secret"})
-		}
-	}
-	add(s, func(a, b int) (int, int) { return a, b })
-	for _, v := range pii.DetectionViews(s) {
-		add(v.Text, v.Source)
-	}
-	return out
 }
 
 // Encodings a canary is written with.
@@ -296,14 +321,15 @@ func Forms(c Canary) []string {
 	v := c.Value
 	forms := []string{v, strings.ToLower(v), url.QueryEscape(v), percentAll(v, 1), jsonUEscape(v)}
 	compact := strings.NewReplacer(" ", "", "-", "", ".", "").Replace(v)
-	if c.Kind != "email" && c.Kind != "secret" {
+	number := c.Kind != "email" && c.Kind != "secret" && c.Kind != "ip" && c.Kind != "person_name"
+	if number || c.Kind == "person_name" {
 		forms = append(forms, compact)
 	}
 	if c.Kind == "secret" {
-		forms = append(forms, strings.TrimPrefix(v, SecretPrefix))
+		forms = append(forms, SecretBody(v))
 	}
 	// Digit runs of 6+ of the value: a partial leak of a number.
-	if c.Kind != "email" && c.Kind != "secret" && len(compact) >= 9 {
+	if number && len(compact) >= 9 {
 		forms = append(forms, compact[:7], compact[len(compact)-7:])
 	}
 	return forms
