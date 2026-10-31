@@ -17,11 +17,13 @@ import (
 
 // Refusal codes (stable, documented for agents).
 const (
-	EBadQuery      = "E_BAD_QUERY"
-	EUnknownField  = "E_UNKNOWN_FIELD"
-	EPIIInQuery    = "E_PII_IN_QUERY"
-	EOverBudget    = "E_OVER_BUDGET"
-	ESource        = "E_SOURCE"
+	EBadQuery     = "E_BAD_QUERY"
+	EUnknownField = "E_UNKNOWN_FIELD"
+	EPIIInQuery   = "E_PII_IN_QUERY"
+	EOverBudget   = "E_OVER_BUDGET"
+	ESource       = "E_SOURCE"
+	// EMask is reserved: search and count skip a granule where masking
+	// fails too often instead of refusing (see run).
 	EMask          = "E_MASK"
 	EPolicyChanged = "E_POLICY_CHANGED"
 	EStale         = "E_STALE"

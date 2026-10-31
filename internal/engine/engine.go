@@ -50,7 +50,8 @@ type Limits struct {
 	MaxOutput  int
 	// Deadline of one call.
 	Deadline time.Duration
-	// MaxMaskFailures in a call before E_MASK.
+	// MaxMaskFailures in one granule before the granule is skipped
+	// whole (see run).
 	MaxMaskFailures int
 }
 
@@ -225,7 +226,8 @@ type SearchResult struct {
 	Scanned      Scanned           `json:"scanned"`
 	Masking      Masking           `json:"masking"`
 	// MaskedFailures counts records withheld whole because masking
-	// failed.
+	// failed: the records it failed on, and every record of a granule
+	// where it failed MaxMaskFailures times or more.
 	MaskedFailures int `json:"masked_failures,omitempty"`
 }
 
@@ -421,19 +423,36 @@ func (e *Engine) run(ctx context.Context, plan source.Byteplan, chunk, gran int,
 		if took := time.Since(maskStart); took > e.o.Cost.Time(fetched)*3/2 && took > 100*time.Millisecond {
 			e.o.Cost.Recalibrate() // overrun: recalibrate at once
 		}
+		// With the pre-filter on, only the records whose clear text
+		// holds the needles are masked: their failures would tell
+		// which ones do, so they are not counted (failed records are
+		// still withheld whole, as they never match); see
+		// prefilter.go.
+		perGranule := map[int]int{}
+		for i := range recs {
+			if recs[i].Failed() && !filtered {
+				perGranule[raws[i].Granule]++
+			}
+		}
 		for i := range raws {
-			// With the pre-filter on, only the records whose clear
-			// text holds the needles are masked: their failures
-			// would tell which ones do, so they are not counted
-			// (failed records are still withheld whole); see
-			// prefilter.go.
+			// A granule where masking failed MaxMaskFailures times
+			// or more is skipped whole: none of its records is
+			// returned or counted, and all of them count as masked
+			// failures (a masker failing that often on a granule's
+			// content is not trusted with the rest of it). This was
+			// chosen over a call-level E_MASK refusal: the call
+			// would stop there every time, so no cursor (and, on a
+			// cold plan, no narrower range) could ever get past it.
+			// Skipping depends on the plan's granules and their
+			// bytes only, never on predicates or call boundaries.
+			if n := perGranule[raws[i].Granule]; n >= e.o.Limits.MaxMaskFailures {
+				failures++
+				continue
+			}
 			if recs[i].Failed() && !filtered {
 				failures++
 			}
 			visit(raws[i], recs[i])
-		}
-		if failures >= e.o.Limits.MaxMaskFailures {
-			return chunk, gran, sc, failures, &Error{Code: EMask, Message: "masking failed on several records: the call is refused"}
 		}
 		// Reported work is granule-rounded: the planned bytes of the
 		// granules (a remote slice, unknown before the fetch, by the

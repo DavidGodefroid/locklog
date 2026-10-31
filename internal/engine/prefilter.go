@@ -21,8 +21,8 @@ import (
 // are masked, so a failure count would tell whether a failing record's clear
 // text holds the needle. With the filter on (and a needle in the query),
 // failures are therefore not counted at all: masked_failures stays 0 and
-// E_MASK is never raised, while a record that fails is still withheld whole
-// (it never matches). Masking the skipped records instead would remove the
+// no granule is skipped for its failures, while a record that fails is still
+// withheld whole (it never matches). Masking the skipped records instead would remove the
 // filter's only purpose. The weaker failure signal is a reason the filter is
 // refused on production.
 
