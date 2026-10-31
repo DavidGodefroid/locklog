@@ -6,6 +6,11 @@
 // also probes whether a backend answers a data read without credentials,
 // which a production profile refuses.
 //
+// The pin is the configured host name and port: the name is resolved at
+// each dial, so a resolver that changes its answer can point the console
+// at another address (never a link-local or metadata one). On production
+// the certificate check (verify-full) binds the connection to the name.
+//
 // The console reaches a backend only through the Docker network the human
 // names with LOCKLOG_NETWORK (no network otherwise). Whether agents can
 // also reach that network, or the backend's unauthenticated ports, is a
@@ -18,6 +23,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -39,6 +45,24 @@ const MaxResponseBytes = 64 << 20
 
 // ErrNotAllowed is returned for a request outside the allowlist.
 var ErrNotAllowed = errors.New("egress: request not in the allowlist")
+
+// errRedirect is the client's answer to a redirect: never followed.
+var errRedirect = errors.New("egress: redirects are not followed")
+
+// metadataAddr reports an address the console never dials: link-local
+// (169.254.0.0/16, fe80::/10: the cloud metadata services), the other
+// known metadata addresses, and the unspecified address.
+func metadataAddr(ip net.IP) bool {
+	if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+		return true
+	}
+	for _, m := range []string{"fd00:ec2::254", "100.100.100.200"} {
+		if ip.Equal(net.ParseIP(m)) {
+			return true
+		}
+	}
+	return false
+}
 
 // ErrResponseTooLarge is returned when a body passes MaxResponseBytes.
 var ErrResponseTooLarge = errors.New("egress: response larger than the cap")
@@ -77,8 +101,9 @@ func NewAllowlist(routes ...Route) *Allowlist {
 	return a
 }
 
-// Allows reports whether method and path (relative to the base path, raw
-// and unescaped forms both checked) are in the list.
+// Allows reports whether method and path (relative to the base path, as
+// the caller builds it; request re-escapes it, so that a "%2F" in a
+// segment stays inside that segment) are in the list.
 func (a *Allowlist) Allows(method, path string) bool {
 	if !strings.HasPrefix(path, "/") || strings.Contains(path, "//") {
 		return false
@@ -138,6 +163,7 @@ type Client struct {
 	creds     Credentials
 	orgID     string
 	http      *http.Client
+	probe     *http.Client
 	userAgent string
 	maxBody   int64
 }
@@ -192,48 +218,62 @@ func New(r *config.Remote, allow *Allowlist, creds Credentials, opt Options) (*C
 		resolver = net.DefaultResolver
 	}
 	dialer := &net.Dialer{Timeout: 10 * time.Second}
-	tr := &http.Transport{
-		// No proxy: HTTP_PROXY and friends never apply.
-		Proxy: nil,
-		DialContext: func(ctx context.Context, network, a string) (net.Conn, error) {
-			if a != addr {
-				return nil, fmt.Errorf("egress: dial %s refused: the source is pinned to %s", a, addr)
+	dial := func(ctx context.Context, network, a string) (net.Conn, error) {
+		if a != addr {
+			return nil, fmt.Errorf("egress: dial %s refused: the source is pinned to %s", a, addr)
+		}
+		host, p, _ := net.SplitHostPort(a)
+		ips, err := resolver.LookupIPAddr(ctx, host)
+		if err != nil {
+			return nil, fmt.Errorf("egress: resolve %s: %w", host, err)
+		}
+		var last error
+		for _, ip := range ips {
+			if !opt.AllowLinkLocal && metadataAddr(ip.IP) {
+				last = fmt.Errorf("egress: %s resolves to a link-local, metadata or unspecified address, refused", host)
+				continue
 			}
-			host, p, _ := net.SplitHostPort(a)
-			ips, err := resolver.LookupIPAddr(ctx, host)
-			if err != nil {
-				return nil, fmt.Errorf("egress: resolve %s: %w", host, err)
+			conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip.IP.String(), p))
+			if err == nil {
+				return conn, nil
 			}
-			var last error
-			for _, ip := range ips {
-				if !opt.AllowLinkLocal && (ip.IP.IsLinkLocalUnicast() || ip.IP.IsLinkLocalMulticast()) {
-					last = fmt.Errorf("egress: %s resolves to a link-local address, refused", host)
-					continue
-				}
-				conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip.IP.String(), p))
-				if err == nil {
-					return conn, nil
-				}
-				last = err
-			}
-			if last == nil {
-				last = fmt.Errorf("egress: %s has no address", host)
-			}
-			return nil, last
-		},
-		TLSClientConfig:       tlsConf,
-		ForceAttemptHTTP2:     true,
-		MaxIdleConnsPerHost:   4,
-		ResponseHeaderTimeout: timeout,
-		DisableCompression:    false,
+			last = err
+		}
+		if last == nil {
+			last = fmt.Errorf("egress: %s has no address", host)
+		}
+		return nil, last
 	}
-	c.http = &http.Client{
-		Transport: tr,
-		Timeout:   timeout,
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return errors.New("egress: redirects are not followed")
-		},
+	client := func(tc *tls.Config) *http.Client {
+		return &http.Client{
+			Transport: &http.Transport{
+				// No proxy: HTTP_PROXY and friends never apply.
+				Proxy:                 nil,
+				DialContext:           dial,
+				TLSClientConfig:       tc,
+				ForceAttemptHTTP2:     true,
+				MaxIdleConnsPerHost:   4,
+				ResponseHeaderTimeout: timeout,
+			},
+			Timeout: timeout,
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return errRedirect
+			},
+		}
 	}
+	c.http = client(tlsConf)
+	// The probe's client: the same pin and TLS checks, no client
+	// certificate, its own connection pool (a pooled connection set up with
+	// the certificate is never reused by a probe).
+	var probeTLS *tls.Config
+	if tlsConf != nil {
+		probeTLS = tlsConf.Clone()
+		probeTLS.Certificates = nil
+		probeTLS.GetClientCertificate = func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+			return &tls.Certificate{}, nil
+		}
+	}
+	c.probe = client(probeTLS)
 	return c, nil
 }
 
@@ -262,7 +302,7 @@ func tlsConfig(r *config.Remote, u *url.URL, opt Options) (*tls.Config, error) {
 	}
 	switch {
 	case r.TLS == kconfig.TLSVerifyFull:
-	case r.TLS == kconfig.TLSVerifyCA || (r.TLS == kconfig.TLSRequire && r.TLSCA != ""):
+	case kconfig.TLSVerifiesChain(r.TLS, r.TLSCA):
 		// The chain, not the name: verified by hand.
 		roots := conf.RootCAs
 		conf.InsecureSkipVerify = true
@@ -340,7 +380,11 @@ func (c *Client) Get(ctx context.Context, path string, q url.Values) (Response, 
 }
 
 func (c *Client) do(req *http.Request) (Response, error) {
-	resp, err := c.http.Do(req)
+	return c.doWith(c.http, req)
+}
+
+func (c *Client) doWith(hc *http.Client, req *http.Request) (Response, error) {
+	resp, err := hc.Do(req)
 	if err != nil {
 		var ue *url.Error
 		if errors.As(err, &ue) {
@@ -368,36 +412,89 @@ func (c *Client) do(req *http.Request) (Response, error) {
 // not, say, a login page).
 type Recognizer func(body []byte) bool
 
-// Probe sends one read of a data endpoint WITHOUT credentials (no
-// Authorization, no X-Scope-OrgID), follows no redirect, and reports
-// whether the backend answered it: a 2xx with a body recognize accepts. A
-// production profile refuses such a backend: anyone on its network reads
-// the logs without the console.
-func (c *Client) Probe(ctx context.Context, path string, recognize Recognizer) (bool, error) {
+// probeOnce reads path with only the headers in hdr (no Authorization, no
+// client certificate). It reports open on a 2xx data answer, closed on 401
+// or 403, a 2xx that is not data (a login page), or a redirect to another
+// path (a login flow); any other answer (404, 429, 5xx, a redirect to the
+// same path) is an error: the check cannot tell, and fails closed.
+func (c *Client) probeOnce(ctx context.Context, path string, hdr http.Header, recognize Recognizer) (bool, error) {
 	req, err := c.request(ctx, http.MethodGet, path, nil, nil)
 	if err != nil {
 		return false, err
 	}
-	r, err := c.do(req)
+	for k, v := range hdr {
+		req.Header[k] = v
+	}
+	resp, err := c.probe.Do(req)
+	if resp != nil {
+		defer resp.Body.Close()
+	}
 	if err != nil {
-		if r.Status != 0 {
-			return false, nil // refused (401, 403, a redirect): authenticated
+		if errors.Is(err, errRedirect) && resp != nil {
+			loc, lerr := resp.Location()
+			if lerr == nil {
+				want := strings.TrimSuffix(req.URL.Path, "/")
+				if p := strings.TrimSuffix(loc.Path, "/"); p != want || loc.Host != req.URL.Host {
+					return false, nil
+				}
+			}
+			return false, fmt.Errorf("egress: probe: %s redirects to itself (%d): cannot tell whether it is open", req.URL.Path, resp.StatusCode)
 		}
-		if strings.Contains(err.Error(), "redirects are not followed") {
+		// A server that demands a client certificate refuses the probe's
+		// handshake: closed.
+		// (crypto/tls exports no type for a remote alert: its text.)
+		if m := err.Error(); strings.Contains(m, "remote error: tls: certificate required") || strings.Contains(m, "remote error: tls: bad certificate") {
 			return false, nil
+		}
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			return false, fmt.Errorf("egress: probe %s: %w", req.URL.Path, ue.Err)
 		}
 		return false, err
 	}
-	return recognize(r.Body), nil
+	body, err := io.ReadAll(io.LimitReader(resp.Body, c.maxBody+1))
+	if err != nil {
+		return false, fmt.Errorf("egress: probe %s: reading the response: %w", req.URL.Path, err)
+	}
+	switch {
+	case resp.StatusCode >= 200 && resp.StatusCode <= 299:
+		return recognize(body), nil
+	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+		return false, nil
+	}
+	return false, fmt.Errorf("egress: probe %s: status %d: cannot tell whether the backend is open", req.URL.Path, resp.StatusCode)
+}
+
+// Probe reads a data endpoint WITHOUT credentials: no Authorization, no
+// client certificate. An X-Scope-OrgID is not a credential (anyone who
+// reaches the backend can set it), so it reads once with no tenant and
+// once with one (the configured org_id, else a made-up tenant): data on
+// either is an open backend. A production profile refuses it: anyone on
+// its network reads the logs without the console.
+func (c *Client) Probe(ctx context.Context, path string, recognize Recognizer) (bool, error) {
+	tenant := c.orgID
+	if tenant == "" {
+		tenant = "locklog-probe"
+	}
+	for _, hdr := range []http.Header{{}, {"X-Scope-Orgid": {tenant}}} {
+		open, err := c.probeOnce(ctx, path, hdr, recognize)
+		if err != nil || open {
+			return open, err
+		}
+	}
+	return false, nil
 }
 
 // LokiProbePath is the data endpoint the unauthenticated-read check reads.
 const LokiProbePath = "/loki/api/v1/labels"
 
-// LokiData recognizes a Loki data answer: {"status":"success","data":[...]}.
+// LokiData recognizes a Loki data answer: a JSON object whose status is
+// "success" (whatever its data).
 func LokiData(body []byte) bool {
-	s := strings.Join(strings.Fields(string(body)), "")
-	return strings.HasPrefix(s, `{"status":"success","data":[`) || (strings.Contains(s, `"status":"success"`) && strings.Contains(s, `"data":[`))
+	var v struct {
+		Status string `json:"status"`
+	}
+	return json.Unmarshal(body, &v) == nil && v.Status == "success"
 }
 
 // CheckUnauthenticated is the production check of a Loki source: it
