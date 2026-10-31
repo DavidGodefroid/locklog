@@ -239,6 +239,10 @@ logs), the `template` text mode, your own rules, and `lookup = "approved"`.
 `docker compose up` deletes a recreated container's `json-file` logs: use
 the journald driver or Loki for history across deploys.
 
+Loki 3 users: see [docs/loki.md](docs/loki.md) on the default
+`detected_level` field: what Loki puts in it, and how locklog selects on it
+(locally, never as a Loki filter).
+
 ## Masking benchmark
 
 The leak harness plants canaries of every detected kind, in every format

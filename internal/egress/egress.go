@@ -166,6 +166,7 @@ type Client struct {
 	probe     *http.Client
 	userAgent string
 	maxBody   int64
+	headers   map[string]string
 }
 
 // Options tune a client; tests set them.
@@ -181,6 +182,10 @@ type Options struct {
 	AllowLinkLocal bool
 	// MaxResponseBytes overrides MaxResponseBytes (tests).
 	MaxResponseBytes int64
+	// Headers are fixed request headers of the source (e.g. Loki's
+	// response-encoding flags). They never carry credentials: those go
+	// through the auth mode.
+	Headers map[string]string
 }
 
 // New builds the client of a remote source. creds are the source's
@@ -209,6 +214,10 @@ func New(r *config.Remote, allow *Allowlist, creds Credentials, opt Options) (*C
 	if opt.MaxResponseBytes > 0 {
 		c.maxBody = opt.MaxResponseBytes
 	}
+	if err := checkHeaders(opt.Headers); err != nil {
+		return nil, err
+	}
+	c.headers = opt.Headers
 	timeout := opt.Timeout
 	if timeout == 0 {
 		timeout = 60 * time.Second
@@ -275,6 +284,20 @@ func New(r *config.Remote, allow *Allowlist, creds Credentials, opt Options) (*C
 	}
 	c.probe = client(probeTLS)
 	return c, nil
+}
+
+// checkHeaders refuses the headers that carry credentials, a tenant or the
+// host (those go through the auth mode and the source URL only), and the
+// headers that tag locklog's queries (User-Agent, X-Query-Tags), which a
+// fixed header must not override.
+func checkHeaders(h map[string]string) error {
+	for k := range h {
+		switch http.CanonicalHeaderKey(k) {
+		case "Authorization", "Proxy-Authorization", "Cookie", "X-Scope-Orgid", "Host", "User-Agent", "X-Query-Tags":
+			return fmt.Errorf("egress: header %s is not a fixed header", k)
+		}
+	}
+	return nil
 }
 
 func tlsConfig(r *config.Remote, u *url.URL, opt Options) (*tls.Config, error) {
@@ -344,6 +367,11 @@ func (c *Client) request(ctx context.Context, method, path string, q url.Values,
 	if req.URL.EscapedPath() != (&url.URL{Path: u.Path}).EscapedPath() || req.URL.Host != c.base.Host {
 		return nil, fmt.Errorf("%w: %s %s", ErrNotAllowed, method, path)
 	}
+	for k, v := range c.headers {
+		req.Header.Set(k, v)
+	}
+	// Set last: no fixed header overrides how locklog's queries are
+	// tagged (checkHeaders refuses them too).
 	req.Header.Set("User-Agent", c.userAgent)
 	req.Header.Set("X-Query-Tags", "source=locklog")
 	return req, nil
@@ -374,6 +402,24 @@ func (c *Client) Get(ctx context.Context, path string, q url.Values) (Response, 
 	req, err := c.request(ctx, http.MethodGet, path, q, nil)
 	if err != nil {
 		return Response{}, err
+	}
+	c.authorize(req)
+	return c.do(req)
+}
+
+// GetWith is Get with extra request headers (e.g. Loki's response-encoding
+// flags, set by the source itself). They follow the fixed-header rule: no
+// credentials, tenant or host.
+func (c *Client) GetWith(ctx context.Context, path string, q url.Values, hdr map[string]string) (Response, error) {
+	if err := checkHeaders(hdr); err != nil {
+		return Response{}, err
+	}
+	req, err := c.request(ctx, http.MethodGet, path, q, nil)
+	if err != nil {
+		return Response{}, err
+	}
+	for k, v := range hdr {
+		req.Header.Set(k, v)
 	}
 	c.authorize(req)
 	return c.do(req)
@@ -488,6 +534,12 @@ func (c *Client) Probe(ctx context.Context, path string, recognize Recognizer) (
 	}
 	return false, nil
 }
+
+// LokiHeaders are the fixed headers of a Loki source: structured metadata
+// comes back apart from the stream labels (without the flag, Loki 3 merges
+// it into each stream's label set). The Loki source also sends it on each
+// request itself, and refuses a streams answer that did not apply it.
+var LokiHeaders = map[string]string{"X-Loki-Response-Encoding-Flags": "categorize-labels"}
 
 // LokiProbePath is the data endpoint the unauthenticated-read check reads.
 const LokiProbePath = "/loki/api/v1/labels"
