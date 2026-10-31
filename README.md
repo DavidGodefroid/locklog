@@ -71,8 +71,8 @@ with its own credentials, sends all of it to the model provider.
 ## Highlights
 
 - **Masked by construction.** Every record is masked inside the console
-  before any predicate runs: a search for a clear email finds nothing,
-  because the agent only ever works on the masked view. Equality on a
+  before any predicate runs, and a predicate holding a clear email is
+  refused (`E_PII_IN_QUERY`): the agent only ever works on the masked view. Equality on a
   pseudonym works, so "every record of this user" still does. (The opt-in
   `prefilter`, refused on production, is the documented exception.)
 - **Investigation tools, not a query language.** `locklog_count` (with

@@ -136,8 +136,8 @@ trusted fields.
 ```json
 { "sources": ["nginx"], "from": "2026-10-30T13:00:00Z", "to": "2026-10-30T15:00:00Z",
   "where": [ {"field": "status", "op": ">=", "value": 500},
-             {"field": "user.email", "op": "=", "value": "⟦email:7F3KQ2M9ZD4X⟧"} ],
-  "text": "upstream timed out", "limit": 100 }
+             {"field": "remote_addr", "op": "=", "value": "⟦ip:K2M9ZDQ81RTA⟧"} ],
+  "text": "/api/orders/", "limit": 100 }
 ```
 
 - `= != in exists` on any field. `< <= > >=` only on trusted fields: ordering

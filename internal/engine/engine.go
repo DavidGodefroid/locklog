@@ -631,18 +631,37 @@ func (e *Engine) run(ctx context.Context, fp **frozen, chunk, gran int, needles 
 	// unknownEst is the bytes the last group of unknown bytes fetched,
 	// the estimate of the next one.
 	var unknownEst int64
+	single := false
 	for chunk < len(plan.Chunks) {
 		if callBytes > 0 && sc.Bytes >= callBytes {
 			return chunk, gran, sc, failures, nil
 		}
 		c := plan.Chunks[chunk]
 		remaining := time.Until(deadline)
-		groups := granuleGroups(c, gran, max(e.o.Cost.Budget(remaining)/factor, 1))
+		// A group is what the time left can mask and, with a byte
+		// budget, at most half of what is left of it: a record's own
+		// bytes run above its share of the stream (the fetch caps
+		// them at the budget), so a group sized to the whole budget
+		// would hit that cap and refuse the call instead of stopping
+		// it at a boundary (#88). Both bounds depend on the plan and
+		// the call only.
+		// Within a compressed chunk every group decompresses the
+		// stream from its start: it is not halved.
+		per := max(e.o.Cost.Budget(remaining)/factor, 1)
+		if callBytes > 0 && !compressed(c) {
+			per = min(per, max((callBytes-sc.Bytes)/2, 1))
+		}
+		groups := granuleGroups(c, gran, per)
 		if len(groups) == 0 {
 			chunk, gran = chunk+1, 0
 			continue
 		}
 		g := groups[0]
+		if single {
+			// The call's first group of several local granules hit
+			// the fetch cap: its first granule alone.
+			g[1] = g[0] + 1
+		}
 		sub := c
 		sub.Granules = c.Granules[g[0]:g[1]]
 		var planned int64
@@ -650,8 +669,12 @@ func (e *Engine) run(ctx context.Context, fp **frozen, chunk, gran int, needles 
 			planned += granuleBytes(gr, c)
 		}
 		// Stop before a group that would not fit (but always make
-		// progress on the first group of a call).
-		if sc.Granules > 0 && e.o.Cost.Time(planned*factor) > remaining {
+		// progress on the first group of a call): in the time left,
+		// or (local granules) in half of the byte budget left, which
+		// its records' own bytes could exceed (rather than fetch it
+		// and drop it at the cap).
+		if sc.Granules > 0 && (e.o.Cost.Time(planned*factor) > remaining ||
+			callBytes > 0 && planned > 0 && !compressed(c) && planned*2 > callBytes-sc.Bytes) {
 			return chunk, gran, sc, failures, nil
 		}
 		// A group of unknown bytes (a remote slice) is estimated by the
@@ -710,9 +733,24 @@ func (e *Engine) run(ctx context.Context, fp **frozen, chunk, gran int, needles 
 			dropped()
 			return chunk, gran, sc, failures, nil
 		}
+		if errors.Is(err, errFetchCap) && sc.Granules == 0 && planned > 0 && len(sub.Granules) == 1 &&
+			!compressed(c) && !e.remote(c.Source) && recLimit < groupLimit {
+			// A call's first group is one local granule whose
+			// records' own bytes exceed what the cost model says can
+			// be masked in time (a loaded host): it is processed
+			// anyway, its records bounded by the call's byte budget
+			// (memory) instead; masking is bounded by the group's
+			// deadline (an overrun is refused as retryable, and
+			// recalibrates). Every call makes progress (#88).
+			raws, total, fetched, recBytes, err = e.fetch(groupCtx, sub, needles, groupLimit, groupLimit)
+		}
 		if errors.Is(err, errFetchCap) {
 			cancel()
 			dropped()
+			if sc.Granules == 0 && len(sub.Granules) > 1 && !compressed(c) && !e.remote(c.Source) && !single {
+				single = true
+				continue
+			}
 			if sc.Granules > 0 {
 				return chunk, gran, sc, failures, nil // the next call has a whole budget
 			}
@@ -735,8 +773,9 @@ func (e *Engine) run(ctx context.Context, fp **frozen, chunk, gran int, needles 
 				*fp = n
 				return chunk, gran, sc, failures, nil
 			}
-			return chunk, gran, sc, failures, &Error{Code: EOverBudget, Message: "a log stream holds more data than one call can process (a compressed file expanding more than estimated, or large repeated records): narrow the range or the sources, or ask for locklog_scan"}
+			return chunk, gran, sc, failures, &Error{Code: EOverBudget, Message: "a log stream's records hold more data than one call can process (a compressed stream expanding, or journal entries sharing large payloads): narrow the range or the sources, or ask for locklog_scan"}
 		}
+		single = false
 		// Masking costs the records' bytes (a compressed stream's
 		// discarded prefix is decompressed, not masked), counted before
 		// the pre-filter.
