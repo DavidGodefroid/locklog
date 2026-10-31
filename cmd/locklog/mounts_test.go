@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -83,6 +84,9 @@ user = "reader"
 // A tls_ca the console cannot read refuses the plan, so the launcher stops
 // before starting the console.
 func TestMountsTLSFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the console's paths are Linux paths")
+	}
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "xdg"))

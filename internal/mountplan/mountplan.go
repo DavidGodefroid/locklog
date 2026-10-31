@@ -153,11 +153,14 @@ func under(p, dir string) bool { return p != dir && beneath(p, dir) }
 // and its key only in the home volume, never under the project (a
 // project inside the home volume is refused). project is the project
 // root on the host, where .locklog/ is bound at the same path. Paths are
-// compared cleaned and, where they exist here, with their links resolved.
+// compared cleaned; those under the project with their links resolved.
 func TLSFiles(p config.Profile, project string) error {
-	proj := ""
+	// Only paths under the project are resolved: it is bound at the same
+	// path in the console, so its links are the console's. Every other
+	// path names a file of the console's image or volume, not of here.
+	raw, proj := "", ""
 	if project != "" {
-		proj = realPath(project)
+		raw, proj = path.Clean(project), realPath(project)
 	}
 	home := ConsoleHome
 	hasTLS := false
@@ -166,7 +169,7 @@ func TLSFiles(p config.Profile, project string) error {
 			hasTLS = true
 		}
 	}
-	if hasTLS && proj != "" && beneath(proj, home) {
+	if hasTLS && proj != "" && (beneath(raw, home) || beneath(proj, home)) {
 		return fmt.Errorf("the project %s is inside the console's home volume %s: refused (its files would be readable by agents)", proj, home)
 	}
 	ll := path.Join(proj, ".locklog")
@@ -182,7 +185,10 @@ func TLSFiles(p config.Profile, project string) error {
 			if !path.IsAbs(f.val) || path.Clean(f.val) != f.val {
 				return fmt.Errorf("source %s: %s %q: want an absolute, clean path", s.Name, f.key, f.val)
 			}
-			c := realPath(f.val)
+			c := f.val
+			if raw != "" && (beneath(c, raw) || beneath(c, proj)) {
+				c = realPath(c)
+			}
 			inProject := proj != "" && beneath(c, proj)
 			switch {
 			case f.key == "tls_ca" && (proj != "" && under(c, ll) || beneath(c, imageCAs) || under(c, home)):

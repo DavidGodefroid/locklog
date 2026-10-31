@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -203,6 +204,9 @@ func TestBackendProbeElastic(t *testing.T) {
 // The remote sources' TLS files the console could not read, or a client
 // key agents could, are findings.
 func TestTLSItem(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the console's paths are Linux paths")
+	}
 	project := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(project, ".locklog"), 0o755); err != nil {
 		t.Fatal(err)
