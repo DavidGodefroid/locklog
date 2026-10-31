@@ -48,6 +48,9 @@ type fakeLoki struct {
 	delay    time.Duration
 	// metaQueries are the query parameters of the label requests.
 	metaQueries []string
+	// ignoreFlags answers as a backend that ignores the encoding-flags
+	// header (metadata merged into the stream labels, no encodingFlags).
+	ignoreFlags bool
 	// ignoreOffset evaluates metric queries without their offset (a
 	// backend whose grid is not the one asked for).
 	ignoreOffset bool
@@ -91,7 +94,7 @@ func (f *fakeLoki) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.requests = append(f.requests, r.URL.Path)
 	f.mu.Unlock()
 	q := r.URL.Query()
-	categorize := r.Header.Get("X-Loki-Response-Encoding-Flags") == "categorize-labels"
+	categorize := r.Header.Get("X-Loki-Response-Encoding-Flags") == "categorize-labels" && !f.ignoreFlags
 	// The label endpoints describe the streams their query selects (all
 	// of them without one).
 	var metaSel [][3]string
@@ -213,7 +216,11 @@ func (f *fakeLoki) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		for _, k := range order {
 			result = append(result, streams[k])
 		}
-		json.NewEncoder(w).Encode(map[string]any{"status": "success", "data": map[string]any{"resultType": "streams", "result": result}})
+		data := map[string]any{"resultType": "streams", "result": result}
+		if categorize {
+			data["encodingFlags"] = []string{"categorize-labels"}
+		}
+		json.NewEncoder(w).Encode(map[string]any{"status": "success", "data": data})
 	default:
 		http.NotFound(w, r)
 	}
@@ -446,21 +453,37 @@ func TestScanReturnsEveryEntryOnceInOrder(t *testing.T) {
 	}
 }
 
-func TestUntrustedMetadataDroppedWithoutEncodingFlag(t *testing.T) {
-	// Without categorize-labels, Loki merges metadata into the stream's
-	// labels: user_email then looks like a label, and is still dropped.
+func TestCategorizeLabelsRequired(t *testing.T) {
+	// The source asks for categorize-labels itself: a client built without
+	// the fixed header still gets the metadata apart (trace_id is trusted
+	// metadata, not a label).
 	f := &fakeLoki{entries: dataset(20)}
 	srv := httptest.NewServer(f)
 	defer srv.Close()
 	cl, _ := egress.New(&config.Remote{URL: srv.URL, Auth: config.AuthNone}, egress.LokiRoutes, egress.Credentials{}, egress.Options{})
 	p, _ := parse.New(parse.Options{})
-	s, _ := New(Options{Name: "l", Client: cl, Parser: p, Selector: map[string]string{"env": "prod"}, TrustedLabels: []string{"app"}})
-	for _, r := range scanAll(t, s, source.Range{From: t0, To: t0.Add(time.Hour)}, source.Selector{}) {
+	s, _ := New(Options{Name: "l", Client: cl, Parser: p, Selector: map[string]string{"env": "prod"}, TrustedLabels: []string{"app"}, TrustedMetadata: []string{"trace_id"}})
+	recs := scanAll(t, s, source.Range{From: t0, To: t0.Add(time.Hour)}, source.Selector{})
+	if len(recs) != 20 {
+		t.Fatalf("%d records", len(recs))
+	}
+	for _, r := range recs {
+		keys := []string{}
 		for _, a := range r.Event.Attrs {
-			if a.Key != "app" {
-				t.Fatalf("attr %q returned", a.Key)
-			}
+			keys = append(keys, a.Key)
 		}
+		if !slices.Equal(keys, []string{"app", "trace_id"}) {
+			t.Fatalf("attrs %v", keys)
+		}
+	}
+	// A backend that ignores the flag (metadata merged into the labels,
+	// where an untrusted field could pass for a label): refused.
+	f.ignoreFlags = true
+	plan, _ := s.Plan(ctx, source.Range{From: t0, To: t0.Add(time.Hour)}, source.Selector{})
+	it, _ := s.Scan(ctx, plan.Chunks[0])
+	defer it.Close()
+	if _, err := it.Next(); err == nil || errors.Is(err, io.EOF) {
+		t.Fatalf("an uncategorized response accepted: %v", err)
 	}
 }
 

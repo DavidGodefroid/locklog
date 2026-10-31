@@ -49,8 +49,16 @@ var hiddenLabels = map[string]bool{"__stream_shard__": true}
 
 // Client is the egress client of the source (egress.Client).
 type Client interface {
-	Get(ctx context.Context, path string, q url.Values) (egress.Response, error)
+	GetWith(ctx context.Context, path string, q url.Values, hdr map[string]string) (egress.Response, error)
 }
+
+// encodingFlag asks Loki 3 to return structured metadata apart from the
+// stream labels. The source sends it on every request, whatever headers its
+// client was built with, and refuses a streams answer that does not say it
+// applied it (without it, Loki merges metadata into each stream's labels).
+const encodingFlag = "categorize-labels"
+
+var requestHeaders = map[string]string{"X-Loki-Response-Encoding-Flags": encodingFlag}
 
 // Options configure a Loki source.
 type Options struct {
@@ -175,7 +183,7 @@ func (s *Source) do(ctx context.Context, path string, q url.Values) ([]byte, err
 		return nil, ctx.Err()
 	}
 	defer func() { <-s.sem }()
-	resp, err := s.o.Client.Get(ctx, path, q)
+	resp, err := s.o.Client.GetWith(ctx, path, q, requestHeaders)
 	if err != nil {
 		return nil, err
 	}
@@ -222,13 +230,14 @@ type entry struct {
 	key    string // stream labels, canonical
 }
 
-// queryResponse is Loki's query_range answer (streams), with or without the
+// queryResponse is Loki's query_range answer (streams), in the
 // categorize-labels encoding.
 type queryResponse struct {
 	Status string `json:"status"`
 	Data   struct {
-		ResultType string `json:"resultType"`
-		Result     []struct {
+		ResultType    string   `json:"resultType"`
+		EncodingFlags []string `json:"encodingFlags"`
+		Result        []struct {
 			Stream map[string]string   `json:"stream"`
 			Metric map[string]string   `json:"metric"`
 			Values [][]json.RawMessage `json:"values"`
@@ -251,6 +260,8 @@ func labelsKey(m map[string]string) string {
 
 var errResponse = errors.New("loki source: unexpected response")
 
+var errUncategorized = errors.New("loki source: the response is not in the categorize-labels encoding (Loki 3 with structured metadata is required)")
+
 // decodeStreams decodes a streams response into entries, sorted by (ts,
 // stream, line): a deterministic order, independent of how Loki grouped
 // them.
@@ -258,6 +269,11 @@ func decodeStreams(body []byte) ([]entry, error) {
 	var r queryResponse
 	if err := json.Unmarshal(body, &r); err != nil || r.Status != "success" || r.Data.ResultType != "streams" {
 		return nil, errResponse
+	}
+	// Without the flag applied, metadata sits among the stream labels,
+	// where an untrusted field could pass for a trusted label: fail closed.
+	if !slices.Contains(r.Data.EncodingFlags, encodingFlag) {
+		return nil, errUncategorized
 	}
 	var out []entry
 	for _, st := range r.Data.Result {

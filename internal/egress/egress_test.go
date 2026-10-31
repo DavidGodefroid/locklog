@@ -124,6 +124,25 @@ func TestGetSendsCredentialsAndTags(t *testing.T) {
 	}
 }
 
+func TestGetWithHeaders(t *testing.T) {
+	var s seen
+	srv := lokiServer(t, &s, nil)
+	c, _ := New(remote(srv.URL, config.AuthBearer, kconfig.TLSVerifyFull), LokiRoutes, Credentials{Secret: "s3cret"}, Options{RootCAs: roots(srv)})
+	q := url.Values{"query": {`{app="api"}`}}
+	if _, err := c.GetWith(context.Background(), "/loki/api/v1/labels", q, LokiHeaders); err != nil || s.auth != "Bearer s3cret" || s.query != q.Encode() {
+		t.Fatalf("GetWith: %v %+v", err, &s)
+	}
+	n := s.n.Load()
+	for _, h := range []string{"Authorization", "cookie", "X-Scope-OrgID", "Host"} {
+		if _, err := c.GetWith(context.Background(), "/loki/api/v1/labels", nil, map[string]string{h: "x"}); err == nil {
+			t.Errorf("header %s sent", h)
+		}
+	}
+	if s.n.Load() != n {
+		t.Error("a refused request reached the server")
+	}
+}
+
 func TestNotAllowedSendsNothing(t *testing.T) {
 	var s seen
 	srv := lokiServer(t, &s, nil)
