@@ -34,7 +34,7 @@ newest entry of its stream, so either push in time order or raise
 | range `sum by (level)(count_over_time({sel}[1m]))`, 1 h / step 60 s | 14-15 s, 3.2 GiB processed |
 | same, 24 h / step 300 s | 15-17 s, 3.4 GiB processed |
 | same, 7 d / step 3600 s | 16-21 s, 4.6 GiB processed |
-| raw `query_range` page, `limit` 5000 (1.75 MiB) | 180-530 ms |
+| raw `query_range` page, `limit` 5000 (1.75 MiB) | ≈ 175 ms warm, up to 530 ms on a cold first pass |
 | raw fetch (response bytes), 1 request in flight | 9.8 MiB/s (5.7 req/s) |
 | 2 in flight | 17.3 MiB/s |
 | **4 in flight** | **20.0 MiB/s (11.5 req/s), the knee** |
@@ -119,15 +119,15 @@ continued free).
 
 | Setting | Default | From |
 |---|---|---|
-| per-call bytes, local (admission) | **512 MiB** (ceiling 64 GiB) | at 60 MB per call, about 9 calls (8 free continuations). Narrowed hour at 1 GiB/day (42 MiB): 1 call. At 7 GiB/day (300 MiB): about 5 calls, about 2.5 min, inside the 5-minute gate |
+| per-call bytes, local (admission) | **512 MiB** (ceiling 64 GiB) | at 60 MB per call, about 9 calls (8 free continuations). Narrowed hour at 1 GiB/day (42 MiB): 1 call. At 7 GiB/day (300 MiB ≈ 315 MB): 6 calls, about 3 min, inside the 5-minute gate |
 | per-call bytes, remote (admission, fetched) | **512 MiB** of response bytes (ceiling 64 GiB) | masking-bound, as local; 512 MiB of responses is ≈ 192 MiB of lines, ≈ 3-4 calls on this corpus |
 | plan chunk (local) | **1 MiB** (one granule, `source.GranuleBytes`) | worst-case cost ≈ 5 µs/B (the encoded corpus, 0.2 MB/s/core): 1 MiB then takes ≈ 5.2 s per core, within the rule "a chunk's worst case ≤ 1/4 of the 30 s deadline" (7.5 s) |
-| calibration corpus | **1 MiB fixed mixed corpus**, 3 passes (3.15 MB, ≈ 1.6-3.1 s at ≈ 1-2 MB/s aggregate on 2 workers) at start, hourly | measured CV 3.5-6.2 %, so a deviation under 10 % is noise. Recalibrate when a chunk takes > 1.5× its prediction |
+| calibration corpus | **1 MiB fixed mixed corpus**, 3 passes (3.15 MB, ≈ 1.6-3.1 s at ≈ 1-2 MB/s aggregate on 2 workers) at start, hourly | measured CV 3.5-6.2 %, so a deviation under 10 % (≈ 1.6 σ) is not acted on. Recalibrate when a chunk takes > 1.5× its prediction |
 | worst-case cost per byte (engine constant, before calibration) | **5 µs/B per core** (all detectors) | the slowest corpus (encoded, 0.2 MB/s/core). The 256 KiB event (268 ms) is 4.1 µs per *scanned* byte, since Find scans its first 64 KiB |
 | Loki in-flight per source | **4** | knee of the curve |
 | Loki `limit` | **5000** (Loki's default max) | 1.75 MiB pages: about 367 B per entry in the response (JSON, timestamp, `categorize-labels` metadata) for lines that average 137 B, so about 37.5 % of response bytes are line bytes |
-| Loki rolling requests/min | **600 non-prod / 240 prod** (plan had 240 / 60) | at 4 in flight, Loki serves about 690/min; 600/min does not throttle it. Production must not throttle below masking speed (≈ 2 MB/s of lines on 2 cores): 240/min = 4 req/s × 5000 × 137 B ≈ 2.7 MB/s of lines. 150/min would give ≈ 1.7 MB/s, below it |
-| Loki byte plans | **time slices + bytes actually fetched**, not `index/stats` | `index/stats` was off by −85 %…+1050 %. Use it only as an advisory estimate in `E_OVER_BUDGET` messages. Budgets charge **fetched bytes = response body bytes** (what crosses the network; ≈ 2.67× the line bytes on this corpus), which depend only on time + trusted selector, never on predicates |
+| Loki rolling requests/min | **600 non-prod / 240 prod** (plan had 240 / 60) | at 4 in flight, Loki serves about 690/min; 600/min does not throttle the masking-bound pipeline. Production must not throttle below masking speed (≈ 2 MB/s of lines on 2 cores): 240/min = 4 req/s × 5000 × 137 B ≈ 2.7 MB/s of lines. 150/min would give ≈ 1.7 MB/s, below it |
+| Loki byte plans | **time slices + bytes actually fetched**, not `index/stats` | `index/stats` was off by −85 %…+1050 %. Use it only as an advisory estimate in `E_OVER_BUDGET` messages. Budgets charge **fetched bytes = decompressed response body bytes** read by the client, whatever the transfer encoding (the spike client let Go's transport negotiate gzip and counted decompressed bytes; ≈ 2.67× the line bytes on this corpus), which depend only on time + trusted selector, never on predicates |
 | Loki structured metadata | always send `X-Loki-Response-Encoding-Flags: categorize-labels` | without it, untrusted metadata is merged into labels |
 | Loki metric counts | per query 7-21 s for 1 h-7 d on 3.2-4.6 GiB processed. The 200 GiB/h prod / 1 TiB/h non-prod "server-processed" budget allows about 40 / 200 such queries per hour | — |
 | ES/OpenSearch in-flight | **4**, `size` 1000 | OpenSearch's knee (51 MiB/s of responses). Elasticsearch still gains up to 8 (39 MiB/s), but the pipeline is masking-bound well below either |
@@ -143,7 +143,8 @@ most 8 GiB (8,192 MiB; the background is sparse, not 5 GiB/day). One
 approved scan over the 7-day range at today's ≈ 1.9 MiB/s of lines for 2 cores
 (≈ 0.95 MiB/s/core) takes about 72 min, over the 30-minute TTL. Finishing in
 1,800 s needs 4.6 MiB/s, so ≥ 2.3 MiB/s/core for the whole pipeline, which
-means the `secret` detector must reach roughly ≥ 5 MiB/s/core. A scan of only
+means the `secret` detector must reach roughly ≥ 4 MiB/s/core (1/total = 1/rest +
+1/secret, with the rest at ≈ 5-6 MiB/s/core). A scan of only
 the dense incident hour (213 MiB) takes about 2 min today. Until lockkit#97 (or a
 follow-up) reaches that speed, LL-16b's variant must scan the narrowed
 range, not 7 days.

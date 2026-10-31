@@ -49,7 +49,7 @@ real files). Debian 12's journalctl (252) does not print `__SEQNUM` and
 | Ubuntu 24.04, 16 flag variants | 255.4 | LZ4 / XZ / ZSTD / none × compact × keyed hash | 16 × 2,000 / 0 | — |
 | Ubuntu 24.04 host, 10 real files | 255.4 | ZSTD, KEYED-HASH, COMPACT | 551,290 entries / 0 | — |
 
-**Result: exit criterion met.** The four distributions are field-identical, plus all flag variants.
+**Result: exit criterion met.** The four distributions are field-identical, plus all flag variants. No fixture field exceeds the 1 MiB DATA cap; above it the reader drops the field, so identity holds below the cap.
 LL-10 uses the pure-Go reader; the `-journal` fallback variant is not needed.
 
 Notes for LL-10:
@@ -121,7 +121,7 @@ opens, nothing else opened. This is in-process, like the egress pin.
 | Option | Engine 29 / CLI 29 | Result |
 |---|---|---|
 | `--mount type=bind,…,readonly,bind-recursive=disabled` | accepted | submounts that exist when the console starts are not visible |
-| `--mount …,bind-nonrecursive=true` | **refused by CLI 29** before anything reaches the engine: "bind-nonrecursive is deprecated, use bind-recursive=disabled instead" | the CLI parses the option, so the launcher must choose it by the **client** version: `bind-recursive=disabled` needs CLI ≥ 25 *and* Engine ≥ 25 (API 1.44); `bind-nonrecursive=true` is known to work with CLI 19.03-24 (Docker's docs; not run here). CLI 25-28 were not run either: they may accept it with a deprecation warning [NV]. Until checked, the safe rule is to use `bind-recursive=disabled` when both are ≥ 25, `bind-nonrecursive=true` with a CLI < 25, and refuse a CLI ≥ 25 against an Engine < 25 unless CLI 25-28 are shown to accept the old form |
+| `--mount …,bind-nonrecursive=true` | **refused by CLI 29** before anything reaches the engine: "bind-nonrecursive is deprecated, use bind-recursive=disabled instead" | the CLI parses the option, so the launcher chooses it by the **client** version only. Both forms set the same API field (`BindOptions.NonRecursive`, API 1.40, Engine ≥ 19.03), so the engine version does not matter. CLI ≥ 25: `bind-recursive=disabled`. CLI 19.03-24: `bind-nonrecursive=true`. From the docker/cli source (not run here): CLI 25.0-28.5 still accept `bind-nonrecursive` with that warning, and only CLI 29 refuses it |
 | `-v …:ro` (default, recursive) | accepted | an existing `mounts/shm` tmpfs of an `--ipc=shareable` container is visible |
 | Compose: `volumes: [{type: bind, source, target, read_only: true, bind: {recursive: disabled}}]` | Compose v5.4.0, accepted | non-recursive, as with `--mount` |
 
@@ -149,13 +149,17 @@ Consequences, for LL-11 and LL-09a:
   the containers root. Counter-measures, in order:
   1. the console opens only `<id>/<id>-json.log[.N[.gz]]` for mapped ids, with
      `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS |
-     RESOLVE_NO_XDEV)`. `RESOLVE_NO_XDEV` refuses a path that crosses into a
-     propagated mount. The fallback runs when `openat2` returns ENOSYS (kernel < 5.6)
-     or EPERM (a seccomp profile without it): one `openat(O_NOFOLLOW)` per
-     component, each checked against the root's mount, by mount id
-     (`statx` `STATX_MNT_ID`) on kernel ≥ 5.8, otherwise by `st_dev` plus a
-     check that no line of `/proc/self/mountinfo` has a mount point beneath
-     the root. `st_dev` alone catches the tmpfs submounts observed (shm,
+     RESOLVE_NO_XDEV)` from a root opened `O_PATH | O_DIRECTORY` (the 0710
+     directories can be traversed but not opened for reading with gid 0).
+     `RESOLVE_NO_XDEV` refuses a path that crosses into a propagated mount.
+     Only ENOSYS (kernel < 5.6) and EPERM (a seccomp profile without
+     `openat2`) fall back; EXDEV and ELOOP are refusals, EAGAIN a retry. The
+     fallback opens each directory component with `O_PATH | O_DIRECTORY |
+     O_NOFOLLOW` and the file with `O_RDONLY | O_NOFOLLOW`, and after each open
+     compares that fd with the root: by mount id (`statx(AT_EMPTY_PATH,
+     STATX_MNT_ID)`) on kernel ≥ 5.8, else by `st_dev` plus a
+     `/proc/self/mountinfo` check that no mount point lies on the path being
+     opened. `st_dev` alone catches the tmpfs submounts observed (shm,
      secrets) but not a bind mount of the same filesystem;
   2. a Landlock ruleset (kernel ≥ 5.13), applied by the console to itself
      before it opens any source, grants only read rights beneath each mount
@@ -164,13 +168,15 @@ Consequences, for LL-11 and LL-09a:
      grants read on propagated mounts too, and no Landlock rule can exclude a
      subdirectory of an allowed tree. After an exploit, the console could
      therefore read other containers' `/dev/shm` files (1777) and, on a swarm
-     engine, `mounts/secrets` files (Docker's default 0444), traversing the
+     engine, `mounts/secrets` files (Docker's default 0444; swarm propagation not
+     checked here [NV]), traversing the
      0710 directories with gid 0. Only counter-measure 1 limits reads, and only
      while the process is not compromised;
-  3. `doctor` names containers with `--ipc=shareable` and a swarm-mode
-     engine as a residual: their shared memory and secrets are readable by a
+  3. `doctor` names containers whose effective `HostConfig.IpcMode` is
+     `shareable` (the flag, or a daemon with `default-ipc-mode: shareable`)
+     and a swarm-mode engine as a residual: their shared memory and secrets are readable by a
      compromised console;
-  4. `docs/security-model.md` states it.
+  4. `docs/security-model.md` (written in the docs PR, LL-20) must state it.
 - The `LL14` test "no submount" must start the console first, then start an
   `--ipc=shareable` container, and assert that the console cannot open or
   write anything under the propagated mount.
@@ -221,7 +227,7 @@ and locklog takes no `CAP_DAC_READ_SEARCH`. Supported Podman paths in v1:
 - `/var/log/pods` (kubelet). No cluster on the spike host. The plan's
   root:root 0640 stays [NV] until LL-11's integration run; kind or k3s in CI
   can check it.
-- `bind-nonrecursive=true` on Engine and CLI 19.03-24, and with CLI 25-28.
+- `bind-nonrecursive=true` on CLI 19.03-24, and on CLI 25-28 (behaviour read from the CLI source only).
 - Swarm secrets propagation.
 - Rootless Docker (unsupported in v1, named by `doctor`).
 - Mode and owner of a Podman `k8s-file` log written to `--log-opt path=`.
