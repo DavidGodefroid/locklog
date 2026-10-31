@@ -1,0 +1,4 @@
+github.com/BurntSushi/toml v1.6.0 h1:dRaEfpa2VI55EwlIW72hMRHdWouJeRF7TPYhI+AUQjk=
+github.com/BurntSushi/toml v1.6.0/go.mod h1:ukJfTF/6rtPPRCnwkur4qwRxa8vTRFBF0uk2lLoLwho=
+github.com/DavidGodefroid/lockkit v0.7.1 h1:5uUr35gN6zzjSfWtvL4spO8KPY9lCof6OQ2mGti0kOY=
+github.com/DavidGodefroid/lockkit v0.7.1/go.mod h1:RXG/MvYxBK2h2cAccPWkyX9HsrpkJgWw0A8Y7SyEbuE=

@@ -10,3 +10,7 @@ uses [Semantic Versioning](https://semver.org/).
 
 - Repository bootstrap: Go module, `locklog version`, CI (tests on Linux,
   macOS and Windows; hygiene, gofmt, vet, staticcheck, govulncheck).
+- Configuration: `.locklog/config.toml` profiles (version 1) with file,
+  journald, docker and Loki sources, masking modes, budgets and their
+  ceilings, production rules, and the policy diff that marks every
+  loosening for the console's review.
