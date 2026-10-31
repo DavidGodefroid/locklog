@@ -1,6 +1,6 @@
 github.com/BurntSushi/toml v1.6.0 h1:dRaEfpa2VI55EwlIW72hMRHdWouJeRF7TPYhI+AUQjk=
 github.com/BurntSushi/toml v1.6.0/go.mod h1:ukJfTF/6rtPPRCnwkur4qwRxa8vTRFBF0uk2lLoLwho=
-github.com/DavidGodefroid/lockkit v0.7.3-0.20261031023302-6f34816f4e84 h1:nMpMeLenLbHsU1Cz+vulBFq1lOCbgKjySpfTHt6uXAw=
-github.com/DavidGodefroid/lockkit v0.7.3-0.20261031023302-6f34816f4e84/go.mod h1:E4k9vDNBj9yEE3a9AQarl3PI8J6V4NtKxt28TZ/vB/A=
+github.com/DavidGodefroid/lockkit v0.7.3-0.20261031042755-2fe998d4b5af h1:ww24oudFFvdTUn2Mi+0jm8hgDBfGjZ5WZMikbxhdjHc=
+github.com/DavidGodefroid/lockkit v0.7.3-0.20261031042755-2fe998d4b5af/go.mod h1:E4k9vDNBj9yEE3a9AQarl3PI8J6V4NtKxt28TZ/vB/A=
 golang.org/x/text v0.43.0 h1:1QivrlhwAsnMOcqgOdl9my7s9OyZl8O5/UGUTJVXoWc=
 golang.org/x/text v0.43.0/go.mod h1:hbSIYA/amXcRXTFSZqh8tWHEoqRvvbKPJ2uz/KU+a+s=
