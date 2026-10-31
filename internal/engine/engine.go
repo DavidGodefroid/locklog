@@ -24,6 +24,7 @@ import (
 	"slices"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/DavidGodefroid/locklog/internal/mask"
@@ -95,6 +96,9 @@ type Options struct {
 	Now     func() time.Time
 	// TailPoll is the interval between a tail's polls (DefaultTailPoll).
 	TailPoll time.Duration
+	// tailPolls (tests) counts each tail's baseline and completed polls,
+	// so that a test acts on the logs between polls instead of sleeping.
+	tailPolls *atomic.Int64
 }
 
 // Engine runs queries. It is safe for concurrent use.
