@@ -5,6 +5,8 @@ package file
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -64,6 +66,7 @@ type Source struct {
 
 	mu      sync.Mutex
 	gens    map[[2]uint64]gen // streams seen, by (dev, inode)
+	failed  map[string]bool   // compressed streams whose indexing failed
 	catalog []fileInfo
 	catTime time.Time
 }
@@ -104,7 +107,7 @@ func New(opts Options) (*Source, error) {
 	}
 	opts.Trusted = slices.Clone(opts.Trusted)
 	sort.Strings(opts.Trusted)
-	return &Source{opts: opts, gens: map[[2]uint64]gen{}}, nil
+	return &Source{opts: opts, gens: map[[2]uint64]gen{}, failed: map[string]bool{}}, nil
 }
 
 // Name returns the source name.
@@ -151,7 +154,27 @@ func (s *Source) files(ctx context.Context) ([]fileInfo, error) {
 		}
 		return out[i].m.rel > out[j].m.rel
 	})
+	// One stream once: a hard link, or a file renamed during the listing,
+	// is the same stream under two paths.
+	seenStream := map[string]bool{}
+	uniq := out[:0]
+	for _, fi := range out {
+		if !seenStream[fi.stream] {
+			seenStream[fi.stream] = true
+			uniq = append(uniq, fi)
+		}
+	}
+	out = uniq
 	s.mu.Lock()
+	live := map[[2]uint64]bool{}
+	for _, fi := range out {
+		live[[2]uint64{fi.id.dev, fi.id.ino}] = true
+	}
+	for k := range s.gens {
+		if !live[k] {
+			delete(s.gens, k) // forgotten: a file seen again is a new stream
+		}
+	}
 	s.catalog, s.catTime = out, s.opts.Now()
 	s.mu.Unlock()
 	return out, nil
@@ -184,15 +207,30 @@ func (s *Source) identifyOpen(f *os.File, m match) (fileInfo, error) {
 		ok = false
 	}
 	if !ok && s.opts.Index != nil {
+		stale := false
 		s.opts.Index.With(s.opts.Name, id.dev, id.ino, func(st *index.Stream) *index.Stream {
-			if st != nil && same(st.PrefixLen, st.PrefixHash) {
+			switch {
+			case st == nil:
+			case same(st.PrefixLen, st.PrefixHash):
 				g, ok = gen{id: st.Gen, prefixLen: st.PrefixLen, prefixHash: st.PrefixHash}, true
+			default:
+				stale = true // the inode holds another stream now
 			}
 			return nil
 		})
+		if stale {
+			s.opts.Index.Delete(s.opts.Name, id.dev, id.ino)
+		}
 	}
 	if !ok {
-		g = gen{id: id.prefixHash[:12]}
+		// A new stream: a random generation, so that a stream that
+		// replaced another on the same inode (copytruncate, an inode
+		// reused) never takes its id, its refs or its index.
+		var b [6]byte
+		if _, err := rand.Read(b[:]); err != nil {
+			return fileInfo{}, err
+		}
+		g = gen{id: hex.EncodeToString(b[:])}
 	}
 	g.prefixLen, g.prefixHash = id.prefixLen, id.prefixHash
 	s.gens[k] = g
@@ -373,9 +411,12 @@ func granuleMayMatch(g *index.Granule, fields []string, r source.Range, sel sour
 	if !selectorIndexed(sel, fields) {
 		return true
 	}
+	names := termFields(sel)
 	match := func(cs []index.Count) bool {
 		for _, c := range cs {
-			if sel.Match(tupleMap(fields, c.Vals)) {
+			// A redacted or overflowing value is unknown: it may
+			// match.
+			if unknown(fields, c.Vals, names) || sel.Match(tupleMap(fields, c.Vals)) {
 				return true
 			}
 		}
@@ -398,8 +439,29 @@ func selectorIndexed(sel source.Selector, fields []string) bool {
 	return true
 }
 
-// tupleMap maps fields to a tuple's values, leaving absent fields out; an
-// Other value matches no term.
+// termFields returns the fields a selector's terms name.
+func termFields(sel source.Selector) []string {
+	var out []string
+	for _, t := range sel.Terms {
+		out = append(out, t.Field)
+	}
+	return out
+}
+
+// unknown reports whether a tuple holds, for one of names, a value the index
+// does not know (index.Redacted: a detector flagged it; index.Other: the
+// minute had too many tuples). Such a tuple may match any term on that
+// field, and cannot be counted by it.
+func unknown(fields, vals, names []string) bool {
+	for i, f := range fields {
+		if (vals[i] == index.Redacted || vals[i] == index.Other) && slices.Contains(names, f) {
+			return true
+		}
+	}
+	return false
+}
+
+// tupleMap maps fields to a tuple's values, leaving absent fields out.
 func tupleMap(fields, vals []string) map[string]string {
 	m := make(map[string]string, len(fields))
 	for i, f := range fields {
@@ -565,6 +627,9 @@ func (it *iter) Close() error {
 
 // Reread returns the record at ref.
 func (s *Source) Reread(ctx context.Context, ref source.RawRef) (source.RawRecord, error) {
+	if ref.Source != s.opts.Name || ref.Offset < 0 || ref.Length <= 0 {
+		return source.RawRecord{}, source.ErrStale
+	}
 	f, fi, err := s.openStreamFile(ctx, ref.Stream)
 	if err != nil {
 		return source.RawRecord{}, err
@@ -688,7 +753,7 @@ func (s *Source) Describe(ctx context.Context) (source.Schema, error) {
 			for _, m := range g.Minutes {
 				for _, c := range m.Counts {
 					for i, f := range fields {
-						if v := c.Vals[i]; v != index.Absent && v != index.Other {
+						if v := c.Vals[i]; v != index.Absent && v != index.Other && v != index.Redacted {
 							if values[f] == nil {
 								values[f] = map[string]bool{}
 							}
@@ -738,9 +803,14 @@ func (s *Source) coverage(files []fileInfo) coverage {
 		n := (size + source.GranuleBytes - 1) / source.GranuleBytes
 		for i := n - 1; i >= 0; i-- {
 			g := gs[i]
-			if !usable(g, size) {
+			if g == nil {
 				c.full = false
 				return c
+			}
+			if !usable(g, size) {
+				// A grown tail (being indexed again) does not end the
+				// run: counts send it to the residual scan.
+				c.full = false
 			}
 			if from, _, ok := g.Span(); ok && (c.indexedFrom.IsZero() || from.Before(c.indexedFrom)) {
 				c.indexedFrom = from

@@ -152,8 +152,9 @@ type RawRef struct {
 type RawRecord struct {
 	Ref   RawRef
 	Event parse.Event
-	// Granule is the index, in its chunk, of the granule the record
-	// belongs to.
+	// Granule identifies the granule the record belongs to, as the source
+	// numbers them (file: the absolute granule number of the stream;
+	// remote: the slice's index in its chunk).
 	Granule int
 }
 

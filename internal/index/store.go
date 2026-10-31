@@ -16,6 +16,10 @@ import (
 	"sync"
 )
 
+// granuleSize is the plan granule size (source.GranuleBytes; the index
+// package does not import source).
+const granuleSize = 1 << 20
+
 // Stream is the index of one file stream.
 type Stream struct {
 	Version int `json:"version"`
@@ -131,6 +135,7 @@ type Store struct {
 	mu      sync.Mutex
 	streams map[string]*Stream // by key(source, dev, ino)
 	dirty   map[string]string  // key -> source
+	wmu     sync.Mutex         // serialises writers of Flush
 }
 
 var sourceRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,47}$`)
@@ -189,13 +194,25 @@ func load(p string) (*Stream, error) {
 		return nil, errors.New("index version")
 	}
 	s.Granules = map[int64]*Granule{}
-	for _, g := range s.List {
-		for _, m := range g.Minutes {
-			for _, c := range m.Counts {
-				if len(c.Vals) != len(s.Fields) {
-					return nil, errors.New("index tuple width")
-				}
+	width := func(cs []Count) error {
+		for _, c := range cs {
+			if len(c.Vals) != len(s.Fields) || c.N < 0 {
+				return errors.New("index tuple width")
 			}
+		}
+		return nil
+	}
+	for _, g := range s.List {
+		if g == nil || g.N < 0 || g.Start < 0 || g.End < g.Start || g.Start/granuleSize != g.N {
+			return nil, errors.New("index granule")
+		}
+		for _, m := range g.Minutes {
+			if err := width(m.Counts); err != nil {
+				return nil, err
+			}
+		}
+		if err := width(g.Untimed); err != nil {
+			return nil, err
 		}
 		s.Granules[g.N] = g
 	}
@@ -207,6 +224,9 @@ func load(p string) (*Stream, error) {
 // store's lock. fn may modify the stream or return a new one to store
 // (replace); returning a non-nil stream marks it dirty.
 func (st *Store) With(source string, dev, ino uint64, fn func(*Stream) *Stream) {
+	if !sourceRe.MatchString(source) {
+		panic("index: invalid source name") // validated by the config
+	}
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	k := key(source, dev, ino)
@@ -218,6 +238,9 @@ func (st *Store) With(source string, dev, ino uint64, fn func(*Stream) *Stream) 
 
 // Delete forgets a stream's index (its file is removed at the next Flush).
 func (st *Store) Delete(source string, dev, ino uint64) {
+	if !sourceRe.MatchString(source) {
+		panic("index: invalid source name")
+	}
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	k := key(source, dev, ino)
@@ -225,30 +248,60 @@ func (st *Store) Delete(source string, dev, ino uint64) {
 	st.dirty[k] = source
 }
 
-// Flush writes the changed stream indexes atomically (0600).
+// Flush writes the changed stream indexes atomically (0600). The streams
+// are copied under the lock and written outside it, so queries are not held
+// up by disk writes.
 func (st *Store) Flush() error {
+	type job struct {
+		key, source string
+		s           *Stream
+	}
 	st.mu.Lock()
-	defer st.mu.Unlock()
+	var jobs []job
 	for k, source := range st.dirty {
-		dir := filepath.Join(st.dir, source)
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return err
-		}
-		p := filepath.Join(dir, filepath.Base(k)+".json.gz")
-		s := st.streams[k]
-		if s == nil {
-			if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
-				return err
+		var cp *Stream
+		if s := st.streams[k]; s != nil {
+			c := *s
+			c.Granules = make(map[int64]*Granule, len(s.Granules))
+			for n, g := range s.Granules {
+				c.Granules[n] = g // immutable once stored
 			}
-			delete(st.dirty, k)
-			continue
+			c.Fields, c.Dropped = slices.Clone(s.Fields), slices.Clone(s.Dropped)
+			cp = &c
 		}
-		if err := write(p, s); err != nil {
-			return err
-		}
+		jobs = append(jobs, job{k, source, cp})
 		delete(st.dirty, k)
 	}
-	return nil
+	st.mu.Unlock()
+	st.wmu.Lock()
+	defer st.wmu.Unlock()
+	var firstErr error
+	for _, j := range jobs {
+		dir := filepath.Join(st.dir, j.source)
+		p := filepath.Join(dir, filepath.Base(j.key)+".json.gz")
+		var err error
+		if err = os.MkdirAll(dir, 0o700); err == nil {
+			if j.s == nil {
+				if err = os.Remove(p); errors.Is(err, fs.ErrNotExist) {
+					err = nil
+				}
+			} else {
+				err = write(p, j.s)
+			}
+		}
+		if err != nil {
+			// Written again at the next flush.
+			st.mu.Lock()
+			if _, again := st.dirty[j.key]; !again {
+				st.dirty[j.key] = j.source
+			}
+			st.mu.Unlock()
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
 }
 
 func write(p string, s *Stream) error {

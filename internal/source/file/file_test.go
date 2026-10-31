@@ -14,6 +14,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -209,7 +210,7 @@ func TestCompressedFilesScanLikePlain(t *testing.T) {
 		}
 		// Once indexed, the compressed stream has exact granules and
 		// scanning one granule alone gives the same records.
-		if _, _, err := s.IndexStep(ctx, 1<<40); err != nil {
+		if _, _, err := s.IndexStep(ctx, 1<<40, true); err != nil {
 			t.Fatal(err)
 		}
 		plan, _ = s.Plan(ctx, everything, source.Selector{})
@@ -343,7 +344,8 @@ func TestNoWriteFlagsInSources(t *testing.T) {
 				continue
 			}
 			b, _ := os.ReadFile(filepath.Join(dir, en.Name()))
-			for _, bad := range []string{"O_CREAT", "O_WRONLY", "O_RDWR", "O_TRUNC", "O_APPEND", "os.Create", "os.OpenFile", "WriteFile"} {
+			for _, bad := range []string{"O_CREAT", "O_WRONLY", "O_RDWR", "O_TRUNC", "O_APPEND", "os.Create", "os.OpenFile", "WriteFile",
+				"os.Remove", "os.Rename", "Chmod", "Chtimes", "os.Truncate", "Ftruncate", "os.Link", "Symlink", "Mkdir", "Unlinkat", "Renameat", "Fchmod", "Mknod", "Linkat"} {
 				if bytes.Contains(b, []byte(bad)) {
 					t.Errorf("%s uses %s", en.Name(), bad)
 				}
@@ -402,7 +404,7 @@ func TestColdStartNewestFirstBackfill(t *testing.T) {
 	e.write("logs/app.log.1", genLines(t0, 20000), t0.Add(20000*time.Second))
 	e.write("logs/app.log", genLines(t0.Add(20000*time.Second), 20000), t0.Add(40000*time.Second))
 	s := e.source([]string{e.root + "/logs/app.log*"})
-	r := source.Range{From: t0, To: t0.Add(40000 * time.Second)}
+	r := source.Range{From: t0, To: t0.Add(40020 * time.Second)} // whole minutes
 	want := fullCounts(t, s, r, 10*time.Minute)
 
 	sch, _ := s.Describe(ctx)
@@ -436,7 +438,7 @@ func TestColdStartNewestFirstBackfill(t *testing.T) {
 			}
 			break
 		}
-		_, done, err := s.IndexStep(ctx, 1<<20) // one granule per step
+		_, done, err := s.IndexStep(ctx, 1<<20, true) // one granule per step
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -476,7 +478,7 @@ func TestPlanFiltersIndexedGranules(t *testing.T) {
 	e := newEnv(t)
 	e.write("logs/app.log", genLines(t0, 30000), time.Time{})
 	s := e.source([]string{e.root + "/logs/app.log"})
-	s.IndexStep(ctx, 1<<40)
+	s.IndexStep(ctx, 1<<40, true)
 	// The last ~10 minutes are in the last granule only.
 	r := source.Range{From: t0.Add(29400 * time.Second), To: t0.Add(30000 * time.Second)}
 	plan, _ := s.Plan(ctx, r, source.Selector{})
@@ -509,7 +511,7 @@ func TestIndexRedactsAndDropsHighCardinality(t *testing.T) {
 		o.Trusted = []string{"level", "status", "user"}
 		o.Sensitive = func(f, v string) bool { return strings.Contains(v, "@") }
 	})
-	s.IndexStep(ctx, 1<<40)
+	s.IndexStep(ctx, 1<<40, true)
 	sch, _ := s.Describe(ctx)
 	for _, f := range sch.Fields {
 		switch f.Name {
@@ -533,8 +535,15 @@ func TestIndexRedactsAndDropsHighCardinality(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Rows) != 1 || res.Rows[0].Vals[0] != index.Redacted || res.Rows[0].N != 2000 {
-		t.Fatalf("%+v", res.Rows)
+	// Redacted values cannot be counted by the index: those granules
+	// go to the residual scan (the masker then shows pseudonyms).
+	if len(res.Rows) != 0 || res.Residual.Granules() == 0 {
+		t.Fatalf("%+v", res)
+	}
+	// A selector on a redacted value keeps the granule in the plan.
+	plan, _ := s.Plan(ctx, everything, source.Selector{Terms: []source.Term{{Field: "user", Op: "=", Values: []string{"u1@example.com"}}}})
+	if plan.Granules() == 0 {
+		t.Fatal("a granule with redacted values was planned out")
 	}
 	if _, err := s.IndexCounts(ctx, CountQuery{Range: everything, By: []string{"status"}}); !errors.Is(err, ErrNotIndexable) {
 		t.Fatal("count by a dropped field served from the index")
@@ -557,7 +566,7 @@ func TestRotationAndGrowth(t *testing.T) {
 	id1 := plan.Chunks[0].Stream
 	recs := scanPlan(t, s, plan)
 	ref := recs[0].Ref
-	s.IndexStep(ctx, 1<<40)
+	s.IndexStep(ctx, 1<<40, true)
 
 	// Growth keeps the stream (and its index, re-indexing the tail).
 	f, _ := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0)
@@ -567,7 +576,7 @@ func TestRotationAndGrowth(t *testing.T) {
 	if plan.Chunks[0].Stream != id1 || plan.Chunks[0].Granules[0].Indexed {
 		t.Fatalf("grown file: %+v", plan.Chunks[0])
 	}
-	s.IndexStep(ctx, 1<<40)
+	s.IndexStep(ctx, 1<<40, true)
 	res, _ := s.IndexCounts(ctx, CountQuery{Range: everything, By: []string{"level"}})
 	if len(res.Rows) != 2 || len(res.Residual.Chunks) != 0 {
 		t.Fatalf("after growth: %+v", res)
@@ -669,4 +678,194 @@ func TestPlanSkipsOldFilesByMtime(t *testing.T) {
 	if len(plan.Chunks) != 2 || fi.m.rel != "logs/new.log" {
 		t.Fatal("plan not newest first")
 	}
+}
+
+func TestOpenRefusesNonRegularLastComponent(t *testing.T) {
+	e := newEnv(t)
+	e.write("logs/real.log", "x\n", time.Time{})
+	os.Symlink(filepath.Join(e.root, "logs/real.log"), filepath.Join(e.root, "logs/link.log"))
+	syscall.Mkfifo(filepath.Join(e.root, "logs/fifo.log"), 0o644)
+	os.Mkdir(filepath.Join(e.root, "logs/dir.log"), 0o755)
+	for name, open := range map[string]func(string, string) (*os.File, error){"beneath": openBeneath, "walk": walkOpen} {
+		for _, rel := range []string{"logs/link.log", "logs/fifo.log", "logs/dir.log"} {
+			done := make(chan error, 1)
+			go func() {
+				f, err := open(e.root, rel)
+				if err == nil {
+					f.Close()
+				}
+				done <- err
+			}()
+			select {
+			case err := <-done:
+				if err == nil {
+					t.Fatalf("%s opened %s", name, rel)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatalf("%s blocked on %s", name, rel)
+			}
+		}
+	}
+	if f, err := openBeneath("/dev", "null"); err == nil {
+		f.Close()
+		t.Fatal("a device was opened")
+	}
+}
+
+func TestOverflowTuplesMayMatch(t *testing.T) {
+	e := newEnv(t)
+	var b strings.Builder
+	// One minute, 20 x 15 = 300 distinct tuples (> index.MaxTuples).
+	for i := 0; i < 300; i++ {
+		fmt.Fprintf(&b, "time=2026-10-30T12:00:%02dZ level=l%d status=s%d\n", i%60, i%20, i/20)
+	}
+	e.write("logs/app.log", b.String(), time.Time{})
+	s := e.source([]string{e.root + "/logs/app.log"})
+	s.IndexStep(ctx, 1<<40, true)
+	sel := source.Selector{Terms: []source.Term{{Field: "status", Op: "=", Values: []string{"s14"}}}}
+	plan, _ := s.Plan(ctx, everything, sel)
+	if plan.Granules() != 1 {
+		t.Fatal("a granule with overflowing tuples was planned out")
+	}
+	r := source.Range{From: t0, To: t0.Add(time.Hour)}
+	res, err := s.IndexCounts(ctx, CountQuery{Range: r, Selector: sel})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var n int64
+	for _, row := range res.Rows {
+		n += row.N
+	}
+	for _, rec := range scanPlan(t, s, res.Residual) {
+		if v, _ := index.Lookup(rec.Event, "status"); v == "s14" {
+			n++
+		}
+	}
+	if n != 20 {
+		t.Fatalf("status=s14 counted %d, want 20", n)
+	}
+}
+
+func TestCopytruncateIsANewStream(t *testing.T) {
+	e := newEnv(t)
+	p := e.write("logs/app.log", "", time.Time{})
+	s := e.source([]string{e.root + "/logs/app.log"})
+	s.Plan(ctx, everything, source.Selector{}) // seen empty
+	os.WriteFile(p, []byte("time=2026-10-30T12:00:00Z level=info msg=a\n"), 0o644)
+	plan, _ := s.Plan(ctx, everything, source.Selector{})
+	id1 := plan.Chunks[0].Stream
+	s.IndexStep(ctx, 1<<40, true)
+	os.Truncate(p, 0)
+	s.Plan(ctx, everything, source.Selector{}) // seen empty again
+	os.WriteFile(p, []byte("time=2026-10-30T12:00:00Z level=fail msg=b\n"), 0o644)
+	plan, _ = s.Plan(ctx, everything, source.Selector{})
+	if plan.Chunks[0].Stream == id1 || plan.Chunks[0].Granules[0].Indexed {
+		t.Fatal("the rewritten file kept the old stream or its index")
+	}
+	res, _ := s.IndexCounts(ctx, CountQuery{Range: source.Range{From: t0, To: t0.Add(time.Hour)}, By: []string{"level"}})
+	if len(res.Rows) != 0 || res.Residual.Granules() != 1 {
+		t.Fatalf("old index served: %+v", res)
+	}
+}
+
+func TestPartialLineAcrossBoundaryNotSealed(t *testing.T) {
+	e := newEnv(t)
+	var b strings.Builder
+	for i := 0; b.Len() < source.GranuleBytes-20; i++ {
+		fmt.Fprintf(&b, "time=2026-10-30T12:00:00Z level=info msg=%d\n", i)
+	}
+	head := b.String()
+	partial := "time=2026-10-30T12:01:00Z level=e"
+	p := e.write("logs/app.log", head+partial, time.Time{})
+	// Grow past the boundary with the line still unfinished.
+	f, _ := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0)
+	f.WriteString(strings.Repeat("x", 40))
+	f.Close()
+	s := e.source([]string{e.root + "/logs/app.log"})
+	s.IndexStep(ctx, 1<<40, true)
+	f, _ = os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0)
+	f.WriteString(" more\ntime=2026-10-30T12:02:00Z level=error msg=z\n")
+	f.Close()
+	s.IndexStep(ctx, 1<<40, true)
+	r := source.Range{From: t0, To: t0.Add(time.Hour)}
+	got, _ := indexPlusResidual(t, s, r, time.Hour)
+	want := fullCounts(t, s, r, time.Hour)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("index after completion %v, scan %v", got, want)
+	}
+}
+
+func TestIndexedFromSurvivesGrowth(t *testing.T) {
+	e := newEnv(t)
+	p := e.write("logs/app.log", genLines(t0, 20000), time.Time{})
+	s := e.source([]string{e.root + "/logs/app.log"})
+	s.IndexStep(ctx, 1<<40, true)
+	sch, _ := s.Describe(ctx)
+	if !sch.IndexedFrom.Equal(t0) || !sch.FullyIndexed {
+		t.Fatalf("%+v", sch)
+	}
+	f, _ := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0)
+	f.WriteString("time=2026-10-30T20:00:00Z level=info msg=x\n")
+	f.Close()
+	sch, _ = s.Describe(ctx)
+	if !sch.IndexedFrom.Equal(t0) || sch.FullyIndexed {
+		t.Fatalf("after growth: %+v", sch)
+	}
+	r := source.Range{From: t0, To: t0.Add(10 * time.Hour)}
+	got, res := indexPlusResidual(t, s, r, time.Hour)
+	if !reflect.DeepEqual(got, fullCounts(t, s, r, time.Hour)) || res.Residual.Granules() != 1 {
+		t.Fatal("grown tail not sent to the residual scan")
+	}
+}
+
+func TestHardLinkIsOneStream(t *testing.T) {
+	e := newEnv(t)
+	p := e.write("logs/a.log", genLines(t0, 12), time.Time{})
+	os.Link(p, filepath.Join(e.root, "logs/b.log"))
+	s := e.source([]string{e.root + "/logs/*.log"})
+	plan, _ := s.Plan(ctx, everything, source.Selector{})
+	if len(plan.Chunks) != 1 {
+		t.Fatalf("%d chunks for one inode", len(plan.Chunks))
+	}
+}
+
+func TestConcurrentIndexAndQueries(t *testing.T) {
+	e := newEnv(t)
+	p := e.write("logs/app.log", genLines(t0, 20000), time.Time{})
+	s := e.source([]string{e.root + "/logs/app.log"})
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			s.IndexStep(ctx, 1<<20, true)
+			e.store.Flush()
+			if i%3 == 0 {
+				f, _ := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0)
+				f.WriteString("time=2026-10-30T20:00:00Z level=info msg=x\n")
+				f.Close()
+			}
+		}
+	}()
+	r := source.Range{From: t0, To: t0.Add(10 * time.Hour)}
+	for i := 0; i < 20; i++ {
+		s.Describe(ctx)
+		s.IndexCounts(ctx, CountQuery{Range: r, By: []string{"level"}})
+		plan, _ := s.Plan(ctx, r, source.Selector{})
+		if len(plan.Chunks) > 0 {
+			c := plan.Chunks[0]
+			c.Granules = c.Granules[:1]
+			if it, err := s.Scan(ctx, c); err == nil {
+				all(t, it)
+			}
+		}
+	}
+	close(stop)
+	wg.Wait()
 }

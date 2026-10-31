@@ -7,9 +7,11 @@ import (
 
 // Indexer is a source that can build its local index step by step.
 type Indexer interface {
-	// IndexStep indexes about maxBytes and reports the bytes processed
-	// and whether nothing was left to index.
-	IndexStep(ctx context.Context, maxBytes int64) (processed int64, done bool, err error)
+	// IndexStep indexes about maxBytes and reports the bytes processed and
+	// whether nothing was left to index. With upkeep false it does only
+	// backfill (streams and granules never indexed), not the re-indexing
+	// of grown tails.
+	IndexStep(ctx context.Context, maxBytes int64, upkeep bool) (processed int64, done bool, err error)
 }
 
 // RunOptions configure Run.
@@ -17,9 +19,9 @@ type RunOptions struct {
 	// BytesPerHour is the index building budget (a rolling budget of its
 	// own, apart from the agents' budgets).
 	BytesPerHour int64
-	// Busy reports that agent calls are running. Once a source's backfill
-	// is done, its index is kept up to date only while not busy; the
-	// backfill itself (first start, a new file) runs at the full budget.
+	// Busy reports that agent calls are running. While busy, only the
+	// backfill runs (first start, a new file, at the full budget); the
+	// upkeep of grown tails waits.
 	Busy func() bool
 	// Flush persists the index (Store.Flush); called after steps, at most
 	// every FlushEvery.
@@ -66,7 +68,6 @@ func Run(ctx context.Context, srcs []Indexer, o RunOptions) {
 	tokens := capacity
 	last := o.Now()
 	lastFlush := last
-	backfilled := make([]bool, len(srcs))
 	flush := func(force bool) {
 		if o.Flush != nil && (force || o.Now().Sub(lastFlush) >= o.FlushEvery) {
 			if err := o.Flush(); err != nil && o.OnError != nil {
@@ -88,20 +89,13 @@ func Run(ctx context.Context, srcs []Indexer, o RunOptions) {
 			continue
 		}
 		worked, allDone := false, true
-		for i, src := range srcs {
+		upkeep := o.Busy == nil || !o.Busy()
+		for _, src := range srcs {
 			if tokens <= 0 || ctx.Err() != nil {
 				allDone = false
 				break
 			}
-			if backfilled[i] && o.Busy != nil && o.Busy() {
-				// Probe with no budget: a source with new work
-				// (a new file, growth) is backfilling again.
-				if _, done, err := src.IndexStep(ctx, 0); err != nil || done {
-					continue
-				}
-				backfilled[i] = false
-			}
-			n, done, err := src.IndexStep(ctx, tokens)
+			n, done, err := src.IndexStep(ctx, tokens, upkeep)
 			tokens -= n
 			if n > 0 {
 				worked = true
@@ -112,7 +106,6 @@ func Run(ctx context.Context, srcs []Indexer, o RunOptions) {
 				}
 				done = true // retried on the next pass
 			}
-			backfilled[i] = done
 			allDone = allDone && done
 		}
 		flush(false)

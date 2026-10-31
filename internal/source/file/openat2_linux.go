@@ -21,7 +21,7 @@ func openat2Beneath(root, rel string) (*os.File, error, bool) {
 	}
 	defer unix.Close(rfd)
 	how := unix.OpenHow{
-		Flags:   unix.O_RDONLY | unix.O_CLOEXEC | unix.O_NOFOLLOW | unix.O_NONBLOCK,
+		Flags:   unix.O_RDONLY | unix.O_CLOEXEC | unix.O_NOFOLLOW | unix.O_NONBLOCK | unix.O_NOCTTY,
 		Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS,
 	}
 	fd, err := unix.Openat2(rfd, rel, &how)

@@ -19,7 +19,11 @@ import (
 // as early as possible. A compressed file is indexed in one forward pass.
 // It processes about maxBytes (a compressed file may exceed it) and reports
 // the bytes processed and whether nothing is left to index.
-func (s *Source) IndexStep(ctx context.Context, maxBytes int64) (int64, bool, error) {
+//
+// With upkeep false, only backfill runs: streams and granules never indexed.
+// Upkeep is re-indexing a grown tail granule; the scheduler pauses it while
+// agents are busy.
+func (s *Source) IndexStep(ctx context.Context, maxBytes int64, upkeep bool) (int64, bool, error) {
 	if s.opts.Index == nil {
 		return 0, true, nil
 	}
@@ -31,7 +35,10 @@ func (s *Source) IndexStep(ctx context.Context, maxBytes int64) (int64, bool, er
 	for _, fi := range files {
 		_, isize, gs := s.streamIndex(fi)
 		if fi.id.compression != compNone {
-			if isize >= 0 && complete(gs, isize) {
+			s.mu.Lock()
+			failed := s.failed[fi.stream]
+			s.mu.Unlock()
+			if failed || isize >= 0 && complete(gs, isize) || !upkeep && isize >= 0 {
 				continue
 			}
 			if done >= maxBytes {
@@ -47,8 +54,8 @@ func (s *Source) IndexStep(ctx context.Context, maxBytes int64) (int64, bool, er
 		size := fi.id.size
 		count := (size + source.GranuleBytes - 1) / source.GranuleBytes
 		for i := count - 1; i >= 0; i-- {
-			if usable(gs[i], size) {
-				continue
+			if usable(gs[i], size) || !upkeep && gs[i] != nil {
+				continue // indexed (or, without upkeep, indexed once)
 			}
 			if done >= maxBytes {
 				return done, false, nil
@@ -107,6 +114,8 @@ func (s *Source) indexPlain(ctx context.Context, fi fileInfo, n int64) (int64, e
 	}
 	defer it.Close()
 	b := index.NewBuilder(s.fields(), s.opts.Sensitive)
+	var lastEnd int64
+	lastOpen := false
 	for {
 		rec, err := it.Next()
 		if errors.Is(err, io.EOF) {
@@ -116,8 +125,13 @@ func (s *Source) indexPlain(ctx context.Context, fi fileInfo, n int64) (int64, e
 			return it.Processed(), err
 		}
 		b.Add(rec.Event)
+		lastEnd, lastOpen = rec.Ref.Offset+rec.Ref.Length, rec.Event.Unterminated
 	}
-	s.store(fi, -1, []index.Granule{b.Finish(n, start, end, end == (n+1)*source.GranuleBytes)})
+	// Sealed only when the granule is whole and its last record was
+	// complete before the end of the file: a line still being written
+	// across the boundary is indexed again once complete.
+	sealed := end == (n+1)*source.GranuleBytes && !lastOpen && lastEnd <= size
+	s.store(fi, -1, []index.Granule{b.Finish(n, start, end, sealed)})
 	return it.Processed(), nil
 }
 
@@ -134,33 +148,35 @@ func (s *Source) indexCompressed(ctx context.Context, fi fileInfo) (int64, error
 		return 0, err
 	}
 	defer it.Close()
-	builders := map[int64]*index.Builder{}
+	// Records come in stream order: each granule is finished as soon as
+	// the next starts (memory: one builder). Every granule is indexed,
+	// empty ones included, so the whole stream is covered.
+	var out []index.Granule
+	cur := int64(0)
+	b := index.NewBuilder(s.fields(), s.opts.Sensitive)
+	finish := func(upTo int64) {
+		for ; cur < upTo; cur++ {
+			start, end := granuleBounds(cur, math.MaxInt64)
+			out = append(out, b.Finish(cur, start, end, true))
+			b = index.NewBuilder(s.fields(), s.opts.Sensitive)
+		}
+	}
 	for {
 		rec, err := it.Next()
 		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
+			s.mu.Lock()
+			s.failed[fi.stream] = true // not retried: a bomb or a corrupt file
+			s.mu.Unlock()
 			return it.Processed(), err
 		}
-		g := rec.Ref.Offset / source.GranuleBytes
-		if builders[g] == nil {
-			builders[g] = index.NewBuilder(s.fields(), s.opts.Sensitive)
-		}
-		builders[g].Add(rec.Event)
+		finish(rec.Ref.Offset / source.GranuleBytes)
+		b.Add(rec.Event)
 	}
 	size := it.lr.Offset()
-	// Every granule is indexed, empty ones included, so the whole stream
-	// is covered.
-	var out []index.Granule
-	for n := int64(0); n*source.GranuleBytes < size; n++ {
-		b := builders[n]
-		if b == nil {
-			b = index.NewBuilder(s.fields(), s.opts.Sensitive)
-		}
-		start, end := granuleBounds(n, size)
-		out = append(out, b.Finish(n, start, end, true))
-	}
+	finish((size + source.GranuleBytes - 1) / source.GranuleBytes)
 	s.store(fi, size, out)
 	return it.Processed(), nil
 }
@@ -182,6 +198,11 @@ type (
 func (s *Source) IndexCounts(ctx context.Context, q CountQuery) (CountResult, error) {
 	if q.Bucket < 0 || q.Bucket%time.Minute != 0 {
 		return CountResult{}, errors.New("file source: count bucket must be a whole number of minutes")
+	}
+	// The index counts whole minutes: a range that is not whole minutes
+	// would count differently depending on how granules are cut.
+	if !q.Range.From.Equal(q.Range.From.Truncate(time.Minute)) || !q.Range.To.Equal(q.Range.To.Truncate(time.Minute)) {
+		return CountResult{}, ErrNotIndexable
 	}
 	plan, err := s.Plan(ctx, q.Range, q.Selector)
 	if err != nil {
@@ -214,10 +235,16 @@ func (s *Source) IndexCounts(ctx context.Context, q CountQuery) (CountResult, er
 				rest = append(rest, g)
 				continue
 			}
-			flush()
 			if !selectorIndexed(q.Selector, fields) || !selectorIndexed(source.Selector{Terms: byTerms(q.By)}, fields) {
 				return CountResult{}, ErrNotIndexable
 			}
+			// A granule with a redacted or overflowing value of a
+			// counted or selected field is scanned instead.
+			if granuleUnknown(ig, fields, append(termFields(q.Selector), q.By...)) {
+				rest = append(rest, g)
+				continue
+			}
+			flush()
 			pos := positions(fields, q.By)
 			for _, m := range ig.Minutes {
 				t := time.Unix(m.M*60, 0).UTC()
@@ -263,6 +290,22 @@ func (s *Source) IndexCounts(ctx context.Context, q CountQuery) (CountResult, er
 	}
 	res.IndexedFrom = s.coverage(files).indexedFrom
 	return res, nil
+}
+
+func granuleUnknown(g *index.Granule, fields, names []string) bool {
+	for _, m := range g.Minutes {
+		for _, c := range m.Counts {
+			if unknown(fields, c.Vals, names) {
+				return true
+			}
+		}
+	}
+	for _, c := range g.Untimed {
+		if unknown(fields, c.Vals, names) {
+			return true
+		}
+	}
+	return false
 }
 
 func byTerms(by []string) []source.Term {
