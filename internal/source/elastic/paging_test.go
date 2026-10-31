@@ -368,8 +368,9 @@ func TestCheckMappings(t *testing.T) {
 		{"text in one index", both(good, `{"properties":{"@timestamp":{"type":"date"},"app":{"type":"keyword"},"level":{"type":"text"}}}`), "", false, false, false},
 		{"ignore_above on the field", both(good, `{"properties":{"@timestamp":{"type":"date"},"app":{"type":"keyword"},"level":{"type":"keyword","ignore_above":1024}}}`), "", true, true, true},
 		{"index-level ignore_above", both(good, good), `{"logs-a":{"settings":{},` + stdDefaults + `},"logs-b":{"settings":{"index.mapping.ignore_above":"256"},` + stdDefaults + `}}`, true, true, true},
-		// Recorded shape of a logsdb index (Elasticsearch 8.17): no
-		// explicit ignore_above, the mode among the settings.
+		// A logsdb index's settings, in the shape Elasticsearch
+		// documents (not recorded from a server): no explicit
+		// ignore_above, the mode among the settings.
 		{"logsdb index", both(good, good), `{"logs-a":{"settings":{},` + stdDefaults + `},"logs-b":{"settings":{"index.mode":"logsdb"},"defaults":{"index.mapping.ignore_above":"8191"}}}`, true, true, true},
 		{"logsdb mode, ignore_above defaults unread", both(good, good), `{"logs-a":{"settings":{},` + stdDefaults + `},"logs-b":{"settings":{"index.mode":"logsdb"}}}`, true, true, true},
 		{"time_series index", both(good, good), `{"logs-a":{"settings":{},` + stdDefaults + `},"logs-b":{"settings":{"index.mode":"time_series","index.routing_path":["app"]},"defaults":{}}}`, true, true, true},

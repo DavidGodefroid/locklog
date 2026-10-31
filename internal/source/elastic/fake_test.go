@@ -23,8 +23,8 @@ const readOnlyGrants = `{"cluster":["monitor"],"global":[],"indices":[{"names":[
 // Elasticsearch 8.15): two indices, an alias, a data stream.
 const resolvedLogs = `{"indices":[{"name":"logs-a","aliases":["logs-current"],"attributes":["open"]},{"name":"logs-b","attributes":["open"]},{"name":".ds-logs-app-2026.10.30-000001","attributes":["open"],"data_stream":"logs-app"}],"aliases":[{"name":"logs-current","indices":["logs-a"]}],"data_streams":[{"name":"logs-app","backing_indices":[".ds-logs-app-2026.10.30-000001"],"timestamp_field":"@timestamp"}]}`
 
-// defaultMapping and defaultSettings are the fake's two indices (shapes
-// recorded from Elasticsearch 8.15).
+// defaultMapping and defaultSettings are the fake's two indices, in the
+// shapes Elasticsearch 8 documents (written by hand, not recorded).
 const (
 	mappedFields    = `{"@timestamp":{"type":"date"},"message":{"type":"text"},"app":{"type":"keyword"},"level":{"type":"keyword"},"pod":{"type":"keyword"},"env":{"type":"keyword"},"user_email":{"type":"keyword"},"event":{"properties":{"id":{"type":"keyword"}}}}`
 	defaultMapping  = `{"logs-a":{"mappings":{"properties":` + mappedFields + `}},"logs-b":{"mappings":{"properties":` + mappedFields + `}}}`
