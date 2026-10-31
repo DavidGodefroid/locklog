@@ -71,6 +71,9 @@ const (
 
 	cacheMax      = 4096
 	cachePayload  = 512
+	// bigCacheBytes bounds the larger decoded values kept per file, so an
+	// object many entries share is decoded once.
+	bigCacheBytes = 8 << 20
 	maxArrayChain = 1 << 24
 )
 
@@ -105,6 +108,8 @@ type File struct {
 	zd    *zstd.Decoder // streaming, reset per use
 	names map[uint64]string
 	data  map[uint64][]byte
+	big   map[uint64][]byte
+	bigN  int
 	buf   [entryHeaderSize]byte
 }
 
@@ -147,7 +152,7 @@ func Open(r io.ReaderAt, size int64) (*File, error) {
 		return nil, err
 	}
 	return &File{r: r, size: uint64(size), h: h, compact: h.Incompatible&incompatCompact != 0, zd: zd,
-		names: map[uint64]string{}, data: map[uint64][]byte{}}, nil
+		names: map[uint64]string{}, data: map[uint64][]byte{}, big: map[uint64][]byte{}}, nil
 }
 
 // Header returns the file header.
@@ -297,6 +302,10 @@ type Entry struct {
 	// entry's budgets, and compressed fields left undecoded (their name
 	// unread) once the decode budget is spent.
 	Dropped int
+	// Decoded is the decompression work the entry cost, in bytes (names
+	// and values decoded, not served from the caches): the bytes a
+	// source reports as processed besides the entry's own size.
+	Decoded int64
 }
 
 // Field is one name=value pair. Value may be binary; callers must not
@@ -345,6 +354,7 @@ func (f *File) Entry(off uint64, keep func(name string) bool) (*Entry, error) {
 			return nil, err
 		}
 		work -= cost
+		e.Decoded += int64(cost)
 		if !keep(name) {
 			continue
 		}
@@ -352,7 +362,8 @@ func (f *File) Entry(off uint64, keep func(name string) bool) (*Entry, error) {
 			e.Dropped++
 			continue
 		}
-		v, err := f.value(p, len(name))
+		v, decoded, err := f.valueCost(p, len(name))
+		e.Decoded += int64(decoded)
 		if errors.Is(err, errTooLarge) {
 			work -= MaxData
 			e.Dropped++
@@ -476,9 +487,30 @@ func validName(b []byte) bool {
 // value returns the value of the DATA object at off (whose name is nameLen
 // bytes), or errTooLarge when its payload is over MaxData.
 func (f *File) value(off uint64, nameLen int) ([]byte, error) {
+	v, _, err := f.valueCost(off, nameLen)
+	return v, err
+}
+
+// valueCost is value, with the bytes it decoded (0 from a cache; an
+// over-cap compressed value counts as MaxData).
+func (f *File) valueCost(off uint64, nameLen int) ([]byte, int, error) {
 	if v, ok := f.data[off]; ok {
-		return v[nameLen+1:], nil
+		return v[nameLen+1:], 0, nil
 	}
+	if v, ok := f.big[off]; ok {
+		return v[nameLen+1:], 0, nil
+	}
+	v, err := f.value0(off, nameLen)
+	if errors.Is(err, errTooLarge) {
+		return nil, MaxData, err
+	}
+	if err != nil {
+		return nil, 0, err
+	}
+	return v, nameLen + 1 + len(v), nil
+}
+
+func (f *File) value0(off uint64, nameLen int) ([]byte, error) {
 	start := f.payloadStart()
 	flags, size, err := f.objectHeader(off, typeData, start+2, 1<<62)
 	if err != nil {
@@ -545,6 +577,13 @@ func (f *File) value(off uint64, nameLen int) ([]byte, error) {
 			clear(f.data)
 		}
 		f.data[off] = p
+	} else if len(p) <= bigCacheBytes/2 {
+		if f.bigN+len(p) > bigCacheBytes {
+			clear(f.big)
+			f.bigN = 0
+		}
+		f.big[off] = p
+		f.bigN += len(p)
 	}
 	return p[nameLen+1:], nil
 }

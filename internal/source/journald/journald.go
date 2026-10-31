@@ -507,7 +507,8 @@ func (s *Source) read(jf *journal.File, stream string, off uint64) (source.RawRe
 	if err != nil {
 		return source.RawRecord{}, false, 0, err
 	}
-	n := int64(e.Size)
+	size := int64(e.Size)
+	n := size + e.Decoded // processed: read and decompressed
 	var msg string
 	var hasMsg bool
 	var members []parse.Member
@@ -546,11 +547,11 @@ func (s *Source) read(jf *journal.File, stream string, off uint64) (source.RawRe
 	if ev.MessageKey == "" {
 		ev.MessageKey = message
 	}
-	ev.Offset, ev.Length = int64(off), n
+	ev.Offset, ev.Length = int64(off), size
 	if e.Dropped > 0 {
 		ev.Truncated = true
 	}
-	return source.RawRecord{Ref: source.RawRef{Source: s.opts.Name, Stream: stream, Offset: int64(off), Length: n}, Event: ev}, true, n, nil
+	return source.RawRecord{Ref: source.RawRef{Source: s.opts.Name, Stream: stream, Offset: int64(off), Length: size}, Event: ev}, true, n, nil
 }
 
 // keep is the allowlist, applied to each field's name before its value is
@@ -608,8 +609,8 @@ func (s *Source) Reread(ctx context.Context, ref source.RawRef) (source.RawRecor
 	if !ok {
 		return source.RawRecord{}, source.ErrStale
 	}
-	rec, served, n, err := s.read(jf, ref.Stream, uint64(ref.Offset))
-	if err != nil || !served || n != ref.Length {
+	rec, served, _, err := s.read(jf, ref.Stream, uint64(ref.Offset))
+	if err != nil || !served || rec.Ref.Length != ref.Length {
 		return source.RawRecord{}, source.ErrStale
 	}
 	rec.Ref = ref
@@ -668,8 +669,8 @@ func (s *Source) Around(ctx context.Context, ref source.RawRef, before, after in
 		}
 	}
 	slices.Reverse(back)
-	self, ok, n, err := s.read(jf, ref.Stream, offs[at])
-	if err != nil || !ok || n != ref.Length {
+	self, ok, _, err := s.read(jf, ref.Stream, offs[at])
+	if err != nil || !ok || self.Ref.Length != ref.Length {
 		return nil, source.ErrStale
 	}
 	out := append(back, self)

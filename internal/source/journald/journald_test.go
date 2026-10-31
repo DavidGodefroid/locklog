@@ -686,3 +686,46 @@ func TestScanAndRereadAgreeOnGranules(t *testing.T) {
 		}
 	}
 }
+
+func TestSharedLargeObjectsDecodedOnceAndCounted(t *testing.T) {
+	big1 := "MESSAGE=" + strings.Repeat("m", 1<<20-100)
+	big2 := "CODE_FUNC=" + strings.Repeat("c", 1<<20-100)
+	var es []journaltest.Entry
+	for i := 0; i < 300; i++ {
+		es = append(es, journaltest.Entry{Realtime: 1761800000000000 + uint64(i), Fields: []string{big1, big2, "PRIORITY=6"}})
+	}
+	for _, comp := range []string{"zstd", "lz4", "xz"} {
+		raw := journaltest.Build(journaltest.Options{Compact: true, Compress: comp}, es)
+		s := newSource(t, Options{Roots: []string{rootWith(t, raw)}})
+		ctx := context.Background()
+		plan, _ := s.Plan(ctx, everything, source.Selector{})
+		start := time.Now()
+		var processed int64
+		n := 0
+		for _, c := range plan.Chunks {
+			it, err := s.Scan(ctx, c)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for {
+				if _, err := it.Next(); err != nil {
+					break
+				}
+				n++
+			}
+			processed += it.Processed()
+			it.Close()
+		}
+		if n != len(es) {
+			t.Fatalf("%s: %d records", comp, n)
+		}
+		// Decoded once per file, and the decoded bytes are reported.
+		if processed < 2<<20 {
+			t.Fatalf("%s: processed %d, below the bytes decoded", comp, processed)
+		}
+		// Without the cache, xz alone took minutes for this file.
+		if d := time.Since(start); d > 10*time.Second {
+			t.Fatalf("%s: scan took %v", comp, d)
+		}
+	}
+}
