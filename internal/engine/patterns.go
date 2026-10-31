@@ -187,7 +187,8 @@ func (e *Engine) Patterns(ctx context.Context, q PatternsQuery) (_ PatternsResul
 	if len(q.Sources) == 0 {
 		q.Sources = append([]string(nil), e.names...)
 	}
-	maxRange, remoteRange, hasRemote := e.o.Limits.LocalRange, e.o.Limits.RemoteRange, false
+	lim := e.limits(ctx)
+	maxRange, remoteRange, hasRemote := lim.LocalRange, lim.RemoteRange, false
 	for _, s := range q.Sources {
 		if _, ok := e.o.Sources[s]; ok && e.remote(s) {
 			maxRange, hasRemote = min(maxRange, remoteRange), true
@@ -226,6 +227,12 @@ func (e *Engine) Patterns(ctx context.Context, q PatternsQuery) (_ PatternsResul
 		base.From, base.To = q.From.Add(-d), q.To.Add(-d)
 	}
 	digest := e.queryDigest("patterns", q)
+	if cursor != "" {
+		var err *Error
+		if digest, err = e.scanDigest(ctx, "patterns", digest); err != nil {
+			return PatternsResult{}, err
+		}
+	}
 	res := PatternsResult{Epoch: e.o.Masker.Epoch(), Patterns: []PatternGroup{}}
 
 	var f *frozen
@@ -250,14 +257,14 @@ func (e *Engine) Patterns(ctx context.Context, q PatternsQuery) (_ PatternsResul
 	} else {
 		pq := q.Query
 		pq.Order = "asc"
-		plan, err := e.planQuery(ctx, &pq, e.o.Limits.RemoteBytes, e.o.Limits.LocalBytes)
+		plan, err := e.planQuery(ctx, &pq, lim.RemoteBytes, lim.LocalBytes)
 		if err != nil {
 			return PatternsResult{}, err
 		}
 		if q.offset > 0 {
 			bq := base
 			bq.Order = "asc"
-			bp, err := e.planQuery(ctx, &bq, e.o.Limits.RemoteBytes, e.o.Limits.LocalBytes)
+			bp, err := e.planQuery(ctx, &bq, lim.RemoteBytes, lim.LocalBytes)
 			if err != nil {
 				return PatternsResult{}, err
 			}
@@ -271,7 +278,7 @@ func (e *Engine) Patterns(ctx context.Context, q PatternsQuery) (_ PatternsResul
 					local += c.Bytes
 				}
 			}
-			if local > e.o.Limits.LocalBytes || remote > e.o.Limits.RemoteBytes {
+			if local > lim.LocalBytes || remote > lim.RemoteBytes {
 				return PatternsResult{}, &Error{Code: EOverBudget, Message: "the plan of the window and its baseline exceeds this call's byte budget (narrow the range or the sources, or ask for locklog_scan)",
 					Estimate: &Estimate{Bytes: plan.Bytes(), Granules: plan.Granules(), Range: 2 * q.To.Sub(q.From)}}
 			}
@@ -279,12 +286,15 @@ func (e *Engine) Patterns(ctx context.Context, q PatternsQuery) (_ PatternsResul
 		if q.offset == 0 {
 			a.winChunks = len(plan.Chunks)
 		}
-		f = e.freeze(digest, plan, false)
+		var aerr error
+		if f, digest, aerr = e.admitPlan(ctx, "patterns", digest, plan, false, func() []string { return scopeLines(q.Query) }); aerr != nil {
+			return PatternsResult{}, aerr
+		}
 	}
 
 	sc, failures := Scanned{}, 0
 	var err *Error
-	chunk, gran, sc, failures, err = e.run(ctx, &f, chunk, gran, nil, e.callBytes(q.Sources), q.evalFactor()+1, func(raw source.RawRecord, rec mask.Record, b *budget) {
+	chunk, gran, sc, failures, err = e.run(ctx, &f, chunk, gran, nil, e.callBytes(ctx, q.Sources), q.evalFactor()+1, func(raw source.RawRecord, rec mask.Record, b *budget) {
 		t, timed := rec.Time()
 		var bucket time.Time
 		switch {
@@ -392,7 +402,7 @@ func (e *Engine) Patterns(ctx context.Context, q PatternsQuery) (_ PatternsResul
 	res.Complete = chunk >= len(f.plan.Chunks)
 	if !res.Complete {
 		st := cursorState{Plan: f.id, Query: digest, Chunk: chunk, Granule: gran, Epoch: e.o.Masker.Epoch(), PolicyFP: e.o.PolicyFP(), Cache: e.aggs.put(a),
-			From: q.From, To: q.To, Last: last}
+			From: q.From, To: q.To, Last: last, Scan: scanID(ctx)}
 		res.Cursor = e.seal("Lc1", st)
 		// The plan holds the window, then the baseline: until the window
 		// is read, coverage is the window's.

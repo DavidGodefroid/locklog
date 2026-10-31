@@ -410,3 +410,79 @@ func TestStatus(t *testing.T) {
 		t.Error("Status of no session")
 	}
 }
+
+// approvalEnv is a console whose human answers every approval with a.
+type approvalEnv struct {
+	*fakeEnv
+	a       console.Approval
+	screens []console.Screen
+	ids     []int64
+}
+
+func (e *approvalEnv) Approve(_ context.Context, id int64, s console.Screen) console.Approval {
+	e.screens, e.ids = append(e.screens, s), append(e.ids, id)
+	return e.a
+}
+
+// askingEngine asks for an approval, then answers what an unmask would.
+type askingEngine struct{ fakeEngine }
+
+type pseudonymResult struct{ P []string }
+
+func (r pseudonymResult) AuditPseudonyms() []string { return r.P }
+
+func (e *askingEngine) Handle(ctx context.Context, m string, p json.RawMessage, c Caller) (any, *Refusal, error) {
+	ap := ApproveFrom(ctx)
+	if ap == nil {
+		return nil, nil, errors.New("no approver")
+	}
+	if a := ap(ctx, console.Screen{Header: "unmask · read-pii", NeverAuto: true}); !a.Approved {
+		return nil, nil, &Declined{Resp: a.Refusal}
+	}
+	return pseudonymResult{P: []string{"⟦email:7F3KQ2M9ZD4X⟧"}}, nil, nil
+}
+
+// TestHandlerApprovals: an engine asks the console's human through the
+// call's approver; a denial reaches the agent as the console answered it
+// (audited as denied, a pending ticket as pending); an approved value tool
+// is audited by pseudonym only.
+func TestHandlerApprovals(t *testing.T) {
+	b := New(Options{Profile: "staging", Root: project(t, localCfg)})
+	pol, err := b.LoadPolicy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng := &askingEngine{}
+	denied := console.ErrResp(0, ipc.CodeRefused, "denied by the human")
+	env := &approvalEnv{fakeEnv: &fakeEnv{sess: &session{engine: eng, policy: pol.(Policy)}, policy: pol}, a: console.Approval{Refusal: denied}}
+	ms := b.Methods()
+	ctx := console.WithPeer(context.Background(), ipc.Cred{UID: 1000, PID: 42})
+	resp := ms[MethodUnmask](ctx, ipc.Request{ID: 21, Method: MethodUnmask, Params: json.RawMessage(`{"ref":"Lr1.x","pseudonyms":["⟦email:7F3KQ2M9ZD4X⟧"],"reason":"jane@example.com"}`)}, env)
+	if resp.Error == nil || resp.Error.Message != "denied by the human" || resp.ID != 21 {
+		t.Fatalf("denied: %+v", resp)
+	}
+	if len(env.ids) != 1 || env.ids[0] != 21 || !env.screens[0].NeverAuto {
+		t.Fatalf("approvals %v %+v", env.ids, env.screens)
+	}
+	if r := env.records[0].(Record); r.Decision != "denied" || len(r.Pseudonyms) != 0 {
+		t.Errorf("denied record: %+v", r)
+	}
+	env.a = console.Approval{Refusal: console.PendingResp(0, "locklog", console.Pending{Ticket: "T1"})}
+	resp = ms[MethodScan](ctx, ipc.Request{ID: 22, Method: MethodScan, Params: json.RawMessage(`{"tool":"search","query":{"sources":["nginx","jane"],"from":"2026-10-30T13:00:00Z"}}`)}, env)
+	if resp.Error != nil || !strings.Contains(string(resp.Result), `"pending"`) {
+		t.Fatalf("pending: %+v", resp)
+	}
+	if r := env.records[1].(Record); r.Decision != "pending" || r.Tool != "search" || len(r.Sources) != 1 || r.Sources[0] != "nginx" || r.From != "2026-10-30T13:00:00Z" {
+		t.Errorf("pending record: %+v", r)
+	}
+	env.a = console.Approval{Approved: true}
+	resp = ms[MethodUnmask](ctx, ipc.Request{ID: 23, Method: MethodUnmask, Params: json.RawMessage(`{"ref":"Lr1.x","pseudonyms":["⟦email:7F3KQ2M9ZD4X⟧"],"reason":"jane@example.com"}`)}, env)
+	if resp.Error != nil {
+		t.Fatalf("approved: %+v", resp)
+	}
+	r := env.records[2].(Record)
+	raw, _ := json.Marshal(r)
+	if r.Decision != "ok" || len(r.Pseudonyms) != 1 || strings.Contains(string(raw), "jane") {
+		t.Errorf("approved record: %s", raw)
+	}
+}

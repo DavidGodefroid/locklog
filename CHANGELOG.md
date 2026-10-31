@@ -97,6 +97,13 @@ uses [Semantic Versioning](https://semver.org/).
   patterns capped apart from the window's, `truncated` past the cap; with a
   remote source both windows fit its range budget), plan-based admission
   and free continuations; `count` gains `by_pattern`.
+- Engine read-around calls: `log.context` (the records around a ref, before
+  and after up to 50, the ref's record checked by its keyed digest),
+  `log.trace` (one clear id or pseudonym over a range, whole words of the
+  masked view only, with search's plans, budgets and cursors) and `log.tail`
+  (new records matching a filter for up to 50 s, at most 200), served by
+  the console and as the `locklog_context`, `locklog_trace` and
+  `locklog_tail` tools.
 - `locklog setup`: the trusted `.locklog/` (yours, 0755, writable by no one
   else; checked again by the launcher afterwards) and a first
   `config.toml` from the host's facts, which the launcher gathers on the
@@ -142,9 +149,72 @@ uses [Semantic Versioning](https://semver.org/).
   from the printed snippet calls the console as uid 10052, not root, no
   sudo), and `production guard (e2e)` (the launcher's `mcp` against a
   production console is refused with `E_PRODUCTION_HOST_AGENT`).
+- Rolling budgets (LL-19), per source and for the console: bytes processed
+  per hour (plan-based, granule-rounded; remote: the bytes fetched),
+  remote backend requests per minute (paced, refused past the call's
+  deadline) and server-side metric queries per hour; search, count,
+  patterns, trace, context re-reads, tail polls and continuations all draw
+  on them and are refused with `E_OVER_BUDGET` and the estimate before
+  touching data. `log.status` shows what is left.
+- `log.scan` (`locklog_scan`): a search, count, patterns or trace over the
+  free budgets, approved once (class `read`) for its whole plan. The plan
+  hash is keyed (HMAC under `K_ref`) and binds the tool, the sources, the
+  absolute range, the predicates, the budget and the policy fingerprint;
+  the byte plan is frozen at the approval; continuations are free and
+  need no new approval until the plan ends or the 30-minute TTL; the
+  cursor is bound to the scan and the peer uid; a reissued scan with the
+  same plan re-attaches; each call's deadline is min(240 s, what is left
+  of 570 s since the request); a remote scan has its own request pacing,
+  not the rolling per-minute budget.
+- `log.unmask` (`locklog_unmask`): the clear values of exact pseudonyms of
+  one record, once, on a `read-pii` approval auto mode never gives; the
+  plan hash binds the ref, the record's keyed digest, the epoch and the
+  exact spans, checked again after the approval (`E_STALE`); secrets and
+  values that held a secret span are never revealed; `unmask = "never"`
+  (the production default) refuses with `E_UNMASK_NEVER`.
+- `log.lookup` (`locklog_lookup`): the pseudonyms of clear values of a
+  detector kind (equality only), refused for secrets, field names and
+  template tokens; limited by distinct values per hour per peer uid and per
+  console; `lookup = "approved"` makes it a `read-pii` approval; audited by
+  pseudonym only.
+- Plan hashes, query and record digests and the policy fingerprint never
+  reach the agent (#26): a scan is known by a random id.
+- The Elasticsearch 8 / OpenSearch 2 source (`kind = "elastic"` or
+  `"opensearch"`): allowlisted read routes on the source's own indices
+  (`_search`, `_count`, `_field_caps`, `_mapping`, `_settings`, `/`,
+  `_security/user/_privileges`, `_resolve/index`, OpenSearch's
+  `authinfo`), each with its own query-parameter allowlist (the egress
+  layer now checks parameters per route, Loki's included); typed query
+  bodies (time range, `term`/`terms` on trusted keyword fields, sort with
+  an optional tiebreaker, `search_after`, size and timeout caps,
+  `date_histogram` and `terms` counts) with text matched locally,
+  untrusted fields dropped, multi-valued fields and `!=` evaluated alike
+  by the server and the engine (empty values kept local); the Loki paging
+  and byte model (lazy slices, bytes counted per page against the call's
+  limit, bounded Around and Reread, `MaxSlices`, `Split` of an
+  over-budget slice); `auth = "api_key"` (Elasticsearch `ApiKey`). A
+  production privilege check that fails closed: any grant beyond a
+  read-only allowlist, on any pattern, alias or data stream, any
+  OpenSearch role not known read-only (or vouched for in
+  `read_only_roles`), an OpenSearch answer without a role, and a client
+  certificate for OpenSearch are refused. Field checks over every index:
+  trusted, selector and tiebreaker fields must be plain keyword fields
+  (aliases judged by their target; normalizers, scripts, runtime fields
+  and `copy_to` into them refused; dynamic templates accepted only when
+  provably harmless; `dynamic` other than a boolean, true, false or
+  strict refused); `ignore_above`, `null_value` and non-standard index
+  modes keep terms local. Until the newest `Check` has succeeded, no
+  trusted term is pushed and no count is served on the server, and a
+  stream whose pushed term is no longer server-side is stale.
 
 ### Fixed
 
+- `Scanned.Bytes` counts the bytes a remote source fetched and the call
+  dropped (out of a slice's range, past the call's byte limit, or more than
+  the time left could mask), as the rolling budget charges them (#67).
+- A call naming no source has the remote per-call byte budget when a
+  remote source is configured.
+- `locklog_request_change` bounds its text to the console's 500 bytes.
 - A Loki time slice holding more than one call's byte budget is split into
   narrower epoch-aligned slices (down to 1 s) and paged with a cursor, in
   both orders, instead of being refused; a slice still over the budget at

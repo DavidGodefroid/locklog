@@ -144,6 +144,7 @@ func newFixtureMask(t *testing.T, content string, mopt func(*mask.Options), opt 
 		Detect:     func(s string) bool { return m.Text(s) != s },
 		NameMasked: func(_, p string) bool { return pii.LooksPersonal(p) },
 		Limits:     DefaultLimits(),
+		tailPolls:  new(atomic.Int64),
 	}
 	if opt != nil {
 		opt(&o)
