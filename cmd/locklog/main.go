@@ -16,6 +16,7 @@ const usage = `usage: locklog <command>
 
 Commands:
   version                 print the version
+  console [--profile P]   the console of a profile (in the launcher's container)
   mounts [--profile P]    print the mount plan of a profile (read by the launcher)
 `
 
@@ -38,6 +39,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 		fmt.Fprintf(stdout, "locklog %s\n", version)
 		return 0
+	case "console":
+		return consoleCmd(args[1:], stdout, stderr)
 	case "mounts":
 		return mounts(args[1:], stdout, stderr)
 	case "help", "-h", "--help":

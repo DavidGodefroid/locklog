@@ -25,3 +25,9 @@ uses [Semantic Versioning](https://semver.org/).
   read-only allowlist checked segment by segment, response caps, the tls
   modes, and the production check that refuses a backend answering a data
   read without credentials.
+- The console (`locklog console`): the agent's log methods served through
+  lockkit's console over a seam to the engine, the launcher's checks
+  before any log is read (dev:inode of `.locklog` and of each mount root;
+  no network for a local-only profile), an audit record per call written
+  before the answer leaves (fail closed; never a predicate or a value), and
+  `--allowed-uids`.
