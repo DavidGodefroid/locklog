@@ -490,6 +490,11 @@ func prefilterEquivalence(t *testing.T, f *fixture, failing bool) {
 		q(func(q *Query) { q.Text = "user1"; q.Limit = 200 }),
 		q(func(q *Query) { q.Text = "no such words"; q.Limit = 200 }),
 	}
+	if testing.Short() {
+		// One needle of each kind: plain, joined across dropped runes,
+		// a contains predicate, only inside masked values, absent.
+		queries = []Query{queries[0], queries[5], queries[7], queries[9], queries[11]}
+	}
 	for _, qq := range queries {
 		f.eng.o.Prefilter = false
 		off := allPages(t, f.eng, qq)
@@ -774,7 +779,11 @@ func TestNumericTermsColdEqualsIndexed(t *testing.T) {
 		want int
 	}
 	var cases []tc
-	for _, lit := range []string{"200", "200.0", "2e2"} {
+	lits := []string{"200", "200.0", "2e2"}
+	if testing.Short() {
+		lits = lits[2:] // the literal least like the raw one
+	}
+	for _, lit := range lits {
 		cases = append(cases,
 			tc{"= " + lit, Pred{Field: "status", Op: "=", Value: json.RawMessage(lit)}, 2500},
 			tc{"in " + lit, Pred{Field: "status", Op: "in", Value: json.RawMessage("[" + lit + ", 3e2]")}, 5000},

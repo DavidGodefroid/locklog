@@ -45,6 +45,31 @@ jobs:
             exit 1
           }
 
+  # The engine and the sources under the race detector (cgo, -short: the
+  # heaviest equivalence cases run in full in the test job above).
+  race:
+    name: race (engine, sources)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CGO_ENABLED: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.x"
+          check-latest: true
+      - name: go test -race -short
+        shell: bash
+        run: |
+          set -o pipefail
+          go test -race -short -timeout 15m ./internal/engine/ ./internal/source/... 2>&1 | tee test.log || {
+            grep -E -- '--- FAIL|_test\.go:[0-9]+:|^FAIL|panic:|WARNING: DATA RACE' test.log | head -40 | sed 's/^/::error::/'
+            exit 1
+          }
+
   # Windows: the module builds and its unit tests run, but the locklog
   # console itself runs only on Linux (in Docker). Test files that need Unix
   # accounts, file modes, sockets or terminals carry `//go:build unix`.
