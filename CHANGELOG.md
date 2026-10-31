@@ -97,6 +97,13 @@ uses [Semantic Versioning](https://semver.org/).
   patterns capped apart from the window's, `truncated` past the cap; with a
   remote source both windows fit its range budget), plan-based admission
   and free continuations; `count` gains `by_pattern`.
+- Engine read-around calls: `log.context` (the records around a ref, before
+  and after up to 50, the ref's record checked by its keyed digest),
+  `log.trace` (one clear id or pseudonym over a range, whole words of the
+  masked view only, with search's plans, budgets and cursors) and `log.tail`
+  (new records matching a filter for up to 50 s, at most 200), served by
+  the console and as the `locklog_context`, `locklog_trace` and
+  `locklog_tail` tools.
 - `locklog setup`: the trusted `.locklog/` (yours, 0755, writable by no one
   else; checked again by the launcher afterwards) and a first
   `config.toml` from the host's facts, which the launcher gathers on the

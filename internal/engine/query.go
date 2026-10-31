@@ -137,6 +137,8 @@ type Query struct {
 
 	textRe     *regexp.Regexp
 	textReCost int
+	// trace is the id or pseudonym of a trace (Trace), nil for a search.
+	trace *traceID
 }
 
 // numeric reports whether a value of the predicate is a number. The
@@ -169,7 +171,7 @@ func (p *Pred) numeric() bool {
 // no text, no regex, every predicate an equality on a trusted field with
 // non-numeric values (see numeric).
 func (q *Query) trustedOnly(trusted func(src, name string, label bool) bool) bool {
-	if q.Text != "" || q.Regex != "" {
+	if q.Text != "" || q.Regex != "" || q.trace != nil {
 		return false
 	}
 	for _, p := range q.Where {

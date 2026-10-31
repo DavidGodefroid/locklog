@@ -24,6 +24,7 @@ import (
 	"slices"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/DavidGodefroid/locklog/internal/mask"
@@ -93,6 +94,11 @@ type Options struct {
 	// same count.
 	Workers int
 	Now     func() time.Time
+	// TailPoll is the interval between a tail's polls (DefaultTailPoll).
+	TailPoll time.Duration
+	// tailPolls (tests) counts each tail's baseline and completed polls,
+	// so that a test acts on the logs between polls instead of sleeping.
+	tailPolls *atomic.Int64
 }
 
 // Engine runs queries. It is safe for concurrent use.
@@ -922,10 +928,20 @@ type match struct {
 	timed bool
 	out   json.RawMessage
 	kinds []string
+	// stream and off locate a tailed record.
+	stream [2]string
+	off    int64
 }
 
 // Search runs a search (locklog_search).
-func (e *Engine) Search(ctx context.Context, q Query) (_ SearchResult, retErr error) {
+func (e *Engine) Search(ctx context.Context, q Query) (SearchResult, error) {
+	q.trace = nil
+	return e.search(ctx, q, "search")
+}
+
+// search runs a search or a trace (q.trace set); kind binds cursors to
+// their method (a trace cursor never continues a search).
+func (e *Engine) search(ctx context.Context, q Query, kind string) (_ SearchResult, retErr error) {
 	// The caller's predicates are not shared: validation and evaluation
 	// write into them.
 	q.Where = slices.Clone(q.Where)
@@ -958,7 +974,15 @@ func (e *Engine) Search(ctx context.Context, q Query) (_ SearchResult, retErr er
 	if err := e.validator(maxRange).validate(&q); err != nil {
 		return SearchResult{}, err
 	}
-	digest := e.queryDigest("search", q)
+	var digest string
+	if q.trace != nil {
+		digest = e.queryDigest(kind, struct {
+			Q  Query
+			ID string
+		}{q, q.trace.id})
+	} else {
+		digest = e.queryDigest(kind, q)
+	}
 	res := SearchResult{Epoch: e.o.Masker.Epoch(), Records: []json.RawMessage{}, Masking: Masking{Kinds: []string{}}}
 
 	var f *frozen

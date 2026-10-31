@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/DavidGodefroid/locklog/internal/config"
+	"github.com/DavidGodefroid/locklog/internal/engine"
 	"github.com/DavidGodefroid/locklog/internal/landlock"
 	"github.com/DavidGodefroid/locklog/internal/logconsole"
 	"github.com/DavidGodefroid/locklog/internal/mask"
@@ -335,6 +336,43 @@ func TestLimitsAndNames(t *testing.T) {
 	}
 	if fields, labels := trustedNames(config.Source{Kind: config.KindFile, Format: "json", Trusted: []string{"stream"}}); !slices.Equal(fields, []string{"stream"}) || labels != nil {
 		t.Errorf("json: fields %v labels %v", fields, labels)
+	}
+}
+
+// TestAroundMethodsServed: the console serves every engine method, and
+// log.patterns, log.context, log.trace and log.tail reach the engine, masked.
+func TestAroundMethodsServed(t *testing.T) {
+	for _, m := range []string{engine.MethodSearch, engine.MethodCount, engine.MethodPatterns, engine.MethodContext, engine.MethodTrace, engine.MethodTail} {
+		if !slices.Contains(logconsole.Methods, m) {
+			t.Errorf("%s not served", m)
+		}
+	}
+	f := newFixture(t, fileProfile, appLog)
+	s := open(t, f.options(nil))
+	res, ref := call(t, s, logconsole.MethodSearch, `{"from":"2026-10-30T13:00:00Z","to":"2026-10-30T14:00:00Z","limit":1}`)
+	if ref != nil {
+		t.Fatalf("refused: %+v", ref)
+	}
+	sr := res.(engine.SearchResult)
+	if len(sr.Records) == 0 {
+		t.Fatal("no record")
+	}
+	var r struct{ Ref string }
+	json.Unmarshal(sr.Records[0], &r)
+	for _, c := range []struct{ method, params string }{
+		{logconsole.MethodPatterns, `{"from":"2026-10-30T13:00:00Z","to":"2026-10-30T14:00:00Z"}`},
+		{logconsole.MethodContext, `{"ref":"` + r.Ref + `","before":1,"after":1}`},
+		{logconsole.MethodTrace, `{"id":"order-1","from":"2026-10-30T13:00:00Z","to":"2026-10-30T14:00:00Z"}`},
+		{logconsole.MethodTail, `{"duration":"1s","max":1}`},
+	} {
+		res, ref := call(t, s, c.method, c.params)
+		if ref != nil {
+			t.Fatalf("%s refused: %+v", c.method, ref)
+		}
+		out, _ := json.Marshal(res)
+		if strings.Contains(string(out), "jane") || strings.Contains(string(out), "Jane") {
+			t.Fatalf("%s unmasked: %s", c.method, out)
+		}
 	}
 }
 

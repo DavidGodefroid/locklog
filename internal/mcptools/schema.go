@@ -16,6 +16,8 @@ const (
 	maxRegex    = 256
 	maxTop      = 100 // engine.MaxTop
 	maxDuration = 16  // a duration such as 24h or 168h
+	maxAround   = 50  // engine.MaxAround
+	maxRef      = 4096
 )
 
 var (
@@ -28,6 +30,21 @@ var (
 		tuneRange(s)
 		s.Properties["top"].Minimum, s.Properties["top"].Maximum = ptr(1.0), ptr(float64(maxTop))
 		s.Properties["baseline"].MaxLength = ptr(maxDuration)
+	})
+	contextSchema = inputSchema[ContextIn](func(s *jsonschema.Schema) {
+		s.Properties["ref"].MinLength, s.Properties["ref"].MaxLength = ptr(1), ptr(maxRef)
+		for _, k := range []string{"before", "after"} {
+			s.Properties[k].Minimum, s.Properties[k].Maximum = ptr(0.0), ptr(float64(maxAround))
+		}
+	})
+	traceSchema = inputSchema[TraceIn](func(s *jsonschema.Schema) {
+		s.Properties["id"].MinLength, s.Properties["id"].MaxLength = ptr(1), ptr(maxValue)
+		s.Properties["limit"].Minimum, s.Properties["limit"].Maximum = ptr(1.0), ptr(float64(maxLimit))
+	})
+	tailSchema = inputSchema[TailIn](func(s *jsonschema.Schema) {
+		tuneRange(s)
+		s.Properties["duration"].MaxLength = ptr(maxDuration)
+		s.Properties["max"].Minimum, s.Properties["max"].Maximum = ptr(1.0), ptr(float64(maxLimit))
 	})
 	piiAddSchema = inputSchema[PIIAddIn](func(s *jsonschema.Schema) {
 		s.Properties["pattern"].MinLength, s.Properties["pattern"].MaxLength = ptr(1), ptr(maxPattern)
