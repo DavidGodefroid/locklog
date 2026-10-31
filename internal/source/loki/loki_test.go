@@ -65,6 +65,8 @@ type fakeLoki struct {
 	// offGrid writes metric points 1 s late (a backend whose grid is
 	// not the one asked for).
 	offGrid bool
+	// onRange, when set, is called before a log query_range is answered.
+	onRange func(start, end int64)
 }
 
 func matches(ms [][3]string, l map[string]string) bool {
@@ -197,6 +199,9 @@ func (f *fakeLoki) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if m := metricRe.FindStringSubmatch(query); m != nil {
 			f.metric(w, m, start, end, q.Get("step"))
 			return
+		}
+		if f.onRange != nil {
+			f.onRange(start, end)
 		}
 		sel, err := parseQuery(query)
 		if err != nil {
@@ -1178,5 +1183,145 @@ func TestSmallGuards(t *testing.T) {
 	defer func() { maxBoundaryBytes = prev }()
 	if _, err := s.IndexCounts(ctx, source.CountQuery{Range: r, Bucket: 5 * time.Minute}); !errors.Is(err, source.ErrNotIndexable) {
 		t.Fatalf("over the boundary byte cap: %v", err)
+	}
+}
+
+// TestScanFetchesLazily: a scan fetches at most InFlight slices ahead of the
+// one Next reads, however slowly it is consumed.
+func TestScanFetchesLazily(t *testing.T) {
+	f := &fakeLoki{entries: dataset(300)} // 10 minutes of a 1 h plan of 1 min slices
+	var mu sync.Mutex
+	firsts := map[int64]bool{}
+	f.onRange = func(start, _ int64) {
+		if start%int64(time.Minute) == 0 { // a slice's first page
+			mu.Lock()
+			firsts[start] = true
+			mu.Unlock()
+		}
+	}
+	started := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(firsts)
+	}
+	const inFlight = 2
+	s := newSource(t, f, func(o *Options) { o.InFlight = inFlight })
+	plan, _ := s.Plan(ctx, source.Range{From: t0, To: t0.Add(time.Hour)}, source.Selector{})
+	if n := len(plan.Chunks[0].Granules); n != 60 {
+		t.Fatalf("%d slices", n)
+	}
+	it, err := s.Scan(ctx, plan.Chunks[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if n := started(); n > inFlight {
+		t.Fatalf("%d slices fetched before any Next, want at most %d", n, inFlight)
+	}
+	// Reading slice 0 (30 entries): slices 1 and 2 ahead at most.
+	for i := 0; i < 30; i++ {
+		if _, err := it.Next(); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if n := started(); n > 1+inFlight {
+		t.Fatalf("%d slices fetched while the first is read, want at most %d", n, 1+inFlight)
+	}
+	recs := drain(t, it)
+	if len(recs) != 270 || started() != 60 {
+		t.Fatalf("%d more records, %d slices fetched", len(recs), started())
+	}
+	if f.maxIn > inFlight {
+		t.Fatalf("%d requests in flight", f.maxIn)
+	}
+}
+
+// TestProcessedPerPageAndByteLimit: Processed counts each page as it
+// arrives (before the slice is complete), and a scan whose context carries
+// a byte limit stops fetching past it with source.ErrByteLimit instead of
+// buffering the slice whole.
+func TestProcessedPerPageAndByteLimit(t *testing.T) {
+	f := &fakeLoki{entries: dataset(300)}
+	var n atomic.Int32
+	release := make(chan struct{})
+	f.onRange = func(int64, int64) {
+		if n.Add(1) == 2 {
+			<-release // the slice's second page waits
+		}
+	}
+	s := newSource(t, f, func(o *Options) { o.InFlight = 1 })
+	plan, _ := s.Plan(ctx, source.Range{From: t0, To: t0.Add(time.Hour)}, source.Selector{})
+	one := plan.Chunks[0]
+	one.Granules = one.Granules[:1] // 30 entries: 5 pages of 7
+	it, _ := s.Scan(ctx, one)
+	deadline := time.Now().Add(5 * time.Second)
+	for it.Processed() == 0 {
+		if time.Now().After(deadline) {
+			close(release)
+			t.Fatal("the first page is not counted before the slice completes")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	page := it.Processed()
+	close(release)
+	if recs := drain(t, it); len(recs) != 30 {
+		t.Fatalf("%d records", len(recs))
+	}
+	total, pages := it.Processed(), n.Load()
+	if pages < 4 || total <= page {
+		t.Fatalf("%d pages, %d bytes (first page %d)", pages, total, page)
+	}
+	// A limit of about one and a half pages: two pages fetched, then the
+	// scan fails; nothing of the slice is returned.
+	f.onRange = nil
+	queries := func() int {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return len(f.queries)
+	}
+	before := queries()
+	it, _ = s.Scan(source.WithByteLimit(ctx, page*3/2), one)
+	_, err := it.Next()
+	it.Close()
+	if !errors.Is(err, source.ErrByteLimit) {
+		t.Fatalf("past the byte limit: %v", err)
+	}
+	if got := queries() - before; got != 2 {
+		t.Fatalf("%d pages fetched under a limit of 1.5 pages", got)
+	}
+	if p := it.Processed(); p <= page*3/2 || p > 3*page {
+		t.Fatalf("processed %d bytes under a limit of %d", p, page*3/2)
+	}
+	// Within the limit, the same scan completes.
+	it, _ = s.Scan(source.WithByteLimit(ctx, total), one)
+	if recs := drain(t, it); len(recs) != 30 {
+		t.Fatalf("%d records within the limit", len(recs))
+	}
+}
+
+// TestAroundByteLimit: Around fetches its window under the call's byte
+// limit, or MaxAroundBytes without one, and fails past it.
+func TestAroundByteLimit(t *testing.T) {
+	f := &fakeLoki{entries: dataset(300)}
+	s := newSource(t, f, nil)
+	recs := scanAll(t, s, source.Range{From: t0, To: t0.Add(time.Hour)}, source.Selector{})
+	ref := recs[150].Ref
+	if a, err := s.Around(ctx, ref, 2, 2); err != nil || len(a) != 5 {
+		t.Fatalf("around: %d, %v", len(a), err)
+	}
+	if _, err := s.Around(source.WithByteLimit(ctx, 1000), ref, 2, 2); !errors.Is(err, source.ErrByteLimit) {
+		t.Fatalf("around past the call's limit: %v", err)
+	}
+	prev := MaxAroundBytes
+	MaxAroundBytes = 1000
+	defer func() { MaxAroundBytes = prev }()
+	if _, err := s.Around(ctx, ref, 2, 2); !errors.Is(err, source.ErrByteLimit) {
+		t.Fatalf("around past MaxAroundBytes: %v", err)
+	}
+	// Reread reads one nanosecond: a page at most.
+	if got, err := s.Reread(ctx, ref); err != nil || got.Event.Raw != recs[150].Event.Raw {
+		t.Fatalf("reread: %v", err)
 	}
 }
