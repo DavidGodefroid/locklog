@@ -288,11 +288,13 @@ func New(r *config.Remote, allow *Allowlist, creds Credentials, opt Options) (*C
 }
 
 // checkHeaders refuses the headers that carry credentials, a tenant or the
-// host: those go through the auth mode and the source URL only.
+// host (those go through the auth mode and the source URL only), and the
+// headers that tag locklog's queries (User-Agent, X-Query-Tags), which a
+// fixed header must not override.
 func checkHeaders(h map[string]string) error {
 	for k := range h {
 		switch http.CanonicalHeaderKey(k) {
-		case "Authorization", "Proxy-Authorization", "Cookie", "X-Scope-Orgid", "Host":
+		case "Authorization", "Proxy-Authorization", "Cookie", "X-Scope-Orgid", "Host", "User-Agent", "X-Query-Tags":
 			return fmt.Errorf("egress: header %s is not a fixed header", k)
 		}
 	}
@@ -366,11 +368,13 @@ func (c *Client) request(ctx context.Context, method, path string, q url.Values,
 	if req.URL.EscapedPath() != (&url.URL{Path: u.Path}).EscapedPath() || req.URL.Host != c.base.Host {
 		return nil, fmt.Errorf("%w: %s %s", ErrNotAllowed, method, path)
 	}
-	req.Header.Set("User-Agent", c.userAgent)
-	req.Header.Set("X-Query-Tags", "source=locklog")
 	for k, v := range c.headers {
 		req.Header.Set(k, v)
 	}
+	// Set last: no fixed header overrides how locklog's queries are
+	// tagged (checkHeaders refuses them too).
+	req.Header.Set("User-Agent", c.userAgent)
+	req.Header.Set("X-Query-Tags", "source=locklog")
 	return req, nil
 }
 

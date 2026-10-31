@@ -34,15 +34,19 @@ func matchesSize(ms []match) int {
 	return n
 }
 
-// put stores matches and returns their id; matches larger than the whole
-// cache are cut to fit.
-func (c *resultCache) put(ms []match) string {
+// fits reports whether matches of size bytes can be cached at all.
+func (c *resultCache) fits(size int) bool { return size <= c.max }
+
+// put stores matches and returns their id. Matches are never cut (the
+// cursor is past the granules they came from: a cut would lose them while
+// the search reports complete); ok is false when they exceed the whole
+// cache.
+func (c *resultCache) put(ms []match) (id string, ok bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	size := matchesSize(ms)
-	for size > c.max && len(ms) > 0 {
-		ms = ms[:len(ms)/2]
-		size = matchesSize(ms)
+	if size > c.max {
+		return "", false
 	}
 	for c.size+size > c.max && len(c.order) > 0 {
 		old := c.order[0]
@@ -52,11 +56,11 @@ func (c *resultCache) put(ms []match) string {
 	}
 	var b [12]byte
 	rand.Read(b[:])
-	id := hex.EncodeToString(b[:])
+	id = hex.EncodeToString(b[:])
 	c.entries[id] = cacheEntry{ms: ms, size: size}
 	c.order = append(c.order, id)
 	c.size += size
-	return id
+	return id, true
 }
 
 // get returns the matches of id, leaving them in place: a continuation

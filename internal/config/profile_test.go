@@ -9,6 +9,8 @@ import (
 	"time"
 
 	kconfig "github.com/DavidGodefroid/lockkit/config"
+
+	"github.com/DavidGodefroid/locklog/internal/mask"
 )
 
 const fileSrc = `
@@ -130,6 +132,7 @@ func TestProfileValues(t *testing.T) {
 		{`unmask = "always"`, "unknown unmask mode"},
 		{`lookup = "open"`, "unknown lookup mode"},
 		{`detectors = ["email", "dna"]`, "unknown detector"},
+		{`detectors = ["email", "secret"]`, "secret detection is always on"},
 		{`pseudonym_rotation = "5m"`, "pseudonym_rotation: want"},
 		{`pseudonym_rotation = "500d"`, "pseudonym_rotation: want"},
 		{`pseudonym_max_age = "3d"` + "\n" + `pseudonym_rotation = "7d"`, "is above pseudonym_max_age"},
@@ -143,6 +146,24 @@ func TestProfileValues(t *testing.T) {
 		t.Errorf("explicit settings: %v %q", p.Detectors, p.PseudonymRotation)
 	}
 	wantErr(t, "[profiles.staging]\n", "no sources")
+}
+
+// The default set masks public IP addresses; person_name and phone_loose
+// are opt-in, and a profile may name them.
+func TestDetectorDefaultsAndOptIn(t *testing.T) {
+	def := DefaultDetectors()
+	if !slices.Contains(def, "ip") || slices.Contains(def, mask.SecretDetectorName) {
+		t.Errorf("default detectors = %v", def)
+	}
+	for _, n := range OptInDetectors() {
+		if slices.Contains(def, n) {
+			t.Errorf("opt-in %s in the default set", n)
+		}
+	}
+	p := mustParse(t, fileSrc+"[profiles.staging]\ndetectors = [\"email\", \"person_name\", \"phone_loose\", \"ip\"]\n")["staging"]
+	if !slices.Equal(p.Detectors, []string{"email", "ip", "person_name", "phone_loose"}) {
+		t.Errorf("detectors = %v", p.Detectors)
+	}
 }
 
 func TestLimits(t *testing.T) {

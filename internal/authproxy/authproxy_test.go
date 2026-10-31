@@ -310,3 +310,19 @@ func TestDirLockedBeforeTheEmptinessCheck(t *testing.T) {
 		t.Fatalf("mode %v after the check", fi.Mode().Perm())
 	}
 }
+
+// TestRefusesComposeSpecialCharsInDir: the Dir goes into the generated
+// Compose snippet's volume strings, where ':' splits and '$' interpolates.
+func TestRefusesComposeSpecialCharsInDir(t *testing.T) {
+	for _, bad := range []string{"loki$proxy", "loki${HOME}", "loki$$x", "a:b", `a"b`, `a\b`, "a\nb"} {
+		o, _ := setup(t)
+		o.Dir = filepath.Join(filepath.Dir(o.Dir), bad)
+		os.MkdirAll(filepath.Dir(o.Dir), 0o700)
+		if _, err := Generate(o); err == nil {
+			t.Errorf("Dir %q accepted", bad)
+		}
+		if _, err := os.Lstat(o.Dir); err == nil {
+			t.Errorf("Dir %q created", bad)
+		}
+	}
+}

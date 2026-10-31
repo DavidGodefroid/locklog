@@ -80,8 +80,8 @@ jobs:
           }
 
   # Remote sources against real backends (pulled images, no local build).
-  integration:
-    name: integration
+  integration-loki:
+    name: integration (loki)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:

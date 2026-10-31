@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/DavidGodefroid/locklog/internal/egress"
@@ -75,8 +76,15 @@ type Options struct {
 	InFlight int
 	// Limit overrides Limit (tests).
 	Limit int
-	Now   func() time.Time
+	// DescribeLookback is how far back Describe lists labels and values
+	// (0: DescribeLookback).
+	DescribeLookback time.Duration
+	Now              func() time.Time
 }
+
+// DescribeLookback is how far back Describe looks by default: a label or a
+// value seen only before it is not listed (it is still queryable).
+const DescribeLookback = 24 * time.Hour
 
 // Source is a Loki source. It is safe for concurrent use.
 type Source struct {
@@ -371,12 +379,34 @@ func sortEntries(es []entry) {
 // them cannot be fetched. The slice fails rather than return part of it.
 var errCrowded = errors.New("at least a page of entries share one nanosecond: they cannot be paged completely")
 
+// meter counts the response bytes of a read as its pages arrive, against
+// a limit shared by the slices of one scan (0: none).
+type meter struct {
+	n     atomic.Int64
+	limit int64
+}
+
+// add counts a page; past the limit, the read stops (source.ErrByteLimit).
+func (m *meter) add(n int64) error {
+	if m == nil {
+		return nil
+	}
+	if t := m.n.Add(n); m.limit > 0 && t > m.limit {
+		return source.ErrByteLimit
+	}
+	return nil
+}
+
 // fetchSlice returns every entry of [from, to) for query q, in order, and
 // the response bytes it fetched. Pages are cut by Limit; the next page
 // starts at the last timestamp of the page, and the entries already
 // returned at that timestamp are skipped. A full page that brings nothing
 // new at one timestamp is an error (errCrowded), never a silent cut.
-func (s *Source) fetchSlice(ctx context.Context, q string, from, to int64) ([]entry, int64, error) {
+//
+// Each page's bytes are counted on m (nil: not counted) as it arrives; past
+// m's limit the slice fails with source.ErrByteLimit before decoding the
+// page, so a slice never buffers more than the limit and one page.
+func (s *Source) fetchSlice(ctx context.Context, q string, from, to int64, m *meter) ([]entry, int64, error) {
 	var out []entry
 	var fetched int64
 	start := from
@@ -394,6 +424,9 @@ func (s *Source) fetchSlice(ctx context.Context, q string, from, to int64) ([]en
 			return nil, fetched, err
 		}
 		fetched += int64(len(body))
+		if err := m.add(int64(len(body))); err != nil {
+			return nil, fetched, err
+		}
 		page, err := decodeStreams(body)
 		if err != nil {
 			return nil, fetched, err
@@ -472,58 +505,61 @@ func (s *Source) record(c source.Chunk, e entry, ordinal int) source.RawRecord {
 	}
 }
 
-// Scan fetches the chunk's slices (up to InFlight at once) and yields their
-// records in time order.
+// Scan yields the records of the chunk's slices in time order. Slices are
+// fetched lazily, at most InFlight of them ahead of the one Next is reading
+// (each buffered whole, to be sorted), and every page's bytes count towards
+// Processed as it arrives. The byte limit of ctx (source.WithByteLimit)
+// bounds the bytes all of them fetch: past it, the fetches stop and Next
+// fails with source.ErrByteLimit.
 func (s *Source) Scan(ctx context.Context, c source.Chunk) (source.Iterator, error) {
 	if len(c.Granules) == 0 {
 		return nil, errors.New("loki source: empty chunk")
 	}
 	ctx, cancel := context.WithCancel(ctx)
-	it := &iter{s: s, c: c, cancel: cancel, results: make([]chan sliceResult, len(c.Granules))}
-	for i := range c.Granules {
-		it.results[i] = make(chan sliceResult, 1)
-	}
-	go func() {
-		var wg sync.WaitGroup
-		gate := make(chan struct{}, s.o.InFlight)
-		for i, g := range c.Granules {
-			select {
-			case gate <- struct{}{}:
-			case <-ctx.Done():
-				it.results[i] <- sliceResult{err: ctx.Err()}
-				continue
-			}
-			wg.Add(1)
-			go func(i int, g source.Granule) {
-				defer wg.Done()
-				defer func() { <-gate }()
-				es, n, err := s.fetchSlice(ctx, c.Stream, g.Start, g.End)
-				it.results[i] <- sliceResult{entries: es, bytes: n, err: err}
-			}(i, g)
-		}
-		wg.Wait()
-	}()
+	it := &iter{s: s, c: c, ctx: ctx, cancel: cancel, results: make([]chan sliceResult, len(c.Granules))}
+	it.meter.limit = source.ByteLimitFrom(ctx)
+	it.fill()
 	return it, nil
 }
 
 type sliceResult struct {
 	entries []entry
-	bytes   int64
 	err     error
 }
 
 type iter struct {
-	s         *Source
-	c         source.Chunk
-	cancel    context.CancelFunc
-	results   []chan sliceResult
-	cur       int
-	entries   []entry
-	pos       int
-	processed int64
-	ordinal   int
-	lastTS    int64
-	err       error
+	s       *Source
+	c       source.Chunk
+	ctx     context.Context
+	cancel  context.CancelFunc
+	wg      sync.WaitGroup
+	meter   meter
+	results []chan sliceResult
+	// started slices are [0, started); cur is the next one Next reads.
+	started int
+	cur     int
+	entries []entry
+	pos     int
+	ordinal int
+	lastTS  int64
+	err     error
+}
+
+// fill starts the fetches of the slices up to InFlight ahead of cur.
+func (it *iter) fill() {
+	for ; it.started < len(it.results) && it.started < it.cur+it.s.o.InFlight; it.started++ {
+		i, g := it.started, it.c.Granules[it.started]
+		ch := make(chan sliceResult, 1)
+		it.results[i] = ch
+		it.wg.Add(1)
+		go func() {
+			defer it.wg.Done()
+			// Past the shared limit, every fetch fails at its next
+			// page: Next reports the first failed slice in order.
+			es, _, err := it.s.fetchSlice(it.ctx, it.c.Stream, g.Start, g.End, &it.meter)
+			ch <- sliceResult{entries: es, err: err}
+		}()
+	}
 }
 
 func (it *iter) Next() (source.RawRecord, error) {
@@ -535,13 +571,15 @@ func (it *iter) Next() (source.RawRecord, error) {
 			return source.RawRecord{}, io.EOF
 		}
 		r := <-it.results[it.cur]
-		it.processed += r.bytes
+		it.results[it.cur] = nil
 		if r.err != nil {
 			it.err = fmt.Errorf("loki source: %w", r.err)
+			it.entries, it.pos = nil, 0
 			return source.RawRecord{}, it.err
 		}
 		it.entries, it.pos = r.entries, 0
 		it.cur++
+		it.fill()
 	}
 	e := it.entries[it.pos]
 	it.pos++
@@ -555,19 +593,21 @@ func (it *iter) Next() (source.RawRecord, error) {
 	return rec, nil
 }
 
-// Processed returns the response bytes fetched so far.
-func (it *iter) Processed() int64 { return it.processed }
+// Processed returns the response bytes fetched so far, page by page
+// (slices fetched ahead included).
+func (it *iter) Processed() int64 { return it.meter.n.Load() }
 
-// Close stops the fetches.
+// Close stops the fetches and waits for them.
 func (it *iter) Close() error {
 	it.cancel()
+	it.wg.Wait()
 	return nil
 }
 
 // Reread fetches the entry at ref again: ref.Offset is its timestamp and
 // ref.Length its ordinal (from 1) among the entries of that nanosecond.
 func (s *Source) Reread(ctx context.Context, ref source.RawRef) (source.RawRecord, error) {
-	es, _, err := s.fetchSlice(ctx, ref.Stream, ref.Offset, ref.Offset+1)
+	es, _, err := s.fetchSlice(ctx, ref.Stream, ref.Offset, ref.Offset+1, nil)
 	if err != nil {
 		return source.RawRecord{}, fmt.Errorf("loki source: %w", err)
 	}
@@ -581,13 +621,23 @@ func (s *Source) Reread(ctx context.Context, ref source.RawRef) (source.RawRecor
 // AroundWindow bounds how far Around looks on each side.
 const AroundWindow = 15 * time.Minute
 
+// MaxAroundBytes bounds the response bytes of one Around when its context
+// carries no byte limit (source.WithByteLimit). A var for tests.
+var MaxAroundBytes int64 = 64 << 20
+
 // Around returns up to before entries before ref, ref's entry and up to
-// after entries after it, from the same query.
+// after entries after it, from the same query. The window is fetched under
+// the byte limit of ctx (else MaxAroundBytes): past it, Around fails with
+// source.ErrByteLimit rather than buffer the window whole.
 func (s *Source) Around(ctx context.Context, ref source.RawRef, before, after int) ([]source.RawRecord, error) {
 	before, after = max(0, min(before, 50)), max(0, min(after, 50))
 	from := ref.Offset - int64(AroundWindow)
 	to := ref.Offset + int64(AroundWindow)
-	es, _, err := s.fetchSlice(ctx, ref.Stream, from, to)
+	m := &meter{limit: source.ByteLimitFrom(ctx)}
+	if m.limit == 0 {
+		m.limit = MaxAroundBytes
+	}
+	es, _, err := s.fetchSlice(ctx, ref.Stream, from, to, m)
 	if err != nil {
 		return nil, fmt.Errorf("loki source: %w", err)
 	}
@@ -626,7 +676,8 @@ type labelsResponse struct {
 // labels' values (asked only for trusted labels), the names of other labels
 // (masked by the caller), and the source kind. Every label request carries
 // the profile's selector as its query: only the profile's streams are
-// described.
+// described. Labels and values are those of the last DescribeLookback
+// (Options.DescribeLookback): older ones are not listed, though queryable.
 func (s *Source) Describe(ctx context.Context) (source.Schema, error) {
 	sch := source.Schema{Kind: Kind, Format: s.o.Parser.Options().Format, Streams: 1}
 	sel, err := s.selector(source.Selector{}).Render()
@@ -636,7 +687,11 @@ func (s *Source) Describe(ctx context.Context) (source.Schema, error) {
 	end := s.o.Now()
 	v := url.Values{}
 	v.Set("query", sel)
-	v.Set("start", strconv.FormatInt(end.Add(-24*time.Hour).UnixNano(), 10))
+	lookback := s.o.DescribeLookback
+	if lookback <= 0 {
+		lookback = DescribeLookback
+	}
+	v.Set("start", strconv.FormatInt(end.Add(-lookback).UnixNano(), 10))
 	v.Set("end", strconv.FormatInt(end.UnixNano(), 10))
 	body, err := s.do(ctx, "/loki/api/v1/labels", v)
 	if err != nil {
@@ -833,7 +888,7 @@ func (s *Source) IndexCounts(ctx context.Context, q source.CountQuery) (source.C
 	fetch := func(bounds []int64) (map[int64][]entry, error) {
 		out := map[int64][]entry{}
 		for _, b := range bounds {
-			es, n, err := s.fetchSlice(ctx, sel, b, b+1)
+			es, n, err := s.fetchSlice(ctx, sel, b, b+1, nil)
 			if boundaryBytes += n; boundaryBytes > maxBoundaryBytes {
 				return nil, source.ErrNotIndexable
 			}

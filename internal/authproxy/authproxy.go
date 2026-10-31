@@ -108,9 +108,10 @@ func Generate(o Options) (Result, error) {
 		return Result{}, errors.New("authproxy: invalid user name")
 	case o.Port < 1 || o.Port > 65535:
 		return Result{}, errors.New("authproxy: invalid port")
-	case strings.ContainsAny(o.Dir, ":\"\\") || strings.ContainsFunc(o.Dir, func(r rune) bool { return r < 0x20 || r == 0x7f }):
-		// The Compose short volume syntax splits on ':'.
-		return Result{}, errors.New("authproxy: the directory path must not hold ':', quotes, backslashes or control characters")
+	case strings.ContainsAny(o.Dir, ":\"\\$") || strings.ContainsFunc(o.Dir, func(r rune) bool { return r < 0x20 || r == 0x7f }):
+		// The Compose short volume syntax splits on ':', and Compose
+		// interpolates '$' in the snippet's volume strings.
+		return Result{}, errors.New("authproxy: the directory path must not hold ':', '$', quotes, backslashes or control characters")
 	}
 	// Both sides by their real paths (a symlinked project, or a symlinked
 	// ancestor of Dir such as macOS's /var -> /private/var, must not hide

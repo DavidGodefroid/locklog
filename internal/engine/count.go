@@ -26,9 +26,19 @@ const (
 	// MaxGroups bounds distinct (bucket, by) groups; beyond, records
 	// count under an "⟦other⟧" key. Distinct counts are exact up to it.
 	MaxGroups = 100000
+	// MaxGroupBytes bounds the memory of one count's groups (keys are
+	// masked values of any length): beyond, records count under
+	// "⟦other⟧" as beyond MaxGroups.
+	MaxGroupBytes = 8 << 20
+	// groupOverhead is the memory of a group besides its key bytes.
+	groupOverhead = 160
+	// maxAggBytes bounds the partial counts kept between continuations,
+	// in total.
+	maxAggBytes = 64 << 20
 )
 
-// Other is the key of groups beyond MaxGroups or of index overflow.
+// Other is the key of groups beyond MaxGroups or MaxGroupBytes, or of
+// index overflow.
 const Other = mask.Open + "other" + mask.Close
 
 // CountQuery is a count (locklog_count).
@@ -42,6 +52,10 @@ type CountQuery struct {
 	// values, then the ByLabels values.
 	By       []string `json:"by,omitempty"`
 	ByLabels []string `json:"by_labels,omitempty"`
+	// ByPattern also groups by the Template of the masked message (the
+	// last key; null without a message). It counts as one of MaxBy and is
+	// never served from the index.
+	ByPattern bool `json:"by_pattern,omitempty"`
 	// FirstLast adds each group's first and last timestamp.
 	FirstLast bool `json:"first_last,omitempty"`
 
@@ -78,10 +92,19 @@ type CountResult struct {
 type agg struct {
 	groups  map[string]*Group
 	untimed int64
-	indexed bool
-	from    time.Time
-	until   time.Time
-	noFrom  bool
+	noText  int64 // patterns: matching records without a message
+	// patterns: the baseline's groups (capped on their own), and the
+	// number of plan chunks of the window (the baseline's follow).
+	base      *agg
+	winChunks int
+	// truncated is set once a group went to Other for MaxGroups or
+	// MaxGroupBytes.
+	truncated bool
+	indexed   bool
+	from      time.Time
+	until     time.Time
+	noFrom    bool
+	bytes     int64 // memory of the groups (keys twice, plus overhead)
 }
 
 func newAgg() *agg { return &agg{groups: map[string]*Group{}} }
@@ -103,7 +126,9 @@ func (a *agg) add(b time.Time, key []*string, n int64, t time.Time, timed bool) 
 	k := groupKey(b, key)
 	g := a.groups[k]
 	if g == nil {
-		if len(a.groups) >= MaxGroups {
+		size := groupOverhead + 2*int64(len(k))
+		if len(a.groups) >= MaxGroups || a.bytes+size > MaxGroupBytes {
+			a.truncated = true
 			o := Other
 			key = make([]*string, len(key))
 			for i := range key {
@@ -115,6 +140,7 @@ func (a *agg) add(b time.Time, key []*string, n int64, t time.Time, timed bool) 
 		if g == nil {
 			g = &Group{Bucket: b, Key: key}
 			a.groups[k] = g
+			a.bytes += groupOverhead + 2*int64(len(k))
 		}
 	}
 	g.N += n
@@ -130,11 +156,13 @@ func (a *agg) add(b time.Time, key []*string, n int64, t time.Time, timed bool) 
 	}
 }
 
-// aggCache keeps partial counts between continuations.
+// aggCache keeps partial counts between continuations, at most maxAggs
+// and maxAggBytes in total (the oldest are evicted first).
 type aggCache struct {
-	mu sync.Mutex
-	m  map[string]*agg
-	o  []string
+	mu    sync.Mutex
+	m     map[string]*agg
+	o     []string
+	bytes int64
 }
 
 const maxAggs = 64
@@ -145,10 +173,12 @@ func (c *aggCache) put(a *agg) string {
 	if c.m == nil {
 		c.m = map[string]*agg{}
 	}
-	for len(c.o) >= maxAggs {
+	for len(c.o) > 0 && (len(c.o) >= maxAggs || c.bytes+a.size() > maxAggBytes) {
+		c.bytes -= c.m[c.o[0]].size()
 		delete(c.m, c.o[0])
 		c.o = c.o[1:]
 	}
+	c.bytes += a.size()
 	var b [12]byte
 	rand.Read(b[:])
 	id := hex.EncodeToString(b[:])
@@ -174,9 +204,11 @@ func (c *aggCache) get(id string) (*agg, bool) {
 func (c *aggCache) drop(id string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if _, ok := c.m[id]; !ok {
+	a, ok := c.m[id]
+	if !ok {
 		return
 	}
+	c.bytes -= a.size()
 	delete(c.m, id)
 	c.o = slices.DeleteFunc(c.o, func(o string) bool { return o == id })
 }
@@ -189,7 +221,18 @@ func (a *agg) clone() *agg {
 		gg := *g
 		b.groups[k] = &gg // Key and the times are never mutated in place
 	}
+	if a.base != nil {
+		b.base = a.base.clone()
+	}
 	return &b
+}
+
+// size is the memory of a's groups, its baseline's included.
+func (a *agg) size() int64 {
+	if a.base == nil {
+		return a.bytes
+	}
+	return a.bytes + a.base.size()
 }
 
 func (q *CountQuery) bucketOf(t time.Time) time.Time {
@@ -207,12 +250,22 @@ func (q *CountQuery) bucketOf(t time.Time) time.Time {
 // does (countFailed), while any other count leaves it out, since its masked
 // predicates cannot be evaluated on it.
 func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr error) {
+	// The caller's predicates are not shared: validation and evaluation
+	// write into them.
+	q.Where = slices.Clone(q.Where)
 	cursor := q.Cursor
 	q.Cursor = ""
+	// The caps first: the trust loops below are sources × predicates.
+	if len(q.Sources) > MaxSources || len(q.Where) > MaxPredicates || q.byCount() > MaxBy {
+		return CountResult{}, refuse(EBadQuery, "", "at most %d sources, %d predicates and %d fields and labels to count by", MaxSources, MaxPredicates, MaxBy)
+	}
 	trustedOnly := q.trustedOnly(e.o.Trusted)
 	if len(q.Sources) == 0 {
 		q.Sources = append([]string(nil), e.names...)
 		trustedOnly = q.trustedOnly(e.o.Trusted)
+	}
+	if q.ByPattern {
+		trustedOnly = false // a template is of masked text
 	}
 	for _, p := range q.groupBy() {
 		for _, s := range q.Sources {
@@ -224,8 +277,12 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 	maxRange := e.o.Limits.CountRange
 	if !trustedOnly {
 		maxRange = e.o.Limits.LocalRange
-		for _, s := range q.Sources {
-			if _, ok := e.o.Sources[s]; ok && e.remote(s) {
+	}
+	for _, s := range q.Sources {
+		// A remote source without its own counts is scanned: its range,
+		// trusted-only or not.
+		if src, ok := e.o.Sources[s]; ok && e.remote(s) {
+			if _, counts := src.(source.Counter); !trustedOnly || !counts {
 				maxRange = min(maxRange, e.o.Limits.RemoteRange)
 			}
 		}
@@ -245,8 +302,8 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 	if err := v.validate(&q.Query); err != nil {
 		return CountResult{}, err
 	}
-	if len(q.By)+len(q.ByLabels) > MaxBy {
-		return CountResult{}, refuse(EBadQuery, "by", "at most %d fields and labels", MaxBy)
+	if q.byCount() > MaxBy {
+		return CountResult{}, refuse(EBadQuery, "by", "at most %d fields, labels and the pattern", MaxBy)
 	}
 	for i, b := range q.By {
 		if err := v.path(&q.Query, b, fmt.Sprintf("by[%d]", i)); err != nil {
@@ -302,7 +359,21 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 			}
 		}
 		if !a.indexed {
-			p, err := e.planQuery(ctx, &q.Query, e.o.Limits.RemoteBytes, e.o.Limits.LocalBytes)
+			// Scanned, not answered by the sources' counts: a remote
+			// source's range applies (its bytes are unknown before
+			// the fetch, so admission cannot bound a longer range).
+			for _, s := range q.Sources {
+				if _, ok := e.o.Sources[s]; ok && e.remote(s) && q.To.Sub(q.From) > e.o.Limits.RemoteRange {
+					return CountResult{}, &Error{Code: EOverBudget, Span: "to",
+						Message:  fmt.Sprintf("this count is scanned, and a remote source's range is at most %s: narrow the range, or count by trusted labels only on whole-minute buckets", e.o.Limits.RemoteRange),
+						Estimate: &Estimate{Range: q.To.Sub(q.From)}}
+				}
+			}
+			// A count does not depend on order: its plan is read in
+			// stream order (the cheapest).
+			pq := q.Query
+			pq.Order = "asc"
+			p, err := e.planQuery(ctx, &pq, e.o.Limits.RemoteBytes, e.o.Limits.LocalBytes)
 			if err != nil {
 				return CountResult{}, err
 			}
@@ -316,7 +387,11 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 
 	sc, failures := Scanned{}, 0
 	var err *Error
-	chunk, gran, sc, failures, err = e.run(ctx, f.plan, chunk, gran, nil, e.callBytes(q.Sources), func(raw source.RawRecord, rec mask.Record) {
+	factor := q.evalFactor()
+	if q.ByPattern {
+		factor++ // templating reads every matching message
+	}
+	chunk, gran, sc, failures, err = e.run(ctx, f.plan, chunk, gran, nil, e.callBytes(q.Sources), factor, func(raw source.RawRecord, rec mask.Record, b *budget) {
 		if rec.Failed() && trustedOnly {
 			// The index counts every record by its trusted values;
 			// a scan of a trusted-only count does the same for a
@@ -326,7 +401,7 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 			e.countFailed(&q, raw, rec, a)
 			return
 		}
-		if !q.match(rec) {
+		if !q.match(rec, b) {
 			return
 		}
 		t, timed := rec.Time()
@@ -347,6 +422,17 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 				s := vs[0].text
 				key[i] = &s
 			}
+		}
+		if q.ByPattern {
+			var p *string
+			if m := rec.Message(); m != "" {
+				if b.charge(leafCost + int64(len(m))) {
+					return
+				}
+				tp := Template(m)
+				p = &tp
+			}
+			key = append(key, p)
 		}
 		a.add(q.bucketOf(t), key, 1, t, true)
 	})
@@ -409,27 +495,27 @@ func (q *Query) rangeContains(t time.Time, minuteResolution bool) bool {
 // counted and is left out, which the index path does too (such a granule
 // goes to the residual scan).
 func (e *Engine) countFailed(q *CountQuery, raw source.RawRecord, rec mask.Record, a *agg) {
-	known := func(v string) (ok bool) {
+	known := func(name, v string) (ok bool) {
 		defer func() {
 			if recover() != nil {
 				ok = false
 			}
 		}()
-		return e.o.Masker.Text(v) == v
+		return e.o.Masker.TrustedValue(raw.Ref.Source, name, v) == v
 	}
 	sel := q.selector(raw.Ref.Source, e.o.Trusted)
 	fields, labels := map[string]string{}, map[string]string{}
 	get := func(name string, label bool) (string, bool, bool) {
-		look, m := index.Lookup, fields
+		m := fields
 		if label {
-			look, m = index.LookupAttr, labels
+			m = labels
 		}
-		v, ok := look(raw.Event, name)
-		if !ok {
+		v := index.Value(raw.Event, index.TermKey(name, label))
+		switch {
+		case v == index.Absent:
 			return "", false, true
-		}
-		if !known(v) {
-			return "", false, false
+		case v == index.Redacted || !known(name, v):
+			return "", false, false // unknown, as in the index
 		}
 		m[name] = v
 		return v, true, true
@@ -464,6 +550,15 @@ func (e *Engine) countFailed(q *CountQuery, raw source.RawRecord, rec mask.Recor
 	a.add(q.bucketOf(t), key, 1, t, true)
 }
 
+// byCount is the number of keys a count groups by.
+func (q *CountQuery) byCount() int {
+	n := len(q.By) + len(q.ByLabels)
+	if q.ByPattern {
+		n++
+	}
+	return n
+}
+
 // groupBy is the group key's parts: By fields, then ByLabels labels.
 func (q *CountQuery) groupBy() []Pred {
 	var out []Pred
@@ -495,10 +590,11 @@ func (e *Engine) indexCounts(ctx context.Context, q *CountQuery, a *agg) (source
 		if err != nil {
 			return source.Byteplan{}, err
 		}
+		by := q.groupBy()
 		for _, row := range r.Rows {
 			key := make([]*string, len(row.Vals))
 			for i, v := range row.Vals {
-				key[i] = e.indexValue(v)
+				key[i] = e.indexValue(name, by[i].name(), v)
 			}
 			a.add(row.Bucket, key, row.N, time.Time{}, false)
 		}
@@ -519,9 +615,11 @@ func (e *Engine) indexCounts(ctx context.Context, q *CountQuery, a *agg) (source
 	return plan, nil
 }
 
-// indexValue masks an indexed raw value for the agent: trusted values pass
-// the masker's text path; markers become placeholders.
-func (e *Engine) indexValue(v string) *string {
+// indexValue masks an indexed raw value of a trusted field or label for the
+// agent; markers become placeholders. A value the masker would change as a
+// trusted leaf (an index built before a rule, or by another Sensitive) is
+// withheld, never shown clear: the scan shows it masked.
+func (e *Engine) indexValue(src, name, v string) *string {
 	var s string
 	switch v {
 	case index.Absent:
@@ -531,7 +629,10 @@ func (e *Engine) indexValue(v string) *string {
 	case index.Other:
 		s = Other
 	default:
-		s = e.o.Masker.Text(v)
+		s = v
+		if e.o.Masker.TrustedValue(src, name, v) != v {
+			s = mask.Redacted
+		}
 	}
 	return &s
 }

@@ -39,14 +39,59 @@ type Detectors []pii.Detector
 // Find implements Finder.
 func (ds Detectors) Find(s string) []pii.Match { return pii.FindInViews(s, ds) }
 
+// SecretDetectorName is lockkit's secret detector: step 1, always on,
+// never a value detector a profile names.
+const SecretDetectorName = "secret"
+
+// SecretDetectors finds secrets with lockkit's secret detector
+// (credentials, token shapes, private keys, URL userinfo), in the text and
+// in its detection views. Every masker runs it in step 1, whatever
+// Options.Secrets adds.
+func SecretDetectors() Detectors {
+	ds, err := pii.Detectors([]string{SecretDetectorName})
+	if err != nil || len(ds) != 1 {
+		panic(fmt.Sprintf("mask: lockkit has no secret detector: %v", err))
+	}
+	return Detectors(ds)
+}
+
+// DefaultValueDetectors names the value detectors of a profile that sets
+// none, and of a masker given no Values: lockkit's default set
+// (pii.AllDetectors) and ip (public addresses; private and loopback ones
+// are infrastructure, never found).
+func DefaultValueDetectors() []string {
+	ds := pii.AllDetectors()
+	out := make([]string, 0, len(ds)+1)
+	for _, d := range ds {
+		out = append(out, d.Name())
+	}
+	return append(out, "ip")
+}
+
+// ValueDetectors returns the value detectors a profile names (step 4).
+// The secret detector is refused: secrets are step 1, always on.
+func ValueDetectors(names []string) (Detectors, error) {
+	if slices.Contains(names, SecretDetectorName) {
+		return nil, fmt.Errorf("mask: %q is not a value detector (secret detection is always on)", SecretDetectorName)
+	}
+	ds, err := pii.Detectors(names)
+	if err != nil {
+		return nil, fmt.Errorf("mask: %w", err)
+	}
+	return Detectors(ds), nil
+}
+
 // Options configure a Masker.
 type Options struct {
 	// Structured is StructuredRedactUnknown (default) or StructuredDetect.
 	Structured string
-	// Values are the value detectors of step 4 (personal data).
+	// Values are the value detectors of step 4 (personal data); left
+	// nil, DefaultValueDetectors.
 	Values Finder
 	// Secrets finds secret values (step 1); SecretName reports a field
-	// name whose value is a secret whole.
+	// name whose value is a secret whole. Both add to lockkit's secret
+	// detector (SecretDetectors) and pii.LooksSecret, which every masker
+	// runs: they can widen step 1, never replace it.
 	Secrets    Finder
 	SecretName func(name string) bool
 	// Trusted are the clear paths of trusted fields: shown after the
@@ -57,6 +102,24 @@ type Options struct {
 	Rules *Rules
 	// Pseudonyms is the current epoch.
 	Pseudonyms *pii.Pseudonymizer
+
+	// withoutLockkitSecrets drops lockkit's secret step: for the tests
+	// that prove the leak harness sees an unmasked secret, never settable
+	// outside this package.
+	withoutLockkitSecrets bool
+}
+
+// finders runs several finders; find merges their overlapping matches.
+type finders []Finder
+
+func (fs finders) Find(s string) []pii.Match {
+	var out []pii.Match
+	for _, f := range fs {
+		if f != nil {
+			out = append(out, f.Find(s)...)
+		}
+	}
+	return out
 }
 
 // Masker masks events. It is safe for concurrent use.
@@ -82,6 +145,25 @@ func New(o Options) (*Masker, error) {
 	}
 	if o.Rules == nil {
 		o.Rules = &Rules{}
+	}
+	if o.Values == nil {
+		ds, err := ValueDetectors(DefaultValueDetectors())
+		if err != nil {
+			return nil, err
+		}
+		o.Values = ds
+	}
+	if !o.withoutLockkitSecrets {
+		if o.Secrets == nil {
+			o.Secrets = SecretDetectors()
+		} else {
+			o.Secrets = finders{SecretDetectors(), o.Secrets}
+		}
+		if extra := o.SecretName; extra == nil {
+			o.SecretName = pii.LooksSecret
+		} else {
+			o.SecretName = func(n string) bool { return pii.LooksSecret(n) || extra(n) }
+		}
 	}
 	m := &Masker{o: o, trusted: map[string]bool{}, names: newNameBook()}
 	for _, t := range o.Trusted {
@@ -135,6 +217,51 @@ func (m *Masker) Text(s string) (out string) {
 	return w.text(s)
 }
 
+// TrustedValue masks a trusted value read outside a record (an index value,
+// a value compared with a trusted field) as Mask masks a trusted leaf at
+// path of source: secret names, human and agent rules (an ancestor's too),
+// then the detectors, a number in exponent or decimal form read as the
+// integer it is. Its JSON kind and how path splits into keys are unknown,
+// so every reading is tried (string and, for a number literal, number; the
+// dotted path as nested keys and as one key): the first that changes the
+// value is returned, else the value. A value it changes must never be
+// shown or matched clear.
+func (m *Masker) TrustedValue(source, path, v string) (out string) {
+	defer func() {
+		if recover() != nil {
+			out = Redacted // a failure withholds it all
+		}
+	}()
+	kinds := []parse.Kind{parse.KindString}
+	if validLiteral(parse.KindNumber, v) {
+		kinds = append(kinds, parse.KindNumber)
+	}
+	splits := [][]string{{path}}
+	if strings.Contains(path, ".") {
+		splits = append(splits, strings.Split(path, "."))
+	}
+	for _, k := range kinds {
+		for _, parts := range splits {
+			val := parse.Value{Kind: k, Str: v}
+			for i := len(parts) - 1; i > 0; i-- {
+				val = parse.Value{Kind: parse.KindObject, Members: []parse.Member{{Key: parts[i], Value: val}}}
+			}
+			w := &walk{m: m, source: source, kinds: map[string]bool{}}
+			o := w.members([]parse.Member{{Key: parts[0], Value: val}}, "", "", true, inherited{})[0].value
+			for o.kind == Object && len(o.members) == 1 {
+				o = o.members[0].value
+			}
+			if o.kind == Object || o.kind == Array {
+				return Redacted
+			}
+			if o.text != v {
+				return o.text
+			}
+		}
+	}
+	return v
+}
+
 // RedactText masks text the agent wrote before it is echoed back (refusal
 // echoes): secrets as ⟦secret⟧, personal values as ⟦redacted⟧, never as a
 // pseudonym (no oracle, design §4.4).
@@ -149,8 +276,8 @@ func (m *Masker) RedactText(s string) (out string) {
 	if len(s) > pii.DetectLimit {
 		s = pii.CutAt(s, pii.DetectLimit)
 	}
-	s = replace(s, w.find(m.o.Secrets, s), func(string, pii.Match) string { return Secret })
 	for round := 0; ; round++ {
+		s, _ = w.redactSecrets(s)
 		ms := w.values(blankLen(s))
 		if len(ms) == 0 {
 			break
@@ -169,6 +296,7 @@ type walk struct {
 	source      string
 	kinds       map[string]bool
 	secretPaths []string
+	lateSecret  bool // pseudonymise found a secret (see value)
 }
 
 // inherited is what a container's name and rules impose on everything
@@ -197,13 +325,12 @@ func (w *walk) members(ms []parse.Member, clearPath, shownPath string, trusted b
 // returns the clear name (after U+FFFD replacement) and the shown name.
 func (w *walk) key(k string) (string, string) {
 	k = cleanSource(k)
-	secrets := w.find(w.m.o.Secrets, k)
+	step1, hadSecret := w.redactSecrets(k)
 	values := w.values(k)
-	if len(secrets) == 0 && len(values) == 0 {
+	if !hadSecret && len(values) == 0 {
 		w.m.noteClear(w.source, k)
 		return k, outputSafe(k)
 	}
-	step1 := replace(k, secrets, func(string, pii.Match) string { return Secret })
 	id, err := w.m.o.Pseudonyms.ID(KeyKind, step1)
 	if err != nil {
 		w.kinds["redacted"] = true
@@ -310,11 +437,16 @@ func (w *walk) leafMasked(v parse.Value, name, clearPath string, trusted bool, i
 		*hadSecret = true
 		return Value{kind: String, text: Secret}
 	}
-	secrets := w.find(w.m.o.Secrets, s)
-	if len(secrets) > 0 {
+	s, stepSecret := w.redactSecrets(s)
+	if stepSecret {
 		*hadSecret = true
-		s = replace(s, secrets, func(string, pii.Match) string { return Secret })
 	}
+	w.lateSecret = false
+	defer func() {
+		if w.lateSecret {
+			*hadSecret = true // a secret step 4's replacements uncovered
+		}
+	}()
 	// Steps 2-5 work on s, the string step 1 produced.
 	rule, hasRule := w.m.o.Rules.human(w.source, clearPath)
 	// The strongest of the field's own rule and an inherited one wins
@@ -325,7 +457,7 @@ func (w *walk) leafMasked(v parse.Value, name, clearPath string, trusted bool, i
 	var out Value
 	switch {
 	case hasRule && rule.Mode == ModeAllow:
-		out = w.detected(v.Kind, s, len(secrets) > 0)
+		out = w.detected(v.Kind, s, stepSecret)
 	case hasRule && rule.Mode == ModeRedact:
 		w.kinds["redacted"] = true
 		return Value{kind: String, text: Redacted}
@@ -338,7 +470,7 @@ func (w *walk) leafMasked(v parse.Value, name, clearPath string, trusted bool, i
 		w.kinds["redacted"] = true
 		return Value{kind: String, text: Redacted}
 	default:
-		out = w.detected(v.Kind, s, len(secrets) > 0)
+		out = w.detected(v.Kind, s, stepSecret)
 	}
 	// An agent rule only tightens: redact always wins; a pseudonym masks a
 	// value nothing masked whole.
@@ -385,10 +517,10 @@ func (w *walk) message(s, key string) string {
 		if len(t) > pii.DetectLimit {
 			t = pii.CutAt(t, pii.DetectLimit)
 		}
-		if secrets := w.find(w.m.o.Secrets, t); len(secrets) > 0 {
+		if r, found := w.redactSecrets(t); found {
 			w.kinds["secret"] = true
 			w.secretPaths = append(w.secretPaths, key)
-			t = replace(t, secrets, func(string, pii.Match) string { return Secret })
+			t = r
 		}
 		return w.whole(t, kind).text
 	}
@@ -448,29 +580,36 @@ func (w *walk) text(s string) string {
 	if len(s) > pii.DetectLimit {
 		s = pii.CutAt(s, pii.DetectLimit)
 	}
-	if secrets := w.find(w.m.o.Secrets, s); len(secrets) > 0 {
+	if r, found := w.redactSecrets(s); found {
 		w.kinds["secret"] = true
-		s = replace(s, secrets, func(string, pii.Match) string { return Secret })
+		s = r
 	}
 	return outputSafe(w.pseudonymise(s, w.values(s)))
 }
 
 // pseudonymise replaces the matches of s, then masks again what the
-// detectors find once those are replaced (a value glued to a neighbour is
-// one only when the neighbour is gone): no detectable value is left.
+// secret finders and the detectors find once those are replaced (a value
+// glued to a neighbour is one only when the neighbour is gone; a secret
+// name before a pseudonym may make the rest read as a secret): no
+// detectable value or secret is left. A secret found so sets lateSecret.
 func (w *walk) pseudonymise(s string, ms []pii.Match) string {
 	out := w.replaceValues(s, ms)
-	for round := 0; round < 3 && len(ms) > 0; round++ {
+	for round := 0; len(ms) > 0; round++ {
+		if r, found := w.redactSecrets(out); found {
+			w.kinds["secret"] = true
+			w.lateSecret = true
+			out = r
+		}
 		ms = w.values(blankLen(out))
 		if len(ms) == 0 {
 			break
 		}
+		if round == 3 {
+			// Still glued values after the last round: withhold it all.
+			w.kinds["redacted"] = true
+			return Redacted
+		}
 		out = w.replaceValues(out, ms)
-	}
-	if len(ms) > 0 && len(w.values(blankLen(out))) > 0 {
-		// Still glued values after the last round: withhold it all.
-		w.kinds["redacted"] = true
-		return Redacted
 	}
 	return out
 }
@@ -529,6 +668,44 @@ func overlapsAny(m pii.Match, ms []pii.Match) bool {
 		}
 	}
 	return false
+}
+
+// redactSecrets is step 1: every secret of s as Secret, until the
+// secret finders find nothing more in the result with its placeholders
+// blanked (a secret name before a replaced value may make the rest of the
+// text read as a value: "pass:⟦secret⟧\":\""); a match of placeholders and
+// blanks alone is what was already replaced. Past four rounds, the whole
+// string is withheld.
+func (w *walk) redactSecrets(s string) (string, bool) {
+	found := false
+	for round := 0; ; round++ {
+		plain := blankLen(s) // the same length as s
+		var ms []pii.Match
+		for _, m := range w.find(w.m.o.Secrets, plain) {
+			if !blankOnly(plain, m) {
+				m.Start, m.End = widenToPlaceholders(s, m.Start, m.End)
+				ms = append(ms, m)
+			}
+		}
+		if len(ms) == 0 {
+			return s, found
+		}
+		found = true
+		if round == 4 {
+			return Secret, true
+		}
+		s = replace(s, mergeOverlaps(ms), func(string, pii.Match) string { return Secret })
+	}
+}
+
+// blankOnly reports a match of plain that covers blanks alone.
+func blankOnly(plain string, m pii.Match) bool {
+	for i := m.Start; i < m.End; i++ {
+		if c := plain[i]; c != ' ' && c != '\t' && c != '\n' && c != '\r' {
+			return false
+		}
+	}
+	return true
 }
 
 func (w *walk) find(f Finder, s string) []pii.Match {
@@ -642,6 +819,13 @@ var jsonNumber = regexp.MustCompile(`^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9
 // controls (but tab and newline) and invisible characters are dropped
 // (§5.4), as are invalid bytes and U+FFFD, before detection, so that the detectors see exactly the text
 // that will be shown.
+// Clean is the text the masker reads of a clear string before masking it:
+// invalid bytes, U+FFFD, controls and invisible runes dropped (which can
+// join text that is apart in the clear), brackets made U+FFFD. Every
+// unmasked segment of a masked string is a substring of Clean of the clear
+// string (the engine's pre-filter relies on it).
+func Clean(s string) string { return cleanSource(s) }
+
 func cleanSource(s string) string {
 	dirty := !utf8.ValidString(s)
 	for _, r := range s {
