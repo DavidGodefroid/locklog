@@ -245,28 +245,86 @@ type SearchResult struct {
 func (e *Engine) planQuery(ctx context.Context, q *Query, remoteBudget, localBudget int64) (source.Byteplan, *Error) {
 	var plan source.Byteplan
 	r := source.Range{From: q.From, To: q.To}
-	var bytesLocal, bytesRemote int64
 	for _, name := range q.Sources {
 		src := e.o.Sources[name]
 		p, err := src.Plan(ctx, r, q.selector(name, e.o.Trusted))
 		if err != nil {
 			return source.Byteplan{}, sourceError(err)
 		}
-		if e.remote(name) {
-			bytesRemote += p.Bytes()
-		} else {
-			bytesLocal += p.Bytes()
-		}
 		plan.Chunks = append(plan.Chunks, p.Chunks...)
+	}
+	plan = orderPlan(plan, q.Order)
+	var bytesLocal, bytesRemote int64
+	for _, c := range plan.Chunks {
+		if e.remote(c.Source) {
+			bytesRemote += c.Bytes
+		} else {
+			bytesLocal += c.Bytes
+		}
 	}
 	if bytesLocal > localBudget || bytesRemote > remoteBudget {
 		return source.Byteplan{}, &Error{Code: EOverBudget, Message: "the plan exceeds this call's byte budget (narrow the range or the sources, or ask for locklog_scan)",
 			Estimate: &Estimate{Bytes: plan.Bytes(), Granules: plan.Granules(), Range: q.To.Sub(q.From)}}
 	}
-	if q.Order == "asc" {
-		slices.Reverse(plan.Chunks) // sources plan newest stream first
-	}
 	return plan, nil
+}
+
+// orderPlan puts a plan (sources plan newest stream first, stream order
+// within a stream) in the query's time order, so that pages across calls
+// follow it within each stream: ascending, oldest stream first and every
+// stream's chunks in stream order; descending, newest stream first and every
+// stream's chunks and granules in reverse. A descending chunk is split into
+// one chunk per granule, each costing what reading that granule alone costs
+// (for a compressed stream, decompressing everything before it). Granules
+// of unknown bytes (an unmeasured compressed stream, a remote slice) stay
+// as planned. Streams of several sources are not merged by time across
+// calls: each call's matches are sorted, streams follow each other.
+func orderPlan(plan source.Byteplan, order string) source.Byteplan {
+	var streams [][]source.Chunk
+	for i, c := range plan.Chunks {
+		if i == 0 || c.Source != plan.Chunks[i-1].Source || c.Stream != plan.Chunks[i-1].Stream {
+			streams = append(streams, nil)
+		}
+		streams[len(streams)-1] = append(streams[len(streams)-1], c)
+	}
+	var out source.Byteplan
+	if order != "desc" {
+		slices.Reverse(streams)
+		for _, cs := range streams {
+			out.Chunks = append(out.Chunks, cs...)
+		}
+		return out
+	}
+	for _, cs := range streams {
+		for i := len(cs) - 1; i >= 0; i-- {
+			out.Chunks = append(out.Chunks, descGranules(cs[i])...)
+		}
+	}
+	return out
+}
+
+// descGranules splits a chunk into single-granule chunks, last first.
+func descGranules(c source.Chunk) []source.Chunk {
+	if len(c.Granules) < 2 || estimated(c.Granules) {
+		return []source.Chunk{c}
+	}
+	var sum int64
+	for _, g := range c.Granules {
+		sum += g.Bytes
+	}
+	prefix := c.Bytes - sum // a compressed stream's bytes read and discarded
+	out := make([]source.Chunk, 0, len(c.Granules))
+	for i := len(c.Granules) - 1; i >= 0; i-- {
+		g := c.Granules[i]
+		one := c
+		one.Granules = []source.Granule{g}
+		one.Bytes = g.Bytes
+		if prefix > 0 {
+			one.Bytes += prefix + g.Start - c.Start()
+		}
+		out = append(out, one)
+	}
+	return out
 }
 
 // sourceError maps an error of a source to a fixed, content-free refusal of

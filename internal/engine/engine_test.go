@@ -1802,3 +1802,99 @@ func TestCountMemoryBound(t *testing.T) {
 		t.Fatalf("cache bytes after dropping all: %d", c.bytes)
 	}
 }
+
+// recordTimes returns the ts of every record, failing on an untimed one.
+func recordTimes(t *testing.T, recs []json.RawMessage) []time.Time {
+	t.Helper()
+	var out []time.Time
+	for _, r := range recs {
+		var m struct {
+			TS time.Time `json:"ts"`
+		}
+		if err := json.Unmarshal(r, &m); err != nil || m.TS.IsZero() {
+			t.Fatalf("record without ts: %.200s", r)
+		}
+		out = append(out, m.TS)
+	}
+	return out
+}
+
+// checkOrder fails on the first record out of the query's order.
+func checkOrder(t *testing.T, ts []time.Time, want int, desc bool) {
+	t.Helper()
+	if len(ts) != want {
+		t.Fatalf("%d records, want %d", len(ts), want)
+	}
+	for i := 1; i < len(ts); i++ {
+		if desc && ts[i].After(ts[i-1]) || !desc && ts[i].Before(ts[i-1]) {
+			t.Fatalf("record %d at %v after one at %v", i, ts[i], ts[i-1])
+		}
+	}
+}
+
+// TestOrderAcrossCalls: pages follow the query's order across calls, for a
+// descending search over a stream larger than a call (plain and
+// compressed) and for an ascending one over a stream the index prunes into
+// several chunks.
+func TestOrderAcrossCalls(t *testing.T) {
+	errors := q(func(q *Query) {
+		q.Where = []Pred{{Field: "level", Op: OpEq, Value: raw("error")}}
+		q.Limit = 200
+	})
+	desc := errors
+	desc.Order = "desc"
+	t.Run("desc", func(t *testing.T) {
+		f := newFixture(t, genLog(t0, 30000, "c@example.org"), oneGranulePerCall)
+		recs, pages := allRecords(t, f.eng, desc)
+		if len(pages) < 3 {
+			t.Fatalf("%d pages: the stream fits one call", len(pages))
+		}
+		checkOrder(t, recordTimes(t, recs), 6000, true)
+	})
+	t.Run("desc compressed", func(t *testing.T) {
+		var gz bytes.Buffer
+		w := gzip.NewWriter(&gz)
+		w.Write([]byte(genLog(t0, 30000, "c@example.org")))
+		w.Close()
+		f := newFixture(t, gz.String(), oneGranulePerCall)
+		for i := 0; ; i++ { // measured: granules of known bytes
+			_, done, err := f.src.IndexStep(ctx, 64<<20, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if done || i > 20 {
+				break
+			}
+		}
+		recs, _ := allRecords(t, f.eng, desc)
+		checkOrder(t, recordTimes(t, recs), 6000, true)
+	})
+	t.Run("asc pruned", func(t *testing.T) {
+		var b strings.Builder
+		for i := 0; i < 45000; i++ {
+			lvl := "error"
+			if i >= 15000 && i < 30000 {
+				lvl = "info"
+			}
+			fmt.Fprintf(&b, "time=%s level=%s msg=\"m %d\"\n", t0.Add(time.Duration(i)*time.Second).Format(time.RFC3339), lvl, i)
+		}
+		f := newFixture(t, b.String(), oneGranulePerCall)
+		for i := 0; ; i++ {
+			_, done, err := f.src.IndexStep(ctx, 64<<20, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if done || i > 20 {
+				break
+			}
+		}
+		qq := errors
+		qq.To = t0.Add(48 * time.Hour)
+		f.eng.o.Limits.LocalRange = 72 * time.Hour
+		recs, _ := allRecords(t, f.eng, qq)
+		checkOrder(t, recordTimes(t, recs), 30000, false)
+		qq.Order = "desc"
+		recs, _ = allRecords(t, f.eng, qq)
+		checkOrder(t, recordTimes(t, recs), 30000, true)
+	})
+}

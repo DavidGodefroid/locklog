@@ -129,7 +129,9 @@ type Query struct {
 	Regex  string   `json:"regex,omitempty"`
 	Fields []string `json:"fields,omitempty"`
 	Limit  int      `json:"limit,omitempty"`
-	// Order is "asc" (default) or "desc".
+	// Order is "asc" (default) or "desc": pages follow it within each
+	// stream; each call's matches are sorted, while streams of several
+	// sources follow each other rather than being merged by time.
 	Order  string `json:"order,omitempty"`
 	Cursor string `json:"cursor,omitempty"`
 
