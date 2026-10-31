@@ -317,7 +317,10 @@ func TestOpenRefusesSymlinkComponents(t *testing.T) {
 	e := newEnv(t)
 	e.write("logs/real/a.log", "x\n", time.Time{})
 	os.Symlink(filepath.Join(e.root, "logs/real"), filepath.Join(e.root, "logs/via"))
-	for name, open := range map[string]func(string, string) (*os.File, error){"beneath": openBeneath, "walk": walkOpen} {
+	for name, open := range map[string]func(string, string) (*os.File, error){
+		"beneath": func(r, p string) (*os.File, error) { return openBeneath(r, p, false) },
+		"walk":    func(r, p string) (*os.File, error) { return walkOpen(r, p, false) },
+	} {
 		if f, err := open(e.root, "logs/real/a.log"); err != nil {
 			t.Fatalf("%s: %v", name, err)
 		} else {
