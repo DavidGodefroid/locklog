@@ -112,9 +112,15 @@ func cutUTF8(b []byte, n int) []byte {
 // on a rune boundary. Replacement comes first because it can grow the text
 // (one byte becomes three).
 func capText(b []byte, n int) (string, bool) {
+	cut := false
+	if len(b) > n {
+		// Cut the raw bytes on a rune boundary first, so that a valid
+		// rune cut by the reader does not become a U+FFFD.
+		b, cut = cutUTF8(b, n), true
+	}
 	s := validText(b)
 	if len(s) <= n {
-		return s, false
+		return s, cut
 	}
 	return string(cutUTF8([]byte(s), n)), true
 }

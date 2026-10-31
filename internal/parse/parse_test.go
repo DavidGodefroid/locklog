@@ -598,3 +598,67 @@ func TestReadErrorKeepsOffset(t *testing.T) {
 		t.Fatalf("offset %d, want 3", lr.Offset())
 	}
 }
+
+func TestPartialFrameAtEOFHeld(t *testing.T) {
+	p := mustParser(t, Options{Format: "testframe"})
+	r := p.NewReader(strings.NewReader("2026-10-30T14:00:00Z P {\"msg\":\"he\n"), 0)
+	ev, err := r.Next()
+	if err != nil || !ev.Unterminated {
+		t.Fatalf("%+v %v", ev, err)
+	}
+	r.Next()
+	if r.Offset() != 0 {
+		t.Fatalf("offset %d, want 0", r.Offset())
+	}
+}
+
+func TestResumeMidSplitPattern(t *testing.T) {
+	p := mustParser(t, Options{Multiline: MultilinePattern, Start: `^START`})
+	var b strings.Builder
+	b.WriteString("START\n")
+	for i := 1; i < MaxEventLines; i++ {
+		b.WriteString("x\n")
+	}
+	b.WriteString("{\"a\":1}\nmore\n")
+	in := b.String()
+	all := readAll(t, p, in)
+	if len(all) != 2 || !all[1].Split || all[1].Lines != 2 {
+		t.Fatalf("%+v", all)
+	}
+	rest := readAll(t, p, in[all[1].Offset:])
+	if len(rest) != 1 || rest[0].Raw != all[1].Raw || rest[0].Format != "plain" {
+		t.Fatalf("resumed %+v", rest)
+	}
+}
+
+func TestFramedJSONKeepsMemberOrder(t *testing.T) {
+	p := mustParser(t, Options{Format: "testframe"})
+	evs := readAll(t, p, "2026-10-30T14:00:00Z F {\"a\":1,\"ts\":\"2020-01-01T00:00:00Z\",\"b\":2}\n")
+	var keys []string
+	for _, m := range evs[0].Fields {
+		keys = append(keys, m.Key)
+	}
+	if strings.Join(keys, ",") != "a,ts,b" {
+		t.Fatalf("order %v", keys)
+	}
+}
+
+func TestUnterminatedBlankTailHeld(t *testing.T) {
+	p := mustParser(t, Options{})
+	r := p.NewReader(strings.NewReader("ERROR x\n   "), 0)
+	r.Next()
+	if _, err := r.Next(); !errors.Is(err, io.EOF) {
+		t.Fatal(err)
+	}
+	if r.Offset() != 8 {
+		t.Fatalf("offset %d, want 8", r.Offset())
+	}
+}
+
+func TestCapTextKeepsRuneCutByReader(t *testing.T) {
+	b := append([]byte(strings.Repeat("a", MaxLineBytes-1)), "é"...) // é straddles the cap
+	s, cut := capText(b, MaxLineBytes)
+	if !cut || strings.ContainsRune(s, '�') || len(s) != MaxLineBytes-1 {
+		t.Fatalf("cut=%v len=%d", cut, len(s))
+	}
+}

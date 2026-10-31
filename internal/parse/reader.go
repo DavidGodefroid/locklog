@@ -2,6 +2,7 @@ package parse
 
 import (
 	"io"
+	"slices"
 	"strings"
 	"time"
 )
@@ -26,6 +27,17 @@ type Reader struct {
 	// unterminated line (-1 otherwise): Offset stays there, so a reader
 	// following a growing stream reads that event again once complete.
 	hold int64
+	// splitNext marks the next event as a split part (pattern mode, after
+	// a full event and a skipped blank line).
+	splitNext bool
+}
+
+// holdBlank holds Offset on a skipped blank line that is unterminated: the
+// writer may complete it into a line that matters.
+func (r *Reader) holdBlank(ln logical) {
+	if ln.Unterminated {
+		r.hold = ln.Offset
+	}
 }
 
 // logical is a logical line: one physical line, or the partial frames of a
@@ -88,16 +100,21 @@ func (r *Reader) Next() (Event, error) {
 					r.appendLine(ln)
 					continue
 				}
+				// The event is full: the blank line is skipped and
+				// the next continuation line starts a split part.
 				ev := r.emit()
-				r.start(ln, true)
+				r.splitNext = true
+				r.holdBlank(ln)
 				return ev, nil
 			}
 			if r.pending != nil {
 				// A skipped blank line ends the pending event: emit it
 				// first so offsets stay ordered.
 				ev := r.emit()
+				r.holdBlank(ln)
 				return ev, nil
 			}
+			r.holdBlank(ln)
 			continue // blank line between events: skipped
 		}
 		if r.pending != nil && r.continues(ln) {
@@ -149,10 +166,15 @@ func (r *Reader) nextLogical() (logical, error) {
 	fr.Text, cut = capText([]byte(fr.Text), MaxLineBytes)
 	out := logical{Line: l, frame: &fr}
 	out.Truncated = out.Truncated || cut
+	// The payload is joined in a buffer capped at MaxLineBytes (linear
+	// in the number of frames).
+	var buf []byte
+	open := false // the run was still partial at the end of the stream
 	for fr.Partial {
 		l2, err := r.lr.Next()
 		if err != nil {
 			r.err = err
+			open = true
 			break
 		}
 		next, ok := r.p.framer.Unwrap(l2.Text, &r.p.opts)
@@ -166,17 +188,27 @@ func (r *Reader) nextLogical() (logical, error) {
 		out.Length += l2.Length
 		out.Truncated = out.Truncated || l2.Truncated
 		out.Unterminated = l2.Unterminated
-		if room := MaxLineBytes - len(out.frame.Text); room > 0 {
+		if buf == nil {
+			buf = append(make([]byte, 0, len(fr.Text)+len(next.Text)), fr.Text...)
+		}
+		if room := MaxLineBytes - len(buf); room > 0 {
 			if len(next.Text) > room {
-				out.frame.Text += string(cutUTF8([]byte(next.Text), room))
+				buf = append(buf, cutUTF8([]byte(next.Text), room)...)
 				out.Truncated = true
 			} else {
-				out.frame.Text += next.Text
+				buf = append(buf, next.Text...)
 			}
 		} else if next.Text != "" {
 			out.Truncated = true
 		}
 		fr.Partial = next.Partial
+	}
+	if buf != nil {
+		out.frame.Text = string(buf)
+	}
+	if open {
+		// The rest of the run may still be written: hold the event.
+		out.Unterminated = true
 	}
 	out.frame.Partial = false
 	out.Text = out.frame.Text
@@ -219,11 +251,22 @@ func (r *Reader) start(ln logical, split bool) {
 		unterminated: ln.Unterminated,
 		frame:        ln.frame,
 	}
-	// A split continuation is free text; so is, in indent mode, a line
-	// that starts with a space or a tab (it would be a continuation after
-	// any free-text line, so a reader resumed there agrees).
-	indented := ln.Text != "" && (ln.Text[0] == ' ' || ln.Text[0] == '\t')
-	if !split && !(indented && r.p.opts.Multiline == MultilineIndent) {
+	// A split continuation is free text; so is a line that would be a
+	// continuation after any free-text line (indented in indent mode, not
+	// matching the start pattern in pattern mode), so that a reader
+	// resumed there agrees with one that read through.
+	var continuation bool
+	switch r.p.opts.Multiline {
+	case MultilineIndent:
+		continuation = ln.Text != "" && (ln.Text[0] == ' ' || ln.Text[0] == '\t')
+	case MultilinePattern:
+		continuation = !r.p.start.MatchString(ln.Text)
+	}
+	if r.splitNext && continuation {
+		a.split = true
+	}
+	r.splitNext = false
+	if !a.split && !continuation {
 		a.format = r.p.structured(ln.Text)
 	}
 	r.pending = a
@@ -260,7 +303,7 @@ func (r *Reader) emit() Event {
 			// The runtime's timestamp is authoritative for ordering;
 			// a payload timestamp stays in the payload text/fields.
 			if ev.timeMember != nil {
-				ev.Fields = append([]Member{*ev.timeMember}, ev.Fields...)
+				ev.Fields = slices.Insert(slices.Clone(ev.Fields), min(ev.timePos, len(ev.Fields)), *ev.timeMember)
 			}
 			if ev.Format == "plain" && ev.HasTime {
 				// Keep the payload's leading timestamp in the
