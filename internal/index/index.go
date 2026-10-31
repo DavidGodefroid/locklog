@@ -87,7 +87,12 @@ func (g *Granule) Span() (from, to time.Time, ok bool) {
 type Builder struct {
 	fields    []string
 	sensitive func(field, value string) bool
-	g         Granule
+	// memo holds sensitive's answers: trusted fields are low-cardinality
+	// (status, method, level), and asking the masker for every record
+	// dominated the backfill (R6-P1: backfill at full speed). Bounded by
+	// memoMax entries of values up to memoValueMax bytes.
+	memo map[memoKey]bool
+	g    Granule
 	minutes   map[int64]map[string]*Count
 	untimed   map[string]*Count
 }
@@ -95,8 +100,33 @@ type Builder struct {
 // NewBuilder indexes the given fields; sensitive reports values a detector
 // flags (nil: none).
 func NewBuilder(fields []string, sensitive func(field, value string) bool) *Builder {
-	return &Builder{fields: fields, sensitive: sensitive, minutes: map[int64]map[string]*Count{}, untimed: map[string]*Count{}}
+	b := &Builder{fields: fields, minutes: map[int64]map[string]*Count{}, untimed: map[string]*Count{}}
+	if sensitive != nil {
+		b.memo = map[memoKey]bool{}
+		b.sensitive = func(f, v string) bool {
+			if len(v) > memoValueMax {
+				return sensitive(f, v)
+			}
+			k := memoKey{f, v}
+			if r, ok := b.memo[k]; ok {
+				return r
+			}
+			r := sensitive(f, v)
+			if len(b.memo) < memoMax {
+				b.memo[k] = r
+			}
+			return r
+		}
+	}
+	return b
 }
+
+type memoKey struct{ field, value string }
+
+const (
+	memoMax      = 4096
+	memoValueMax = 256
+)
 
 // Add counts one record.
 func (b *Builder) Add(ev parse.Event) {
