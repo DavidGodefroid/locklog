@@ -282,11 +282,38 @@ jobs:
           for t in ReadsApprovedContainers NeverServesConsoles CannotListOrWrite; do
             grep -q -- "--- PASS: TestIntegration$t" it.log
           done
+      - name: Landlock, and a mount propagated after the reader started
+        shell: bash
+        run: |
+          set -euxo pipefail
+          root="$(docker info --format '{{.DockerRootDir}}')/containers"
+          mapdir=$(echo "$RUNNER_TEMP"/xdg/locklog/map/locklog-console-*)
+          sync="$RUNNER_TEMP/sync"
+          mkdir -m 0777 "$sync"
+          # The reader restricts itself, says it is ready, then waits for
+          # the shareable container's id.
+          docker run -d --name "$R-reader" --user 10051:10051 --group-add 0 --cap-drop ALL --security-opt no-new-privileges \
+            --read-only --network none --tmpfs /tmp:rw,nosuid,nodev,noexec,size=64m \
+            --mount "type=bind,src=$root,dst=$root,readonly,bind-recursive=disabled" \
+            --mount "type=bind,src=$mapdir,dst=/run/locklog-map,readonly" \
+            --mount "type=bind,src=$RUNNER_TEMP/it,dst=/it,readonly" \
+            --mount "type=bind,src=$sync,dst=/sync" \
+            -e "LOCKLOG_DOCKER_ROOT=$root" -e "LL11_GLOB=$R-*" -e LL11_SYNC=/sync \
+            "$IMG" /it/docker.test -test.v -test.run '^TestIntegrationLandlockShm$'
+          for _ in $(seq 60); do [ -e "$sync/ready" ] && break; sleep 1; done
+          test -e "$sync/ready" || { docker logs "$R-reader"; exit 1; }
+          docker run -d --name "$R-shm" --ipc=shareable "$IMG" sh -c 'echo probe > /dev/shm/ll11-probe; sleep 300'
+          sleep 2
+          docker inspect --format '{{.Id}}' "$R-shm" > "$sync/shm-id"
+          rc=$(docker wait "$R-reader")
+          docker logs "$R-reader" 2>&1 | tee landlock.log
+          test "$rc" = 0
+          grep -q -- '--- PASS: TestIntegrationLandlockShm' landlock.log
       - name: remove the test containers
         if: always()
         run: |
           [ -n "${R:-}" ] || exit 0
-          docker rm -f "$R-a" "$R-b" "other-$R" "locklog-console-it-$R" "$R-local" >/dev/null 2>&1 || true
+          docker rm -f "$R-a" "$R-b" "other-$R" "locklog-console-it-$R" "$R-local" "$R-reader" "$R-shm" >/dev/null 2>&1 || true
 
   # install.sh of this commit against the latest published release: the
   # signatures (checksums.txt and the images), the checksum, the launcher

@@ -34,6 +34,10 @@ uses [Semantic Versioning](https://semver.org/).
   `locklog refresh`. gid 0 applies to the whole console, so a docker source
   runs in a console of its own: the mount plan and the launcher refuse it
   beside a file or journald source.
+- `internal/landlock`: a Landlock ruleset the console applies to itself
+  (read-only beneath the log and containers roots, writes only to its
+  volumes and /tmp, rights chosen by ABI), and the rule that a docker source
+  on a production profile needs Landlock or openat2 with `RESOLVE_NO_XDEV`.
 
 ### Fixed
 

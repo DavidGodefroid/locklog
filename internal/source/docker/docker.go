@@ -286,20 +286,30 @@ func (s *Source) apply(m Map) error {
 }
 
 func (s *Source) newCont(c Container) (*cont, error) {
-	p, err := parse.New(parserOptions(s.opts, c.Name))
+	fo, err := s.fileOptions(c)
 	if err != nil {
-		return nil, fmt.Errorf("docker source: %w", err)
+		return nil, err
 	}
-	paths, alt := s.paths(c)
-	// The index is tagged with the name every record carries: a renamed
-	// container's granules (counted under the old name) are rebuilt, also
-	// across a restart or a rename through a name that is not served.
-	src, err := file.New(file.Options{Name: s.opts.Name, Paths: paths, Alternates: alt, Roots: []string{s.opts.Root}, Parser: p,
-		Trusted: s.opts.Trusted, Index: s.opts.Index, Sensitive: s.opts.Sensitive, Now: s.opts.Now, NoXDev: true, Tag: c.Name})
+	src, err := file.New(fo)
 	if err != nil {
 		return nil, fmt.Errorf("docker source: %w", err)
 	}
 	return &cont{c: c, src: src}, nil
+}
+
+// fileOptions are the options of a container's file source: its literal
+// paths only, beneath the root, never across a mount point (NoXDev, always),
+// the index tagged with the name every record carries (a renamed
+// container's granules, counted under the old name, are rebuilt, also
+// across a restart or a rename through a name that is not served).
+func (s *Source) fileOptions(c Container) (file.Options, error) {
+	p, err := parse.New(parserOptions(s.opts, c.Name))
+	if err != nil {
+		return file.Options{}, fmt.Errorf("docker source: %w", err)
+	}
+	paths, alt := s.paths(c)
+	return file.Options{Name: s.opts.Name, Paths: paths, Alternates: alt, Roots: []string{s.opts.Root}, Parser: p,
+		Trusted: s.opts.Trusted, Index: s.opts.Index, Sensitive: s.opts.Sensitive, Now: s.opts.Now, NoXDev: true, Tag: c.Name}, nil
 }
 
 // byStream returns the served container of a stream, checking its name.

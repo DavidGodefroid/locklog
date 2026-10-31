@@ -553,3 +553,24 @@ func TestIndexFollowsRenames(t *testing.T) {
 		check(t, e, s, "shop-a3")
 	})
 }
+
+// Every container's file source refuses to cross a mount point, whatever
+// the map says.
+func TestFileSourcesNeverCrossMounts(t *testing.T) {
+	e := newEnv(t)
+	s := e.source("*")
+	for _, c := range []Container{{ID: id('a'), Name: "a", MaxFile: 1}, {ID: id('b'), Name: "b", MaxFile: 100, Compress: true}} {
+		fo, err := s.fileOptions(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !fo.NoXDev || len(fo.Roots) != 1 || fo.Roots[0] != e.root || fo.Recursive || fo.Tag != c.Name {
+			t.Errorf("%s: %+v", c.Name, fo)
+		}
+		for _, p := range append(slices.Clone(fo.Paths), fo.Alternates[fo.Paths[min(1, len(fo.Paths)-1)]]) {
+			if p != "" && !strings.HasPrefix(p, e.root+"/"+c.ID+"/"+c.ID+"-json.log") {
+				t.Errorf("%s: path %s", c.Name, p)
+			}
+		}
+	}
+}
