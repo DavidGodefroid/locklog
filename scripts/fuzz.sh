@@ -6,8 +6,10 @@
 # when -fuzztime runs out while a worker is still busy, with no crasher.
 # That exit is treated as a pass only when the output shows
 # nothing else wrong: no "Failing input written" line, no panic, and no new
-# or changed file under the target's testdata/fuzz directory. Anything else
-# fails the run.
+# or changed file under the target's testdata/fuzz directory (a crasher
+# written while minimising at the deadline prints no "Failing input
+# written": the corpus check is what catches it). Anything else fails the
+# run.
 set -eu
 
 cd "$(dirname "$0")/.."
@@ -23,7 +25,8 @@ corpus_state() {
 	fi
 }
 
-for pkg in $(go list ./...); do
+pkgs=$(go list ./...) # on its own line: set -e does not see a for list
+for pkg in $pkgs; do
 	dir=$(go list -f '{{.Dir}}' "$pkg")
 	targets=$(grep -h -o '^func Fuzz[A-Za-z0-9_]*' "$dir"/*_test.go 2>/dev/null | sed 's/^func //' || true)
 	for t in $targets; do
@@ -36,7 +39,8 @@ for pkg in $(go list ./...); do
 		[ "$status" -eq 0 ] && continue
 		after=$(corpus_state "$corpus")
 		if grep -q 'context deadline exceeded' "$log" &&
-			! grep -q -e 'Failing input written' -e '^panic:' -e 'fuzzing process hung' -e 'testdata/fuzz/' "$log" &&
+			! grep -q -e 'Failing input written' -e '^panic:' -e 'fuzzing process hung' -e 'terminated unexpectedly' \
+				-e 'failing input file' -e 'failure while testing seed corpus' -e 'testdata/fuzz/' "$log" &&
 			[ "$before" = "$after" ]; then
 			echo "fuzz: $pkg $t: fuzzer ended with 'context deadline exceeded' and wrote no failing input; counted as a pass"
 			continue
