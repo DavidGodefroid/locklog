@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -443,7 +444,7 @@ func TestPrefilterEquivalence(t *testing.T) {
 	content := genLog(t0, 20000, "canary@example.org") + "time=2026-10-30T13:00:00Z level=info msg=\"caf\\u00e9 ok\"\n"
 	t.Run("plain", func(t *testing.T) { prefilterEquivalence(t, newFixture(t, content, oneGranulePerCall), false) })
 	t.Run("failing granule", func(t *testing.T) {
-		prefilterEquivalence(t, newFixtureMask(t, boomLog(), withBoom, oneGranulePerCall), true)
+		prefilterEquivalence(t, newFixtureMask(t, boomLog(10000), withBoom, oneGranulePerCall), true)
 	})
 }
 
@@ -611,7 +612,7 @@ func TestNoDigestOnTheSocket(t *testing.T) {
 func TestCountFromIndexEqualsScan(t *testing.T) {
 	// The last granule holds records the masker fails on: the index
 	// counts them by their trusted values, and so must a scan.
-	content := boomLog()
+	content := boomLog(30000)
 	// A string value: numeric terms are never served from the index.
 	cq := CountQuery{Query: q(func(q *Query) { q.Where = []Pred{{Field: "status", Op: "!=", Value: raw("200")}} }), Bucket: "1h", By: []string{"level"}}
 	scan := newFixtureMask(t, content, withBoom, nil)
@@ -1007,11 +1008,11 @@ func TestFailedContinuationKeepsItsState(t *testing.T) {
 	}
 }
 
-// boomLog is genLog(t0, 30000) with three records the masker fails on in
-// its last granule.
-func boomLog() string {
+// boomLog is genLog(t0, n) with three records the masker fails on in its
+// last granule.
+func boomLog(n int) string {
 	var b strings.Builder
-	b.WriteString(genLog(t0, 30000, "c@example.org"))
+	b.WriteString(genLog(t0, n, "c@example.org"))
 	for i := 0; i < 3; i++ {
 		fmt.Fprintf(&b, "time=2026-10-30T21:00:0%dZ level=error status=500 msg=\"kaboom upstream BOOM %d\"\n", i, i)
 	}
@@ -1022,7 +1023,7 @@ func boomLog() string {
 // whole and counted; every other record of its granule is answered, and no
 // call is refused, so cursors always get past it.
 func TestMaskFailuresWithheldPerRecord(t *testing.T) {
-	f := newFixtureMask(t, boomLog(), withBoom, oneGranulePerCall)
+	f := newFixtureMask(t, boomLog(30000), withBoom, oneGranulePerCall)
 	qq := q(func(q *Query) { q.Text = "upstream"; q.Limit = 200; q.Fields = []string{"level"} })
 	recs, pages := allRecords(t, f.eng, qq)
 	failed := 0
@@ -1085,5 +1086,142 @@ func TestLastCursorMismatch(t *testing.T) {
 	}
 	if _, err := f.eng.Count(ctx, CountQuery{Query: Query{Last: "2h", Text: "upstream", Cursor: c.Cursor}}); err != nil {
 		t.Errorf("count, same last: %v", err)
+	}
+}
+
+// labelSource is a fake label-bearing source (as Loki): its records have a
+// line field and a stream label both named env, with different values. Its
+// IndexCounts answers label-only counts, as a metric query would.
+type labelSource struct {
+	recs []source.RawRecord
+	sels *[]source.Selector
+}
+
+func (s labelSource) Name() string                                    { return "loki" }
+func (s labelSource) Kind() string                                    { return "loki" }
+func (s labelSource) Describe(context.Context) (source.Schema, error) { return source.Schema{}, nil }
+func (s labelSource) Plan(_ context.Context, _ source.Range, sel source.Selector) (source.Byteplan, error) {
+	*s.sels = append(*s.sels, sel)
+	return source.Byteplan{Chunks: []source.Chunk{{Source: "loki", Stream: "s", Bytes: 4096,
+		Granules: []source.Granule{{Start: 0, End: 1, Bytes: 4096}}}}}, nil
+}
+func (s labelSource) Scan(context.Context, source.Chunk) (source.Iterator, error) {
+	return &sliceIter{recs: s.recs}, nil
+}
+func (s labelSource) Reread(context.Context, source.RawRef) (source.RawRecord, error) {
+	return source.RawRecord{}, source.ErrStale
+}
+func (s labelSource) Around(context.Context, source.RawRef, int, int) ([]source.RawRecord, error) {
+	return nil, source.ErrStale
+}
+func (s labelSource) IndexCounts(_ context.Context, q source.CountQuery) (source.CountResult, error) {
+	*s.sels = append(*s.sels, q.Selector)
+	if len(q.By) > 0 {
+		return source.CountResult{}, source.ErrNotIndexable
+	}
+	for _, t := range q.Selector.Terms {
+		if !t.Label {
+			return source.CountResult{}, source.ErrNotIndexable
+		}
+	}
+	rows := map[string]*source.CountRow{}
+	var res source.CountResult
+	for _, r := range s.recs {
+		labels := map[string]string{}
+		for _, a := range r.Event.Attrs {
+			labels[a.Key] = a.Value.Str
+		}
+		if !q.Range.Contains(r.Event.Time) || !q.Selector.Match(nil, labels) {
+			continue
+		}
+		var vals []string
+		for _, l := range q.ByLabels {
+			vals = append(vals, labels[l])
+		}
+		k := strings.Join(vals, "|")
+		if rows[k] == nil {
+			rows[k] = &source.CountRow{Bucket: q.Range.From, Vals: vals}
+		}
+		rows[k].N++
+	}
+	for _, r := range rows {
+		res.Rows = append(res.Rows, *r)
+	}
+	return res, nil
+}
+
+type sliceIter struct {
+	recs []source.RawRecord
+	i    int
+}
+
+func (it *sliceIter) Next() (source.RawRecord, error) {
+	if it.i >= len(it.recs) {
+		return source.RawRecord{}, io.EOF
+	}
+	it.i++
+	return it.recs[it.i-1], nil
+}
+func (it *sliceIter) Processed() int64 { return 4096 }
+func (it *sliceIter) Close() error     { return nil }
+
+// TestLabelsAndFieldsAreSeparate: a label predicate or group reads the
+// source's labels, a field one the line's fields, whether the search or
+// count is answered by a scan or by the source's index; pushed terms keep
+// the distinction.
+func TestLabelsAndFieldsAreSeparate(t *testing.T) {
+	f := newFixture(t, "x\n", nil)
+	p, _ := parse.New(parse.Options{})
+	var recs []source.RawRecord
+	for i := 0; i < 60; i++ {
+		ts := t0.Add(time.Duration(i) * time.Minute)
+		ev := p.Line(fmt.Sprintf("time=%s env=f%d msg=\"hello %d\"", ts.Format(time.RFC3339), i%2, i))
+		ev.Attrs = []parse.Member{{Key: "env", Value: parse.Value{Kind: parse.KindString, Str: fmt.Sprintf("l%d", i%3)}}}
+		recs = append(recs, source.RawRecord{Ref: source.RawRef{Source: "loki", Stream: "s", Offset: int64(i)}, Event: ev})
+	}
+	var sels []source.Selector
+	o := f.eng.o
+	o.Sources = map[string]source.Source{"loki": labelSource{recs: recs, sels: &sels}}
+	o.Trusted = func(_, name string) bool { return name == "env" }
+	eng, err := New(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	search := func(p Pred) int {
+		recs, _ := allRecords(t, eng, q(func(q *Query) { q.Where = []Pred{p}; q.Limit = 200 }))
+		return len(recs)
+	}
+	if n := search(Pred{Label: "env", Op: "=", Value: raw("l0")}); n != 20 {
+		t.Fatalf("label search: %d", n)
+	}
+	if !sels[len(sels)-1].Terms[0].Label {
+		t.Fatal("a label predicate was pushed as a field term")
+	}
+	if n := search(Pred{Field: "env", Op: "=", Value: raw("f0")}); n != 30 {
+		t.Fatalf("field search: %d", n)
+	}
+	if sels[len(sels)-1].Terms[0].Label {
+		t.Fatal("a field predicate was pushed as a label term")
+	}
+	count := func(cq CountQuery) ([]string, bool) {
+		res, err := eng.Count(ctx, cq)
+		if err != nil || !res.Complete {
+			t.Fatalf("%v %v", err, res.Complete)
+		}
+		return strip(res.Groups), res.Scanned.Granules == 0
+	}
+	lab := CountQuery{Query: q(func(q *Query) { q.Where = []Pred{{Label: "env", Op: "in", Value: raw([]string{"l0", "l1"})}} }), ByLabels: []string{"env"}}
+	fromIndex, indexed := count(lab)
+	lab.Text = "hello" // not trusted-only: scanned
+	scanned, scanOnly := count(lab)
+	want := []string{t0.Format(time.RFC3339) + " l0 20", t0.Format(time.RFC3339) + " l1 20"}
+	if !indexed || scanOnly || !slices.Equal(fromIndex, want) || !slices.Equal(scanned, want) {
+		t.Fatalf("label count: index %v (%v), scan %v (%v)", fromIndex, indexed, scanned, !scanOnly)
+	}
+	// A field group is not a label: the source cannot count it, the
+	// scan groups on the line field.
+	byField, indexed := count(CountQuery{Query: q(func(q *Query) { q.Where = []Pred{{Label: "env", Op: "=", Value: raw("l0")}} }), By: []string{"env"}})
+	if indexed || !slices.Equal(byField, []string{t0.Format(time.RFC3339) + " f0 10", t0.Format(time.RFC3339) + " f1 10"}) {
+		t.Fatalf("field count: %v (index %v)", byField, indexed)
 	}
 }

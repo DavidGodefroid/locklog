@@ -219,6 +219,9 @@ func (s *Source) IndexCounts(ctx context.Context, q CountQuery) (CountResult, er
 	if !q.Range.From.Equal(q.Range.From.Truncate(time.Minute)) || !q.Range.To.Equal(q.Range.To.Truncate(time.Minute)) {
 		return CountResult{}, ErrNotIndexable
 	}
+	if len(q.ByLabels) > 0 {
+		return CountResult{}, ErrNotIndexable // the index holds no labels
+	}
 	plan, err := s.Plan(ctx, q.Range, q.Selector)
 	if err != nil {
 		return CountResult{}, err
@@ -274,7 +277,7 @@ func (s *Source) IndexCounts(ctx context.Context, q CountQuery) (CountResult, er
 					b = q.Range.From.Add(t.Sub(q.Range.From) / q.Bucket * q.Bucket)
 				}
 				for _, cnt := range m.Counts {
-					if !q.Selector.Match(tupleMap(fields, cnt.Vals)) {
+					if !q.Selector.Match(tupleMap(fields, cnt.Vals), nil) {
 						continue
 					}
 					vals := project(cnt.Vals, pos)
@@ -286,7 +289,7 @@ func (s *Source) IndexCounts(ctx context.Context, q CountQuery) (CountResult, er
 				}
 			}
 			for _, cnt := range ig.Untimed {
-				if q.Selector.Match(tupleMap(fields, cnt.Vals)) {
+				if q.Selector.Match(tupleMap(fields, cnt.Vals), nil) {
 					res.Untimed += cnt.N
 				}
 			}

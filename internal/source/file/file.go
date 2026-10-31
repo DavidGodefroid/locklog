@@ -432,7 +432,7 @@ func granuleMayMatch(g *index.Granule, fields []string, r source.Range, sel sour
 		for _, c := range cs {
 			// A redacted or overflowing value is unknown: it may
 			// match.
-			if unknown(fields, c.Vals, names) || sel.Match(tupleMap(fields, c.Vals)) {
+			if unknown(fields, c.Vals, names) || sel.Match(tupleMap(fields, c.Vals), nil) {
 				return true
 			}
 		}
@@ -446,9 +446,11 @@ func granuleMayMatch(g *index.Granule, fields []string, r source.Range, sel sour
 	return match(g.Untimed)
 }
 
+// selectorIndexed reports whether every term is on an indexed line field
+// (the index holds no labels).
 func selectorIndexed(sel source.Selector, fields []string) bool {
 	for _, t := range sel.Terms {
-		if !slices.Contains(fields, t.Field) {
+		if t.Label || !slices.Contains(fields, t.Field) {
 			return false
 		}
 	}

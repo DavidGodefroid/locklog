@@ -20,8 +20,9 @@ import (
 )
 
 const (
-	// Version of the on-disk format; another version is rebuilt.
-	Version = 1
+	// Version of the on-disk format; another version is rebuilt. 2:
+	// values are line fields only (1 fell back to frame attributes).
+	Version = 2
 	// MaxDistinct is the most distinct values a field may have in one
 	// stream and stay indexed.
 	MaxDistinct = 64
@@ -196,12 +197,16 @@ func Values(ev parse.Event, fields []string, sensitive func(field, value string)
 	return out
 }
 
-// Lookup returns the scalar text of a field of ev: a top-level member named
-// name, else a dotted path through nested objects, else a frame attribute.
+// Lookup returns the scalar text of a line field of ev: a top-level member
+// named name, else a dotted path through nested objects. Frame attributes
+// (labels) are another namespace (LookupAttr): the engine's scan reads a
+// field predicate on the line's fields only, and so does the index.
 func Lookup(ev parse.Event, name string) (string, bool) {
-	if v, ok := lookupMembers(ev.Fields, name); ok {
-		return v, true
-	}
+	return lookupMembers(ev.Fields, name)
+}
+
+// LookupAttr returns the scalar text of a frame attribute (label) of ev.
+func LookupAttr(ev parse.Event, name string) (string, bool) {
 	return lookupMembers(ev.Attrs, name)
 }
 

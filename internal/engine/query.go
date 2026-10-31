@@ -184,11 +184,13 @@ func (q *Query) selector(src string, trusted func(src, field string) bool) sourc
 		if !trusted(src, p.name()) || p.numeric() {
 			continue
 		}
+		// A label predicate is pushed as a label term, a field one
+		// as a field term: a source applies each in its namespace.
 		switch p.Op {
 		case OpEq, OpIn:
-			sel.Terms = append(sel.Terms, source.Term{Field: p.name(), Op: OpIn, Values: p.vals})
+			sel.Terms = append(sel.Terms, source.Term{Field: p.name(), Label: p.Label != "", Op: OpIn, Values: p.vals})
 		case OpNe:
-			sel.Terms = append(sel.Terms, source.Term{Field: p.name(), Op: OpNe, Values: p.vals})
+			sel.Terms = append(sel.Terms, source.Term{Field: p.name(), Label: p.Label != "", Op: OpNe, Values: p.vals})
 		}
 	}
 	return sel

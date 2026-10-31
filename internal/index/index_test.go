@@ -259,3 +259,22 @@ func TestRunBusyPausesUpkeepNotBackfill(t *testing.T) {
 		t.Fatal("run ended early")
 	}
 }
+
+// TestLookupNamespaces: the index reads line fields only; frame attributes
+// (labels) are a separate namespace.
+func TestLookupNamespaces(t *testing.T) {
+	ev := parse.Event{
+		Fields: []parse.Member{{Key: "env", Value: parse.Value{Kind: parse.KindString, Str: "field"}}},
+		Attrs: []parse.Member{{Key: "env", Value: parse.Value{Kind: parse.KindString, Str: "label"}},
+			{Key: "stream", Value: parse.Value{Kind: parse.KindString, Str: "stdout"}}},
+	}
+	if v, _ := Lookup(ev, "env"); v != "field" {
+		t.Fatal(v)
+	}
+	if v, ok := Lookup(ev, "stream"); ok {
+		t.Fatalf("a label read as a field: %q", v)
+	}
+	if v, _ := LookupAttr(ev, "env"); v != "label" {
+		t.Fatal(v)
+	}
+}

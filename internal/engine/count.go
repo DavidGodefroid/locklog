@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/DavidGodefroid/locklog/internal/index"
 	"github.com/DavidGodefroid/locklog/internal/mask"
@@ -34,8 +36,12 @@ type CountQuery struct {
 	Query
 	// Bucket is a duration ("5m"); empty: one bucket for the range.
 	Bucket string `json:"bucket,omitempty"`
-	// By groups by up to two trusted or pseudonymised fields.
-	By []string `json:"by,omitempty"`
+	// By groups by up to two trusted or pseudonymised line fields, and
+	// ByLabels by source labels (Loki stream labels, journald and docker
+	// attributes); at most MaxBy in all. A group's key holds the By
+	// values, then the ByLabels values.
+	By       []string `json:"by,omitempty"`
+	ByLabels []string `json:"by_labels,omitempty"`
 	// FirstLast adds each group's first and last timestamp.
 	FirstLast bool `json:"first_last,omitempty"`
 
@@ -208,7 +214,7 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 		q.Sources = append([]string(nil), e.names...)
 		trustedOnly = q.trustedOnly(func(s, f string) bool { return e.o.Trusted(s, f) })
 	}
-	for _, b := range q.By {
+	for _, b := range append(slices.Clone(q.By), q.ByLabels...) {
 		for _, s := range q.Sources {
 			if !e.o.Trusted(s, b) {
 				trustedOnly = false
@@ -239,12 +245,17 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 	if err := v.validate(&q.Query); err != nil {
 		return CountResult{}, err
 	}
-	if len(q.By) > MaxBy {
-		return CountResult{}, refuse(EBadQuery, "by", "at most %d fields", MaxBy)
+	if len(q.By)+len(q.ByLabels) > MaxBy {
+		return CountResult{}, refuse(EBadQuery, "by", "at most %d fields and labels", MaxBy)
 	}
 	for i, b := range q.By {
 		if err := v.path(&q.Query, b, fmt.Sprintf("by[%d]", i)); err != nil {
 			return CountResult{}, err
+		}
+	}
+	for i, l := range q.ByLabels {
+		if l == "" || len(l) > 512 || !utf8.ValidString(l) || strings.ContainsFunc(l, unicode.IsControl) {
+			return CountResult{}, refuse(EBadQuery, fmt.Sprintf("by_labels[%d]", i), "invalid label name")
 		}
 	}
 	if q.Bucket != "" {
@@ -326,9 +337,12 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 		if !q.Query.rangeContains(t, a.indexed) {
 			return
 		}
-		key := make([]*string, len(q.By))
-		for i, b := range q.By {
-			vs := lookup(rec, &Pred{Field: b})
+		by := q.groupBy()
+		key := make([]*string, len(by))
+		for i := range by {
+			// A label is read from the record's labels, a field
+			// from its line fields: never one for the other.
+			vs := lookup(rec, &by[i])
 			if len(vs) > 0 && vs[0].kind != mask.Object && vs[0].kind != mask.Null {
 				s := vs[0].text
 				key[i] = &s
@@ -404,19 +418,40 @@ func (e *Engine) countFailed(q *CountQuery, raw source.RawRecord, rec mask.Recor
 		return e.o.Masker.Text(v) == v
 	}
 	sel := q.selector(raw.Ref.Source, e.o.Trusted)
-	vals := map[string]string{}
-	for _, f := range append(termFields(sel), q.By...) {
-		v, ok := index.Lookup(raw.Event, f)
+	fields, labels := map[string]string{}, map[string]string{}
+	get := func(name string, label bool) (string, bool, bool) {
+		look, m := index.Lookup, fields
+		if label {
+			look, m = index.LookupAttr, labels
+		}
+		v, ok := look(raw.Event, name)
 		if !ok {
-			continue
+			return "", false, true
 		}
 		if !known(v) {
+			return "", false, false
+		}
+		m[name] = v
+		return v, true, true
+	}
+	for _, t := range sel.Terms {
+		if _, _, ok := get(t.Field, t.Label); !ok {
 			return
 		}
-		vals[f] = v
 	}
-	if !sel.Match(vals) {
+	if !sel.Match(fields, labels) {
 		return
+	}
+	by := q.groupBy()
+	key := make([]*string, len(by))
+	for i, p := range by {
+		v, present, ok := get(p.name(), p.Label != "")
+		if !ok {
+			return
+		}
+		if present {
+			key[i] = &v
+		}
 	}
 	t, timed := rec.Time()
 	if !timed {
@@ -426,19 +461,17 @@ func (e *Engine) countFailed(q *CountQuery, raw source.RawRecord, rec mask.Recor
 	if !q.Query.rangeContains(t, a.indexed) {
 		return
 	}
-	key := make([]*string, len(q.By))
-	for i, b := range q.By {
-		if v, ok := vals[b]; ok {
-			key[i] = &v
-		}
-	}
 	a.add(q.bucketOf(t), key, 1, t, true)
 }
 
-func termFields(sel source.Selector) []string {
-	var out []string
-	for _, t := range sel.Terms {
-		out = append(out, t.Field)
+// groupBy is the group key's parts: By fields, then ByLabels labels.
+func (q *CountQuery) groupBy() []Pred {
+	var out []Pred
+	for _, b := range q.By {
+		out = append(out, Pred{Field: b})
+	}
+	for _, l := range q.ByLabels {
+		out = append(out, Pred{Label: l})
 	}
 	return out
 }
@@ -458,7 +491,7 @@ func (e *Engine) indexCounts(ctx context.Context, q *CountQuery, a *agg) (source
 	for _, name := range q.Sources {
 		ic := e.o.Sources[name].(source.Counter)
 		r, err := ic.IndexCounts(ctx, source.CountQuery{Range: source.Range{From: q.From, To: q.To},
-			Selector: q.selector(name, e.o.Trusted), By: q.By, Bucket: q.bucket})
+			Selector: q.selector(name, e.o.Trusted), By: q.By, ByLabels: q.ByLabels, Bucket: q.bucket})
 		if err != nil {
 			return source.Byteplan{}, err
 		}
