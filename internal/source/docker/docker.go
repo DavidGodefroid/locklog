@@ -78,8 +78,10 @@ type Options struct {
 	Name string
 	// Containers are the approved container name globs.
 	Containers []string
-	// Attrs are the json-file attrs kept (as "attrs.<key>"); others are
-	// dropped.
+	// Attrs are the keys of the json-file frame's "attrs" object kept (the
+	// log driver's labels and env): each is the member <key> of the nested
+	// object attribute "attrs", addressed by the path "attrs.<key>"; the
+	// other keys are dropped.
 	Attrs []string
 	// Root is the containers root, as mounted (absolute).
 	Root string
