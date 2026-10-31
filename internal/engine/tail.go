@@ -1,10 +1,13 @@
 package engine
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
+	"maps"
 	"math"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/DavidGodefroid/locklog/internal/mask"
@@ -161,6 +164,7 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 	for k := range done {
 		original[k] = true
 	}
+	copied := map[streamKey]bool{} // streams that are copies (rotations)
 	type rkey struct {
 		k streamKey
 		p pos
@@ -186,7 +190,14 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 			*sawUntimed = true
 			return
 		}
+		k := keyOf(raw.Ref)
 		if t.Before(start) {
+			// A stream that appeared or restarted during the tail
+			// and holds records from before it is a copy (a
+			// rotation by copytruncate).
+			if !original[k] {
+				copied[k] = true
+			}
 			return
 		}
 		// Counted once per record; with the pre-filter on, not
@@ -198,19 +209,12 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 			return
 		}
 		d := e.RecordDigest(raw.Event.Raw) + "|" + t.Format(time.RFC3339Nano)
-		k := keyOf(raw.Ref)
-		// A copy of a record already returned from another stream of
-		// the source (a rotation) is not returned again. Identical records of one
-		// stream are distinct records (each position is evaluated
-		// once).
-		other := func(sk streamKey) bool { return sk != k && sk[0] == k[0] }
-		// Streams known at the start and never restarted hold
-		// originals: only a stream that appeared or restarted during
-		// the tail may hold a copy. Identical records of two replicas
-		// or two sources are distinct.
-		if original[k] {
-			other = func(streamKey) bool { return false }
-		}
+		// A record returned from one stream and also in another
+		// stream of the source, one of them a copy, is returned once
+		// (whichever is evaluated first). Identical records of one
+		// stream, of two replicas, of a new file or of two sources
+		// are distinct records.
+		other := func(sk streamKey) bool { return sk != k && sk[0] == k[0] && (copied[k] || copied[sk]) }
 		for sk := range returned[d] {
 			if other(sk) {
 				return
@@ -443,7 +447,11 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 		var final []match
 		failures, sawUntimed := 0, false
 		outFailed = false
-		for _, h := range heldAll {
+		keys := slices.SortedFunc(maps.Keys(heldAll), func(a, b streamKey) int {
+			return cmp.Or(strings.Compare(a[0], b[0]), strings.Compare(a[1], b[1]))
+		})
+		for _, k := range keys {
+			h := heldAll[k]
 			if h.raw.Event.Unterminated {
 				partial = true
 				continue

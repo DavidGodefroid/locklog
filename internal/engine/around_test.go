@@ -460,8 +460,67 @@ func TestTailRotation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Records) != 2 || !strings.Contains(string(res.Records[0]), "live 1 ") || !strings.Contains(string(res.Records[1]), "live 2 ") {
-		t.Fatalf("%d records: %s", len(res.Records), res.Records)
+	if len(res.Records) != 2 || !res.Complete || !strings.Contains(string(res.Records[0]), "live 1 ") || !strings.Contains(string(res.Records[1]), "live 2 ") {
+		t.Fatalf("%d records, complete %v: %s", len(res.Records), res.Complete, res.Records)
+	}
+
+	// Records follow the held one before the rotation: each still once.
+	nextSecond()
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		appendLines(t, path, liveLine(3, "x"))
+		time.Sleep(300 * time.Millisecond)
+		appendLines(t, path, liveLine(4, "x"))
+		b, _ := os.ReadFile(path)
+		os.WriteFile(path+".2", b, 0o644)
+		os.Truncate(path, 0)
+		appendLines(t, path, liveLine(5, "x"))
+	}()
+	res, err = eng.Tail(ctx, TailQuery{Duration: "1500ms"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Records) != 3 || !res.Complete {
+		t.Fatalf("%d records, complete %v: %s", len(res.Records), res.Complete, res.Records)
+	}
+	for i, r := range res.Records {
+		if !strings.Contains(string(r), fmt.Sprintf("live %d ", i+3)) {
+			t.Fatalf("record %d: %s", i, r)
+		}
+	}
+}
+
+// TestTailNewFileSameLine: a file that appears during the tail with the
+// same line, in the same second, as a returned record is not a copy: both
+// are returned.
+func TestTailNewFileSameLine(t *testing.T) {
+	f := newFixture(t, genLog(time.Now().Add(-time.Hour), 5, "c@example.org"), func(o *Options) { o.TailPoll = 50 * time.Millisecond })
+	p, _ := parse.New(parse.Options{})
+	src, err := file.New(file.Options{Name: "app", Paths: []string{f.root + "/logs/*.log"}, Roots: []string{f.root}, Parser: p,
+		Trusted: []string{"level", "status"}, Index: f.store, Sensitive: func(fl, v string) bool { return f.masker.TrustedValue("app", fl, v) != v }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := f.eng.o
+	o.Sources = map[string]source.Source{"app": src}
+	eng, err := New(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(f.root, "logs", "app.log")
+	l := fmt.Sprintf(`time=%s level=error msg="GET /health 200"`, time.Now().UTC().Add(time.Second).Truncate(time.Second).Format(time.RFC3339))
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		appendLines(t, path, l)
+		time.Sleep(300 * time.Millisecond)
+		os.WriteFile(filepath.Join(f.root, "logs", "worker2.log"), []byte(l+"\n"), 0o644)
+	}()
+	res, err := eng.Tail(ctx, TailQuery{Duration: "1500ms"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Records) != 2 || !res.Complete {
+		t.Fatalf("%d records, complete %v", len(res.Records), res.Complete)
 	}
 }
 
