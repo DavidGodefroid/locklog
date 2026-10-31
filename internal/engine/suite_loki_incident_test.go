@@ -101,7 +101,17 @@ func lokiLine(r *rand.Rand, p lokiPlan, app string, ts time.Time, seq int64) (st
 type pushStream struct {
 	Stream map[string]string `json:"stream"`
 	Values [][]any           `json:"values"`
+	n      int64             // entries pushed in all
 }
+
+// pushedPerStream counts the entries lokiIngest pushed, by stream.
+var (
+	pushedMu        sync.Mutex
+	pushedPerStream = map[string]int64{}
+)
+
+// lokiPushLog, when set (TestSuiteLokiDebug), sees every push answer.
+var lokiPushLog func(status int, h http.Header, body []byte)
 
 // lokiPush posts streams (gzip JSON) to Loki's push API.
 func lokiPush(base string, streams []*pushStream) error {
@@ -132,6 +142,9 @@ func lokiPush(base string, streams []*pushStream) error {
 		}
 		msg, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
+		if lokiPushLog != nil {
+			lokiPushLog(resp.StatusCode, resp.Header, msg)
+		}
 		switch {
 		case resp.StatusCode/100 == 2:
 			return nil
@@ -190,6 +203,7 @@ func lokiIngest(t *testing.T, base string, p lokiPlan) (bytesPushed int64, entri
 							order = append(order, s)
 						}
 						s.Values = append(s.Values, []any{strconv.FormatInt(ts.UnixNano(), 10), line})
+						s.n++
 						size += len(line)
 						total.Add(int64(len(line)))
 						counts[run].Add(1)
@@ -225,6 +239,11 @@ func lokiIngest(t *testing.T, base string, p lokiPlan) (bytesPushed int64, entri
 					if err := flush(); err != nil {
 						errs <- err
 					}
+					pushedMu.Lock()
+					for _, st := range order {
+						pushedPerStream[fmt.Sprint(st.Stream)] += st.n
+					}
+					pushedMu.Unlock()
 				}()
 			}
 		}
@@ -265,6 +284,63 @@ func lokiCount(t testing.TB, base, sel string, from, to time.Time) int64 {
 	json.Unmarshal(v.Data.Result[0].Value[1], &s)
 	n, _ := strconv.ParseInt(s, 10, 64)
 	return n
+}
+
+// lokiMetric runs a metric range query and returns its series' points.
+func lokiMetric(t testing.TB, base, q string, from, to time.Time, step time.Duration) []struct {
+	Metric map[string]string    `json:"metric"`
+	Values [][2]json.RawMessage `json:"values"`
+} {
+	t.Helper()
+	resp, err := http.Get(fmt.Sprintf("%s/loki/api/v1/query_range?query=%s&start=%d&end=%d&step=%d", base, urlEscape(q), from.UnixNano(), to.UnixNano(), int64(step/time.Second)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var v struct {
+		Data struct {
+			Result []struct {
+				Metric map[string]string    `json:"metric"`
+				Values [][2]json.RawMessage `json:"values"`
+			} `json:"result"`
+		} `json:"data"`
+	}
+	b, _ := io.ReadAll(resp.Body)
+	if err := json.Unmarshal(b, &v); err != nil || resp.StatusCode != 200 {
+		t.Fatalf("metric: %d %.300s", resp.StatusCode, b)
+	}
+	return v.Data.Result
+}
+
+func pointsSum(vals [][2]json.RawMessage) int64 {
+	var n int64
+	for _, p := range vals {
+		var s string
+		json.Unmarshal(p[1], &s)
+		c, _ := strconv.ParseInt(s, 10, 64)
+		n += c
+	}
+	return n
+}
+
+// lokiRangeSum counts a selector's entries over [from, to) by summing
+// hourly count_over_time steps (a second way to count).
+func lokiRangeSum(t testing.TB, base, sel string, from, to time.Time) int64 {
+	var n int64
+	for _, s := range lokiMetric(t, base, fmt.Sprintf("sum by () (count_over_time(%s [3600s]))", sel), from.Truncate(time.Hour).Add(time.Hour), to.Truncate(time.Hour).Add(time.Hour), time.Hour) {
+		n += pointsSum(s.Values)
+	}
+	return n
+}
+
+// lokiPerStream is the hourly-summed count of each stream of a selector.
+func lokiPerStream(t testing.TB, base, sel string, from, to time.Time) string {
+	var out []string
+	for _, s := range lokiMetric(t, base, fmt.Sprintf("sum by (app, pod, level) (count_over_time(%s [3600s]))", sel), from.Truncate(time.Hour).Add(time.Hour), to.Truncate(time.Hour).Add(time.Hour), time.Hour) {
+		out = append(out, fmt.Sprintf("%v=%d", s.Metric, pointsSum(s.Values)))
+	}
+	slices.Sort(out)
+	return strings.Join(out, " ")
 }
 
 func urlEscape(s string) string {
@@ -598,13 +674,21 @@ func TestLokiIncident(t *testing.T) {
 	}
 	// Everything pushed is readable before the clock runs.
 	for _, run := range []string{"lvl", "nolvl"} {
+		sel := `{run="` + run + `"}`
+		from := p.T.Add(-7*24*time.Hour - time.Minute)
 		for i := 0; ; i++ {
-			n := lokiCount(t, base, `{run="`+run+`"}`, p.T.Add(-7*24*time.Hour-time.Minute), p.T.Add(time.Minute))
+			// A new instant each time: a cached answer is never reused.
+			n := lokiCount(t, base, sel, from, p.T.Add(time.Minute+time.Duration(i)*time.Millisecond))
 			if n == entries[run] {
 				break
 			}
 			if i > 60 {
-				t.Fatalf("%s: Loki holds %d entries, %d pushed", run, n, entries[run])
+				pushedMu.Lock()
+				t.Logf("pushed per stream: %v", pushedPerStream)
+				pushedMu.Unlock()
+				t.Errorf("%s: Loki's instant count is %d entries, %d pushed; summed over hourly steps %d; per stream %s",
+					run, n, entries[run], lokiRangeSum(t, base, sel, from, p.T.Add(time.Minute)), lokiPerStream(t, base, sel, from, p.T.Add(time.Minute)))
+				t.FailNow()
 			}
 			time.Sleep(2 * time.Second)
 		}

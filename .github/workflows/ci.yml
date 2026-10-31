@@ -281,6 +281,15 @@ jobs:
           done
           docker logs loki | tail -50
           exit 1
+      # Debug (LL-16b): how the real Loki answers pushes and reads of the
+      # suites' entries; its effective limits.
+      - name: Loki debug
+        env:
+          LOCKLOG_SUITE_LOKI_URL: http://127.0.0.1:3100
+          LOCKLOG_SUITE_LOKI_DEBUG: "1"
+        run: |
+          curl -fsS http://127.0.0.1:3100/config | grep -E 'reject_old|out_of_order|unordered|query_ingesters_within|max_chunk_age|chunk_idle|creation_grace|max_label|structured_metadata|streams_per_user|ingestion_rate|per_stream' || true
+          GOMAXPROCS=2 go test -count=1 -v -run '^TestSuiteLokiDebug$' ./internal/engine/ | cut -c1-2000
       - name: suites
         shell: bash
         env:

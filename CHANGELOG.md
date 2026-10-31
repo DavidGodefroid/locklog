@@ -232,3 +232,12 @@ uses [Semantic Versioning](https://semver.org/).
 - The launcher chooses the non-recursive bind option from the Docker CLI
   version, which parses it (`bind-recursive=disabled` from CLI 25), not from
   the engine's.
+
+### Known limitations
+
+- An approved scan of 20 GiB of local files does not complete within its
+  30-minute TTL on a 2-core CI runner: one approval, a steady 4.03 MiB/s,
+  7.10 GiB scanned when the TTL expired (11.38 MiB/s needed). Masking is
+  the bottleneck, mostly the `secret` detector (lockkit#97). The
+  approved-scan test records it as a known gap (#104); its size and TTL
+  are unchanged.
