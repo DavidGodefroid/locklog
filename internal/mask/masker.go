@@ -98,6 +98,14 @@ type Options struct {
 	// secret step and the detectors, never redacted by redact-unknown nor
 	// pseudonymised for their name.
 	Trusted []string
+	// AttrKeys are the frame and static attribute keys of the source
+	// (parse.FrameKeys for a framed format, and the docker source's
+	// "container"): its attributes (parse.Event.Attrs) are trusted on
+	// their own, and a Trusted path under one of these keys names an
+	// attribute, never a payload field. Field trust is not applied to a
+	// payload path whose first key is one of them, so a line's own
+	// {"container": ...} is masked as any untrusted field.
+	AttrKeys []string
 	// Rules are the human and agent rules (step 2).
 	Rules *Rules
 	// Pseudonyms is the current epoch.
@@ -167,7 +175,10 @@ func New(o Options) (*Masker, error) {
 	}
 	m := &Masker{o: o, trusted: map[string]bool{}, names: newNameBook()}
 	for _, t := range o.Trusted {
-		m.trusted[t] = true
+		head, _, _ := strings.Cut(t, ".")
+		if !slices.Contains(o.AttrKeys, head) {
+			m.trusted[t] = true
+		}
 	}
 	return m, nil
 }
