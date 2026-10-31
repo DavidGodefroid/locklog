@@ -63,6 +63,10 @@ func (a pos) after(b pos) bool { return a.off > b.off || a.off == b.off && a.len
 
 type streamKey [2]string
 
+// tailFarFuture is the end of a local stream's tail plans: none, so that an
+// indexed granule of records dated ahead never drops out of a plan.
+var tailFarFuture = time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC)
+
 // maxTailAnchors bounds the anchors a tail keeps per stream (one per poll
 // the stream grew in) to recognise its copies.
 const maxTailAnchors = 64
@@ -103,8 +107,12 @@ type held struct {
 // Journal entries are atomic and never held. A
 // stream first seen during the tail is scanned from its start (its records
 // still need a time from the start on). A record that was already there at
-// the start is never new, whatever its date; one written after it with a
-// time before the start (its second, for a byte stream) is not returned.
+// the start (for a byte stream, its end at the first listing, milliseconds
+// after the call starts; a compressed stream not measured then, whole) is
+// never new, whatever its date. Residuals: a journal entry already there
+// and dated from the start on (a clock stepped back) is returned; a record
+// written after the start with a time before it (its second, for a byte
+// stream) is not.
 //
 // Every record of a scanned granule is masked before evaluation, as in a
 // search; a poll's matches are kept only when it completes (stopping points
@@ -161,7 +169,7 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 			if e.remote(s) {
 				continue
 			}
-			p, err := e.o.Sources[s].Plan(tctx, source.Range{From: time.Unix(0, 0).UTC(), To: e.o.Now().Add(24 * time.Hour)}, source.Selector{})
+			p, err := e.o.Sources[s].Plan(tctx, source.Range{From: time.Unix(0, 0).UTC(), To: tailFarFuture}, source.Selector{})
 			if err != nil {
 				return nil, err
 			}
@@ -187,6 +195,15 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 		}
 	}
 	baseEnd := maps.Clone(done)
+	// A compressed stream not measured at the start changes identity if
+	// it changes: its records were all there at the start.
+	baseWhole := map[streamKey]bool{}
+	for k, end := range base {
+		if end == math.MaxInt64 {
+			baseWhole[k] = true
+		}
+	}
+	e.tailPolled()
 
 	// known are the local streams seen at the start or in a completed
 	// poll; a stream first seen later may be a copy of one of them.
@@ -240,7 +257,7 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 			if t.Before(startExact) {
 				return
 			}
-		} else if be, ok := baseEnd[k]; ok && raw.Ref.Offset+raw.Ref.Length <= be {
+		} else if be, ok := baseEnd[k]; ok && raw.Ref.Offset+raw.Ref.Length <= be || baseWhole[k] {
 			return // there whole at the start
 		}
 		// Counted once per record; with the pre-filter on, not
@@ -273,7 +290,7 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 		}
 		pq := q
 		planAt := time.Now()
-		// Local streams are planned up to a far bound: an indexed
+		// Local streams are planned with no upper bound: an indexed
 		// granule of records dated ahead (a writer's clock, a zone
 		// read as UTC) must not drop out of the plan. Remote slices
 		// end at now.
@@ -285,7 +302,7 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 			if len(sq.Sources) == 0 {
 				continue
 			}
-			sq.To = e.o.Now().UTC().Add(24 * time.Hour)
+			sq.To = tailFarFuture
 			if remote {
 				sq.To = e.o.Now().UTC().Truncate(time.Second).Add(time.Second)
 			}
@@ -546,9 +563,15 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 			as := append(anchor[k], a)
 			anchor[k] = as[max(0, len(as)-maxTailAnchors):]
 		}
-		for k := range present {
-			known[k] = true
+		// Known: the streams this poll planned. One that appeared
+		// between its plan and its listing is still checked as a
+		// possible copy by the next poll.
+		for _, c := range plan.Chunks {
+			if !e.remote(c.Source) {
+				known[streamKey{c.Source, c.Stream}] = true
+			}
 		}
+		e.tailPolled()
 		// The held record of an original that is no longer planned
 		// is its copy's to evaluate.
 		for _, sk := range link {
@@ -651,4 +674,11 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 	slices.Sort(res.Masking.Kinds)
 	res.Complete = covered && !early && !untimed && !partial && n == len(found)
 	return res, nil
+}
+
+// tailPolled counts a tail's baseline or a completed poll (tests).
+func (e *Engine) tailPolled() {
+	if e.o.tailPolls != nil {
+		e.o.tailPolls.Add(1)
+	}
 }

@@ -56,7 +56,7 @@ func TestAllowlist(t *testing.T) {
 			t.Errorf("Allows(%s %s) = %t, want %t", tt.method, tt.path, got, tt.ok)
 		}
 	}
-	for _, bad := range []Route{{"PUT", "/x"}, {"GET", "x"}, {"GET", "/a//b"}} {
+	for _, bad := range []Route{{"PUT", "/x", nil}, {"GET", "x", nil}, {"GET", "/a//b", nil}} {
 		func() {
 			defer func() {
 				if recover() == nil {

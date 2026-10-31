@@ -3,6 +3,8 @@
 package engine
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -317,6 +319,37 @@ func nextSecond() {
 	time.Sleep(now.Truncate(time.Second).Add(time.Second).Sub(now))
 }
 
+// settle waits until two more tail polls of f's engine have completed: the
+// second was planned after the call, so it saw what was written before it.
+// A test acts on the logs between polls instead of sleeping.
+func settle(t *testing.T, e *Engine) {
+	n := e.o.tailPolls.Load() + 2
+	for end := time.Now().Add(time.Minute); e.o.tailPolls.Load() < n; {
+		if time.Now().After(end) {
+			return // the tail ended: its assertions fail, not this goroutine
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// slowed scales a wall-clock bound under the race detector, which slows
+// masking several fold.
+func slowed(d time.Duration) time.Duration {
+	if raceEnabled {
+		return 5 * d
+	}
+	return d
+}
+
+// tailDur is a tail's duration, scaled like slowed.
+func tailDur(d string) string {
+	v, err := time.ParseDuration(d)
+	if err != nil {
+		panic(err)
+	}
+	return slowed(v).String()
+}
+
 func liveLine(i int, user string) string {
 	return fmt.Sprintf("time=%s level=error status=502 msg=\"live %d for %s\"", time.Now().UTC().Format(time.RFC3339Nano), i, user)
 }
@@ -325,17 +358,17 @@ func TestTail(t *testing.T) {
 	f := newFixture(t, genLog(time.Now().Add(-time.Hour), 100, "c@example.org"), func(o *Options) { o.TailPoll = 100 * time.Millisecond })
 	path := filepath.Join(f.root, "logs", "app.log")
 	go func() {
-		time.Sleep(400 * time.Millisecond)
+		settle(t, f.eng)
 		appendLines(t, path, liveLine(1, "a@example.com"), liveLine(2, "b@example.com"))
-		time.Sleep(400 * time.Millisecond)
+		settle(t, f.eng)
 		appendLines(t, path, liveLine(3, "a@example.com"))
 	}()
 	start := time.Now()
-	res, err := f.eng.Tail(ctx, TailQuery{Duration: "2s", Where: []Pred{{Field: "level", Op: "=", Value: raw("error")}}})
+	res, err := f.eng.Tail(ctx, TailQuery{Duration: tailDur("2s"), Where: []Pred{{Field: "level", Op: "=", Value: raw("error")}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if took := time.Since(start); took < 2*time.Second || took > 5*time.Second {
+	if took := time.Since(start); took < 2*time.Second || took > slowed(5*time.Second) {
 		t.Fatalf("took %s", took)
 	}
 	if len(res.Records) != 3 || !res.Complete {
@@ -356,15 +389,15 @@ func TestTailStopsAtMax(t *testing.T) {
 	f := newFixture(t, "", func(o *Options) { o.TailPoll = 50 * time.Millisecond })
 	path := filepath.Join(f.root, "logs", "app.log")
 	go func() {
-		time.Sleep(200 * time.Millisecond)
+		settle(t, f.eng)
 		appendLines(t, path, liveLine(1, "x"), liveLine(2, "x"), liveLine(3, "x"))
 	}()
 	start := time.Now()
-	res, err := f.eng.Tail(ctx, TailQuery{Duration: "10s", Max: 2})
+	res, err := f.eng.Tail(ctx, TailQuery{Duration: tailDur("10s"), Max: 2})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if time.Since(start) > 5*time.Second || len(res.Records) != 2 || res.Complete {
+	if time.Since(start) > slowed(5*time.Second) || len(res.Records) != 2 || res.Complete {
 		t.Fatalf("%s, %d records, complete %v", time.Since(start), len(res.Records), res.Complete)
 	}
 }
@@ -376,10 +409,10 @@ func TestTailNewByTime(t *testing.T) {
 	f := newFixture(t, genLog(time.Now().Add(-time.Hour), 5, "c@example.org"), func(o *Options) { o.TailPoll = 50 * time.Millisecond })
 	path := filepath.Join(f.root, "logs", "app.log")
 	go func() {
-		time.Sleep(200 * time.Millisecond)
+		settle(t, f.eng)
 		appendLines(t, path, `time=2020-01-01T00:00:00Z level=info msg="old dated"`, liveLine(1, "x"))
 	}()
-	res, err := f.eng.Tail(ctx, TailQuery{Duration: "1s"})
+	res, err := f.eng.Tail(ctx, TailQuery{Duration: tailDur("1s")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -388,10 +421,10 @@ func TestTailNewByTime(t *testing.T) {
 	}
 	nextSecond()
 	go func() {
-		time.Sleep(200 * time.Millisecond)
+		settle(t, f.eng)
 		appendLines(t, path, `no time at all here`, liveLine(2, "x"))
 	}()
-	res, err = f.eng.Tail(ctx, TailQuery{Duration: "1s"})
+	res, err = f.eng.Tail(ctx, TailQuery{Duration: tailDur("1s")})
 	if err != nil || len(res.Records) != 1 || !strings.Contains(string(res.Records[0]), "live 2 ") {
 		t.Fatalf("%v %s", err, res.Records)
 	}
@@ -403,14 +436,14 @@ func TestTailPartialLine(t *testing.T) {
 	f := newFixture(t, genLog(time.Now().Add(-time.Hour), 5, "c@example.org"), func(o *Options) { o.TailPoll = 50 * time.Millisecond })
 	path := filepath.Join(f.root, "logs", "app.log")
 	go func() {
-		time.Sleep(200 * time.Millisecond)
+		settle(t, f.eng)
 		fh, _ := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
 		fh.WriteString(fmt.Sprintf("time=%s level=error msg=\"first half", time.Now().UTC().Format(time.RFC3339Nano)))
-		time.Sleep(300 * time.Millisecond)
+		settle(t, f.eng)
 		fh.WriteString(" second half\"\n")
 		fh.Close()
 	}()
-	res, err := f.eng.Tail(ctx, TailQuery{Duration: "1s"})
+	res, err := f.eng.Tail(ctx, TailQuery{Duration: tailDur("1s")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -420,12 +453,12 @@ func TestTailPartialLine(t *testing.T) {
 	// Still unterminated at the end: left out, incomplete.
 	nextSecond()
 	go func() {
-		time.Sleep(200 * time.Millisecond)
+		settle(t, f.eng)
 		fh, _ := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
 		fh.WriteString(fmt.Sprintf("time=%s level=error msg=\"never ends", time.Now().UTC().Format(time.RFC3339Nano)))
 		fh.Close()
 	}()
-	res, err = f.eng.Tail(ctx, TailQuery{Duration: "1s"})
+	res, err = f.eng.Tail(ctx, TailQuery{Duration: tailDur("1s")})
 	if err != nil || len(res.Records) != 0 || res.Complete {
 		t.Fatalf("%v %s, complete %v", err, res.Records, res.Complete)
 	}
@@ -451,15 +484,15 @@ func TestTailRotation(t *testing.T) {
 	}
 	path := filepath.Join(f.root, "logs", "app.log")
 	go func() {
-		time.Sleep(200 * time.Millisecond)
+		settle(t, eng)
 		appendLines(t, path, liveLine(1, "x"))
-		time.Sleep(300 * time.Millisecond)
+		settle(t, eng)
 		b, _ := os.ReadFile(path)
 		os.WriteFile(path+".1", b, 0o644)
 		os.Truncate(path, 0)
 		appendLines(t, path, liveLine(2, "x"))
 	}()
-	res, err := eng.Tail(ctx, TailQuery{Duration: "1500ms"})
+	res, err := eng.Tail(ctx, TailQuery{Duration: tailDur("1500ms")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -470,16 +503,16 @@ func TestTailRotation(t *testing.T) {
 	// Records follow the held one before the rotation: each still once.
 	nextSecond()
 	go func() {
-		time.Sleep(200 * time.Millisecond)
+		settle(t, eng)
 		appendLines(t, path, liveLine(3, "x"))
-		time.Sleep(300 * time.Millisecond)
+		settle(t, eng)
 		appendLines(t, path, liveLine(4, "x"))
 		b, _ := os.ReadFile(path)
 		os.WriteFile(path+".2", b, 0o644)
 		os.Truncate(path, 0)
 		appendLines(t, path, liveLine(5, "x"))
 	}()
-	res, err = eng.Tail(ctx, TailQuery{Duration: "1500ms"})
+	res, err = eng.Tail(ctx, TailQuery{Duration: tailDur("1500ms")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -515,12 +548,12 @@ func TestTailNewFileSameLine(t *testing.T) {
 	path := filepath.Join(f.root, "logs", "app.log")
 	l := fmt.Sprintf(`time=%s level=error msg="GET /health 200"`, time.Now().UTC().Add(time.Second).Truncate(time.Second).Format(time.RFC3339))
 	go func() {
-		time.Sleep(200 * time.Millisecond)
+		settle(t, eng)
 		appendLines(t, path, l)
-		time.Sleep(300 * time.Millisecond)
+		settle(t, eng)
 		os.WriteFile(filepath.Join(f.root, "logs", "worker2.log"), []byte(l+"\n"), 0o644)
 	}()
-	res, err := eng.Tail(ctx, TailQuery{Duration: "1500ms"})
+	res, err := eng.Tail(ctx, TailQuery{Duration: tailDur("1500ms")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -535,13 +568,13 @@ func TestTailIdenticalLines(t *testing.T) {
 	f := newFixture(t, genLog(time.Now().Add(-time.Hour), 5, "c@example.org"), func(o *Options) { o.TailPoll = 50 * time.Millisecond })
 	path := filepath.Join(f.root, "logs", "app.log")
 	go func() {
-		time.Sleep(200 * time.Millisecond)
+		settle(t, f.eng)
 		l := liveLine(1, "x")
 		appendLines(t, path, l, l)
-		time.Sleep(200 * time.Millisecond)
+		settle(t, f.eng)
 		appendLines(t, path, l)
 	}()
-	res, err := f.eng.Tail(ctx, TailQuery{Duration: "1s"})
+	res, err := f.eng.Tail(ctx, TailQuery{Duration: tailDur("1s")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -554,9 +587,6 @@ func TestTailIdenticalLines(t *testing.T) {
 // granule's end holds its last record; that record is still returned once
 // later records follow it.
 func TestTailHeldAtGranuleEnd(t *testing.T) {
-	if raceEnabled {
-		t.Skip("timing: the race detector slows masking several fold")
-	}
 	f := newFixture(t, genLog(time.Now().Add(-time.Hour), 5, "c@example.org"), func(o *Options) { o.TailPoll = 50 * time.Millisecond })
 	path := filepath.Join(f.root, "logs", "app.log")
 	for _, short := range []int64{0, 100} {
@@ -567,7 +597,7 @@ func TestTailHeldAtGranuleEnd(t *testing.T) {
 		}
 		target := (st.Size()/source.GranuleBytes+1)*source.GranuleBytes - short
 		go func() {
-			time.Sleep(200 * time.Millisecond)
+			settle(t, f.eng)
 			// Old records up to the live one, which ends exactly at
 			// target.
 			l := liveLine(1, "x")
@@ -583,10 +613,10 @@ func TestTailHeldAtGranuleEnd(t *testing.T) {
 				n -= ln + 1
 			}
 			appendLines(t, path, append(lines, l)...)
-			time.Sleep(300 * time.Millisecond)
+			settle(t, f.eng)
 			appendLines(t, path, liveLine(2, "x"), liveLine(3, "x"))
 		}()
-		res, err := f.eng.Tail(ctx, TailQuery{Duration: "1s"})
+		res, err := f.eng.Tail(ctx, TailQuery{Duration: tailDur("1s")})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -621,7 +651,7 @@ func TestTailJournald(t *testing.T) {
 	}
 	f := newFixture(t, "", func(o *Options) { o.Sources["journal"] = js; o.TailPoll = 50 * time.Millisecond })
 	go func() {
-		time.Sleep(300 * time.Millisecond)
+		settle(t, f.eng)
 		now := uint64(time.Now().UnixMicro())
 		es2 := append(slices.Clone(es),
 			journaltest.Entry{Realtime: now, Fields: []string{"MESSAGE=entry 10", "PRIORITY=6"}},
@@ -630,7 +660,7 @@ func TestTailJournald(t *testing.T) {
 		os.WriteFile(tmp, journaltest.Build(journaltest.Options{Compact: true, PerArray: 100}, es2), 0o644)
 		os.Rename(tmp, jpath)
 	}()
-	res, err := f.eng.Tail(ctx, TailQuery{Sources: []string{"journal"}, Duration: "1500ms"})
+	res, err := f.eng.Tail(ctx, TailQuery{Sources: []string{"journal"}, Duration: tailDur("1500ms")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -664,17 +694,17 @@ func TestTailJournaldGranuleEnd(t *testing.T) {
 	}
 	f := newFixture(t, "", func(o *Options) { o.Sources["journal"] = js; o.TailPoll = 50 * time.Millisecond })
 	go func() {
-		time.Sleep(300 * time.Millisecond)
+		settle(t, f.eng)
 		live := func(m string) journaltest.Entry {
 			return journaltest.Entry{Realtime: uint64(time.Now().UnixMicro()), Fields: []string{"MESSAGE=" + m, "PRIORITY=6"}}
 		}
 		es = append(es, live("live A"))
 		write(es)
-		time.Sleep(300 * time.Millisecond)
+		settle(t, f.eng)
 		es = append(es, live("live B"), live("live C"))
 		write(es)
 	}()
-	res, err := f.eng.Tail(ctx, TailQuery{Sources: []string{"journal"}, Duration: "1500ms"})
+	res, err := f.eng.Tail(ctx, TailQuery{Sources: []string{"journal"}, Duration: tailDur("1500ms")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -705,12 +735,12 @@ func TestTailReplicas(t *testing.T) {
 	}
 	path := filepath.Join(f.root, "logs", "app.log")
 	go func() {
-		time.Sleep(200 * time.Millisecond)
+		settle(t, eng)
 		l := liveLine(1, "x")
 		appendLines(t, path, l)
 		appendLines(t, bpath, l)
 	}()
-	res, err := eng.Tail(ctx, TailQuery{Duration: "1s"})
+	res, err := eng.Tail(ctx, TailQuery{Duration: tailDur("1s")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -722,17 +752,16 @@ func TestTailReplicas(t *testing.T) {
 // TestTailBudgetOnNewData: admission applies to what a poll scans for new
 // records, not to the whole unindexed file.
 func TestTailBudgetOnNewData(t *testing.T) {
-	if raceEnabled {
-		t.Skip("timing: the race detector slows masking several fold")
-	}
 	content := genLog(time.Now().Add(-30*time.Hour), 80000, "c@example.org") // > 8 MiB, unindexed
 	f := newFixture(t, content, func(o *Options) { o.TailPoll = 50 * time.Millisecond; o.Limits.LocalBytes = 4 << 20 })
 	path := filepath.Join(f.root, "logs", "app.log")
 	go func() {
-		time.Sleep(200 * time.Millisecond)
-		appendLines(t, path, liveLine(1, "x"))
+		settle(t, f.eng)
+		appendLines(t, path, liveLine(1, "x"), liveLine(2, "x")) // the second completes the first
 	}()
-	res, err := f.eng.Tail(ctx, TailQuery{Duration: "1s"})
+	// The tail ends on its record (max), not on a duration that a slow
+	// first poll over the large file could outlast.
+	res, err := f.eng.Tail(ctx, TailQuery{Duration: "50s", Max: 1})
 	if err != nil || len(res.Records) != 1 {
 		t.Fatalf("%v %d", err, len(res.Records))
 	}
@@ -740,22 +769,21 @@ func TestTailBudgetOnNewData(t *testing.T) {
 
 // TestTailWorkFollowsNewData: polls scan only what grew, not the stream.
 func TestTailWorkFollowsNewData(t *testing.T) {
-	if raceEnabled {
-		t.Skip("timing: the race detector slows masking several fold")
-	}
 	content := genLog(time.Now().Add(-30*time.Hour), 80000, "c@example.org") // > 8 granules
 	f := newFixture(t, content, func(o *Options) { o.TailPoll = 50 * time.Millisecond })
 	path := filepath.Join(f.root, "logs", "app.log")
 	go func() {
-		time.Sleep(300 * time.Millisecond)
-		appendLines(t, path, liveLine(1, "x"))
+		settle(t, f.eng)
+		appendLines(t, path, liveLine(1, "x"), liveLine(2, "x")) // the second completes the first
 	}()
 	start := time.Now()
-	res, err := f.eng.Tail(ctx, TailQuery{Duration: "1s"})
+	// The tail ends on its record (max), not on a duration that a slow
+	// first poll over the large file could outlast.
+	res, err := f.eng.Tail(ctx, TailQuery{Duration: "50s", Max: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Records) != 1 || time.Since(start) > 4*time.Second {
+	if len(res.Records) != 1 || time.Since(start) > slowed(10*time.Second) {
 		t.Fatalf("%d records in %s", len(res.Records), time.Since(start))
 	}
 	if res.Scanned.Granules > 2 {
@@ -886,9 +914,6 @@ func TestTraceAcrossSources(t *testing.T) {
 // TestContextEpochAndWork: a ref of another pseudonym epoch is refused; the
 // work of a context call counts the granules read back.
 func TestContextEpochAndWork(t *testing.T) {
-	if raceEnabled {
-		t.Skip("timing: the race detector slows masking several fold")
-	}
 	f := newFixture(t, genLog(t0, 30000, "c@example.org"), nil)
 	old := f.eng.seal("Lr1", refState{Source: "app", Stream: "x", Offset: 0, Length: 10, Epoch: "older", PolicyFP: f.fp})
 	if _, err := f.eng.Context(ctx, ContextQuery{Ref: old}); code(err) != EStale {
@@ -908,7 +933,9 @@ func TestContextEpochAndWork(t *testing.T) {
 	for i := 0; i < 120; i++ {
 		fmt.Fprintf(&b, "time=%s level=info msg=\"rec %d %s\"\n", t0.Add(time.Duration(i)*time.Second).Format(time.RFC3339), i, pad)
 	}
-	g := newFixture(t, b.String(), nil)
+	// 200 KiB records: the race detector slows their masking past the
+	// default deadline.
+	g := newFixture(t, b.String(), func(o *Options) { o.Limits.Deadline = slowed(o.Limits.Deadline) })
 	ref, _ = firstRef(t, g, func(q *Query) { q.Text = "rec 110 " })
 	res, err = g.eng.Context(ctx, ContextQuery{Ref: ref, Before: 50})
 	if err != nil {
@@ -942,16 +969,16 @@ func TestTailCopytruncateIdentical(t *testing.T) {
 	// complete:false (the tail says rotation may have cost records).
 	eng, path := rotEngine(t)
 	go func() {
-		time.Sleep(200 * time.Millisecond)
+		settle(t, eng)
 		l := liveLine(1, "x")
 		appendLines(t, path, l, l)
-		time.Sleep(300 * time.Millisecond)
+		settle(t, eng)
 		b, _ := os.ReadFile(path)
 		os.WriteFile(path+".1", b, 0o644)
 		os.Truncate(path, 0)
 		appendLines(t, path, liveLine(2, "x"))
 	}()
-	res, err := eng.Tail(ctx, TailQuery{Duration: "1500ms"})
+	res, err := eng.Tail(ctx, TailQuery{Duration: tailDur("1500ms")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -970,14 +997,14 @@ func TestTailRenameRotation(t *testing.T) {
 	// complete:false (the tail says rotation may have cost records).
 	eng, path := rotEngine(t)
 	go func() {
-		time.Sleep(200 * time.Millisecond)
+		settle(t, eng)
 		appendLines(t, path, liveLine(1, "x"), liveLine(2, "x"))
-		time.Sleep(300 * time.Millisecond)
+		settle(t, eng)
 		os.Rename(path, path+".1")
 		os.WriteFile(path, nil, 0o644)
 		appendLines(t, path, liveLine(3, "x"))
 	}()
-	res, err := eng.Tail(ctx, TailQuery{Duration: "1500ms"})
+	res, err := eng.Tail(ctx, TailQuery{Duration: tailDur("1500ms")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -995,9 +1022,9 @@ func TestTailTruncateRegrow(t *testing.T) {
 	eng, path := rotEngine(t)
 	var wrote atomic.Int64
 	go func() {
-		time.Sleep(200 * time.Millisecond)
+		settle(t, eng)
 		appendLines(t, path, liveLine(1, "x"))
-		time.Sleep(300 * time.Millisecond)
+		settle(t, eng)
 		st, _ := os.Stat(path)
 		os.Truncate(path, 0)
 		var lines []string
@@ -1010,7 +1037,7 @@ func TestTailTruncateRegrow(t *testing.T) {
 		appendLines(t, path, lines...)
 		wrote.Store(int64(len(lines)))
 	}()
-	res, err := eng.Tail(ctx, TailQuery{Duration: "1500ms", Max: 200})
+	res, err := eng.Tail(ctx, TailQuery{Duration: tailDur("1500ms"), Max: 200})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1028,18 +1055,18 @@ func TestTailIdenticalAcrossCopy(t *testing.T) {
 	// complete:false (the tail says rotation may have cost records).
 	eng, path := rotEngine(t)
 	go func() {
-		time.Sleep(200 * time.Millisecond)
+		settle(t, eng)
 		nextSecondHalf()
 		l := liveLine(1, "x")
 		appendLines(t, path, l, liveLine(9, "y"))
-		time.Sleep(200 * time.Millisecond)
+		settle(t, eng)
 		appendLines(t, path, l)
 		b, _ := os.ReadFile(path)
 		os.WriteFile(path+".1", b, 0o644)
 		os.Truncate(path, 0)
 		appendLines(t, path, liveLine(2, "x"))
 	}()
-	res, err := eng.Tail(ctx, TailQuery{Duration: "2s"})
+	res, err := eng.Tail(ctx, TailQuery{Duration: tailDur("2s")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1069,16 +1096,16 @@ func TestTailDoubleCopytruncate(t *testing.T) {
 		os.Truncate(path, 0)
 	}
 	go func() {
-		time.Sleep(200 * time.Millisecond)
+		settle(t, eng)
 		appendLines(t, path, liveLine(1, "x"))
-		time.Sleep(300 * time.Millisecond)
+		settle(t, eng)
 		ct()
 		appendLines(t, path, liveLine(2, "x"), liveLine(3, "x"))
-		time.Sleep(300 * time.Millisecond)
+		settle(t, eng)
 		ct()
 		appendLines(t, path, liveLine(4, "x"))
 	}()
-	res, err := eng.Tail(ctx, TailQuery{Duration: "2s"})
+	res, err := eng.Tail(ctx, TailQuery{Duration: tailDur("2s")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1154,14 +1181,14 @@ func TestTailNewFileCopytruncate(t *testing.T) {
 	eng, dir := globEngine(t, "/logs/*.log*")
 	path := filepath.Join(dir, "svc.log")
 	go func() {
-		time.Sleep(200 * time.Millisecond)
+		settle(t, eng)
 		os.WriteFile(path, []byte(liveLine(1, "x")+"\n"), 0o644)
-		time.Sleep(400 * time.Millisecond)
+		settle(t, eng)
 		b, _ := os.ReadFile(path)
 		os.WriteFile(path+".1", b, 0o644)
 		os.Truncate(path, 0)
 	}()
-	res, err := eng.Tail(ctx, TailQuery{Duration: "1500ms"})
+	res, err := eng.Tail(ctx, TailQuery{Duration: tailDur("1500ms")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1178,14 +1205,14 @@ func TestTailOneLineCopytruncate(t *testing.T) {
 	path := filepath.Join(dir, "app.log")
 	nextSecond()
 	go func() {
-		time.Sleep(200 * time.Millisecond)
+		settle(t, eng)
 		appendLines(t, path, liveLine(1, "x"))
-		time.Sleep(400 * time.Millisecond)
+		settle(t, eng)
 		b, _ := os.ReadFile(path)
 		os.WriteFile(path+".1", b, 0o644)
 		os.Truncate(path, 0)
 	}()
-	res, err := eng.Tail(ctx, TailQuery{Duration: "1500ms"})
+	res, err := eng.Tail(ctx, TailQuery{Duration: tailDur("1500ms")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1199,9 +1226,6 @@ func TestTailOneLineCopytruncate(t *testing.T) {
 func TestTailGranuleEndCopytruncate(t *testing.T) {
 	// The streams change during this tail: every record once, and
 	// complete:false (the tail says rotation may have cost records).
-	if raceEnabled {
-		t.Skip("timing: the race detector slows masking several fold")
-	}
 	eng, dir := globEngine(t, "/logs/app.log*")
 	path := filepath.Join(dir, "app.log")
 	st, _ := os.Stat(path)
@@ -1226,14 +1250,14 @@ func TestTailGranuleEndCopytruncate(t *testing.T) {
 	eng.Search(ctx, Query{Limit: 1})
 	nextSecond()
 	go func() {
-		time.Sleep(200 * time.Millisecond)
+		settle(t, eng)
 		appendLines(t, path, liveLine(1, "x"))
-		time.Sleep(400 * time.Millisecond)
+		settle(t, eng)
 		b, _ := os.ReadFile(path)
 		os.WriteFile(path+".1", b, 0o644)
 		os.Truncate(path, 0)
 	}()
-	res, err := eng.Tail(ctx, TailQuery{Duration: "1500ms"})
+	res, err := eng.Tail(ctx, TailQuery{Duration: tailDur("1500ms")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1249,14 +1273,14 @@ func TestTailRenameAway(t *testing.T) {
 	path := filepath.Join(dir, "app.log")
 	nextSecond()
 	go func() {
-		time.Sleep(200 * time.Millisecond)
+		settle(t, eng)
 		appendLines(t, path, liveLine(1, "x"))
-		time.Sleep(300 * time.Millisecond)
+		settle(t, eng)
 		appendLines(t, path, liveLine(2, "x"))
 		os.Rename(path, path+".1")
 		os.WriteFile(path, nil, 0o644)
 	}()
-	res, err := eng.Tail(ctx, TailQuery{Duration: "1500ms"})
+	res, err := eng.Tail(ctx, TailQuery{Duration: tailDur("1500ms")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1273,7 +1297,7 @@ func TestTailRenameAway(t *testing.T) {
 // filtered plans.
 func indexDuringTail(t *testing.T, f *fixture, match bool) {
 	path := filepath.Join(f.root, "logs", "app.log")
-	time.Sleep(300 * time.Millisecond)
+	settle(t, f.eng)
 	var lines []string
 	if match {
 		lines = append(lines, liveLine(1, "x"))
@@ -1283,7 +1307,7 @@ func indexDuringTail(t *testing.T, f *fixture, match bool) {
 		lines = append(lines, fmt.Sprintf("time=%s level=info msg=\"%s\"", now, strings.Repeat("p", 400)))
 	}
 	appendLines(t, path, lines...)
-	time.Sleep(400 * time.Millisecond)
+	settle(t, f.eng)
 	for {
 		_, done, err := f.src.IndexStep(context.Background(), 1<<30, false)
 		if err != nil {
@@ -1300,13 +1324,10 @@ func indexDuringTail(t *testing.T, f *fixture, match bool) {
 // returns its match once, complete; with no match, it is complete and
 // empty.
 func TestTailIndexedDuringTail(t *testing.T) {
-	if raceEnabled {
-		t.Skip("timing: the race detector slows masking several fold")
-	}
 	for _, match := range []bool{true, false} {
 		f := newFixture(t, genLog(time.Now().Add(-time.Hour), 5, "c@example.org"), func(o *Options) { o.TailPoll = 100 * time.Millisecond })
 		go indexDuringTail(t, f, match)
-		res, err := f.eng.Tail(ctx, TailQuery{Duration: "2s", Where: []Pred{{Field: "level", Op: "=", Value: raw("error")}}})
+		res, err := f.eng.Tail(ctx, TailQuery{Duration: tailDur("2s"), Where: []Pred{{Field: "level", Op: "=", Value: raw("error")}}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1342,14 +1363,14 @@ func TestTailReplicasStartDuringTail(t *testing.T) {
 	nextSecondHalf()
 	l := fmt.Sprintf(`time=%s level=error msg="replica starting"`, time.Now().UTC().Truncate(time.Second).Format(time.RFC3339))
 	go func() {
-		time.Sleep(150 * time.Millisecond)
+		settle(t, eng)
 		os.WriteFile(filepath.Join(f.root, "logs", "a.log"), []byte(l+"\n"), 0o644)
-		time.Sleep(250 * time.Millisecond)
+		settle(t, eng)
 		os.WriteFile(filepath.Join(f.root, "logs", "b.log"), []byte(l+"\n"+liveLine(7, "b")+"\n"), 0o644)
-		time.Sleep(250 * time.Millisecond)
+		settle(t, eng)
 		appendLines(t, filepath.Join(f.root, "logs", "b.log"), liveLine(8, "b"))
 	}()
-	res, err := eng.Tail(ctx, TailQuery{Duration: "1500ms"})
+	res, err := eng.Tail(ctx, TailQuery{Duration: tailDur("1500ms")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1377,12 +1398,12 @@ func TestTailSameContentNewFiles(t *testing.T) {
 	}
 	l := fmt.Sprintf(`time=%s level=error msg="replica starting"`, time.Now().UTC().Add(time.Second).Truncate(time.Second).Format(time.RFC3339))
 	go func() {
-		time.Sleep(150 * time.Millisecond)
+		settle(t, eng)
 		os.WriteFile(filepath.Join(f.root, "logs", "a.log"), []byte(l+"\n"), 0o644)
-		time.Sleep(250 * time.Millisecond)
+		settle(t, eng)
 		os.WriteFile(filepath.Join(f.root, "logs", "b.log"), []byte(l+"\n"), 0o644)
 	}()
-	res, err := eng.Tail(ctx, TailQuery{Duration: "1s"})
+	res, err := eng.Tail(ctx, TailQuery{Duration: tailDur("1s")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1403,15 +1424,15 @@ func TestTailRenameAwaySameHeader(t *testing.T) {
 	hdr := "# svc log v1"
 	nextSecond()
 	go func() {
-		time.Sleep(150 * time.Millisecond)
+		settle(t, eng)
 		os.WriteFile(path, []byte(hdr+"\n"), 0o644)
-		time.Sleep(250 * time.Millisecond)
+		settle(t, eng)
 		appendLines(t, path, liveLine(1, "x"), liveLine(2, "x"), liveLine(3, "x"), liveLine(4, "x"), liveLine(5, "x"))
-		time.Sleep(250 * time.Millisecond)
+		settle(t, eng)
 		os.Rename(path, path+".1")
 		os.WriteFile(path, []byte(hdr+"\n"+liveLine(6, "x")+"\n"+liveLine(7, "x")+"\n"), 0o644)
 	}()
-	res, err := eng.Tail(ctx, TailQuery{Duration: "1500ms"})
+	res, err := eng.Tail(ctx, TailQuery{Duration: tailDur("1500ms")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1423,15 +1444,16 @@ func TestTailRenameAwaySameHeader(t *testing.T) {
 // TestTailFutureIndexed: records dated ahead (a writer's clock, a zone read
 // as UTC), indexed before the next poll, are still tailed.
 func TestTailFutureIndexed(t *testing.T) {
-	if raceEnabled {
-		t.Skip("timing: the race detector slows masking several fold")
-	}
-	for _, idx := range []bool{false, true} {
+	for _, c := range []struct {
+		idx   bool
+		ahead time.Duration
+	}{{false, 20 * time.Second}, {true, 20 * time.Second}, {true, 48 * time.Hour}} {
+		idx := c.idx
 		f := newFixture(t, genLog(time.Now().Add(-time.Hour), 5, "c@example.org"), func(o *Options) { o.TailPoll = 700 * time.Millisecond })
 		path := filepath.Join(f.root, "logs", "app.log")
 		go func() {
-			time.Sleep(200 * time.Millisecond)
-			fut := time.Now().Add(20 * time.Second).UTC().Format(time.RFC3339Nano)
+			settle(t, f.eng)
+			fut := time.Now().Add(c.ahead).UTC().Format(time.RFC3339Nano)
 			lines := []string{"time=" + fut + " level=error msg=\"skewed\""}
 			for range 6000 {
 				lines = append(lines, "time="+fut+" level=info msg=\""+strings.Repeat("p", 400)+"\"")
@@ -1446,12 +1468,12 @@ func TestTailFutureIndexed(t *testing.T) {
 				}
 			}
 		}()
-		res, err := f.eng.Tail(ctx, TailQuery{Duration: "2s", Where: []Pred{{Field: "level", Op: "=", Value: raw("error")}}})
+		res, err := f.eng.Tail(ctx, TailQuery{Duration: tailDur("2s"), Where: []Pred{{Field: "level", Op: "=", Value: raw("error")}}})
 		if err != nil {
 			t.Fatal(err)
 		}
 		if len(res.Records) != 1 || !res.Complete {
-			t.Fatalf("indexed %v: %d records, complete %v", idx, len(res.Records), res.Complete)
+			t.Fatalf("indexed %v, %s ahead: %d records, complete %v", idx, c.ahead, len(res.Records), res.Complete)
 		}
 	}
 }
@@ -1463,16 +1485,16 @@ func TestTailStaleCopyThenRenameAway(t *testing.T) {
 	path := filepath.Join(dir, "app.log")
 	nextSecond()
 	go func() {
-		time.Sleep(150 * time.Millisecond)
+		settle(t, eng)
 		appendLines(t, path, liveLine(1, "x"), liveLine(2, "x"))
-		time.Sleep(250 * time.Millisecond)
+		settle(t, eng)
 		b, _ := os.ReadFile(path)
 		os.WriteFile(path+".bak", b, 0o644)
-		time.Sleep(250 * time.Millisecond)
+		settle(t, eng)
 		appendLines(t, path, liveLine(3, "x"))
 		os.Rename(path, filepath.Join(dir, "old-app"))
 	}()
-	res, err := eng.Tail(ctx, TailQuery{Duration: "1500ms"})
+	res, err := eng.Tail(ctx, TailQuery{Duration: tailDur("1500ms")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1487,16 +1509,16 @@ func TestTailTwoCopies(t *testing.T) {
 	path := filepath.Join(dir, "app.log")
 	nextSecond()
 	go func() {
-		time.Sleep(150 * time.Millisecond)
+		settle(t, eng)
 		appendLines(t, path, liveLine(1, "x"), liveLine(2, "x"))
-		time.Sleep(250 * time.Millisecond)
+		settle(t, eng)
 		appendLines(t, path, liveLine(3, "x"))
 		b, _ := os.ReadFile(path)
 		os.WriteFile(path+".1", b, 0o644)
 		os.WriteFile(path+".bak", b, 0o644)
 		os.Truncate(path, 0)
 	}()
-	res, err := eng.Tail(ctx, TailQuery{Duration: "1500ms"})
+	res, err := eng.Tail(ctx, TailQuery{Duration: tailDur("1500ms")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1561,11 +1583,11 @@ func TestTailSameSecondBaseline(t *testing.T) {
 		appendLines(t, path, liveLine(1, "x"))
 		if grow {
 			go func() {
-				time.Sleep(300 * time.Millisecond)
+				settle(t, f.eng)
 				appendLines(t, path, liveLine(2, "x"))
 			}()
 		}
-		res, err := f.eng.Tail(ctx, TailQuery{Duration: "1s"})
+		res, err := f.eng.Tail(ctx, TailQuery{Duration: tailDur("1s")})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1607,7 +1629,7 @@ func TestTailStartSecondEarlierGranule(t *testing.T) {
 	if err := os.WriteFile(jpath, journaltest.Build(journaltest.Options{Compact: true, PerArray: 100}, es), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	res, err := f.eng.Tail(ctx, TailQuery{Sources: []string{"journal"}, Duration: "500ms"})
+	res, err := f.eng.Tail(ctx, TailQuery{Sources: []string{"journal"}, Duration: tailDur("500ms")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1637,7 +1659,7 @@ func TestTailStartSecondFileBoundary(t *testing.T) {
 		live = append(live, fmt.Sprintf("time=%s level=error msg=\"live %d %s\"", time.Now().UTC().Format(time.RFC3339Nano), i, strings.Repeat("q", 300)))
 	}
 	appendLines(t, path, live...)
-	res, err := f.eng.Tail(ctx, TailQuery{Duration: "500ms"})
+	res, err := f.eng.Tail(ctx, TailQuery{Duration: tailDur("500ms")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1665,7 +1687,7 @@ func TestTailPrefilterPartialAtGranuleEnd(t *testing.T) {
 		path := filepath.Join(f.root, "logs", "app.log")
 		nextSecond()
 		go func() {
-			time.Sleep(300 * time.Millisecond)
+			settle(t, f.eng)
 			st, _ := os.Stat(path)
 			target := int64(1 << 20)
 			partial := fmt.Sprintf("time=%s level=error msg=\"live part", time.Now().UTC().Format(time.RFC3339Nano))
@@ -1681,16 +1703,119 @@ func TestTailPrefilterPartialAtGranuleEnd(t *testing.T) {
 				n -= ln + 1
 			}
 			writeRaw(t, path, b.String()+partial)
-			time.Sleep(400 * time.Millisecond)
+			settle(t, f.eng)
 			writeRaw(t, path, " needle\"\n")
 			appendLines(t, path, fmt.Sprintf("time=%s level=info msg=\"after\"", time.Now().UTC().Format(time.RFC3339Nano)))
 		}()
-		res, err := f.eng.Tail(ctx, TailQuery{Text: "needle", Duration: "1500ms"})
+		res, err := f.eng.Tail(ctx, TailQuery{Text: "needle", Duration: tailDur("1500ms")})
 		if err != nil {
 			t.Fatal(err)
 		}
 		if len(res.Records) != 1 || !res.Complete {
 			t.Errorf("prefilter %v: %d records, complete %v", pre, len(res.Records), res.Complete)
 		}
+	}
+}
+
+// TestTailFutureAlreadyThere: records dated two days ahead that were there,
+// indexed, when the tail starts are not new.
+func TestTailFutureAlreadyThere(t *testing.T) {
+	f := newFixture(t, genLog(time.Now().Add(-time.Hour), 5, "c@example.org"), func(o *Options) { o.TailPoll = 100 * time.Millisecond })
+	path := filepath.Join(f.root, "logs", "app.log")
+	fut := time.Now().Add(48 * time.Hour).UTC().Format(time.RFC3339Nano)
+	var lines []string
+	for range 3000 { // about 1.3 MiB: a sealed granule and the next one
+		lines = append(lines, "time="+fut+" level=error msg=\""+strings.Repeat("p", 400)+"\"")
+	}
+	appendLines(t, path, lines...)
+	for {
+		_, done, err := f.src.IndexStep(context.Background(), 1<<30, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if done {
+			break
+		}
+	}
+	go func() {
+		settle(t, f.eng)
+		appendLines(t, path, liveLine(1, "x"))
+	}()
+	res, err := f.eng.Tail(ctx, TailQuery{Duration: tailDur("1s"), Where: []Pred{{Field: "level", Op: "=", Value: raw("error")}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Records) != 1 || !res.Complete || !strings.Contains(string(res.Records[0]), "live 1 ") {
+		t.Fatalf("%d records, complete %v", len(res.Records), res.Complete)
+	}
+}
+
+// TestTailGzFutureAlreadyThere: a compressed stream there at the start, not
+// measured, with records dated ahead: none of them is new.
+func TestTailGzFutureAlreadyThere(t *testing.T) {
+	eng, path := rotEngine(t)
+	fut := time.Now().Add(20 * time.Second).UTC().Format(time.RFC3339Nano)
+	var b bytes.Buffer
+	zw := gzip.NewWriter(&b)
+	fmt.Fprintf(zw, "time=%s level=error msg=\"preexisting gz future\"\n", fut)
+	zw.Close()
+	if err := os.WriteFile(path+".1.gz", b.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		settle(t, eng)
+		appendLines(t, path, liveLine(1, "x"))
+	}()
+	res, err := eng.Tail(ctx, TailQuery{Duration: tailDur("1s")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Records) != 1 || !res.Complete || !strings.Contains(string(res.Records[0]), "live 1 ") {
+		t.Fatalf("%d records, complete %v: %s", len(res.Records), res.Complete, res.Records)
+	}
+}
+
+// listingHook runs hook before each unfiltered listing plan of a tail.
+type listingHook struct {
+	source.Source
+	listings atomic.Int64
+	hook     func(n int64)
+}
+
+func (s *listingHook) Plan(ctx context.Context, r source.Range, sel source.Selector) (source.Byteplan, error) {
+	if r.From.Equal(time.Unix(0, 0).UTC()) {
+		s.hook(s.listings.Add(1))
+	}
+	return s.Source.Plan(ctx, r, sel)
+}
+
+// TestTailCopyBetweenPlanAndListing: a copytruncate landing between a poll's
+// plan and its listing is still linked as a copy by the next poll.
+func TestTailCopyBetweenPlanAndListing(t *testing.T) {
+	eng0, path := rotEngine(t)
+	w := &listingHook{Source: eng0.o.Sources["app"]}
+	w.hook = func(n int64) {
+		switch n {
+		case 3: // before poll 1's listing
+			appendLines(t, path, liveLine(1, "x"))
+		case 6: // poll 4's listing: plan already made
+			b, _ := os.ReadFile(path)
+			os.WriteFile(path+".1", b, 0o644)
+			os.Truncate(path, 0)
+		}
+	}
+	o := eng0.o
+	o.Sources = map[string]source.Source{"app": w}
+	eng, err := New(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nextSecond()
+	res, err := eng.Tail(ctx, TailQuery{Duration: tailDur("1500ms")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Records) != 1 || res.Complete {
+		t.Errorf("listings %d: %d records, complete %v", w.listings.Load(), len(res.Records), res.Complete)
 	}
 }

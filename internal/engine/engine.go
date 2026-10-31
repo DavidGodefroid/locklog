@@ -24,6 +24,7 @@ import (
 	"slices"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/DavidGodefroid/locklog/internal/mask"
@@ -116,6 +117,9 @@ type Options struct {
 	LookupApproved bool
 	// Production marks the approval screens of a production profile.
 	Production bool
+	// tailPolls (tests) counts each tail's baseline and completed polls,
+	// so that a test acts on the logs between polls instead of sleeping.
+	tailPolls *atomic.Int64
 }
 
 // Scan defaults (design §3.3).

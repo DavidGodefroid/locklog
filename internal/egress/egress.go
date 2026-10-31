@@ -20,6 +20,7 @@
 package egress
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -73,6 +74,10 @@ var ErrResponseTooLarge = errors.New("egress: response larger than the cap")
 type Route struct {
 	Method string
 	Path   string
+	// Params are the query parameters the route may carry, each once:
+	// name to fixed value, or to "" for any value. Any other parameter,
+	// or one repeated, is refused.
+	Params map[string]string
 }
 
 // Allowlist is a compiled set of routes.
@@ -83,6 +88,7 @@ type Allowlist struct {
 type compiledRoute struct {
 	method string
 	segs   []string
+	params map[string]string
 }
 
 // NewAllowlist compiles routes. It panics on a malformed route: the lists
@@ -96,15 +102,24 @@ func NewAllowlist(routes ...Route) *Allowlist {
 		if !strings.HasPrefix(r.Path, "/") || strings.Contains(r.Path, "//") {
 			panic("egress: route path " + r.Path)
 		}
-		a.routes = append(a.routes, compiledRoute{method: r.Method, segs: strings.Split(r.Path[1:], "/")})
+		a.routes = append(a.routes, compiledRoute{method: r.Method, segs: strings.Split(r.Path[1:], "/"), params: r.Params})
 	}
 	return a
 }
 
 // Allows reports whether method and path (relative to the base path, as
 // the caller builds it; request re-escapes it, so that a "%2F" in a
-// segment stays inside that segment) are in the list.
+// segment stays inside that segment) are in the list, without query
+// parameters.
 func (a *Allowlist) Allows(method, path string) bool {
+	return a.AllowsQuery(method, path, nil)
+}
+
+// AllowsQuery reports whether method, path and the query parameters q are
+// in the list: a route matching the path whose parameter allowlist holds
+// every parameter of q, each given once, with its fixed value if it has
+// one.
+func (a *Allowlist) AllowsQuery(method, path string, q url.Values) bool {
 	if !strings.HasPrefix(path, "/") || strings.Contains(path, "//") {
 		return false
 	}
@@ -127,24 +142,36 @@ func (a *Allowlist) Allows(method, path string) bool {
 				break
 			}
 		}
-		if ok {
+		if ok && paramsAllowed(r.params, q) {
 			return true
 		}
 	}
 	return false
 }
 
+func paramsAllowed(allowed map[string]string, q url.Values) bool {
+	for k, vs := range q {
+		want, ok := allowed[k]
+		if !ok || len(vs) != 1 || (want != "" && vs[0] != want) {
+			return false
+		}
+	}
+	return true
+}
+
 // LokiRoutes are the only Loki requests locklog sends (read endpoints).
+// Each carries the parameters the Loki source sends (log queries: forward
+// only).
 var LokiRoutes = NewAllowlist(
-	Route{http.MethodGet, "/loki/api/v1/query_range"},
-	Route{http.MethodGet, "/loki/api/v1/query"},
-	Route{http.MethodGet, "/loki/api/v1/labels"},
-	Route{http.MethodGet, "/loki/api/v1/label/{name}/values"},
-	Route{http.MethodGet, "/loki/api/v1/series"},
-	Route{http.MethodGet, "/loki/api/v1/index/stats"},
-	Route{http.MethodGet, "/loki/api/v1/index/volume"},
-	Route{http.MethodGet, "/ready"},
-	Route{http.MethodGet, "/loki/api/v1/status/buildinfo"},
+	Route{http.MethodGet, "/loki/api/v1/query_range", map[string]string{"query": "", "start": "", "end": "", "limit": "", "direction": "forward", "step": ""}},
+	Route{http.MethodGet, "/loki/api/v1/query", map[string]string{"query": "", "time": ""}},
+	Route{http.MethodGet, "/loki/api/v1/labels", map[string]string{"query": "", "start": "", "end": ""}},
+	Route{http.MethodGet, "/loki/api/v1/label/{name}/values", map[string]string{"query": "", "start": "", "end": ""}},
+	Route{http.MethodGet, "/loki/api/v1/series", map[string]string{"match[]": "", "start": "", "end": ""}},
+	Route{http.MethodGet, "/loki/api/v1/index/stats", map[string]string{"query": "", "start": "", "end": ""}},
+	Route{http.MethodGet, "/loki/api/v1/index/volume", map[string]string{"query": "", "start": "", "end": ""}},
+	Route{http.MethodGet, "/ready", nil},
+	Route{http.MethodGet, "/loki/api/v1/status/buildinfo", nil},
 )
 
 // Credentials are what the console obtained for a source (asked or read
@@ -352,7 +379,7 @@ func tlsConfig(r *config.Remote, u *url.URL, opt Options) (*tls.Config, error) {
 // request builds a request for path (relative to the source URL's path)
 // with query q, checked against the allowlist.
 func (c *Client) request(ctx context.Context, method, path string, q url.Values, body io.Reader) (*http.Request, error) {
-	if !c.allow.Allows(method, path) {
+	if !c.allow.AllowsQuery(method, path, q) {
 		return nil, fmt.Errorf("%w: %s %s", ErrNotAllowed, method, path)
 	}
 	u := *c.base
@@ -383,6 +410,9 @@ func (c *Client) authorize(req *http.Request) {
 		req.SetBasicAuth(c.creds.User, c.creds.Secret)
 	case config.AuthBearer:
 		req.Header.Set("Authorization", "Bearer "+c.creds.Secret)
+	case config.AuthAPIKey:
+		// Elasticsearch: the secret is the encoded key, base64(id:key).
+		req.Header.Set("Authorization", "ApiKey "+c.creds.Secret)
 	}
 	if c.orgID != "" {
 		req.Header.Set("X-Scope-OrgID", c.orgID)
@@ -420,6 +450,25 @@ func (c *Client) GetWith(ctx context.Context, path string, q url.Values, hdr map
 	}
 	for k, v := range hdr {
 		req.Header.Set(k, v)
+	}
+	c.authorize(req)
+	return c.do(req)
+}
+
+// Send sends an allowed GET or POST with the source's credentials and a
+// JSON body (nil: none), and returns the capped body. A non-2xx status is
+// an error whose text never quotes either body.
+func (c *Client) Send(ctx context.Context, method, path string, q url.Values, body []byte) (Response, error) {
+	var rd io.Reader
+	if body != nil {
+		rd = bytes.NewReader(body)
+	}
+	req, err := c.request(ctx, method, path, q, rd)
+	if err != nil {
+		return Response{}, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
 	}
 	c.authorize(req)
 	return c.do(req)
@@ -556,10 +605,16 @@ func LokiData(body []byte) bool {
 // CheckUnauthenticated is the production check of a Loki source: it
 // refuses the source when the probe reads data without credentials.
 func CheckUnauthenticated(ctx context.Context, c *Client, production bool) error {
+	return CheckUnauthenticatedAt(ctx, c, production, LokiProbePath, LokiData)
+}
+
+// CheckUnauthenticatedAt is the production check of a remote source whose
+// data endpoint is path and whose data answer recognize recognizes.
+func CheckUnauthenticatedAt(ctx context.Context, c *Client, production bool, path string, recognize Recognizer) error {
 	if !production {
 		return nil
 	}
-	open, err := c.Probe(ctx, LokiProbePath, LokiData)
+	open, err := c.Probe(ctx, path, recognize)
 	if err != nil {
 		return fmt.Errorf("egress: unauthenticated-read check: %w", err)
 	}
