@@ -703,7 +703,11 @@ func TestCalibration(t *testing.T) {
 	p, _ := parse.New(parse.Options{})
 	c := NewCostModel(p, func(ev parse.Event) { f.masker.Mask("app", ev) }, 2, time.Now)
 	ns := c.NsPerByte()
-	if ns < minCostPerByte || ns > DefaultNsPerByte*10 {
+	ceiling := float64(DefaultNsPerByte * 10)
+	if raceEnabled {
+		ceiling *= 10 // the race detector slows masking several fold
+	}
+	if ns < minCostPerByte || ns > ceiling {
 		t.Fatalf("calibrated %.1f ns/byte", ns)
 	}
 	if b := c.Budget(time.Second); b <= 0 || c.Time(b) > time.Second+time.Millisecond {
