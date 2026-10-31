@@ -51,15 +51,18 @@ type fakeDoc struct {
 // _field_caps, the root and the privilege checks. Bodies are decoded
 // strictly into the builder's types: an unknown key is a 400.
 type fakeES struct {
-	mu        sync.Mutex
-	seg       string
-	docs      []fakeDoc
-	flavour   string // "" (Elasticsearch) or "opensearch"
-	grants    string // the _privileges answer
-	resolved  string // the _resolve/index answer
-	mapping   string // the _mapping answer (default: defaultMapping)
-	settings  string // the _settings answer (default: defaultSettings)
-	termsErr  int    // doc_count_error_upper_bound of terms answers
+	mu       sync.Mutex
+	seg      string
+	docs     []fakeDoc
+	flavour  string // "" (Elasticsearch) or "opensearch"
+	grants   string // the _privileges answer
+	resolved string // the _resolve/index answer
+	mapping  string // the _mapping answer (default: defaultMapping)
+	settings string // the _settings answer (default: defaultSettings)
+	termsErr int    // doc_count_error_upper_bound of terms answers
+	// hook, when set, runs before each request is answered (tests hold a
+	// request there).
+	hook      func(r *http.Request)
 	roles     []string
 	security  bool // privilege endpoints answer
 	requests  []string
@@ -99,6 +102,12 @@ func (f *fakeES) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	time.Sleep(f.delay)
+	f.mu.Lock()
+	hook := f.hook
+	f.mu.Unlock()
+	if hook != nil {
+		hook(r)
+	}
 	body, _ := io.ReadAll(r.Body)
 	f.mu.Lock()
 	f.requests = append(f.requests, r.Method+" "+r.URL.Path)

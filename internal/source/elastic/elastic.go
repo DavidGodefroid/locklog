@@ -121,6 +121,7 @@ type Source struct {
 	// may skip values, in some index: their terms are evaluated locally
 	// only.
 	mu      sync.Mutex
+	gen     uint64 // incremented by every Check as it starts
 	checked bool
 	local   map[string]bool
 }
@@ -646,21 +647,8 @@ func (s *Source) streamFilter(stream string) (Filter, error) {
 	if err != nil {
 		return Filter{}, fmt.Errorf("elasticsearch source: %w", err)
 	}
-	// A pushed term (any but the selector's own) must still be one the
-	// backend may answer under the current state: a stream planned
-	// before a Check that keeps the field local, or before any Check, is
-	// stale.
-	st := s.state()
-	for i, x := range append(slices.Clone(f.In), f.NotIn...) {
-		if v, sel := s.o.Selector[x.Field]; sel && i < len(f.In) && slices.Equal(x.Values, []string{v}) {
-			continue
-		}
-		if !s.trusted(x.Field) {
-			return Filter{}, errors.New("elasticsearch source: the stream names an untrusted field")
-		}
-		if !st.serverSide(x.Field) {
-			return Filter{}, source.ErrStale
-		}
+	if err := s.stillServed(f, s.state()); err != nil {
+		return Filter{}, err
 	}
 	for k, v := range s.o.Selector {
 		if !slices.ContainsFunc(f.In, func(x FieldValues) bool { return x.Field == k && slices.Equal(x.Values, []string{v}) }) {
@@ -668,6 +656,25 @@ func (s *Source) streamFilter(stream string) (Filter, error) {
 		}
 	}
 	return f, nil
+}
+
+// stillServed checks a stream's pushed terms (any but the selector's own)
+// against the snapshot st: each must be on a trusted field the backend may
+// answer for. A stream planned before a Check that keeps the field local,
+// or before any Check, is stale.
+func (s *Source) stillServed(f Filter, st pushState) error {
+	for i, x := range append(slices.Clone(f.In), f.NotIn...) {
+		if v, sel := s.o.Selector[x.Field]; sel && i < len(f.In) && slices.Equal(x.Values, []string{v}) {
+			continue
+		}
+		if !s.trusted(x.Field) {
+			return errors.New("elasticsearch source: the stream names an untrusted field")
+		}
+		if !st.serverSide(x.Field) {
+			return source.ErrStale
+		}
+	}
+	return nil
 }
 
 // Scan yields the records of the chunk's slices in time order. Slices are
@@ -724,6 +731,12 @@ func (it *iter) fill() {
 		it.wg.Add(1)
 		go func() {
 			defer it.wg.Done()
+			// A re-Check since Scan may keep a pushed field local: the
+			// slice is then stale, not fetched.
+			if err := it.s.stillServed(it.f, it.s.state()); err != nil {
+				ch <- sliceResult{err: err}
+				return
+			}
 			// Past the shared limit, every fetch fails at its next
 			// page: Next reports the first failed slice in order.
 			hs, _, err := it.s.fetchSlice(it.ctx, it.f, g.Start, g.End, &it.meter)

@@ -144,19 +144,31 @@ uses [Semantic Versioning](https://semver.org/).
   production console is refused with `E_PRODUCTION_HOST_AGENT`).
 - The Elasticsearch 8 / OpenSearch 2 source (`kind = "elastic"` or
   `"opensearch"`): allowlisted read routes on the source's own indices
-  (`_search`, `_count`, `_field_caps`, `_mapping`, `/`,
-  `_security/user/_privileges`, `_resolve/index`, OpenSearch's `authinfo`),
-  typed query bodies (time range, `term`/`terms` on trusted keyword fields,
-  sort with an optional tiebreaker, `search_after`, size and timeout caps,
-  `date_histogram` and `terms` counts) with text matched locally, untrusted
-  fields dropped, multi-valued fields and `!=` evaluated alike by the server
-  and the engine (empty values kept local), the Loki paging and byte model
-  (lazy slices, bytes counted per page against the call's limit, bounded
-  Around, `MaxSlices`), `auth = "api_key"` (Elasticsearch `ApiKey`), and a
+  (`_search`, `_count`, `_field_caps`, `_mapping`, `_settings`, `/`,
+  `_security/user/_privileges`, `_resolve/index`, OpenSearch's
+  `authinfo`), each with its own query-parameter allowlist (the egress
+  layer now checks parameters per route, Loki's included); typed query
+  bodies (time range, `term`/`terms` on trusted keyword fields, sort with
+  an optional tiebreaker, `search_after`, size and timeout caps,
+  `date_histogram` and `terms` counts) with text matched locally,
+  untrusted fields dropped, multi-valued fields and `!=` evaluated alike
+  by the server and the engine (empty values kept local); the Loki paging
+  and byte model (lazy slices, bytes counted per page against the call's
+  limit, bounded Around and Reread, `MaxSlices`, `Split` of an
+  over-budget slice); `auth = "api_key"` (Elasticsearch `ApiKey`). A
   production privilege check that fails closed: any grant beyond a
-  read-only allowlist, on any pattern, alias or data stream, and any
-  OpenSearch role not known read-only (or vouched for in `read_only_roles`)
-  is refused.
+  read-only allowlist, on any pattern, alias or data stream, any
+  OpenSearch role not known read-only (or vouched for in
+  `read_only_roles`), an OpenSearch answer without a role, and a client
+  certificate for OpenSearch are refused. Field checks over every index:
+  trusted, selector and tiebreaker fields must be plain keyword fields
+  (aliases judged by their target; normalizers, scripts, runtime fields
+  and `copy_to` into them refused; dynamic templates accepted only when
+  provably harmless; `dynamic` other than a boolean, true, false or
+  strict refused); `ignore_above`, `null_value` and non-standard index
+  modes keep terms local. Until the newest `Check` has succeeded, no
+  trusted term is pushed and no count is served on the server, and a
+  stream whose pushed term is no longer server-side is stale.
 
 ### Fixed
 

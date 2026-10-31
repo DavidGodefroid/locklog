@@ -442,7 +442,12 @@ func (s *Source) Check(ctx context.Context, production bool) (Info, error) {
 	var err error
 	// Until this Check completes, no trusted term is pushed and no count
 	// is served on the server.
+	// Each Check takes a generation; only the newest one stores its
+	// result, so an older Check finishing late never overrides a newer
+	// one (failed, or still running).
 	s.mu.Lock()
+	s.gen++
+	gen := s.gen
 	s.checked = false
 	s.mu.Unlock()
 	if info.Flavour, info.Version, err = s.detect(ctx); err != nil {
@@ -581,7 +586,9 @@ func (s *Source) Check(ctx context.Context, production bool) (Info, error) {
 		}
 	}
 	s.mu.Lock()
-	s.local, s.checked = local, true
+	if s.gen == gen {
+		s.local, s.checked = local, true
+	}
 	s.mu.Unlock()
 	return info, nil
 }

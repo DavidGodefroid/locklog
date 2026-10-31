@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"slices"
 	"strings"
@@ -674,5 +675,114 @@ func TestCountsUnderConcurrentReCheck(t *testing.T) {
 	}
 	if n != want {
 		t.Fatalf("count %d across a re-Check, want %d", n, want)
+	}
+}
+
+// holdAt returns a hook that holds the n-th request to a path ending in
+// suffix until release is closed, closing reached when it gets there.
+func holdAt(suffix string, n int) (hook func(*http.Request), reached, release chan struct{}) {
+	reached, release = make(chan struct{}), make(chan struct{})
+	var seen atomic.Int64
+	return func(r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, suffix) && seen.Add(1) == int64(n) {
+			close(reached)
+			<-release
+		}
+	}, reached, release
+}
+
+// TestOverlappingChecks: only the newest Check stores its result. An older
+// Check that succeeds after a newer one failed leaves nothing server-side;
+// one that succeeds while a newer one runs too.
+func TestOverlappingChecks(t *testing.T) {
+	lv := source.Term{Field: "level", Label: true, Op: "=", Values: []string{"error"}}
+	r := source.Range{From: t0, To: t0.Add(time.Hour)}
+
+	// A held at _settings; level becomes text; B fails; A released.
+	f := newFake(dataset(40))
+	s := newSource(t, f, nil)
+	hook, reached, release := holdAt("/_settings", 1)
+	f.mu.Lock()
+	f.hook = hook
+	f.mu.Unlock()
+	aDone := make(chan error, 1)
+	go func() { _, err := s.Check(ctx, true); aDone <- err }()
+	<-reached
+	f.mu.Lock()
+	f.types["level"] = "text"
+	f.mu.Unlock()
+	if _, err := s.Check(ctx, true); err == nil {
+		t.Fatal("check B passed on a text field")
+	}
+	close(release)
+	if err := <-aDone; err != nil {
+		t.Fatalf("check A: %v", err)
+	}
+	if s.pushable(lv) {
+		t.Fatal("pushable after the newest Check failed")
+	}
+	if _, err := s.IndexCounts(ctx, source.CountQuery{Range: r}); !errors.Is(err, source.ErrNotIndexable) {
+		t.Fatalf("count served after the newest Check failed: %v", err)
+	}
+
+	// A held at _settings, B held at _mapping; A completes while B runs:
+	// nothing server-side until B completes.
+	f = newFake(dataset(40))
+	s = newSource(t, f, nil)
+	hookA, reachedA, releaseA := holdAt("/_settings", 1)
+	hookB, reachedB, releaseB := holdAt("/_mapping", 2)
+	f.mu.Lock()
+	f.hook = func(r *http.Request) { hookA(r); hookB(r) }
+	f.mu.Unlock()
+	go func() { _, err := s.Check(ctx, true); aDone <- err }()
+	<-reachedA
+	bDone := make(chan error, 1)
+	go func() { _, err := s.Check(ctx, true); bDone <- err }()
+	<-reachedB
+	close(releaseA)
+	if err := <-aDone; err != nil {
+		t.Fatalf("check A: %v", err)
+	}
+	if s.pushable(lv) {
+		t.Fatal("pushable while the newest Check runs")
+	}
+	close(releaseB)
+	if err := <-bDone; err != nil {
+		t.Fatalf("check B: %v", err)
+	}
+	if !s.pushable(lv) {
+		t.Fatal("not pushable after the newest Check succeeded")
+	}
+}
+
+// TestScanRechecksEachSlice: a slice fetched after a re-Check that keeps a
+// pushed field local fails with ErrStale instead of being fetched.
+func TestScanRechecksEachSlice(t *testing.T) {
+	f := newFake(dataset(300))
+	s := newChecked(t, f, func(o *Options) { o.InFlight = 1 })
+	sel := source.Selector{Terms: []source.Term{{Field: "level", Label: true, Op: "!=", Values: []string{"info"}}}}
+	plan, err := s.Plan(ctx, source.Range{From: t0, To: t0.Add(10 * time.Minute)}, sel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	it, err := s.Scan(ctx, plan.Chunks[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer it.Close()
+	if _, err := it.Next(); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	f.mapping = `{"logs-a":{"mappings":{"properties":{"@timestamp":{"type":"date"},"app":{"type":"keyword"},"level":{"type":"keyword","ignore_above":10}}}}}`
+	f.mu.Unlock()
+	if _, err := s.Check(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	for err == nil {
+		_, err = it.Next()
+	}
+	if !errors.Is(err, source.ErrStale) {
+		t.Fatalf("after a re-Check: %v", err)
 	}
 }
