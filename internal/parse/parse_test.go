@@ -338,7 +338,7 @@ func TestLineReaderTerminators(t *testing.T) {
 		}
 		got = append(got, l)
 	}
-	want := []Line{{Text: "a", Offset: 100, Length: 3}, {Text: "b", Offset: 103, Length: 2}, {Text: "", Offset: 105, Length: 1}, {Text: "c", Offset: 106, Length: 1}}
+	want := []Line{{Text: "a", Offset: 100, Length: 3}, {Text: "b", Offset: 103, Length: 2}, {Text: "", Offset: 105, Length: 1}, {Text: "c", Offset: 106, Length: 1, Unterminated: true}}
 	if len(got) != len(want) {
 		t.Fatalf("%+v", got)
 	}
@@ -484,5 +484,117 @@ func checkCoverageGaps(t testing.TB, in string, evs []Event, blankGaps bool) {
 	}
 	if tail := in[pos:]; blankGaps && strings.TrimSpace(tail) != "" {
 		t.Fatalf("non-blank tail %q", tail)
+	}
+}
+
+func TestCapsHoldWithInvalidUTF8(t *testing.T) {
+	bad := strings.Repeat("\xffa", MaxLineBytes/2)
+	p := mustParser(t, Options{})
+	for _, ev := range readAll(t, p, bad+"\n") {
+		if len(ev.Raw) > MaxEventBytes || !ev.Truncated {
+			t.Fatalf("reader: %d bytes, truncated %v", len(ev.Raw), ev.Truncated)
+		}
+	}
+	if ev := p.Line(bad); len(ev.Raw) > MaxEventBytes || !ev.Truncated {
+		t.Fatalf("Line: %d bytes", len(ev.Raw))
+	}
+	fp := mustParser(t, Options{Format: "testframe"})
+	in := "2026-10-30T14:00:00Z P " + bad + "\n2026-10-30T14:00:00Z F " + bad + "\n"
+	for _, ev := range readAll(t, fp, in) {
+		if len(ev.Raw) > MaxEventBytes {
+			t.Fatalf("framed: %d bytes", len(ev.Raw))
+		}
+	}
+}
+
+func TestLineCapsLines(t *testing.T) {
+	p := mustParser(t, Options{})
+	ev := p.Line(strings.Repeat("a\n", 2000))
+	if ev.Lines != MaxEventLines || !ev.Truncated {
+		t.Fatalf("lines %d", ev.Lines)
+	}
+}
+
+func TestOffsetHoldsUnterminatedTail(t *testing.T) {
+	p := mustParser(t, Options{})
+	in := "one\ntwo passw"
+	r := p.NewReader(strings.NewReader(in), 0)
+	a, _ := r.Next()
+	b, _ := r.Next()
+	if a.Unterminated || !b.Unterminated || b.Raw != "two passw" {
+		t.Fatalf("%+v %+v", a, b)
+	}
+	if _, err := r.Next(); !errors.Is(err, io.EOF) {
+		t.Fatal(err)
+	}
+	if r.Offset() != 4 {
+		t.Fatalf("offset %d, want the unterminated event's 4", r.Offset())
+	}
+}
+
+func TestResumeMidSplitIndent(t *testing.T) {
+	p := mustParser(t, Options{})
+	var b strings.Builder
+	b.WriteString("head\n")
+	for i := 0; i < MaxEventLines; i++ {
+		b.WriteString("\tat x\n")
+	}
+	b.WriteString("\t{\"a\":1}\n\tat y\n")
+	in := b.String()
+	all := readAll(t, p, in)
+	if len(all) != 2 || !all[1].Split || all[1].Format != "plain" {
+		t.Fatalf("%+v", all)
+	}
+	rest := readAll(t, p, in[all[1].Offset:])
+	if len(rest) != 1 || rest[0].Raw != all[1].Raw || rest[0].Format != "plain" || rest[0].Lines != all[1].Lines {
+		t.Fatalf("resumed %+v vs %+v", rest, all[1])
+	}
+}
+
+func TestPatternBlankWhenFullSplits(t *testing.T) {
+	p := mustParser(t, Options{Multiline: MultilinePattern, Start: `^START`})
+	var b strings.Builder
+	b.WriteString("START\n")
+	for i := 1; i < MaxEventLines; i++ {
+		b.WriteString("x\n")
+	}
+	b.WriteString("\n{\"cont\":\"v\"}\n")
+	evs := readAll(t, p, b.String())
+	if len(evs) != 2 || !evs[1].Split || evs[1].Format != "plain" {
+		t.Fatalf("%d %+v", len(evs), evs[len(evs)-1])
+	}
+}
+
+func TestFramedPlainKeepsPayloadTime(t *testing.T) {
+	p := mustParser(t, Options{Format: "testframe"})
+	evs := readAll(t, p, "2026-10-30T14:00:00Z F 2020-01-01T00:00:00Z secret here\n")
+	if len(evs) != 1 || evs[0].Message != "2020-01-01T00:00:00Z secret here" || evs[0].Time.Year() != 2026 {
+		t.Fatalf("%+v", evs)
+	}
+}
+
+type failAfter struct {
+	data string
+	done bool
+}
+
+func (f *failAfter) Read(b []byte) (int, error) {
+	if f.done {
+		return 0, errors.New("disk error")
+	}
+	f.done = true
+	return copy(b, f.data), nil
+}
+
+func TestReadErrorKeepsOffset(t *testing.T) {
+	lr := NewLineReader(&failAfter{data: "ok\npart"}, 0)
+	if l, err := lr.Next(); err != nil || l.Text != "ok" {
+		t.Fatal(l, err)
+	}
+	if _, err := lr.Next(); err == nil || errors.Is(err, io.EOF) {
+		t.Fatalf("want the read error, got %v", err)
+	}
+	if lr.Offset() != 3 {
+		t.Fatalf("offset %d, want 3", lr.Offset())
 	}
 }

@@ -37,6 +37,7 @@ func checkEventsGaps(t *testing.T, in string, evs []Event, blankGaps bool) {
 			t.Fatal("invalid UTF-8 in event")
 		}
 		walk(t, e.Fields, 0)
+		walk(t, e.Attrs, 0)
 	}
 }
 
@@ -53,6 +54,9 @@ func walk(t *testing.T, ms []Member, depth int) {
 }
 
 func walkValue(t *testing.T, v Value, depth int) {
+	if !utf8.ValidString(v.Str) {
+		t.Fatalf("invalid UTF-8 in %s value", v.Kind)
+	}
 	switch v.Kind {
 	case KindObject:
 		walk(t, v.Members, depth)
@@ -138,8 +142,27 @@ func FuzzParseFramed(f *testing.F) {
 	}
 	p := mustParser(f, Options{Format: "testframe"})
 	f.Fuzz(func(t *testing.T, in string) {
-		// Frames with a blank payload are skipped like blank lines.
-		checkEventsGaps(t, in, fuzzRead(t, p, in), false)
+		evs := fuzzRead(t, p, in)
+		checkEventsGaps(t, in, evs, false)
+		// Gaps may hold only blank lines and frames with a blank payload.
+		var pos int64
+		gaps := []string{}
+		for _, e := range evs {
+			gaps = append(gaps, in[pos:e.Offset])
+			pos = e.Offset + e.Length
+		}
+		gaps = append(gaps, in[pos:])
+		for _, g := range gaps {
+			for _, l := range strings.Split(g, "\n") {
+				if strings.TrimSpace(l) == "" {
+					continue
+				}
+				fr, ok := testFramer{}.Unwrap(validText([]byte(strings.TrimSuffix(l, "\r"))), nil)
+				if !ok || strings.TrimSpace(fr.Text) != "" {
+					t.Fatalf("non-blank line skipped: %q", l)
+				}
+			}
+		}
 	})
 }
 

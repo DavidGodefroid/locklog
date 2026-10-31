@@ -77,7 +77,8 @@ jobs:
             exit 1
           }
 
-  # Every fuzz target for a short time (longer runs are nightly).
+  # Every fuzz target for a short time; run scripts/fuzz.sh with a longer
+  # FUZZTIME locally for deeper runs.
   fuzz:
     name: fuzz
     runs-on: ubuntu-latest
@@ -93,7 +94,14 @@ jobs:
           go-version: "1.26.x"
           check-latest: true
       - name: fuzz
-        run: FUZZTIME=20s sh scripts/fuzz.sh
+        run: GOMAXPROCS=2 FUZZTIME=20s sh scripts/fuzz.sh
+      - name: keep the failing inputs
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fuzz-crashers
+          path: "**/testdata/fuzz/**"
+          if-no-files-found: ignore
 
   # One required check name ("lint") for every static check; later pull
   # requests add steps here (goreleaser check, install.sh rules, ...).
