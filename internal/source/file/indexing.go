@@ -90,6 +90,7 @@ func (s *Source) store(fi fileInfo, size int64, gs []index.Granule) {
 		if st == nil || st.Gen != fi.gen || !s.sameFields(st) {
 			st = index.NewStream(fi.id.dev, fi.id.ino, fi.gen, s.opts.Trusted)
 			st.Compression = fi.id.compression
+			st.Tag = s.opts.Tag
 		}
 		st.PrefixLen, st.PrefixHash = fi.id.prefixLen, fi.id.prefixHash
 		if fi.id.compression != compNone {
@@ -253,17 +254,18 @@ func (s *Source) IndexCounts(ctx context.Context, q CountQuery) (CountResult, er
 				rest = append(rest, g)
 				continue
 			}
-			if !selectorIndexed(q.Selector, fields) || !selectorIndexed(source.Selector{Terms: byTerms(q.By)}, fields) {
+			if !selectorIndexed(q.Selector, fields) || !selectorIndexed(source.Selector{Terms: byTerms(q.By, q.ByLabels)}, fields) {
 				return CountResult{}, ErrNotIndexable
 			}
 			// A granule with a redacted or overflowing value of a
 			// counted or selected field is scanned instead.
-			if granuleUnknown(ig, fields, append(termFields(q.Selector), q.By...)) {
+			by := groupKeys(q.By, q.ByLabels)
+			if granuleUnknown(ig, fields, append(termFields(q.Selector), by...)) {
 				rest = append(rest, g)
 				continue
 			}
 			flush()
-			pos := positions(fields, q.By)
+			pos := positions(fields, by)
 			for _, m := range ig.Minutes {
 				t := time.Unix(m.M*60, 0).UTC()
 				if !q.Range.Contains(t) {
@@ -327,12 +329,25 @@ func granuleUnknown(g *index.Granule, fields, names []string) bool {
 	return false
 }
 
-func byTerms(by []string) []source.Term {
-	ts := make([]source.Term, len(by))
-	for i, f := range by {
-		ts[i] = source.Term{Field: f}
+func byTerms(by, byLabels []string) []source.Term {
+	ts := make([]source.Term, 0, len(by)+len(byLabels))
+	for _, f := range by {
+		ts = append(ts, source.Term{Field: f})
+	}
+	for _, l := range byLabels {
+		ts = append(ts, source.Term{Field: l, Label: true})
 	}
 	return ts
+}
+
+// groupKeys is the indexed names of a count's groups: By fields, then
+// ByLabels labels (a row's Vals are in that order).
+func groupKeys(by, byLabels []string) []string {
+	out := slices.Clone(by)
+	for _, l := range byLabels {
+		out = append(out, index.LabelKey(l))
+	}
+	return out
 }
 
 func positions(fields, by []string) []int {

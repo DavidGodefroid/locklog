@@ -130,7 +130,8 @@ func (s *Source) trustedLabel(n string) bool { return slices.Contains(s.o.Truste
 func (s *Source) trustedMeta(n string) bool  { return slices.Contains(s.o.TrustedMetadata, n) }
 
 // pushable reports whether a term means the same in Loki as locally: a
-// term on a trusted stream label, without an empty value (Loki's x="" also
+// label term (source.Term.Label: a line field is never a stream label) on
+// a trusted stream label, without an empty value (Loki's x="" also
 // matches an absent x, and x!="" means "present", where
 // source.Selector.Match needs x present and empty for = "").
 //
@@ -140,7 +141,7 @@ func (s *Source) trustedMeta(n string) bool  { return slices.Contains(s.o.Truste
 // stream. They are evaluated locally, on the metadata the categorized
 // response returns apart from the labels.
 func (s *Source) pushable(t source.Term) bool {
-	return (t.Op == "=" || t.Op == "in" || t.Op == "!=") && s.trustedLabel(t.Field) && len(t.Values) > 0 && !slices.Contains(t.Values, "")
+	return t.Label && (t.Op == "=" || t.Op == "in" || t.Op == "!=") && s.trustedLabel(t.Field) && len(t.Values) > 0 && !slices.Contains(t.Values, "")
 }
 
 // selector builds the server-side selector: the profile's, plus the
@@ -649,7 +650,7 @@ func (s *Source) Describe(ctx context.Context) (source.Schema, error) {
 		if hiddenLabels[l] || !nameRe.MatchString(l) {
 			continue
 		}
-		info := source.FieldInfo{Name: l, Trusted: s.trustedLabel(l)}
+		info := source.FieldInfo{Name: l, Label: true, Trusted: s.trustedLabel(l)}
 		if info.Trusted {
 			vb, err := s.do(ctx, "/loki/api/v1/label/"+l+"/values", v)
 			if err != nil {
@@ -663,7 +664,7 @@ func (s *Source) Describe(ctx context.Context) (source.Schema, error) {
 		sch.Fields = append(sch.Fields, info)
 	}
 	for _, m := range s.o.TrustedMetadata {
-		sch.Fields = append(sch.Fields, source.FieldInfo{Name: m, Trusted: true})
+		sch.Fields = append(sch.Fields, source.FieldInfo{Name: m, Label: true, Trusted: true})
 	}
 	return sch, nil
 }
@@ -750,10 +751,11 @@ var maxBoundaryBytes int64 = 8 << 20
 // fetch or more than 8 MiB of them, or one with a page or more of entries
 // at its nanosecond.
 func (s *Source) IndexCounts(ctx context.Context, q source.CountQuery) (source.CountResult, error) {
-	if len(q.By) > 2 {
+	// Loki counts by labels only: a line field (q.By) needs the lines.
+	if len(q.By) > 0 || len(q.ByLabels) > 2 {
 		return source.CountResult{}, source.ErrNotIndexable
 	}
-	for _, b := range q.By {
+	for _, b := range q.ByLabels {
 		if !s.trustedLabel(b) || !nameRe.MatchString(b) {
 			return source.CountResult{}, source.ErrNotIndexable
 		}
@@ -782,7 +784,7 @@ func (s *Source) IndexCounts(ctx context.Context, q source.CountQuery) (source.C
 	if err != nil {
 		return source.CountResult{}, err
 	}
-	by := slices.Clone(q.By)
+	by := slices.Clone(q.ByLabels)
 	from, to, w := q.Range.From.UnixNano(), q.Range.To.UnixNano(), int64(bucket)
 	n := (to - from) / w
 	type key struct {

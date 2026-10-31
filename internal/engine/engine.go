@@ -50,9 +50,6 @@ type Limits struct {
 	MaxOutput  int
 	// Deadline of one call.
 	Deadline time.Duration
-	// MaxMaskFailures in one granule before the granule is skipped
-	// whole (see run).
-	MaxMaskFailures int
 }
 
 // DefaultLimits are the design defaults.
@@ -63,7 +60,7 @@ func DefaultLimits() Limits {
 		// 1 MB/s/core, so 512 MiB (both kinds) is several free
 		// continuations; the code ceiling stays 64 GiB.
 		LocalBytes: 512 << 20, RemoteBytes: 512 << 20, MaxRecords: 200, MaxOutput: 64 << 10,
-		Deadline: 30 * time.Second, MaxMaskFailures: 3}
+		Deadline: 30 * time.Second}
 }
 
 // Options configure an Engine.
@@ -166,6 +163,9 @@ type cursorState struct {
 	// last is continued over that window, not over a new one.
 	From time.Time `json:"a"`
 	To   time.Time `json:"b"`
+	// Last is the query's last as the agent gave it: a continuation must
+	// give the same one (or none, with the same from/to).
+	Last string `json:"l,omitempty"`
 }
 
 // refState is sealed into a record ref.
@@ -226,8 +226,7 @@ type SearchResult struct {
 	Scanned      Scanned           `json:"scanned"`
 	Masking      Masking           `json:"masking"`
 	// MaskedFailures counts records withheld whole because masking
-	// failed: the records it failed on, and every record of a granule
-	// where it failed MaxMaskFailures times or more.
+	// failed (0 with the opt-in pre-filter, see prefilter.go).
 	MaskedFailures int `json:"masked_failures,omitempty"`
 }
 
@@ -327,11 +326,16 @@ func (e *Engine) openCursor(cursor string) (cursorState, *Error) {
 }
 
 // restoreWindow resolves the last of a continued query to the window of its
-// first call; the query digest, over the resolved range, then matches.
-func restoreWindow(q *Query, st cursorState) {
+// first call; the query digest, over the resolved range, then matches. A
+// continuation whose last differs from the first call's is refused.
+func restoreWindow(q *Query, st cursorState) *Error {
+	if q.Last != st.Last {
+		return &Error{Code: EStale, Span: "cursor", Message: "the cursor belongs to another query"}
+	}
 	if q.Last != "" && q.From.IsZero() && q.To.IsZero() && !st.From.IsZero() {
 		q.From, q.To, q.Last = st.From, st.To, ""
 	}
+	return nil
 }
 
 // resume returns the frozen plan of an opened cursor of a query.
@@ -428,27 +432,14 @@ func (e *Engine) run(ctx context.Context, plan source.Byteplan, chunk, gran int,
 		// which ones do, so they are not counted (failed records are
 		// still withheld whole, as they never match); see
 		// prefilter.go.
-		perGranule := map[int]int{}
-		for i := range recs {
-			if recs[i].Failed() && !filtered {
-				perGranule[raws[i].Granule]++
-			}
-		}
 		for i := range raws {
-			// A granule where masking failed MaxMaskFailures times
-			// or more is skipped whole: none of its records is
-			// returned or counted, and all of them count as masked
-			// failures (a masker failing that often on a granule's
-			// content is not trusted with the rest of it). This was
-			// chosen over a call-level E_MASK refusal: the call
-			// would stop there every time, so no cursor (and, on a
-			// cold plan, no narrower range) could ever get past it.
-			// Skipping depends on the plan's granules and their
-			// bytes only, never on predicates or call boundaries.
-			if n := perGranule[raws[i].Granule]; n >= e.o.Limits.MaxMaskFailures {
-				failures++
-				continue
-			}
+			// A record masking failed on is withheld whole (it
+			// never matches nor counts by masked values) and
+			// counted; the call goes on, so no cursor ever stops at
+			// it. With the pre-filter on, only the records whose
+			// clear text holds the needles are masked: their
+			// failures would tell which ones do, so they are not
+			// counted (see prefilter.go).
 			if recs[i].Failed() && !filtered {
 				failures++
 			}
@@ -621,13 +612,16 @@ func (e *Engine) Search(ctx context.Context, q Query) (_ SearchResult, retErr er
 			}
 		}
 	}
+	last := q.Last
 	var st cursorState
 	if cursor != "" {
 		var err *Error
 		if st, err = e.openCursor(cursor); err != nil {
 			return SearchResult{}, err
 		}
-		restoreWindow(&q, st)
+		if err = restoreWindow(&q, st); err != nil {
+			return SearchResult{}, err
+		}
 	}
 	if err := e.validator(maxRange).validate(&q); err != nil {
 		return SearchResult{}, err
@@ -729,7 +723,7 @@ func (e *Engine) Search(ctx context.Context, q Query) (_ SearchResult, retErr er
 	res.Complete = done && len(rest) == 0
 	if !res.Complete {
 		st := cursorState{Plan: f.id, Query: digest, Chunk: chunk, Granule: gran, Epoch: e.o.Masker.Epoch(), PolicyFP: e.o.PolicyFP(),
-			From: q.From, To: q.To}
+			From: q.From, To: q.To, Last: last}
 		if len(rest) > 0 {
 			st.Cache = e.cache.put(rest)
 		}

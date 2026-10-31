@@ -39,7 +39,12 @@ func (r Range) Overlaps(from, to time.Time) bool { return !to.Before(r.From) && 
 // value, "in" on a set. Values are the field's clear values (trusted fields
 // are shown to the agent in clear after the detectors).
 type Term struct {
-	Field  string
+	Field string
+	// Label is set for a term on a label of the source's frame (Loki
+	// stream labels, journald and docker attributes: parse.Event.Attrs),
+	// unset for a line field. They are separate namespaces: a source
+	// applies a term only in its own one.
+	Label  bool
 	Op     string // "=", "!=", "in"
 	Values []string
 }
@@ -50,10 +55,15 @@ type Selector struct {
 	Terms []Term
 }
 
-// Match reports whether a record whose trusted fields have values vals
-// (missing fields absent) satisfies every term.
-func (s Selector) Match(vals map[string]string) bool {
+// Match reports whether a record whose trusted line fields have values
+// fields and whose labels have values labels (missing ones absent) satisfies
+// every term.
+func (s Selector) Match(fields, labels map[string]string) bool {
 	for _, t := range s.Terms {
+		vals := fields
+		if t.Label {
+			vals = labels
+		}
 		v, ok := vals[t.Field]
 		switch t.Op {
 		case "=", "in":
@@ -174,7 +184,10 @@ type Iterator interface {
 
 // FieldInfo describes one field name a source has seen.
 type FieldInfo struct {
-	Name    string
+	Name string
+	// Label is set for a label of the source's frame (a Loki stream
+	// label, a docker container or stream), unset for a line field.
+	Label   bool
 	Trusted bool
 	// Values are the trusted field's distinct values (raw, masked by the
 	// caller), when the source knows them and they are few.
@@ -233,7 +246,10 @@ var ErrNotIndexable = errors.New("source: the count needs fields the index (or t
 type CountQuery struct {
 	Range    Range
 	Selector Selector
+	// By are line fields, ByLabels labels; a row's Vals are the By values
+	// then the ByLabels values.
 	By       []string
+	ByLabels []string
 	// Bucket is a whole number of minutes (0: one bucket for the range).
 	Bucket time.Duration
 }

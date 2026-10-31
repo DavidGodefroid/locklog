@@ -5,7 +5,6 @@ package file
 import (
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
 	"strings"
@@ -15,13 +14,15 @@ import (
 )
 
 // dir is an open directory, reached from a root without following any
-// symbolic link.
+// symbolic link. It is opened for traversal only (O_PATH on Linux): Docker's
+// 0710 directories grant search, not read, to the group the console joins.
+// list reopens it for reading.
 type dir struct {
 	fd   int
 	path string // for messages only
 }
 
-const dirFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC | unix.O_NOFOLLOW
+const dirFlags = pathFlag | unix.O_DIRECTORY | unix.O_CLOEXEC | unix.O_NOFOLLOW
 
 // openRoot opens a mount root. The root path itself is canonical (the
 // launcher resolved it and the console checked its dev/inode); its last
@@ -76,17 +77,11 @@ func (d *dir) lstat(name string) (entry, error) {
 	return entry{name: name, dir: t == unix.S_IFDIR, reg: t == unix.S_IFREG}, nil
 }
 
-// list returns the directory's entries.
+// list returns the directory's entries. It reopens the directory for
+// reading: d itself may be open for traversal only.
 func (d *dir) list() ([]entry, error) {
-	fd, err := unix.Dup(d.fd)
+	fd, err := unix.Openat(d.fd, ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
-		return nil, err
-	}
-	unix.CloseOnExec(fd)
-	// A dup shares the directory's read position: start from the top
-	// (the directory may have been listed before).
-	if _, err := unix.Seek(fd, 0, io.SeekStart); err != nil {
-		unix.Close(fd)
 		return nil, err
 	}
 	f := os.NewFile(uintptr(fd), d.path)
@@ -132,26 +127,52 @@ func regular(fd int, path string) (*os.File, error) {
 
 // openBeneath opens the regular file at rel (slash-separated, relative)
 // beneath root, without following any symbolic link and without leaving
-// root.
-func openBeneath(root, rel string) (*os.File, error) {
+// root. With noXDev it also refuses to cross a mount point (a mount
+// propagated under root after the console started).
+func openBeneath(root, rel string, noXDev bool) (*os.File, error) {
 	for _, p := range strings.Split(rel, "/") {
 		if err := validName(p); err != nil {
 			return nil, err
 		}
 	}
-	if f, err, ok := openat2Beneath(root, rel); ok {
+	if f, err, ok := openat2Beneath(root, rel, noXDev); ok {
 		return f, err
 	}
-	return walkOpen(root, rel)
+	return walkOpen(root, rel, noXDev)
 }
 
+// errXDev refuses a path that crosses a mount point under a noXDev root.
+var errXDev = errors.New("the path crosses a mount point")
+
 // walkOpen is the component-wise fallback: one openat(O_NOFOLLOW) per
-// component, each relative to the directory before it.
-func walkOpen(root, rel string) (*os.File, error) {
+// component, each relative to the directory before it. With noXDev every
+// opened component is compared with the root: by mount id where the kernel
+// reports it (Linux >= 5.8), else by device.
+func walkOpen(root, rel string, noXDev bool) (*os.File, error) {
 	parts := strings.Split(rel, "/")
 	d, err := openRoot(root)
 	if err != nil {
 		return nil, err
+	}
+	var rootMnt mountKey
+	if noXDev {
+		if rootMnt, err = mountOf(d.fd); err != nil {
+			d.close()
+			return nil, err
+		}
+	}
+	same := func(fd int, path string) error {
+		if !noXDev {
+			return nil
+		}
+		k, err := mountOf(fd)
+		if err != nil {
+			return err
+		}
+		if k != rootMnt {
+			return &fs.PathError{Op: "open", Path: path, Err: errXDev}
+		}
+		return nil
 	}
 	for _, p := range parts[:len(parts)-1] {
 		next, err := d.sub(p)
@@ -160,9 +181,21 @@ func walkOpen(root, rel string) (*os.File, error) {
 			return nil, err
 		}
 		d = next
+		if err := same(d.fd, d.path); err != nil {
+			d.close()
+			return nil, err
+		}
 	}
 	defer d.close()
-	return d.open(parts[len(parts)-1])
+	f, err := d.open(parts[len(parts)-1])
+	if err != nil {
+		return nil, err
+	}
+	if err := same(int(f.Fd()), f.Name()); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return f, nil
 }
 
 // devIno returns the device and inode of a file.

@@ -145,6 +145,13 @@ var (
 	orgIDRe      = regexp.MustCompile(`^[A-Za-z0-9_.!*'()-]{1,150}$`)
 )
 
+// ValidContainerName reports whether n is a container name (not a glob) the
+// docker source may serve: the characters of a container glob, without '*'
+// and '?'.
+func ValidContainerName(n string) bool {
+	return containerRe.MatchString(n) && !strings.ContainsAny(n, "*?")
+}
+
 // ConsolePrefix starts the name of every locklog console container. A
 // container glob that can match any name with this prefix is refused; the
 // docker source also skips console containers by label and id when it

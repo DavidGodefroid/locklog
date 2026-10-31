@@ -539,9 +539,10 @@ func TestTrustedTermsGoServerSide(t *testing.T) {
 	f := &fakeLoki{entries: dataset(200)}
 	s := newSource(t, f, nil)
 	sel := source.Selector{Terms: []source.Term{
-		{Field: "level", Op: "in", Values: []string{"error", "warn"}},
-		{Field: "trace_id", Op: "=", Values: []string{"t3"}}, // metadata: evaluated locally
-		{Field: "status", Op: "=", Values: []string{"500"}},  // not a label: evaluated locally
+		{Field: "level", Label: true, Op: "in", Values: []string{"error", "warn"}},
+		{Field: "trace_id", Label: true, Op: "=", Values: []string{"t3"}}, // metadata: evaluated locally
+		{Field: "status", Op: "=", Values: []string{"500"}},               // not a label: evaluated locally
+		{Field: "app", Op: "=", Values: []string{"web"}},                  // a line field named like a label: local
 	}}
 	recs := scanAll(t, s, source.Range{From: t0, To: t0.Add(time.Hour)}, sel)
 	for _, r := range recs {
@@ -565,7 +566,7 @@ func TestTrustedTermsGoServerSide(t *testing.T) {
 		t.Fatalf("%d records, want %d", len(recs), want)
 	}
 	for _, q := range f.queries {
-		if strings.Contains(q, "status") || strings.Contains(q, "500") || strings.Contains(q, "trace_id") {
+		if strings.Contains(q, "status") || strings.Contains(q, "500") || strings.Contains(q, "trace_id") || strings.Contains(q, "web") {
 			t.Fatalf("a term other than a trusted label reached Loki: %s", q)
 		}
 		if !strings.Contains(q, `env="prod"`) {
@@ -589,7 +590,7 @@ func TestStreamLabelShadowingMetadata(t *testing.T) {
 	}
 	s := newSource(t, f, nil)
 	r := source.Range{From: t0, To: t0.Add(time.Hour)}
-	sel := source.Selector{Terms: []source.Term{{Field: "trace_id", Op: "=", Values: []string{"t3"}}}}
+	sel := source.Selector{Terms: []source.Term{{Field: "trace_id", Label: true, Op: "=", Values: []string{"t3"}}}}
 	recs := scanAll(t, s, r, sel)
 	if len(recs) != len(f.entries) {
 		t.Fatalf("%d records, want all %d (the engine filters)", len(recs), len(f.entries))
@@ -603,7 +604,7 @@ func TestStreamLabelShadowingMetadata(t *testing.T) {
 		if strings.HasPrefix(rec.Event.Raw, "shadow") && vals["trace_id"] == "t3" {
 			t.Fatalf("a stream label passed for trusted metadata: %+v", rec.Event.Attrs)
 		}
-		if sel.Match(vals) {
+		if sel.Match(nil, vals) {
 			matched++
 		}
 	}
@@ -704,8 +705,8 @@ func TestMetricCounts(t *testing.T) {
 		f.entries = append(f.entries, fakeEntry{ts: at.UnixNano(), labels: map[string]string{"env": "prod", "app": "api", "level": "edge"}, line: "edge"})
 	}
 	s := newSource(t, f, nil)
-	sel := source.Selector{Terms: []source.Term{{Field: "app", Op: "=", Values: []string{"api"}}}}
-	res, err := s.IndexCounts(ctx, source.CountQuery{Range: r, By: []string{"level"}, Bucket: 5 * time.Minute, Selector: sel})
+	sel := source.Selector{Terms: []source.Term{{Field: "app", Label: true, Op: "=", Values: []string{"api"}}}}
+	res, err := s.IndexCounts(ctx, source.CountQuery{Range: r, ByLabels: []string{"level"}, Bucket: 5 * time.Minute, Selector: sel})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -732,7 +733,7 @@ func TestMetricCounts(t *testing.T) {
 		t.Fatalf("%d guard queries, %d boundary fetches", guards, logs)
 	}
 	// One bucket for the range: an instant query, [From, To).
-	one, err := s.IndexCounts(ctx, source.CountQuery{Range: r, By: []string{"level"}, Selector: sel})
+	one, err := s.IndexCounts(ctx, source.CountQuery{Range: r, ByLabels: []string{"level"}, Selector: sel})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -743,16 +744,23 @@ func TestMetricCounts(t *testing.T) {
 	if _, err := s.IndexCounts(ctx, source.CountQuery{Range: source.Range{From: r.From.Add(time.Minute), To: r.To.Add(time.Minute)}, Bucket: 5 * time.Minute}); !errors.Is(err, source.ErrNotIndexable) {
 		t.Fatalf("misaligned: %v", err)
 	}
+	// By a line field (even one named like a trusted label): not served.
+	if _, err := s.IndexCounts(ctx, source.CountQuery{Range: r, By: []string{"level"}, Bucket: time.Minute}); !errors.Is(err, source.ErrNotIndexable) {
+		t.Fatalf("by the field level: %v", err)
+	}
+	if _, err := s.IndexCounts(ctx, source.CountQuery{Range: r, Selector: source.Selector{Terms: []source.Term{{Field: "app", Op: "=", Values: []string{"api"}}}}}); !errors.Is(err, source.ErrNotIndexable) {
+		t.Fatalf("a field term named like a label: %v", err)
+	}
 	// By metadata or by an untrusted label: not served by Loki.
 	for _, by := range []string{"trace_id", "pod"} {
-		if _, err := s.IndexCounts(ctx, source.CountQuery{Range: r, By: []string{by}, Bucket: time.Minute}); !errors.Is(err, source.ErrNotIndexable) {
+		if _, err := s.IndexCounts(ctx, source.CountQuery{Range: r, ByLabels: []string{by}, Bucket: time.Minute}); !errors.Is(err, source.ErrNotIndexable) {
 			t.Fatalf("by %s: %v", by, err)
 		}
 	}
 	// A backend whose points are not on the grid asked for: not served.
 	f.offGrid = true
 	for _, b := range []time.Duration{5 * time.Minute, 0} {
-		if _, err := s.IndexCounts(ctx, source.CountQuery{Range: r, By: []string{"level"}, Bucket: b, Selector: sel}); !errors.Is(err, source.ErrNotIndexable) {
+		if _, err := s.IndexCounts(ctx, source.CountQuery{Range: r, ByLabels: []string{"level"}, Bucket: b, Selector: sel}); !errors.Is(err, source.ErrNotIndexable) {
 			t.Fatalf("bucket %v off the grid: %v", b, err)
 		}
 	}
@@ -883,10 +891,10 @@ func TestEmptyValuesNotPushedDown(t *testing.T) {
 	// In Loki, x="" also matches an absent x and x!="" means present;
 	// locally, = "" needs x present and empty. Such terms stay local.
 	for _, term := range []source.Term{
-		{Field: "level", Op: "=", Values: []string{""}},
-		{Field: "level", Op: "!=", Values: []string{""}},
-		{Field: "level", Op: "in", Values: []string{"error", ""}},
-		{Field: "trace_id", Op: "!=", Values: []string{"t1", ""}},
+		{Field: "level", Label: true, Op: "=", Values: []string{""}},
+		{Field: "level", Label: true, Op: "!=", Values: []string{""}},
+		{Field: "level", Label: true, Op: "in", Values: []string{"error", ""}},
+		{Field: "trace_id", Label: true, Op: "!=", Values: []string{"t1", ""}},
 	} {
 		f := &fakeLoki{entries: dataset(40)}
 		s := newSource(t, f, nil)
@@ -983,9 +991,9 @@ func TestCountsNeverGroupOnMetadata(t *testing.T) {
 			meta: map[string]string{"level": "forged"}, line: "no level label"})
 	}
 	s := newSource(t, f, nil)
-	sel := source.Selector{Terms: []source.Term{{Field: "app", Op: "=", Values: []string{"api"}}}}
+	sel := source.Selector{Terms: []source.Term{{Field: "app", Label: true, Op: "=", Values: []string{"api"}}}}
 	for _, b := range []time.Duration{5 * time.Minute, 0} {
-		res, err := s.IndexCounts(ctx, source.CountQuery{Range: r, By: []string{"level"}, Bucket: b, Selector: sel})
+		res, err := s.IndexCounts(ctx, source.CountQuery{Range: r, ByLabels: []string{"level"}, Bucket: b, Selector: sel})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1031,7 +1039,7 @@ func TestCountsDetectIngestionDuringTheCount(t *testing.T) {
 				before := wantCounts(f, r, width)
 				after := wantCounts(&fakeLoki{entries: append(base(), e)}, r, width)
 				s := newSource(t, f, nil)
-				res, err := s.IndexCounts(ctx, source.CountQuery{Range: r, By: []string{"level"}, Bucket: b})
+				res, err := s.IndexCounts(ctx, source.CountQuery{Range: r, ByLabels: []string{"level"}, Bucket: b})
 				if errors.Is(err, source.ErrNotIndexable) {
 					continue
 				}
@@ -1140,7 +1148,7 @@ func TestSmallGuards(t *testing.T) {
 	r := source.Range{From: t0, To: t0.Add(10 * time.Minute)}
 	// An unknown operator is never taken as applied by a count.
 	if _, err := s.IndexCounts(ctx, source.CountQuery{Range: r, Bucket: 5 * time.Minute,
-		Selector: source.Selector{Terms: []source.Term{{Field: "app", Op: "~", Values: []string{"api"}}}}}); !errors.Is(err, source.ErrNotIndexable) {
+		Selector: source.Selector{Terms: []source.Term{{Field: "app", Label: true, Op: "~", Values: []string{"api"}}}}}); !errors.Is(err, source.ErrNotIndexable) {
 		t.Fatalf("unknown op: %v", err)
 	}
 	// Loki's limit refusals of a metric query: not served (the engine

@@ -14,12 +14,17 @@ func TestSelectorMatch(t *testing.T) {
 		{"level": "info", "app": "api"}:  false,
 		{"app": "api"}:                   false,
 	} {
-		if got := sel.Match(*vals); got != want {
+		if got := sel.Match(*vals, nil); got != want {
 			t.Fatalf("%v: %v", *vals, got)
 		}
 	}
-	if (Selector{Terms: []Term{{Field: "a", Op: "~", Values: []string{"x"}}}}).Match(map[string]string{"a": "x"}) {
+	if (Selector{Terms: []Term{{Field: "a", Op: "~", Values: []string{"x"}}}}).Match(map[string]string{"a": "x"}, nil) {
 		t.Fatal("unknown op matched")
+	}
+	// Fields and labels are separate namespaces.
+	lab := Selector{Terms: []Term{{Field: "env", Label: true, Op: "=", Values: []string{"prod"}}}}
+	if !lab.Match(map[string]string{"env": "dev"}, map[string]string{"env": "prod"}) || lab.Match(map[string]string{"env": "prod"}, nil) {
+		t.Fatal("label term read a field")
 	}
 }
 

@@ -22,8 +22,8 @@ const (
 	EPIIInQuery   = "E_PII_IN_QUERY"
 	EOverBudget   = "E_OVER_BUDGET"
 	ESource       = "E_SOURCE"
-	// EMask is reserved: search and count skip a granule where masking
-	// fails too often instead of refusing (see run).
+	// EMask is reserved: a record masking fails on is withheld and
+	// counted in masked_failures, never refused (see run).
 	EMask          = "E_MASK"
 	EPolicyChanged = "E_POLICY_CHANGED"
 	EStale         = "E_STALE"
@@ -184,11 +184,13 @@ func (q *Query) selector(src string, trusted func(src, field string) bool) sourc
 		if !trusted(src, p.name()) || p.numeric() {
 			continue
 		}
+		// A label predicate is pushed as a label term, a field one
+		// as a field term: a source applies each in its namespace.
 		switch p.Op {
 		case OpEq, OpIn:
-			sel.Terms = append(sel.Terms, source.Term{Field: p.name(), Op: OpIn, Values: p.vals})
+			sel.Terms = append(sel.Terms, source.Term{Field: p.name(), Label: p.Label != "", Op: OpIn, Values: p.vals})
 		case OpNe:
-			sel.Terms = append(sel.Terms, source.Term{Field: p.name(), Op: OpNe, Values: p.vals})
+			sel.Terms = append(sel.Terms, source.Term{Field: p.name(), Label: p.Label != "", Op: OpNe, Values: p.vals})
 		}
 	}
 	return sel

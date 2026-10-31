@@ -238,3 +238,14 @@ func TestLokiProduction(t *testing.T) {
 		t.Errorf("remote = %+v", r)
 	}
 }
+
+func TestValidContainerName(t *testing.T) {
+	for n, want := range map[string]bool{
+		"shop-api-1": true, "a": true, "A.b_c-9": true, "": false, "-x": false, "_x": false,
+		"shop-*": false, "a?": false, "a b": false, "a/b": false, "a,b": false, strings.Repeat("a", 129): false,
+	} {
+		if got := ValidContainerName(n); got != want {
+			t.Errorf("ValidContainerName(%q) = %v", n, got)
+		}
+	}
+}

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"os"
 	"slices"
@@ -49,7 +50,9 @@ type Options struct {
 	// Roots are the read-only mount roots; every path must be under one.
 	Roots  []string
 	Parser *parse.Parser
-	// Trusted are the trusted low-cardinality fields the index counts.
+	// Trusted are the trusted low-cardinality line fields the index
+	// counts, and labels as index.LabelKey (a framer's attributes: the
+	// docker source's container and stream).
 	Trusted []string
 	// Index is the local index store (nil: no index).
 	Index *index.Store
@@ -58,6 +61,21 @@ type Options struct {
 	Sensitive func(field, value string) bool
 	// Now is the clock (tests).
 	Now func() time.Time
+	// NoXDev refuses to open a file across a mount point under its root
+	// (RESOLVE_NO_XDEV; the fallback walk compares mount ids, else
+	// devices): the docker source, whose root may receive propagated
+	// mounts after the console started. On a kernel without openat2 and
+	// before 5.8 (no statx mount id), only the device is compared: a bind
+	// mount of the same filesystem is not detected there.
+	NoXDev bool
+	// Tag is stored with each stream's index and checked like the trusted
+	// fields: an index built under another tag is rebuilt (the docker
+	// source's container name, which every record carries).
+	Tag string
+	// Alternates maps a literal path to the path read instead while the
+	// first is absent (docker: <id>-json.log.1, then .1.gz once Docker
+	// compressed it): never both.
+	Alternates map[string]string
 }
 
 // Source is a file source. It is safe for concurrent use.
@@ -95,7 +113,7 @@ func New(opts Options) (*Source, error) {
 	if len(opts.Paths) == 0 {
 		return nil, errors.New("file source: no paths")
 	}
-	for _, p := range opts.Paths {
+	for _, p := range append(slices.Clone(opts.Paths), slices.Collect(maps.Values(opts.Alternates))...) {
 		if err := checkPattern(p, opts.Recursive); err != nil {
 			return nil, err
 		}
@@ -126,6 +144,11 @@ func (s *Source) files(ctx context.Context) ([]fileInfo, error) {
 		if err != nil {
 			return nil, err
 		}
+		if alt := s.opts.Alternates[p]; len(got) == 0 && alt != "" {
+			if got, err = expand(s.opts.Roots, alt, s.opts.Recursive); err != nil {
+				return nil, err
+			}
+		}
 		for _, m := range got {
 			if !seen[m.path()] {
 				seen[m.path()] = true
@@ -138,7 +161,7 @@ func (s *Source) files(ctx context.Context) ([]fileInfo, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		f, err := openBeneath(m.root, m.rel)
+		f, err := openBeneath(m.root, m.rel, s.opts.NoXDev)
 		if err != nil {
 			continue // vanished or unreadable since the listing
 		}
@@ -298,7 +321,7 @@ func (s *Source) lookup(ctx context.Context, stream string) (fileInfo, error) {
 
 // open opens fi's file again and checks it is still the same stream.
 func (s *Source) open(fi fileInfo) (*os.File, fileInfo, error) {
-	f, err := openBeneath(fi.m.root, fi.m.rel)
+	f, err := openBeneath(fi.m.root, fi.m.rel, s.opts.NoXDev)
 	if err != nil {
 		return nil, fileInfo{}, source.ErrStale
 	}
@@ -331,11 +354,12 @@ func (s *Source) streamIndex(fi fileInfo) (fields []string, size int64, granules
 	return fields, size, granules
 }
 
-// sameFields reports whether st indexes the source's trusted fields.
+// sameFields reports whether st indexes the source's trusted fields, under
+// the source's tag.
 func (s *Source) sameFields(st *index.Stream) bool {
 	all := append(slices.Clone(st.Fields), st.Dropped...)
 	sort.Strings(all)
-	return slices.Equal(all, s.opts.Trusted)
+	return slices.Equal(all, s.opts.Trusted) && st.Tag == s.opts.Tag
 }
 
 // streamSize returns the length of fi's stream: the file size for a plain
@@ -446,20 +470,23 @@ func granuleMayMatch(g *index.Granule, fields []string, r source.Range, sel sour
 	return match(g.Untimed)
 }
 
+// selectorIndexed reports whether every term is on an indexed line field or
+// label, each in its own namespace.
 func selectorIndexed(sel source.Selector, fields []string) bool {
 	for _, t := range sel.Terms {
-		if !slices.Contains(fields, t.Field) {
+		if !slices.Contains(fields, index.TermKey(t.Field, t.Label)) {
 			return false
 		}
 	}
 	return true
 }
 
-// termFields returns the fields a selector's terms name.
+// termFields returns the indexed names (index.TermKey) a selector's terms
+// name.
 func termFields(sel source.Selector) []string {
 	var out []string
 	for _, t := range sel.Terms {
-		out = append(out, t.Field)
+		out = append(out, index.TermKey(t.Field, t.Label))
 	}
 	return out
 }
@@ -477,15 +504,21 @@ func unknown(fields, vals, names []string) bool {
 	return false
 }
 
-// tupleMap maps fields to a tuple's values, leaving absent fields out.
-func tupleMap(fields, vals []string) map[string]string {
-	m := make(map[string]string, len(fields))
-	for i, f := range fields {
-		if vals[i] != index.Absent {
-			m[f] = vals[i]
+// tupleMap maps the indexed names to a tuple's values, line fields and
+// labels apart, leaving absent ones out.
+func tupleMap(keys, vals []string) (fields, labels map[string]string) {
+	fields, labels = map[string]string{}, map[string]string{}
+	for i, k := range keys {
+		if vals[i] == index.Absent {
+			continue
+		}
+		if n, label := index.SplitKey(k); label {
+			labels[n] = vals[i]
+		} else {
+			fields[n] = vals[i]
 		}
 	}
-	return m
+	return fields, labels
 }
 
 // Scan returns the records of a chunk.
@@ -791,7 +824,8 @@ func (s *Source) Describe(ctx context.Context) (source.Schema, error) {
 		}
 	}
 	for _, f := range s.opts.Trusted {
-		info := source.FieldInfo{Name: f, Trusted: true}
+		name, label := index.SplitKey(f)
+		info := source.FieldInfo{Name: name, Label: label, Trusted: true}
 		if !dropped[f] && len(values[f]) <= index.MaxDistinct {
 			for v := range values[f] {
 				info.Values = append(info.Values, v)

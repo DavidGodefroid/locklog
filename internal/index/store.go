@@ -41,6 +41,9 @@ type Stream struct {
 	// dropped for cardinality.
 	Fields  []string `json:"fields"`
 	Dropped []string `json:"dropped,omitempty"`
+	// Tag is the source's tag the stream was indexed under (the docker
+	// source's container name); another tag means another index.
+	Tag string `json:"tag,omitempty"`
 	// Granules, by granule number.
 	Granules map[int64]*Granule `json:"-"`
 	List     []*Granule         `json:"granules"`

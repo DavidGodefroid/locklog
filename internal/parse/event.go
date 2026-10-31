@@ -134,8 +134,11 @@ type Event struct {
 	Unterminated bool
 
 	// Attrs are the container frame's fields (stream, ...) for framed
-	// formats; nil otherwise.
+	// formats, after the source's static attributes; nil otherwise.
 	Attrs []Member
+	// Framed is set when the event came out of a container frame: its
+	// FrameKeys resolve against Attrs only.
+	Framed bool
 
 	timeMember *Member // the member Time was lifted from
 	timePos    int     // its index in Fields had it not been lifted

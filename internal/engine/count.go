@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/DavidGodefroid/locklog/internal/index"
 	"github.com/DavidGodefroid/locklog/internal/mask"
@@ -34,8 +36,12 @@ type CountQuery struct {
 	Query
 	// Bucket is a duration ("5m"); empty: one bucket for the range.
 	Bucket string `json:"bucket,omitempty"`
-	// By groups by up to two trusted or pseudonymised fields.
-	By []string `json:"by,omitempty"`
+	// By groups by up to two trusted or pseudonymised line fields, and
+	// ByLabels by source labels (Loki stream labels, journald and docker
+	// attributes); at most MaxBy in all. A group's key holds the By
+	// values, then the ByLabels values.
+	By       []string `json:"by,omitempty"`
+	ByLabels []string `json:"by_labels,omitempty"`
 	// FirstLast adds each group's first and last timestamp.
 	FirstLast bool `json:"first_last,omitempty"`
 
@@ -196,7 +202,10 @@ func (q *CountQuery) bucketOf(t time.Time) time.Time {
 // Count runs a count. A trusted-field-only count is answered from the local
 // index where it holds the range, and from a plan-based scan of the rest
 // (continued free); every other count scans its plan, masking every record
-// first.
+// first. A record masking fails on is reported in masked_failures; a
+// trusted-only count still counts it by its trusted values, as the index
+// does (countFailed), while any other count leaves it out, since its masked
+// predicates cannot be evaluated on it.
 func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr error) {
 	cursor := q.Cursor
 	q.Cursor = ""
@@ -205,7 +214,7 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 		q.Sources = append([]string(nil), e.names...)
 		trustedOnly = q.trustedOnly(func(s, f string) bool { return e.o.Trusted(s, f) })
 	}
-	for _, b := range q.By {
+	for _, b := range append(slices.Clone(q.By), q.ByLabels...) {
 		for _, s := range q.Sources {
 			if !e.o.Trusted(s, b) {
 				trustedOnly = false
@@ -221,24 +230,32 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 			}
 		}
 	}
+	last := q.Last
 	var st cursorState
 	if cursor != "" {
 		var err *Error
 		if st, err = e.openCursor(cursor); err != nil {
 			return CountResult{}, err
 		}
-		restoreWindow(&q.Query, st)
+		if err = restoreWindow(&q.Query, st); err != nil {
+			return CountResult{}, err
+		}
 	}
 	v := e.validator(maxRange)
 	if err := v.validate(&q.Query); err != nil {
 		return CountResult{}, err
 	}
-	if len(q.By) > MaxBy {
-		return CountResult{}, refuse(EBadQuery, "by", "at most %d fields", MaxBy)
+	if len(q.By)+len(q.ByLabels) > MaxBy {
+		return CountResult{}, refuse(EBadQuery, "by", "at most %d fields and labels", MaxBy)
 	}
 	for i, b := range q.By {
 		if err := v.path(&q.Query, b, fmt.Sprintf("by[%d]", i)); err != nil {
 			return CountResult{}, err
+		}
+	}
+	for i, l := range q.ByLabels {
+		if l == "" || len(l) > 512 || !utf8.ValidString(l) || strings.ContainsFunc(l, unicode.IsControl) {
+			return CountResult{}, refuse(EBadQuery, fmt.Sprintf("by_labels[%d]", i), "invalid label name")
 		}
 	}
 	if q.Bucket != "" {
@@ -300,6 +317,15 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 	sc, failures := Scanned{}, 0
 	var err *Error
 	chunk, gran, sc, failures, err = e.run(ctx, f.plan, chunk, gran, nil, e.callBytes(q.Sources), func(raw source.RawRecord, rec mask.Record) {
+		if rec.Failed() && trustedOnly {
+			// The index counts every record by its trusted values;
+			// a scan of a trusted-only count does the same for a
+			// record masking failed on (still withheld from any
+			// output and reported in masked_failures), so index and
+			// scan answers agree.
+			e.countFailed(&q, raw, rec, a)
+			return
+		}
 		if !q.match(rec) {
 			return
 		}
@@ -311,9 +337,12 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 		if !q.Query.rangeContains(t, a.indexed) {
 			return
 		}
-		key := make([]*string, len(q.By))
-		for i, b := range q.By {
-			vs := lookup(rec, &Pred{Field: b})
+		by := q.groupBy()
+		key := make([]*string, len(by))
+		for i := range by {
+			// A label is read from the record's labels, a field
+			// from its line fields: never one for the other.
+			vs := lookup(rec, &by[i])
 			if len(vs) > 0 && vs[0].kind != mask.Object && vs[0].kind != mask.Null {
 				s := vs[0].text
 				key[i] = &s
@@ -351,7 +380,7 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 	res.Complete = chunk >= len(f.plan.Chunks)
 	if !res.Complete {
 		st := cursorState{Plan: f.id, Query: digest, Chunk: chunk, Granule: gran, Epoch: e.o.Masker.Epoch(), PolicyFP: e.o.PolicyFP(), Cache: e.aggs.put(a),
-			From: q.From, To: q.To}
+			From: q.From, To: q.To, Last: last}
 		res.Cursor = e.seal("Lc1", st)
 		if cu, ok := coveredUntil(f.plan, chunk, gran, q.Query); ok {
 			res.CoveredUntil = &cu
@@ -373,6 +402,80 @@ func (q *Query) rangeContains(t time.Time, minuteResolution bool) bool {
 	return !t.Before(q.From) && t.Before(q.To)
 }
 
+// countFailed counts a record masking failed on, in a trusted-only count, by
+// the values the index holds for it: its raw trusted values (index.Lookup),
+// shown through the masker's text path. A value the masker would change is
+// unknown, as in the index (index.Redacted): the record then cannot be
+// counted and is left out, which the index path does too (such a granule
+// goes to the residual scan).
+func (e *Engine) countFailed(q *CountQuery, raw source.RawRecord, rec mask.Record, a *agg) {
+	known := func(v string) (ok bool) {
+		defer func() {
+			if recover() != nil {
+				ok = false
+			}
+		}()
+		return e.o.Masker.Text(v) == v
+	}
+	sel := q.selector(raw.Ref.Source, e.o.Trusted)
+	fields, labels := map[string]string{}, map[string]string{}
+	get := func(name string, label bool) (string, bool, bool) {
+		look, m := index.Lookup, fields
+		if label {
+			look, m = index.LookupAttr, labels
+		}
+		v, ok := look(raw.Event, name)
+		if !ok {
+			return "", false, true
+		}
+		if !known(v) {
+			return "", false, false
+		}
+		m[name] = v
+		return v, true, true
+	}
+	for _, t := range sel.Terms {
+		if _, _, ok := get(t.Field, t.Label); !ok {
+			return
+		}
+	}
+	if !sel.Match(fields, labels) {
+		return
+	}
+	by := q.groupBy()
+	key := make([]*string, len(by))
+	for i, p := range by {
+		v, present, ok := get(p.name(), p.Label != "")
+		if !ok {
+			return
+		}
+		if present {
+			key[i] = &v
+		}
+	}
+	t, timed := rec.Time()
+	if !timed {
+		a.untimed++
+		return
+	}
+	if !q.Query.rangeContains(t, a.indexed) {
+		return
+	}
+	a.add(q.bucketOf(t), key, 1, t, true)
+}
+
+// groupBy is the group key's parts: By fields, then ByLabels labels.
+func (q *CountQuery) groupBy() []Pred {
+	var out []Pred
+	for _, b := range q.By {
+		out = append(out, Pred{Field: b})
+	}
+	for _, l := range q.ByLabels {
+		out = append(out, Pred{Label: l})
+	}
+	return out
+}
+
 func (e *Engine) indexable(srcs []string) bool {
 	for _, s := range srcs {
 		if _, ok := e.o.Sources[s].(source.Counter); !ok {
@@ -388,7 +491,7 @@ func (e *Engine) indexCounts(ctx context.Context, q *CountQuery, a *agg) (source
 	for _, name := range q.Sources {
 		ic := e.o.Sources[name].(source.Counter)
 		r, err := ic.IndexCounts(ctx, source.CountQuery{Range: source.Range{From: q.From, To: q.To},
-			Selector: q.selector(name, e.o.Trusted), By: q.By, Bucket: q.bucket})
+			Selector: q.selector(name, e.o.Trusted), By: q.By, ByLabels: q.ByLabels, Bucket: q.bucket})
 		if err != nil {
 			return source.Byteplan{}, err
 		}

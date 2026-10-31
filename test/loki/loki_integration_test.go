@@ -204,7 +204,7 @@ func TestLokiSourceAgainstLoki(t *testing.T) {
 	// Server-side selection on a trusted label; the trusted metadata term
 	// is not pushed down (a | filter also matches stream labels): it
 	// matches locally, on the categorized metadata.
-	sel := source.Selector{Terms: []source.Term{{Field: "level", Op: "=", Values: []string{"error"}}, {Field: "trace_id", Op: "=", Values: []string{"t7"}}}}
+	sel := source.Selector{Terms: []source.Term{{Field: "level", Label: true, Op: "=", Values: []string{"error"}}, {Field: "trace_id", Label: true, Op: "=", Values: []string{"t7"}}}}
 	got := scan(t, s, r, sel)
 	if len(got) != n/4 {
 		t.Fatalf("selected %d records, want the %d errors", len(got), n/4)
@@ -215,7 +215,7 @@ func TestLokiSourceAgainstLoki(t *testing.T) {
 		for _, a := range rec.Event.Attrs {
 			vals[a.Key] = a.Value.Str
 		}
-		if sel.Match(vals) {
+		if sel.Match(nil, vals) {
 			matched++
 		}
 	}
@@ -238,7 +238,7 @@ func TestLokiSourceAgainstLoki(t *testing.T) {
 		}
 	}
 	want[bucketOf(start)+" "] += 3 // the forged-metadata stream: no level label
-	res, err := s.IndexCounts(context.Background(), source.CountQuery{Range: r, By: []string{"level"}, Bucket: 5 * time.Minute})
+	res, err := s.IndexCounts(context.Background(), source.CountQuery{Range: r, ByLabels: []string{"level"}, Bucket: 5 * time.Minute})
 	if err != nil {
 		t.Fatal(err)
 	}
