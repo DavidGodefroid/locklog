@@ -648,3 +648,25 @@ func TestInvalidLiteralIsAString(t *testing.T) {
 		t.Errorf("a bad number literal forged a field: %s", out)
 	}
 }
+
+// Glued values past the re-pass rounds are withheld, never left clear;
+// a value redact-unknown withholds says nothing of its kinds.
+func TestGluedValuesAndRedactedKinds(t *testing.T) {
+	glued := strings.Repeat("+32475123456", 1) + "+32475123457+32475123458+32475123459+32475123450+32475123451+32475123452"
+	m := newMasker(t, Options{Structured: StructuredDetect})
+	for _, line := range []string{`{"x":"` + glued + `"}`, `{"msg":"` + glued + `"}`, glued} {
+		if out := encode(t, m.Mask("api", event(t, line))); strings.Contains(out, "3247512345") {
+			t.Errorf("a glued phone survived: %s", out)
+		}
+	}
+	if out := m.Text(glued); strings.Contains(out, "3247512345") {
+		t.Errorf("Text: a glued phone survived: %s", out)
+	}
+	if out := m.RedactText(glued); strings.Contains(out, "3247512345") {
+		t.Errorf("RedactText: a glued phone survived: %s", out)
+	}
+	r := newMasker(t, Options{Structured: StructuredRedactUnknown}).Mask("api", event(t, `{"x":"mail john.doe@example.com","y":"BE71096123456769"}`))
+	if k := r.Kinds(); len(k) != 1 || k[0] != "redacted" {
+		t.Errorf("Kinds = %v, want [redacted]", k)
+	}
+}

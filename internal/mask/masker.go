@@ -136,7 +136,16 @@ func (m *Masker) RedactText(s string) string {
 		s = pii.CutAt(s, pii.DetectLimit)
 	}
 	s = replace(s, w.find(m.o.Secrets, s), func(string, pii.Match) string { return Secret })
-	s = replace(s, w.values(s), func(string, pii.Match) string { return Redacted })
+	for round := 0; ; round++ {
+		ms := w.values(blankLen(s))
+		if len(ms) == 0 {
+			break
+		}
+		if round == 4 {
+			return Redacted // still glued values: withhold it all
+		}
+		s = replace(s, ms, func(string, pii.Match) string { return Redacted })
+	}
 	return outputSafe(s)
 }
 
@@ -278,12 +287,12 @@ func (w *walk) leaf(v parse.Value, name, clearPath, shownPath string, trusted bo
 		out = w.whole(s, rule.Kind)
 	case !trusted && (inh.personal || pii.LooksPersonal(name) || pii.LooksQuasi(name)):
 		out = w.whole(s, "")
+	case !trusted && w.m.o.Structured == StructuredRedactUnknown && !w.m.o.Rules.allowed(w.source, clearPath):
+		// Withheld before detection: Kinds must not tell what it held.
+		w.kinds["redacted"] = true
+		return Value{kind: String, text: Redacted}
 	default:
 		out = w.detected(v.Kind, s, len(secrets) > 0)
-		if !trusted && w.m.o.Structured == StructuredRedactUnknown && !w.m.o.Rules.allowed(w.source, clearPath) {
-			w.kinds["redacted"] = true
-			return Value{kind: String, text: Redacted}
-		}
 	}
 	// An agent rule only tightens: redact always wins; a pseudonym masks a
 	// value nothing masked whole.
@@ -402,6 +411,11 @@ func (w *walk) pseudonymise(s string, ms []pii.Match) string {
 			break
 		}
 		out = w.replaceValues(out, ms)
+	}
+	if len(ms) > 0 && len(w.values(blankLen(out))) > 0 {
+		// Still glued values after the last round: withhold it all.
+		w.kinds["redacted"] = true
+		return Redacted
 	}
 	return out
 }

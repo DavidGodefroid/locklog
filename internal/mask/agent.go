@@ -193,8 +193,10 @@ func (m *Masker) AgentAdd(source, shownPath, mode string, now time.Time, lim Age
 	}
 	parts := splitPath(shownPath)
 	clear := make([]string, len(parts))
+	masked := false
 	for i, p := range parts {
 		if strings.HasPrefix(p, Open) {
+			masked = true
 			id, ok := strings.CutPrefix(strings.TrimSuffix(p, Close), Open+KeyKind+":")
 			name, known := m.maskedName(id)
 			if !ok || !known {
@@ -215,7 +217,9 @@ func (m *Masker) AgentAdd(source, shownPath, mode string, now time.Time, lim Age
 		clear[i] = p
 	}
 	cp := strings.Join(clear, ".")
-	if err := checkPath(cp, false); err != nil {
+	// A path through a masked name is matched by its digest only: its
+	// shape is not checked, so the answer tells nothing of the clear name.
+	if err := checkPath(cp, false); err != nil && !masked {
 		return ErrUnknownField
 	}
 	if _, ok := m.o.Rules.human(source, cp); ok {
