@@ -12,10 +12,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
+	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
-	"sync"
+	"time"
 
 	"github.com/DavidGodefroid/lockkit/audit"
 	kconfig "github.com/DavidGodefroid/lockkit/config"
@@ -94,8 +97,9 @@ type Options struct {
 	// mount root, as the launcher checked them on the host.
 	ExpectDir   string
 	ExpectRoots string
-	// InContainer is true in the launcher's container (LOCKLOG_EXPECT_*
-	// are then required).
+	// InContainer is true in locklog's image (InImage): LOCKLOG_EXPECT_DIR
+	// is then required, and Root must be the directory the launcher
+	// started the console in.
 	InContainer bool
 	// SysClassNet is /sys/class/net (tests replace it).
 	SysClassNet string
@@ -105,9 +109,6 @@ type Options struct {
 // Backend implements console.Backend.
 type Backend struct {
 	o Options
-
-	mu  sync.Mutex
-	cur *session
 }
 
 var _ console.Backend = (*Backend)(nil)
@@ -160,7 +161,17 @@ func (p Policy) Profile() console.Profile {
 	}
 	if s, ok := p.remote(); ok {
 		cp.Credentials, cp.VaultPath, cp.User = s.Remote.Credentials, s.Remote.VaultPath, s.Remote.User
-		cp.Host = s.Remote.URL
+		if u, err := url.Parse(s.Remote.URL); err == nil {
+			cp.Host = u.Hostname()
+			cp.DefaultPort = 443
+			if u.Scheme == "http" {
+				cp.DefaultPort = 80
+			}
+			cp.Port = cp.DefaultPort
+			if n, err := strconv.Atoi(u.Port()); err == nil {
+				cp.Port = n
+			}
+		}
 	}
 	return cp
 }
@@ -183,6 +194,10 @@ func where(pr config.Profile) string {
 // LoadPolicy implements console.Backend: the profile from the project's
 // .locklog/config.toml with the launch environment.
 func (b *Backend) LoadPolicy() (console.Policy, error) {
+	// What the launcher checked, before the file is read.
+	if err := CheckMounts(b.o); err != nil {
+		return nil, err
+	}
 	if b.o.Root == "" {
 		return nil, errors.New("no project: the console serves the profiles of a project's .locklog/config.toml")
 	}
@@ -225,7 +240,7 @@ func (b *Backend) Connect(ctx context.Context, c console.Credentials) (console.S
 	if !ok {
 		return nil, errors.New("no approved locklog policy to connect to")
 	}
-	if err := b.checkMounts(); err != nil {
+	if err := CheckMounts(b.o); err != nil {
 		return nil, err
 	}
 	if b.o.Open == nil {
@@ -239,11 +254,7 @@ func (b *Backend) Connect(ctx context.Context, c console.Credentials) (console.S
 	if err != nil {
 		return nil, err
 	}
-	s := &session{engine: e, policy: pol}
-	b.mu.Lock()
-	b.cur = s
-	b.mu.Unlock()
-	return s, nil
+	return &session{engine: e, policy: pol}, nil
 }
 
 // Checks implements console.Backend: a console with no remote source and
@@ -260,7 +271,7 @@ func (b *Backend) Checks(ctx context.Context, s console.Session) []console.Findi
 	}
 	ifs, err := egress.ExtraInterfaces(b.o.SysClassNet)
 	if err != nil {
-		return []console.Finding{{Refuse: true, Text: "cannot list the network interfaces: " + err.Error()}}
+		return []console.Finding{{Refuse: true, Text: "cannot list the network interfaces: " + Sanitizer().Error(err)}}
 	}
 	if len(ifs) > 0 {
 		return []console.Finding{{Refuse: true, Text: "the console has a network (" + strings.Join(ifs, ", ") + ") but its profile reads only local logs: start it with the launcher (no network)"}}
@@ -288,6 +299,10 @@ func (b *Backend) Methods() map[string]console.Handler {
 
 func (b *Backend) handler(method string) console.Handler {
 	return func(ctx context.Context, req ipc.Request, env console.Env) ipc.Response {
+		// Response times levelled: how long a call took says nothing of
+		// how much matched.
+		start := time.Now()
+		defer env.Level(ctx, start)
 		var c Caller
 		if cred, ok := console.PeerFrom(ctx); ok {
 			c = Caller{UID: cred.UID, PID: cred.PID}
@@ -309,12 +324,15 @@ func (b *Backend) handler(method string) console.Handler {
 		var resp ipc.Response
 		switch {
 		case err != nil:
-			msg := env.Sanitizer().Error(err)
-			rec.Decision, rec.Error = "failed", msg
-			resp = console.ErrResp(req.ID, ipc.CodeInternal, msg)
+			// The engine's error may quote the call or a log line: the
+			// detail is shown on the console only, the agent and the
+			// audit get a fixed text.
+			env.Println("log engine failure (" + method + "): " + env.Safe(env.Sanitizer().Error(err)))
+			rec.Decision, rec.Error = "failed", errEngineText
+			resp = console.ErrResp(req.ID, ipc.CodeInternal, errEngineText)
 		case refused != nil:
 			rec.Decision, rec.Code = "refused", string(refused.Info.Code)
-			resp = refusalResp(req.ID, refused)
+			resp = refusalResp(req.ID, refused, env)
 		default:
 			rec.Decision = "ok"
 			resp = console.OKResp(req.ID, result)
@@ -328,36 +346,46 @@ func (b *Backend) handler(method string) console.Handler {
 	}
 }
 
-func refusalResp(id int64, r *Refusal) ipc.Response {
+// errEngineText is what the agent and the audit get of an engine failure.
+const errEngineText = "the log engine failed; the request did not complete"
+
+func refusalResp(id int64, r *Refusal, env console.Env) ipc.Response {
 	info := r.Info
-	return ipc.Response{JSONRPC: "2.0", ID: id, Error: &ipc.RPCError{Code: ipc.CodeRefused, Message: r.Message, Data: &info}}
+	msg := env.Sanitizer().Error(errors.New(r.Message))
+	return ipc.Response{JSONRPC: "2.0", ID: id, Error: &ipc.RPCError{Code: ipc.CodeRefused, Message: msg, Data: &info}}
 }
 
-// writeAudit writes rec through the console's fail-closed write when it
-// has one (console.Server), else through Env.Audit.
+// writeAudit writes rec through the console's fail-closed write
+// (console.Server.WriteAudit). A console without it cannot tell a failed
+// write: the call is refused.
 func writeAudit(env console.Env, rec Record) error {
 	if w, ok := env.(interface{ WriteAudit(audit.Record) error }); ok {
 		return w.WriteAudit(rec)
 	}
-	env.Audit(rec)
-	return nil
+	return errors.New("this console cannot audit its calls")
 }
 
 // checkMounts compares, in the launcher's container, the device and
 // inode of .locklog and of every mount root with what the launcher checked
 // on the host: a directory swapped (for a link, another directory) between
 // the check and docker run is refused before anything is read.
-func (b *Backend) checkMounts() error {
-	if !b.o.InContainer {
+//
+// CheckMounts is exported so that the console command runs it before it
+// reads .locklog at all; LoadPolicy and Connect run it again.
+func CheckMounts(o Options) error {
+	if !o.InContainer {
 		return nil
 	}
-	if b.o.ExpectDir == "" {
+	if o.ExpectDir == "" {
 		return errors.New("LOCKLOG_EXPECT_DIR is not set: start the console with the launcher")
 	}
-	if err := expect(b.o.Root+"/.locklog", b.o.ExpectDir); err != nil {
+	if o.Root == "" || !filepath.IsAbs(o.Root) {
+		return errors.New("no project: start the console with the launcher, from the project")
+	}
+	if err := expect(filepath.Join(o.Root, ".locklog"), o.ExpectDir); err != nil {
 		return err
 	}
-	for _, e := range strings.Split(b.o.ExpectRoots, ";") {
+	for _, e := range strings.Split(o.ExpectRoots, ";") {
 		if e == "" {
 			continue
 		}
@@ -392,7 +420,8 @@ func expect(path, want string) error {
 	return nil
 }
 
-// FromEnv reads the launcher's environment into o.
+// FromEnv reads the launcher's environment into o. It does not decide
+// InContainer: that is InImage, independent of the variables it checks.
 func FromEnv(o Options, getenv func(string) string) Options {
 	o.Network = getenv("LOCKLOG_NETWORK")
 	if r := strings.Fields(getenv("LOCKLOG_EXTRA_ROOTS")); len(r) > 0 {
@@ -400,6 +429,18 @@ func FromEnv(o Options, getenv func(string) string) Options {
 	}
 	o.ExpectDir = getenv("LOCKLOG_EXPECT_DIR")
 	o.ExpectRoots = getenv("LOCKLOG_EXPECT_ROOTS")
-	o.InContainer = o.ExpectDir != "" || o.ExpectRoots != ""
 	return o
+}
+
+// SystemFile is the separated setup's file in locklog's image.
+const SystemFile = "/etc/locklog/system.toml"
+
+// InImage reports whether this process runs in locklog's image: as the
+// console account, or with the image's system file present.
+func InImage(uid int, stat func(string) (os.FileInfo, error)) bool {
+	if uid == product.ConsoleUID {
+		return true
+	}
+	_, err := stat(SystemFile)
+	return err == nil
 }

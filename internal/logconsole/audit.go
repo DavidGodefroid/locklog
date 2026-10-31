@@ -3,6 +3,9 @@ package logconsole
 import (
 	"context"
 	"encoding/json"
+	"regexp"
+	"slices"
+	"time"
 
 	"github.com/DavidGodefroid/lockkit/audit"
 	"github.com/DavidGodefroid/lockkit/console"
@@ -40,9 +43,17 @@ func newRecord(ctx context.Context, env console.Env, method string, params json.
 		From    string   `json:"from"`
 		To      string   `json:"to"`
 	}
+	known := map[string]bool{}
+	if p, ok := env.Policy().(Policy); ok {
+		for _, s := range p.Policy.Profile.Sources {
+			known[s.Name] = true
+		}
+	}
 	if json.Unmarshal(params, &scope) == nil {
+		// Only names of the profile's sources: anything else the agent
+		// typed is its text, and may be a value.
 		for _, s := range scope.Sources {
-			if len(r.Sources) < 32 && validName(s) {
+			if len(r.Sources) < 32 && known[s] && !slices.Contains(r.Sources, s) {
 				r.Sources = append(r.Sources, s)
 			}
 		}
@@ -56,30 +67,15 @@ func newRecord(ctx context.Context, env console.Env, method string, params json.
 	return r
 }
 
-// validName is a source name as the config allows it.
-func validName(s string) bool {
-	if s == "" || len(s) > 48 {
-		return false
-	}
-	for _, c := range s {
-		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '_' || c == '-') {
-			return false
-		}
-	}
-	return true
-}
+// relativeRe is a relative range: a number and a unit.
+var relativeRe = regexp.MustCompile(`^[0-9]{1,6}[smhd]$`)
 
-// validTime is an RFC 3339 time or a relative range such as "1h": letters,
-// digits and the punctuation of times only, at most 40 characters.
+// validTime is an RFC 3339 time or a relative range ("1h", "7d"): never
+// any other text the agent typed.
 func validTime(s string) bool {
-	if s == "" || len(s) > 40 {
-		return false
+	if relativeRe.MatchString(s) {
+		return true
 	}
-	for _, c := range s {
-		if !(c >= '0' && c <= '9' || c == '-' || c == ':' || c == '.' || c == 'T' || c == 'Z' || c == '+' ||
-			c == 'h' || c == 'm' || c == 's' || c == 'd') {
-			return false
-		}
-	}
-	return true
+	_, err := time.Parse(time.RFC3339Nano, s)
+	return err == nil
 }
