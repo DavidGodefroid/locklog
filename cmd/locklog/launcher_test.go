@@ -105,7 +105,7 @@ volume) [ "$2" = inspect ] && exit "${VOLUME_MISSING:-0}" ;;
 run)
 	for a in "$@"; do
 		case "$a" in
-		*:/run/locklog-facts:ro) cp "${a%%:*}" '`+filepath.Join(root, "facts.copy")+`'; stat -c %a "${a%%:*}" > '`+filepath.Join(root, "facts.mode")+`' ;;
+		*:/run/locklog-facts:ro) cp "${a%%:*}" '`+filepath.Join(root, "facts.copy")+`'; ls -l "${a%%:*}" | cut -c1-10 > '`+filepath.Join(root, "facts.mode")+`' ;;
 		doctor) cat > '`+filepath.Join(root, "facts.stdin")+`' ;;
 		locklog-run:/run/locklog) vol=run ;;
 		locklog-home:/home/locklog) vol=home ;;
@@ -511,8 +511,8 @@ func TestLauncherSetupDoctor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if mode, _ := os.ReadFile(filepath.Join(f.root, "facts.mode")); strings.TrimSpace(string(mode)) != "600" {
-		t.Errorf("the facts file has mode %q, want 600", mode)
+	if mode, _ := os.ReadFile(filepath.Join(f.root, "facts.mode")); strings.TrimSpace(string(mode)) != "-rw-------" {
+		t.Errorf("the facts file has mode %q, want -rw------- (0600)", mode)
 	}
 	if !hasSeq(run, "-e", "LOCKLOG_HOST_HOME=") {
 		t.Errorf("setup run lacks LOCKLOG_HOST_HOME: %q", run)
