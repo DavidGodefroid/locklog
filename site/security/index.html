@@ -124,7 +124,7 @@
   <tr><th scope="row">13</th><td>No egress except the configured backends; production backends authenticated over TLS</td><td>network none or a dedicated network; a dialer pinned to host:port; no proxy environment, no redirects off-host; an unauthenticated-read check</td></tr>
   <tr><th scope="row">14</th><td>Read-only by construction</td><td>read-only binds and root; <code>O_RDONLY</code> beneath-root opens; HTTP method and path allowlists</td></tr>
   <tr><th scope="row">15</th><td>Pseudonym keys never leave the home volume; old epoch keys are deleted</td><td>files 0600, rotation</td></tr>
-  <tr><th scope="row">16</th><td>Only the clients group, the image’s <code>agent</code>, the console’s own uid and <code>--allowed-uids</code> reach the socket (never root or 65534)</td><td>kernel peer credentials, lockkit peer check</td></tr>
+  <tr><th scope="row">16</th><td>Only the clients group, the image’s <code>agent</code>, the console’s own uid and <code>--allowed-uids</code> reach the socket (never root or 65534); the launcher does not pass <code>--allowed-uids</code> yet (<a href="https://github.com/DavidGodefroid/locklog/issues/102">#102</a>)</td><td>kernel peer credentials, lockkit peer check</td></tr>
   </tbody>
   </table>
   </div>

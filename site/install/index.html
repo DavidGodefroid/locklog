@@ -88,7 +88,7 @@ locklog setup --agent host
 <span class="cmt"># The console, in a terminal you keep in view (setup prints the line;</span>
 <span class="cmt"># containers get a profile of their own, &lt;profile&gt;-docker)</span>
 locklog console --profile &lt;profile&gt;</code></pre>
-  <p class="prose">Then, in another terminal, ask your agent: <em>“when did the 502s start?”</em>. It calls <code>locklog_count</code>, <code>locklog_patterns</code> and <code>locklog_trace</code>; the console shows each call and asks you only when the agent wants more than the free budgets or a value in clear. In this trial the MCP server runs as the image’s <code>agent</code> account, launched from your account, and the launcher’s <code>mcp</code> refuses production profiles.</p>
+  <p class="prose">Then, in another terminal, ask your agent: <em>“when did the 502s start?”</em>. It calls <code>locklog_count</code>, <code>locklog_patterns</code> and <code>locklog_trace</code>; the console audits every call and asks you only when the agent wants more than the free budgets or a value in clear. In this trial the MCP server runs as the image’s <code>agent</code> account, launched from your account, and the launcher’s <code>mcp</code> refuses production profiles.</p>
 </section>
 
 <section aria-labelledby="production">

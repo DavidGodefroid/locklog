@@ -57,12 +57,13 @@
      │    read-only root, --cpus min(2,nproc), --memory 1g, --log-driver none
      │    read-only, non-recursive binds of the approved log directories
      │    volume locklog-home: pseudonym keys, local index, audit, rules (console only)
-     │    volume locklog-run:  /run/locklog/locklog.sock (2750 locklog:locklog-clients)
+     │    volume locklog-run:  /run/locklog (2750 locklog:locklog-clients), one socket
+     │                         per project and profile, &lt;project-hash&gt;-&lt;profile&gt;.sock (0660)
      │    network: none, or the backend's network for Loki
      └─ map loop: docker events → container names and ids of the approved globs
 
  agent (yours: your own container, or the host for the trial; lea planned)
-   MCP server `locklog mcp` → /run/locklog/locklog.sock (peer uid checked by the kernel)</code></pre>
+   MCP server `locklog mcp` → its project's socket in /run/locklog (peer uid checked by the kernel)</code></pre>
 </section>
 
 <section aria-labelledby="call">
