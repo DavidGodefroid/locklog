@@ -16,9 +16,12 @@ const parsePkg = "github.com/DavidGodefroid/locklog/internal/parse"
 
 // rawImporters are the only packages allowed to import raw events: the
 // sources that produce them, the masker, the local index and the engine,
-// plus the integration tests under test/ (test code only, never linked into
-// a binary). Everything else (console, IPC, MCP) sees masked records only.
-var rawImporters = []string{"internal/parse", "internal/source", "internal/mask", "internal/index", "internal/engine", "test"}
+// plus the _test.go files under test/ (test code only, never linked into a
+// binary). Everything else (console, IPC, MCP) sees masked records only.
+var rawImporters = []string{"internal/parse", "internal/source", "internal/mask", "internal/index", "internal/engine"}
+
+// testOnlyImporters may import raw events from _test.go files only.
+var testOnlyImporters = []string{"test"}
 
 // importViolations returns the files under root that import internal/parse
 // from a package outside rawImporters.
@@ -50,7 +53,7 @@ func importViolations(t *testing.T, root string) []string {
 			if ip != parsePkg && !strings.HasPrefix(ip, parsePkg+"/") {
 				continue
 			}
-			if !allowedImporter(rel) {
+			if !allowedImporter(rel, filepath.Base(p)) {
 				bad = append(bad, path.Join(rel, filepath.Base(p)))
 			}
 		}
@@ -62,13 +65,16 @@ func importViolations(t *testing.T, root string) []string {
 	return bad
 }
 
-func allowedImporter(dir string) bool {
-	for _, a := range rawImporters {
-		if dir == a || strings.HasPrefix(dir, a+"/") {
-			return true
+func allowedImporter(dir, file string) bool {
+	under := func(as []string) bool {
+		for _, a := range as {
+			if dir == a || strings.HasPrefix(dir, a+"/") {
+				return true
+			}
 		}
+		return false
 	}
-	return false
+	return under(rawImporters) || strings.HasSuffix(file, "_test.go") && under(testOnlyImporters)
 }
 
 func TestRawEventsImportedOnlyByRawPackages(t *testing.T) {
@@ -93,8 +99,11 @@ func TestImportLintCatchesPlantedImport(t *testing.T) {
 	write("internal/source/file/ok.go", "package file\n"+imp)
 	write("internal/console/bad.go", "package console\n"+imp)
 	write("internal/sourcex/bad.go", "package sourcex\n"+imp)
+	write("test/loki/ok_test.go", "package loki_test\n"+imp)
+	// Under test/, only test files are exempt: a helper is linkable.
+	write("test/loki/helper.go", "package loki\n"+imp)
 	bad := importViolations(t, root)
-	if strings.Join(bad, ",") != "internal/console/bad.go,internal/sourcex/bad.go" {
+	if strings.Join(bad, ",") != "internal/console/bad.go,internal/sourcex/bad.go,test/loki/helper.go" {
 		t.Fatalf("violations %v", bad)
 	}
 }
