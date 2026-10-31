@@ -569,7 +569,7 @@ func (s *Source) newIter(ctx context.Context, f *os.File, fi fileInfo, start, en
 	if start > 0 {
 		open = start - 1
 	}
-	st, err := openStream(f, fi.id.compression, open)
+	st, err := openStream(ctx, f, fi.id.compression, open)
 	if err != nil {
 		if errors.Is(err, errShort) {
 			return nil, source.ErrStale
@@ -690,7 +690,7 @@ func (s *Source) Reread(ctx context.Context, ref source.RawRef) (source.RawRecor
 		return source.RawRecord{}, stale(err)
 	}
 	defer f.Close()
-	st, err := openStream(f, fi.id.compression, ref.Offset)
+	st, err := openStream(ctx, f, fi.id.compression, ref.Offset)
 	if err != nil {
 		return source.RawRecord{}, source.ErrStale
 	}

@@ -254,7 +254,7 @@ func (e *Engine) planQuery(ctx context.Context, q *Query, remoteBudget, localBud
 		}
 		plan.Chunks = append(plan.Chunks, p.Chunks...)
 	}
-	plan = orderPlan(plan, q.Order)
+	plan, maxRead := orderPlan(plan, q.Order)
 	var bytesLocal, bytesRemote int64
 	for _, c := range plan.Chunks {
 		if e.remote(c.Source) {
@@ -263,7 +263,9 @@ func (e *Engine) planQuery(ctx context.Context, q *Query, remoteBudget, localBud
 			bytesLocal += c.Bytes
 		}
 	}
-	if bytesLocal > localBudget || bytesRemote > remoteBudget {
+	// A chunk read alone processes at most the call's budget (for a
+	// descending granule of a compressed stream, all it decompresses).
+	if bytesLocal > localBudget || bytesRemote > remoteBudget || maxRead > localBudget {
 		return source.Byteplan{}, &Error{Code: EOverBudget, Message: "the plan exceeds this call's byte budget (narrow the range or the sources, or ask for locklog_scan)",
 			Estimate: &Estimate{Bytes: plan.Bytes(), Granules: plan.Granules(), Range: q.To.Sub(q.From)}}
 	}
@@ -281,7 +283,11 @@ func (e *Engine) planQuery(ctx context.Context, q *Query, remoteBudget, localBud
 // of unknown bytes (an unmeasured compressed stream, a remote slice) stay
 // as planned. Streams of several sources are not merged by time across
 // calls: each call's matches are sorted, streams follow each other.
-func orderPlan(plan source.Byteplan, order string) source.Byteplan {
+//
+// It also returns the most bytes reading one descending granule of a
+// compressed stream processes (decompressing from the start), which
+// admission bounds by the byte budget as it bounds an ascending chunk.
+func orderPlan(plan source.Byteplan, order string) (source.Byteplan, int64) {
 	var streams [][]source.Chunk
 	for i, c := range plan.Chunks {
 		if i == 0 || c.Source != plan.Chunks[i-1].Source || c.Stream != plan.Chunks[i-1].Stream {
@@ -295,14 +301,17 @@ func orderPlan(plan source.Byteplan, order string) source.Byteplan {
 		for _, cs := range streams {
 			out.Chunks = append(out.Chunks, cs...)
 		}
-		return out
+		return out, 0
 	}
+	var maxRead int64
 	for _, cs := range streams {
 		for i := len(cs) - 1; i >= 0; i-- {
-			out.Chunks = append(out.Chunks, descGranules(cs[i])...)
+			split, read := descGranules(cs[i])
+			out.Chunks = append(out.Chunks, split...)
+			maxRead = max(maxRead, read)
 		}
 	}
-	return out
+	return out, maxRead
 }
 
 // decompressShare is how many bytes decompressed and discarded cost as
@@ -310,11 +319,13 @@ func orderPlan(plan source.Byteplan, order string) source.Byteplan {
 // case masking about 1 MB/s per core).
 const decompressShare = 64
 
-// descGranules splits a chunk into single-granule chunks, last first.
-func descGranules(c source.Chunk) []source.Chunk {
+// descGranules splits a chunk into single-granule chunks, last first, and
+// returns the most bytes reading one of a compressed stream processes.
+func descGranules(c source.Chunk) ([]source.Chunk, int64) {
 	if len(c.Granules) < 2 || c.Bytes == 0 || c.End() == math.MaxInt64 {
-		return []source.Chunk{c} // unknown bytes: as planned
+		return []source.Chunk{c}, 0 // unknown bytes: as planned
 	}
+	var maxRead int64
 	var sum int64
 	for _, g := range c.Granules {
 		sum += granuleBytes(g, c)
@@ -330,11 +341,13 @@ func descGranules(c source.Chunk) []source.Chunk {
 			// Re-decompressing what precedes the granule is charged at
 			// decompression cost, a fraction of masking's: a descending
 			// read stays proportionate to an ascending one.
-			one.Bytes += (prefix + g.Start - c.Start() + decompressShare - 1) / decompressShare
+			discard := prefix + g.Start - c.Start()
+			one.Bytes += (discard + decompressShare - 1) / decompressShare
+			maxRead = max(maxRead, discard+one.Granules[0].Bytes)
 		}
 		out = append(out, one)
 	}
-	return out
+	return out, maxRead
 }
 
 // sourceError maps an error of a source to a fixed, content-free refusal of
@@ -489,13 +502,26 @@ func (e *Engine) run(ctx context.Context, plan source.Byteplan, chunk, gran int,
 		if callBytes > 0 {
 			limit = max(limit, callBytes-sc.Bytes)
 		}
-		raws, total, fetched, recBytes, err := e.fetch(groupCtx, sub, needles, limit)
+		// The records' own bytes (what masking costs) are bounded the
+		// same way, and by what can be masked before the hard
+		// deadline: deduplicated payloads (journald shares one DATA
+		// object between entries) make them exceed the bytes
+		// processed.
+		hard := deadline.Add(e.o.Limits.Deadline / 2)
+		recLimit := min(limit, max(e.o.Cost.Budget(time.Until(hard)), 1))
+		// A compressed stream decompresses from its start: the bytes
+		// before the group are processed (and discarded) too. Admission
+		// bounds them (orderPlan, the chunk's bytes).
+		if compressed(c) {
+			limit += sub.Start()
+		}
+		raws, total, fetched, recBytes, err := e.fetch(groupCtx, sub, needles, limit, recLimit)
 		if errors.Is(err, errFetchCap) {
 			cancel()
 			if sc.Granules > 0 {
 				return chunk, gran, sc, failures, nil // the next call has a whole budget
 			}
-			return chunk, gran, sc, failures, &Error{Code: EOverBudget, Message: "a log stream holds more data than this call's byte budget (a compressed file expands more than estimated): narrow the range or the sources, or ask for locklog_scan"}
+			return chunk, gran, sc, failures, &Error{Code: EOverBudget, Message: "a log stream holds more data than one call can process (a compressed file expanding more than estimated, or large repeated records): narrow the range or the sources, or ask for locklog_scan"}
 		}
 		// Masking costs the records' bytes (a compressed stream's
 		// discarded prefix is decompressed, not masked), counted before
@@ -536,7 +562,6 @@ func (e *Engine) run(ctx context.Context, plan source.Byteplan, chunk, gran int,
 		// which ones do, so they are not counted (failed records are
 		// still withheld whole, as they never match); see
 		// prefilter.go.
-		hard := deadline.Add(e.o.Limits.Deadline / 2)
 		b := &budget{stop: func() bool { return ctx.Err() != nil || time.Now().After(hard) }}
 		for i := range raws {
 			// A record masking failed on is withheld whole (it
@@ -595,6 +620,16 @@ func overEval(ctx context.Context) *Error {
 	return &Error{Code: EOverBudget, Message: "evaluating the predicates on this data did not finish in time: use fewer or simpler predicates, or narrow the range"}
 }
 
+// compressed reports a chunk of a compressed stream: one costing more than
+// its granules (the decompressed bytes before it, the file).
+func compressed(c source.Chunk) bool {
+	var sum int64
+	for _, g := range c.Granules {
+		sum += granuleBytes(g, c)
+	}
+	return c.Bytes > sum
+}
+
 // estimated reports a group holding a granule whose bytes are an estimate.
 func estimated(gs []source.Granule) bool {
 	return slices.ContainsFunc(gs, func(g source.Granule) bool { return g.Bytes == 0 })
@@ -609,12 +644,13 @@ var errFetchCap = errors.New("engine: group past its byte limit")
 // record whose clear text cannot contain every needle is dropped before
 // masking (non-production only).
 //
-// A positive limit bounds the bytes the group may process: past it, fetch
-// stops with errFetchCap.
+// A positive limit bounds the bytes the group may process, a positive
+// recLimit the bytes of its records: past either, fetch stops with
+// errFetchCap.
 //
 // It also returns the bytes of the records read (before the pre-filter),
 // what masking them costs.
-func (e *Engine) fetch(ctx context.Context, c source.Chunk, needles []string, limit int64) ([]source.RawRecord, int, int64, int64, error) {
+func (e *Engine) fetch(ctx context.Context, c source.Chunk, needles []string, limit, recLimit int64) ([]source.RawRecord, int, int64, int64, error) {
 	it, err := e.o.Sources[c.Source].Scan(ctx, c)
 	if err != nil {
 		return nil, 0, 0, 0, err
@@ -635,7 +671,9 @@ func (e *Engine) fetch(ctx context.Context, c source.Chunk, needles []string, li
 			return nil, total, it.Processed(), recBytes, errFetchCap
 		}
 		total++
-		recBytes += int64(len(raw.Event.Raw))
+		if recBytes += int64(len(raw.Event.Raw)); recLimit > 0 && recBytes > recLimit {
+			return nil, total, it.Processed(), recBytes, errFetchCap
+		}
 		if e.o.Prefilter && len(needles) > 0 && !prefilterPass(raw.Event, needles) {
 			continue
 		}

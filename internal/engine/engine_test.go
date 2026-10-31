@@ -31,6 +31,8 @@ import (
 	"github.com/DavidGodefroid/locklog/internal/parse"
 	"github.com/DavidGodefroid/locklog/internal/source"
 	"github.com/DavidGodefroid/locklog/internal/source/file"
+	"github.com/DavidGodefroid/locklog/internal/source/journald"
+	"github.com/DavidGodefroid/locklog/internal/source/journald/journal/journaltest"
 )
 
 var (
@@ -1984,5 +1986,79 @@ func TestUnknownGranuleBytesStillGrouped(t *testing.T) {
 		}
 		recs, _ := allRecords(t, f.eng, qq)
 		checkOrder(t, recordTimes(t, recs), 6000, order == "desc")
+	}
+}
+
+// TestDedupRecordsBounded: journald shares one DATA object between entries,
+// so records can hold far more bytes than the stream processes: a call
+// buffers at most its budget of record bytes, then refuses.
+func TestDedupRecordsBounded(t *testing.T) {
+	big := "MESSAGE=" + strings.Repeat("stack frame at service.handler(line 42) ", 5000) // ~200 KB
+	var es []journaltest.Entry
+	base := uint64(t0.Add(time.Hour).UnixMicro())
+	for i := 0; i < 2048; i++ {
+		es = append(es, journaltest.Entry{Realtime: base + uint64(i)*1000, Fields: []string{big, "PRIORITY=3"}})
+	}
+	root := t.TempDir()
+	const mid = "0123456789abcdef0123456789abcdef"
+	os.Mkdir(filepath.Join(root, mid), 0o755)
+	if err := os.WriteFile(filepath.Join(root, mid, "system.journal"), journaltest.Build(journaltest.Options{Compact: true, PerArray: 100}, es), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := parse.New(parse.Options{Format: "plain"})
+	js, err := journald.New(journald.Options{Name: "journal", Roots: []string{root}, Parser: p})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var processed int64
+	f := newFixture(t, genLog(t0, 10, "c@example.org"), func(o *Options) {
+		o.Sources["journal"] = processedSource{js, &processed}
+		o.Limits.LocalBytes = 4 << 20
+	})
+	start := time.Now()
+	_, err = f.eng.Search(ctx, q(func(q *Query) { q.Sources = []string{"journal"}; q.Text = "frame" }))
+	if code(err) != EOverBudget || time.Since(start) > 10*time.Second {
+		t.Fatalf("search: %v after %v", err, time.Since(start))
+	}
+}
+
+// TestDescCompressedTailAdmission: reading the newest granule of a large
+// compressed stream decompresses all before it; a descending query whose
+// granule cannot be read within the byte budget is refused at admission,
+// as the ascending one is, before reading anything.
+func TestDescCompressedTailAdmission(t *testing.T) {
+	start := t0.Add(-30 * time.Hour)
+	plain := genLog(start, 120000, "c@example.org") // ~14 MiB, 33 h
+	var gz bytes.Buffer
+	w := gzip.NewWriter(&gz)
+	w.Write([]byte(plain))
+	w.Close()
+	var processed int64
+	f := newFixture(t, gz.String(), func(o *Options) {
+		o.Sources["app"] = processedSource{o.Sources["app"], &processed}
+		o.Limits.LocalBytes = 4 << 20
+	})
+	for i := 0; ; i++ {
+		_, done, err := f.src.IndexStep(ctx, 64<<20, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if done || i > 40 {
+			break
+		}
+	}
+	end := start.Add(120000 * time.Second)
+	for _, order := range []string{"asc", "desc"} {
+		processed = 0
+		_, err := f.eng.Search(ctx, Query{From: end.Add(-5 * time.Hour), To: end, Text: "upstream", Order: order})
+		if code(err) != EOverBudget || processed != 0 {
+			t.Errorf("%s: %v, %d bytes processed", order, err, processed)
+		}
+	}
+	// The head of the stream is read either way.
+	for _, order := range []string{"asc", "desc"} {
+		if _, err := f.eng.Search(ctx, Query{From: start, To: start.Add(10 * time.Minute), Text: "upstream", Order: order}); err != nil {
+			t.Errorf("%s head: %v", order, err)
+		}
 	}
 }
