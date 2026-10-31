@@ -1,0 +1,3 @@
+# The lea placement: lea runs the agent in a container of its own and
+# reaches the locklog console like the own-container recipe does. No lea
+# release supports it yet: use `locklog setup --agent container` meanwhile.
