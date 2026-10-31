@@ -375,3 +375,25 @@ func TestAroundMethodsServed(t *testing.T) {
 		}
 	}
 }
+
+// log.patterns is served by an opened session: masked templates only.
+func TestOpenPatternsMasked(t *testing.T) {
+	f := newFixture(t, fileProfile, appLog)
+	s := open(t, f.options(nil))
+	res, ref := call(t, s, logconsole.MethodPatterns, `{"from":"2026-10-30T13:00:00Z","to":"2026-10-30T14:00:00Z","top":5}`)
+	if ref != nil {
+		t.Fatalf("refused: %+v", ref)
+	}
+	out, _ := json.Marshal(res)
+	got := string(out)
+	if strings.Contains(got, "jane") || strings.Contains(got, "Jane") {
+		t.Fatalf("unmasked: %s", got)
+	}
+	if !strings.Contains(got, `"patterns":[`) || !strings.Contains(got, `"records":2`) {
+		t.Errorf("patterns = %s", got)
+	}
+	_, ref = call(t, s, logconsole.MethodPatterns, `{"from":"2026-10-30T13:00:00Z","to":"2026-10-30T14:00:00Z","top":1000}`)
+	if ref == nil || ref.Info.Code != "E_BAD_QUERY" {
+		t.Errorf("top over the maximum: %+v", ref)
+	}
+}

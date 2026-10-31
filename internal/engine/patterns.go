@@ -279,12 +279,12 @@ func (e *Engine) Patterns(ctx context.Context, q PatternsQuery) (_ PatternsResul
 		if q.offset == 0 {
 			a.winChunks = len(plan.Chunks)
 		}
-		f = e.freeze(digest, plan)
+		f = e.freeze(digest, plan, false)
 	}
 
 	sc, failures := Scanned{}, 0
 	var err *Error
-	chunk, gran, sc, failures, err = e.run(ctx, f.plan, chunk, gran, nil, e.callBytes(q.Sources), q.evalFactor()+1, func(raw source.RawRecord, rec mask.Record, b *budget) {
+	chunk, gran, sc, failures, err = e.run(ctx, &f, chunk, gran, nil, e.callBytes(q.Sources), q.evalFactor()+1, func(raw source.RawRecord, rec mask.Record, b *budget) {
 		t, timed := rec.Time()
 		var bucket time.Time
 		switch {

@@ -36,14 +36,19 @@ import (
 // The agent's methods. Each is free (no approval) within the budgets the
 // engine enforces, and audited.
 const (
-	MethodStatus   = "log.status"
-	MethodSources  = "log.sources"
-	MethodSearch   = "log.search"
-	MethodCount    = "log.count"
+	MethodStatus  = "log.status"
+	MethodSources = "log.sources"
+	MethodSearch  = "log.search"
+	MethodCount   = "log.count"
+	// MethodPatterns is the top message templates of a range, optionally
+	// against a baseline window (locklog_patterns).
 	MethodPatterns = "log.patterns"
-	MethodContext  = "log.context"
-	MethodTrace    = "log.trace"
-	MethodTail     = "log.tail"
+	// MethodContext, MethodTrace and MethodTail read around a ref, follow
+	// an id across sources and follow new records (locklog_context,
+	// locklog_trace, locklog_tail).
+	MethodContext = "log.context"
+	MethodTrace   = "log.trace"
+	MethodTail    = "log.tail"
 )
 
 // Methods lists the methods served, in a fixed order.

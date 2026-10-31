@@ -332,7 +332,11 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 		pollFailures, pollUntimed := 0, false
 		outFailed = false
 		pctx, cancel := context.WithDeadline(tctx, wallEnd.Add(tailGrace))
-		chunk, _, psc, _, rerr := e.run(pctx, pruned, 0, 0, needles, left, q.evalFactor(), func(raw source.RawRecord, rec mask.Record, b *budget) {
+		// The poll's plan is not kept for continuations: a remote slice
+		// that run splits (into a new frozen plan) is dropped with it,
+		// and the poll ends incomplete (chunk < len).
+		pf := &frozen{plan: pruned}
+		chunk, _, psc, _, rerr := e.run(pctx, &pf, 0, 0, needles, left, q.evalFactor(), func(raw source.RawRecord, rec mask.Record, b *budget) {
 			k := keyOf(raw.Ref)
 			p := pos{raw.Ref.Offset, raw.Ref.Length}
 			if e.remote(raw.Ref.Source) {
@@ -366,6 +370,11 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 			pollHeld[k] = &held{raw: raw, rec: rec}
 		})
 		cancel()
+		if pf.id != "" {
+			e.mu.Lock()
+			delete(e.plans, pf.id)
+			e.mu.Unlock()
+		}
 		// The poll's work is the call's, whatever its outcome.
 		res.Scanned.Bytes += psc.Bytes
 		res.Scanned.Records += psc.Records

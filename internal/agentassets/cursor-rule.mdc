@@ -1,0 +1,5 @@
+---
+description: Log investigation through locklog. Apply when the user asks when or where something broke, asks about errors, 5xx, crashes or timeouts in logs, or when tempted to run journalctl, docker logs, kubectl logs, grep on log files, or query Loki or Elasticsearch directly.
+globs:
+alwaysApply: false
+---
