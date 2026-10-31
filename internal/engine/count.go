@@ -207,6 +207,9 @@ func (q *CountQuery) bucketOf(t time.Time) time.Time {
 // does (countFailed), while any other count leaves it out, since its masked
 // predicates cannot be evaluated on it.
 func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr error) {
+	// The caller's predicates are not shared: validation and evaluation
+	// write into them.
+	q.Where = slices.Clone(q.Where)
 	cursor := q.Cursor
 	q.Cursor = ""
 	// The caps first: the trust loops below are sources × predicates.
@@ -334,7 +337,7 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 
 	sc, failures := Scanned{}, 0
 	var err *Error
-	chunk, gran, sc, failures, err = e.run(ctx, f.plan, chunk, gran, nil, e.callBytes(q.Sources), func(raw source.RawRecord, rec mask.Record) {
+	chunk, gran, sc, failures, err = e.run(ctx, f.plan, chunk, gran, nil, e.callBytes(q.Sources), q.evalFactor(), func(raw source.RawRecord, rec mask.Record, b *budget) {
 		if rec.Failed() && trustedOnly {
 			// The index counts every record by its trusted values;
 			// a scan of a trusted-only count does the same for a
@@ -344,7 +347,7 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 			e.countFailed(&q, raw, rec, a)
 			return
 		}
-		if !q.match(rec) {
+		if !q.match(rec, b) {
 			return
 		}
 		t, timed := rec.Time()

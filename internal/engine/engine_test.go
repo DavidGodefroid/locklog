@@ -1491,9 +1491,141 @@ func TestNumericInOnLongArrays(t *testing.T) {
 	for i := 0; i < 32; i++ {
 		preds = append(preds, Pred{Field: "v", Op: OpIn, Value: raw(vals)})
 	}
-	start := time.Now()
+	before := numberParses.Load()
 	recs, _ := allRecords(t, f.eng, q(func(q *Query) { q.Where = preds }))
-	if len(recs) != 4 || time.Since(start) > 3*time.Second {
-		t.Fatalf("%d records in %v", len(recs), time.Since(start))
+	// Each leaf is parsed at most once per predicate (never once per
+	// value): leaves × predicates, plus the predicates' own values.
+	parses, bound := numberParses.Load()-before, int64(4*5001*32+32*64)
+	if len(recs) != 4 || parses > bound {
+		t.Fatalf("%d records, %d number parses (bound %d)", len(recs), parses, bound)
+	}
+}
+
+// heavyRecords returns n records each holding a v array of leaves strings
+// of "ab ab …", the last one ending in "ab END".
+func heavyRecords(n, leaves int) string {
+	var b strings.Builder
+	item := strings.TrimSpace(strings.Repeat("ab ", 6))
+	for r := 0; r < n; r++ {
+		fmt.Fprintf(&b, "{\"time\":\"2026-10-30T12:00:%02dZ\",\"v\":[", r)
+		for i := 0; i < leaves-1; i++ {
+			b.WriteString("\"" + item + "\",")
+		}
+		b.WriteString("\"ab END\"],\"msg\":\"m\"}\n")
+	}
+	return b.String()
+}
+
+// heavyPreds are 31 regexes matching only the last leaf of heavyRecords and
+// one matching none: every leaf is evaluated by every predicate.
+func heavyPreds() []Pred {
+	const g = "[ab ]{1,100}[ab ]{1,100}[ab ]{1,100}"
+	var preds []Pred
+	for i := 0; i < 31; i++ {
+		preds = append(preds, Pred{Field: "v", Op: OpMatches, Value: raw(fmt.Sprintf("%s(E|q%d)ND", g, i))})
+	}
+	return append(preds, Pred{Field: "v", Op: OpMatches, Value: raw(g + "ENDZ")})
+}
+
+// TestEvalDeadlineInsideRecords: predicates costing seconds per record
+// stop at the hard deadline (checked within a record), not after the work.
+func TestEvalDeadlineInsideRecords(t *testing.T) {
+	// The work takes over 5 s (much more under the race detector, which
+	// also slows masking: the deadline is scaled with it).
+	d := time.Second
+	if raceEnabled {
+		d = 4 * time.Second
+	}
+	// Masking without value detectors: the cost is the evaluation's.
+	f := newFixtureMask(t, heavyRecords(12, 2400), func(o *mask.Options) { o.Values = nil },
+		func(o *Options) { o.Limits.Deadline = d })
+	start := time.Now()
+	_, err := f.eng.Search(ctx, q(func(q *Query) { q.Where = heavyPreds() }))
+	if took := time.Since(start); code(err) != EOverBudget || took > 3*d {
+		t.Fatalf("search: %v after %v", err, took)
+	}
+	start = time.Now()
+	_, err = f.eng.Count(ctx, CountQuery{Query: q(func(q *Query) { q.Where = heavyPreds() })})
+	if took := time.Since(start); code(err) != EOverBudget || took > 3*d {
+		t.Fatalf("count: %v after %v", err, took)
+	}
+	// Cancellation is seen within a record too.
+	f.eng.o.Limits.Deadline = 10 * time.Minute
+	cctx, cancel := context.WithTimeout(ctx, d/2)
+	defer cancel()
+	start = time.Now()
+	_, err = f.eng.Search(cctx, q(func(q *Query) { q.Where = heavyPreds() }))
+	if took := time.Since(start); err == nil || took > 2*d {
+		t.Fatalf("cancelled: %v after %v", err, took)
+	}
+}
+
+// TestRegexSizeBounds: large repetition counts and expanded sizes are
+// refused; bounded patterns are taken.
+func TestRegexSizeBounds(t *testing.T) {
+	f := newFixture(t, genLog(t0, 10, "c@example.org"), nil)
+	for re, want := range map[string]string{
+		"[ab ]{1,250}END":      EBadQuery,
+		"a{101}":               EBadQuery,
+		"(a{50}){50}":          EBadQuery,
+		"(((ab){10}){10}){10}": EBadQuery,
+		"[ab ]{1,100}END":      "",
+		"(ab){10}x{3,}":        "",
+		"upstream|timeout":     "",
+	} {
+		_, err := f.eng.Search(ctx, q(func(q *Query) { q.Regex = re }))
+		if code(err) != want {
+			t.Errorf("regex %q: %v, want %q", re, err, want)
+		}
+		_, err = f.eng.Search(ctx, q(func(q *Query) { q.Where = []Pred{{Field: "msg", Op: OpMatches, Value: raw(re)}} }))
+		if code(err) != want {
+			t.Errorf("matches %q: %v, want %q", re, err, want)
+		}
+	}
+}
+
+// epochMasker is a masker under another pseudonym epoch.
+type epochMasker struct {
+	*mask.Masker
+	epoch string
+}
+
+func (m epochMasker) Epoch() string { return m.epoch }
+
+// TestRefStaleAfterEpochChange: a ref made under another pseudonym epoch is
+// refused as stale.
+func TestRefStaleAfterEpochChange(t *testing.T) {
+	f := newFixture(t, genLog(t0, 100, "c@example.org"), nil)
+	res, err := f.eng.Search(ctx, q(func(q *Query) { q.Limit = 1 }))
+	if err != nil || len(res.Records) != 1 {
+		t.Fatal(err)
+	}
+	var first map[string]any
+	json.Unmarshal(res.Records[0], &first)
+	ref := first["ref"].(string)
+	if _, _, err := f.eng.Ref(ref); err != nil {
+		t.Fatal(err)
+	}
+	f.eng.o.Masker = epochMasker{f.masker, "another-epoch"}
+	if _, _, err := f.eng.Ref(ref); code(err) != EStale {
+		t.Fatalf("ref after the epoch changed: %v", err)
+	}
+}
+
+// TestCallerPredicatesUntouched: Search and Count do not write into the
+// caller's predicates.
+func TestCallerPredicatesUntouched(t *testing.T) {
+	f := newFixture(t, genLog(t0, 100, "c@example.org"), nil)
+	where := []Pred{{Field: "status", Op: OpIn, Value: raw([]int{500, 502})}, {Field: "msg", Op: OpMatches, Value: raw("up")}}
+	if _, err := f.eng.Search(ctx, q(func(q *Query) { q.Where = where })); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.eng.Count(ctx, CountQuery{Query: q(func(q *Query) { q.Where = where })}); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range where {
+		if p.re != nil || p.in != nil || p.vals != nil || p.nums != nil {
+			t.Fatalf("predicate written into: %+v", p)
+		}
 	}
 }

@@ -368,10 +368,17 @@ func (e *Engine) resume(st cursorState, query string) (*frozen, *Error) {
 // Stopping points are group boundaries, decided from planned bytes before a
 // fetch and from the bytes actually fetched before masking (remote sources:
 // their deadline starts when the fetch completes). Both depend only on the
-// range and the trusted selector, never on the predicates. It returns the
+// range, the trusted selector and the query's shape (factor), never on what
+// the predicates find in the data. It returns the
 // position reached and the work done.
-func (e *Engine) run(ctx context.Context, plan source.Byteplan, chunk, gran int, needles []string, callBytes int64,
-	visit func(raw source.RawRecord, rec mask.Record)) (int, int, Scanned, int, *Error) {
+//
+// factor (at least 1, a function of the query only) multiplies the cost of a
+// group's bytes for the evaluation of its text predicates. visit evaluates
+// under the budget it is passed: once that is exceeded (the group's hard
+// deadline, or ctx cancelled) the call is refused.
+func (e *Engine) run(ctx context.Context, plan source.Byteplan, chunk, gran int, needles []string, callBytes, factor int64,
+	visit func(raw source.RawRecord, rec mask.Record, b *budget)) (int, int, Scanned, int, *Error) {
+	factor = max(factor, 1)
 	// Deadlines are wall-clock (Options.Now is the query clock).
 	start := time.Now()
 	deadline := start.Add(e.o.Limits.Deadline)
@@ -384,7 +391,7 @@ func (e *Engine) run(ctx context.Context, plan source.Byteplan, chunk, gran int,
 		}
 		c := plan.Chunks[chunk]
 		remaining := time.Until(deadline)
-		groups := granuleGroups(c, gran, max(e.o.Cost.Budget(remaining), 1))
+		groups := granuleGroups(c, gran, max(e.o.Cost.Budget(remaining)/factor, 1))
 		if len(groups) == 0 {
 			chunk, gran = chunk+1, 0
 			continue
@@ -398,7 +405,7 @@ func (e *Engine) run(ctx context.Context, plan source.Byteplan, chunk, gran int,
 		}
 		// Stop before a group that would not fit (but always make
 		// progress on the first group of a call).
-		if sc.Granules > 0 && e.o.Cost.Time(planned) > remaining {
+		if sc.Granules > 0 && e.o.Cost.Time(planned*factor) > remaining {
 			return chunk, gran, sc, failures, nil
 		}
 		groupCtx, cancel := context.WithDeadline(ctx, deadline.Add(e.o.Limits.Deadline/2))
@@ -439,6 +446,8 @@ func (e *Engine) run(ctx context.Context, plan source.Byteplan, chunk, gran int,
 		// which ones do, so they are not counted (failed records are
 		// still withheld whole, as they never match); see
 		// prefilter.go.
+		hard := deadline.Add(e.o.Limits.Deadline / 2)
+		b := &budget{stop: func() bool { return ctx.Err() != nil || time.Now().After(hard) }}
 		for i := range raws {
 			// A record masking failed on is withheld whole (it
 			// never matches nor counts by masked values) and
@@ -451,17 +460,19 @@ func (e *Engine) run(ctx context.Context, plan source.Byteplan, chunk, gran int,
 				failures++
 			}
 			// Evaluation is bounded by the group's hard deadline
-			// too: predicates on large records (numbers in long
-			// arrays) can cost more than masking. The call is
-			// refused whole (visit's effects are the call's own:
-			// a cached page or partial count is left as it was).
-			if i%64 == 0 && (ctx.Err() != nil || time.Now().After(deadline.Add(e.o.Limits.Deadline/2))) {
-				if ctx.Err() != nil {
-					return chunk, gran, sc, failures, &Error{Code: ESource, Message: "cancelled"}
-				}
-				return chunk, gran, sc, failures, &Error{Code: EOverBudget, Message: "evaluating the predicates on this data did not finish in time: use fewer or simpler predicates, or narrow the range"}
+			// too: predicates on large records (regexes on many
+			// leaves, numbers in long arrays) can cost more than
+			// masking. The clock is checked before every record and,
+			// through the budget, within one. The call is refused
+			// whole (visit's effects are the call's own: a cached
+			// page or partial count is left as it was).
+			if b.check() {
+				return chunk, gran, sc, failures, overEval(ctx)
 			}
-			visit(raws[i], recs[i])
+			visit(raws[i], recs[i], b)
+			if b.exceeded() {
+				return chunk, gran, sc, failures, overEval(ctx)
+			}
 		}
 		// Reported work is granule-rounded: the planned bytes of the
 		// granules (a remote slice, unknown before the fetch, by the
@@ -479,6 +490,14 @@ func (e *Engine) run(ctx context.Context, plan source.Byteplan, chunk, gran int,
 		}
 	}
 	return chunk, gran, sc, failures, nil
+}
+
+// overEval is the error of a call whose evaluation was stopped.
+func overEval(ctx context.Context) *Error {
+	if ctx.Err() != nil {
+		return &Error{Code: ESource, Message: "cancelled"}
+	}
+	return &Error{Code: EOverBudget, Message: "evaluating the predicates on this data did not finish in time: use fewer or simpler predicates, or narrow the range"}
 }
 
 // fetch reads the records of a group of granules: those to mask, how many
@@ -615,6 +634,9 @@ type match struct {
 
 // Search runs a search (locklog_search).
 func (e *Engine) Search(ctx context.Context, q Query) (_ SearchResult, retErr error) {
+	// The caller's predicates are not shared: validation and evaluation
+	// write into them.
+	q.Where = slices.Clone(q.Where)
 	cursor := q.Cursor
 	q.Cursor = ""
 	maxRange := e.o.Limits.LocalRange
@@ -697,13 +719,13 @@ func (e *Engine) Search(ctx context.Context, q Query) (_ SearchResult, retErr er
 		var err *Error
 		var found []match
 		size, over := matchesSize(pending), false
-		chunk, gran, sc, failures, err = e.run(ctx, f.plan, chunk, gran, needles, e.callBytes(q.Sources), func(raw source.RawRecord, rec mask.Record) {
+		chunk, gran, sc, failures, err = e.run(ctx, f.plan, chunk, gran, needles, e.callBytes(q.Sources), q.evalFactor(), func(raw source.RawRecord, rec mask.Record, b *budget) {
 			// Granules hold records around the range: keep the
 			// range's (and the untimed ones).
 			if t, ok := rec.Time(); ok && !q.rangeContains(t, false) {
 				return
 			}
-			if !q.match(rec) {
+			if !q.match(rec, b) {
 				return
 			}
 			out, oerr := e.outRecord(raw, rec, q.Fields)

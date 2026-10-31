@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/big"
 	"regexp"
+	"regexp/syntax"
 	"slices"
 	"strings"
 	"time"
@@ -99,6 +100,7 @@ type Pred struct {
 	nums   []*big.Rat
 	in     *inSet // OpIn's values as sets (built on first use)
 	re     *regexp.Regexp
+	reCost int // re's expanded size (regexCost)
 	needle string
 }
 
@@ -131,7 +133,8 @@ type Query struct {
 	Order  string `json:"order,omitempty"`
 	Cursor string `json:"cursor,omitempty"`
 
-	textRe *regexp.Regexp
+	textRe     *regexp.Regexp
+	textReCost int
 }
 
 // numeric reports whether a value of the predicate is a number. The
@@ -263,11 +266,11 @@ func (v *validator) validate(q *Query) *Error {
 		}
 	}
 	if q.Regex != "" {
-		re, err := v.regex(q.Regex, "regex")
+		re, cost, err := v.regex(q.Regex, "regex")
 		if err != nil {
 			return err
 		}
-		q.textRe = re
+		q.textRe, q.textReCost = re, cost
 	}
 	if len(q.Fields) > MaxFields {
 		return refuse(EBadQuery, "fields", "at most %d fields", MaxFields)
@@ -348,11 +351,11 @@ func (v *validator) pred(q *Query, p *Pred, span string) *Error {
 		if err != nil {
 			return refuse(EBadQuery, span+".value", "matches takes a string")
 		}
-		re, e := v.regex(s, span+".value")
+		re, cost, e := v.regex(s, span+".value")
 		if e != nil {
 			return e
 		}
-		p.re = re
+		p.re, p.reCost = re, cost
 		return nil
 	case OpLt, OpLe, OpGt, OpGe:
 		// Ordering on a masked field is an oracle (as MIN/MAX would be).
@@ -407,22 +410,31 @@ func (v *validator) needle(s, span string) *Error {
 	return nil
 }
 
-func (v *validator) regex(s, span string) (*regexp.Regexp, *Error) {
+func (v *validator) regex(s, span string) (*regexp.Regexp, int, *Error) {
 	if s == "" || len(s) > MaxPattern || !utf8.ValidString(s) {
-		return nil, refuse(EBadQuery, span, "want an RE2 pattern of 1 to %d bytes", MaxPattern)
+		return nil, 0, refuse(EBadQuery, span, "want an RE2 pattern of 1 to %d bytes", MaxPattern)
 	}
 	if strings.Contains(s, mask.Open) || strings.Contains(s, mask.Close) {
-		return nil, refuse(EBadQuery, span, "patterns never match inside a placeholder")
+		return nil, 0, refuse(EBadQuery, span, "patterns never match inside a placeholder")
 	}
 	re, err := regexp.Compile(s)
 	if err != nil {
-		return nil, refuse(EBadQuery, span, "invalid RE2 pattern")
+		return nil, 0, refuse(EBadQuery, span, "invalid RE2 pattern")
+	}
+	// Bounded size: evaluation time is bytes × program size.
+	parsed, err := syntax.Parse(s, syntax.Perl)
+	if err != nil {
+		return nil, 0, refuse(EBadQuery, span, "invalid RE2 pattern")
+	}
+	cost, ok := regexCost(parsed)
+	if !ok || cost > maxRegexCost {
+		return nil, 0, refuse(EBadQuery, span, "pattern too large: repetition counts up to %d, and at most %d characters once repetitions are expanded", maxRepeat, maxRegexCost)
 	}
 	// Literal parts of a pattern are checked like text.
 	if v.detect != nil && v.detect(s) {
-		return nil, refuse(EPIIInQuery, span, "the pattern holds personal data or a secret: use locklog_lookup")
+		return nil, 0, refuse(EPIIInQuery, span, "the pattern holds personal data or a secret: use locklog_lookup")
 	}
-	return re, nil
+	return re, cost, nil
 }
 
 func stringValue(r json.RawMessage) (string, error) {
