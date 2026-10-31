@@ -25,11 +25,30 @@ uses [Semantic Versioning](https://semver.org/).
   read-only allowlist checked segment by segment, response caps, the tls
   modes, and the production check that refuses a backend answering a data
   read without credentials.
+- The console (`locklog console`): the agent's log methods served through
+  lockkit's console over a seam to the engine, the launcher's checks
+  before any log is read (dev:inode of `.locklog` and of each mount root;
+  no network for a local-only profile), an audit record per call written
+  before the answer leaves (fail closed; never a predicate or a value), and
+  `--allowed-uids`.
+- The console opens the engine of the approved policy: a masker per source
+  on one pseudonym epoch (rotated and pruned as the profile says), `K_ref`
+  and the local index in the home volume (a missing or corrupt key refuses
+  the start), the file, journald and docker sources given only the mount
+  roots the launcher checked (every planned root must be in
+  `LOCKLOG_EXPECT_ROOTS`, the containers root may be the launcher's "not
+  checked from the host" case; a Loki source is refused until it is
+  supported), the calibrated cost model, the profile's per-call budgets, and
+  `log.status`/`log.sources`. In its image the console confines itself with
+  Landlock before it opens any source, and a docker source on a production
+  profile needs Landlock or openat2; `:status` shows the Landlock state.
+  The mounts are checked again on every call, and a session lost under a
+  call ends it with a connection-lost error (the next call reconnects).
 - The Docker source: containers' `json-file` logs (rotated `.N[.gz]` files
   included) read by name from the containers root through a name → id map,
   approved globs checked again at read time, console containers never served,
-  no read across a mount point; the `docker-json` format with an `attrs`
-  allowlist. The launcher binds the containers root with gid 0, keeps the map
+  no read across a mount point; the `docker-json` format, and an `attrs`
+  allowlist on the `docker-json` frames. The launcher binds the containers root with gid 0, keeps the map
   current with a `docker events` loop, labels console containers, and gains
   `locklog refresh`. gid 0 applies to the whole console, so a docker source
   runs in a console of its own: the mount plan and the launcher refuse it
