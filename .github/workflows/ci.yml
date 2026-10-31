@@ -236,6 +236,69 @@ jobs:
           sudo LOCKLOG_JOURNALD_IT=1 ./journald.test -test.run '^TestLiveJournal$' -test.v | tee it.log
           grep -q -- '--- PASS: TestLiveJournal' it.log
 
+  # The heavy LL-16 suites, on every pull request: the leak suite with every
+  # canary kind in every encoding written into every query position, the
+  # oracle, the equivalence suites, and the latency cases of the oracle
+  # (repeated, interleaved runs on production and non-production defaults,
+  # idle and under a CPU hog, compared statistically). The test job runs
+  # the quick suites (injection, the agent-rule leak case, incident (a)).
+  suites:
+    name: suites (leak, oracle, equivalence, latency)
+    runs-on: ubuntu-latest
+    timeout-minutes: 65
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.x"
+          check-latest: true
+      - name: suites
+        shell: bash
+        run: |
+          set -o pipefail
+          GOMAXPROCS=2 LOCKLOG_SUITES=1 LOCKLOG_SUITE_FULL=1 LOCKLOG_SUITE_TIMING=1 go test -count=1 -timeout 60m -v \
+            -run '^(TestSuite|TestLeakScanner)' ./internal/engine/ 2>&1 |
+            grep -v -E '^=== (RUN|PAUSE|CONT)|: [0-9]+ pages in |: scanned in ' | tee suites.log
+
+  # Local incident (b) at realistic volume (R6-P1): 7 days x 1 GiB/day of
+  # nginx and journald (a quarter of that: the journal history imported by
+  # systemd-journal-remote in export format with past timestamps); job 1
+  # warm and cold, idle and with the host slowed 3x; no prompt (<= 3); warm
+  # within 5 min, cold within 5 min plus the backfill (1.5x the warm build).
+  incidents:
+    name: incidents (local, realistic volume)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.x"
+          check-latest: true
+      - name: systemd-journal-remote
+        run: sudo apt-get update -q && sudo apt-get install -y -q systemd-journal-remote
+      - name: incidents
+        shell: bash
+        run: |
+          set -o pipefail
+          # About 12 GiB of data: the runner's larger temporary disk when
+          # there is one.
+          dir="${RUNNER_TEMP}"
+          if [ -d /mnt ] && sudo mkdir -p /mnt/incidents && sudo chown "$(id -u):$(id -g)" /mnt/incidents; then dir=/mnt/incidents; fi
+          df -h "$dir"
+          TMPDIR="$dir" GOMAXPROCS=2 LOCKLOG_INCIDENT_VOLUME=1GiB \
+            LOCKLOG_JOURNAL_REMOTE=/usr/lib/systemd/systemd-journal-remote \
+            go test -count=1 -timeout 85m -v -run '^(TestIncidentOrder4812|TestIncidentVolume)$' ./internal/engine/ 2>&1 |
+            grep -v -E '^=== (RUN|PAUSE|CONT)' | tee incidents.log
+
   # One required check name ("lint") for every static check; later pull
   # requests add steps here (goreleaser check, install.sh rules, ...).
   lint:
