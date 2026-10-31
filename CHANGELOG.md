@@ -45,7 +45,11 @@ uses [Semantic Versioning](https://semver.org/).
   for Claude Code it merges the free tools (never an approved one such as
   `locklog_request_change`) into the project's `.claude/settings.local.json`
   `permissions.allow`, keeping the human's entries; the shared
-  `.claude/settings.json` is never written.
+  `.claude/settings.json` and the user's own settings are never written.
+  A re-run adds back the entries the human removed, and prints each entry
+  it added (`added to permissions.allow in .claude/settings.local.json:
+  <entry>`); remove an entry again to be asked for it. init warns when git
+  does not ignore `.claude/settings.local.json`.
 - The Docker source: containers' `json-file` logs (rotated `.N[.gz]` files
   included) read by name from the containers root through a name → id map,
   approved globs checked again at read time, console containers never served,

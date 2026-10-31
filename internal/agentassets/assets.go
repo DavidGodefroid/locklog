@@ -5,8 +5,14 @@ package agentassets
 
 import (
 	_ "embed"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
 
 	"github.com/DavidGodefroid/lockkit/agentwire"
 
@@ -52,15 +58,88 @@ var Wiring = agentwire.Wiring{Product: product.P, Assets: agentwire.Assets{
 	ClaudeNote:         "The free locklog tools answer masked data within the budgets; anything beyond them (a policy change, a scan, an unmask) is approved in the locklog console.",
 }}
 
-// InitProject wires agent into the project that holds cwd (agentwire's
-// ProjectRoot): `locklog init <agent>`, and what `locklog setup --agent
-// host` runs for each detected agent.
-func InitProject(cwd, agent string) (agentwire.Result, error) {
-	return Wiring.Init(agentwire.ProjectRoot(product.P, cwd), agent)
+// localSettings is Claude Code's personal settings file, relative to the
+// project root: the only file the allow list is written to.
+const localSettings = ".claude/settings.local.json"
+
+// InitResult is what a project init did: agentwire's actions and notes,
+// the allow entries this run added (a re-run adds back the ones the human
+// removed, and says which), and warnings.
+type InitResult struct {
+	agentwire.Result
+	// AllowAdded are the entries this run added to permissions.allow in
+	// .claude/settings.local.json, in order.
+	AllowAdded []string
+	// Warnings are printed after the notes.
+	Warnings []string
 }
 
-// Report prints what a wiring wrote, one line per file, then its notes.
-func Report(w io.Writer, res agentwire.Result) {
+// InitProject wires agent into the project that holds cwd (agentwire's
+// ProjectRoot): `locklog init <agent>`, and what `locklog setup --agent
+// host` runs for each detected agent. The allow list is only ever written
+// at project scope, never into the user's settings: a foreign project's
+// server named "locklog" must not get its tools allowed.
+func InitProject(cwd, agent string) (InitResult, error) {
+	root := agentwire.ProjectRoot(product.P, cwd)
+	claude := agent == "claude"
+	var before []string
+	if claude {
+		before = allowEntries(filepath.Join(root, filepath.FromSlash(localSettings)))
+	}
+	res, err := Wiring.Init(root, agent)
+	out := InitResult{Result: res}
+	if err != nil || !claude {
+		return out, err
+	}
+	for _, a := range allowEntries(filepath.Join(root, filepath.FromSlash(localSettings))) {
+		if !slices.Contains(before, a) && !slices.Contains(out.AllowAdded, a) {
+			out.AllowAdded = append(out.AllowAdded, a)
+		}
+	}
+	if ignored, known := gitIgnores(root, localSettings); known && !ignored {
+		out.Warnings = append(out.Warnings, "warning: git does not ignore "+localSettings+
+			" (personal settings, with the allow list above): add it to .gitignore, or it may be committed")
+	}
+	return out, nil
+}
+
+// allowEntries reads permissions.allow of a Claude Code settings file
+// (none when it is missing or not of that shape: agentwire refuses it).
+func allowEntries(file string) []string {
+	data, err := os.ReadFile(file)
+	if err != nil {
+		return nil
+	}
+	var s struct {
+		Permissions struct {
+			Allow []string `json:"allow"`
+		} `json:"permissions"`
+	}
+	if json.Unmarshal(data, &s) != nil {
+		return nil
+	}
+	return s.Permissions.Allow
+}
+
+// gitIgnores reports whether git ignores rel in the work tree at root;
+// known is false when that cannot be told (no git, not a work tree).
+// A tracked file is not ignored. A test's stub.
+var gitIgnores = func(root, rel string) (ignored, known bool) {
+	cmd := exec.Command("git", "-C", root, "check-ignore", "-q", "--", rel)
+	err := cmd.Run()
+	if err == nil {
+		return true, true
+	}
+	var ee *exec.ExitError
+	if errors.As(err, &ee) && ee.ExitCode() == 1 {
+		return false, true
+	}
+	return false, false
+}
+
+// Report prints what a wiring wrote, one line per file, the allow entries
+// it added, then its notes and warnings.
+func Report(w io.Writer, res InitResult) {
 	for _, a := range res.Actions {
 		line := a.Status + " " + a.Path
 		if a.Detail != "" {
@@ -68,7 +147,13 @@ func Report(w io.Writer, res agentwire.Result) {
 		}
 		fmt.Fprintln(w, line)
 	}
+	for _, a := range res.AllowAdded {
+		fmt.Fprintf(w, "added to permissions.allow in %s: %s\n", localSettings, a)
+	}
 	if res.Notes != "" {
 		fmt.Fprintln(w, res.Notes)
+	}
+	for _, m := range res.Warnings {
+		fmt.Fprintln(w, m)
 	}
 }

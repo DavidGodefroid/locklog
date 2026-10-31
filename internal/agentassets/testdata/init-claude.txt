@@ -2,6 +2,12 @@ created .mcp.json
 created .claude/skills/locklog/SKILL.md
 created .claude/settings.local.json
 created .locklog/config.toml
+added to permissions.allow in .claude/settings.local.json: mcp__locklog__locklog_status
+added to permissions.allow in .claude/settings.local.json: mcp__locklog__locklog_sources
+added to permissions.allow in .claude/settings.local.json: mcp__locklog__locklog_search
+added to permissions.allow in .claude/settings.local.json: mcp__locklog__locklog_count
+added to permissions.allow in .claude/settings.local.json: mcp__locklog__locklog_pii_list
+added to permissions.allow in .claude/settings.local.json: mcp__locklog__locklog_pii_add
 Claude Code asks once whether to use the project MCP server "locklog"; approve it.
 The calls below never touch data without the console's approval; they are in
 "permissions.allow" in .claude/settings.local.json (personal: check that git

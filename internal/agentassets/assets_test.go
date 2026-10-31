@@ -2,8 +2,10 @@ package agentassets
 
 import (
 	"bytes"
+	"encoding/json"
 	"flag"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -56,7 +58,7 @@ func writeFile(t *testing.T, p, s string, m os.FileMode) {
 	}
 }
 
-func status(res agentwire.Result, path string) string {
+func status(res InitResult, path string) string {
 	for _, a := range res.Actions {
 		if a.Path == path {
 			return a.Status
@@ -210,5 +212,98 @@ func TestInitOtherAgentsNoAllow(t *testing.T) {
 		if _, err := os.Lstat(filepath.Join(root, ".claude")); !os.IsNotExist(err) {
 			t.Errorf("%s: .claude written", a)
 		}
+	}
+}
+
+// A re-run adds back only the entries the human removed, and prints
+// exactly those.
+func TestInitClaudeRerunPrintsAddedEntries(t *testing.T) {
+	root := t.TempDir()
+	res, err := InitProject(root, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(res.AllowAdded, ClaudeAllow()) {
+		t.Fatalf("first run added %q, want %q", res.AllowAdded, ClaudeAllow())
+	}
+	local := filepath.Join(root, ".claude", "settings.local.json")
+	removed := "mcp__locklog__" + mcptools.ToolSearch
+	kept := slices.DeleteFunc(slices.Clone(ClaudeAllow()), func(a string) bool { return a == removed })
+	b, _ := json.Marshal(map[string]any{"permissions": map[string]any{"allow": append([]string{"Bash(ls)"}, kept...)}})
+	writeFile(t, local, string(b), 0o600)
+	res, err = InitProject(root, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(res.AllowAdded, []string{removed}) {
+		t.Errorf("re-run added %q, want only %q", res.AllowAdded, removed)
+	}
+	var out bytes.Buffer
+	Report(&out, res)
+	if strings.Count(out.String(), "added to permissions.allow") != 1 || !strings.Contains(out.String(), "added to permissions.allow in .claude/settings.local.json: "+removed+"\n") {
+		t.Errorf("report:\n%s", out.String())
+	}
+	// Nothing missing: nothing added, nothing printed as added.
+	res, err = InitProject(root, "claude")
+	if err != nil || len(res.AllowAdded) != 0 {
+		t.Errorf("third run: added %q (%v)", res.AllowAdded, err)
+	}
+}
+
+// init warns when git does not ignore .claude/settings.local.json, and
+// only then (ignored, or not a git work tree: no warning).
+func TestInitClaudeWarnsWhenGitDoesNotIgnoreLocalSettings(t *testing.T) {
+	old := gitIgnores
+	t.Cleanup(func() { gitIgnores = old })
+	for _, c := range []struct {
+		ignored, known, warn bool
+	}{{false, true, true}, {true, true, false}, {false, false, false}} {
+		var asked string
+		gitIgnores = func(_, rel string) (bool, bool) { asked = rel; return c.ignored, c.known }
+		res, err := InitProject(t.TempDir(), "claude")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if asked != ".claude/settings.local.json" {
+			t.Errorf("asked git about %q", asked)
+		}
+		var out bytes.Buffer
+		Report(&out, res)
+		if got := strings.Contains(out.String(), "warning: git does not ignore .claude/settings.local.json"); got != c.warn {
+			t.Errorf("ignored=%v known=%v: warned=%v\n%s", c.ignored, c.known, got, out.String())
+		}
+	}
+	// Other agents never touch the allow list: no check.
+	gitIgnores = func(string, string) (bool, bool) { t.Error("git asked for codex"); return false, true }
+	if _, err := InitProject(t.TempDir(), "codex"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The real check: a work tree that ignores the file, then one that tracks
+// nothing and ignores nothing.
+func TestGitIgnoresReal(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("no git")
+	}
+	// No global or system config (a global excludes file would ignore it).
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", home)
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	root := t.TempDir()
+	if err := exec.Command("git", "init", "-q", root).Run(); err != nil {
+		t.Skip("git init:", err)
+	}
+	if ig, known := gitIgnores(root, ".claude/settings.local.json"); ig || !known {
+		t.Errorf("not ignored yet: ignored=%v known=%v", ig, known)
+	}
+	writeFile(t, filepath.Join(root, ".gitignore"), ".claude/settings.local.json\n", 0o644)
+	if ig, known := gitIgnores(root, ".claude/settings.local.json"); !ig || !known {
+		t.Errorf("ignored: ignored=%v known=%v", ig, known)
+	}
+	if _, known := gitIgnores(t.TempDir(), ".claude/settings.local.json"); known {
+		t.Error("outside a work tree: known")
 	}
 }
