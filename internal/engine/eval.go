@@ -2,6 +2,7 @@ package engine
 
 import (
 	"math/big"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -250,6 +251,8 @@ func compare(p *Pred, v val) (int, bool) {
 	return strings.Compare(t, p.vals[0]), true
 }
 
+var jsonNumber = regexp.MustCompile(`^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?$`)
+
 // Number literal bounds: big.Rat's cost grows with the exponent (1e999999
 // takes milliseconds), and log content chooses it.
 const (
@@ -261,7 +264,10 @@ const (
 // bounds; a literal beyond them is not a number to compare (equality falls
 // back to its text).
 func parseNumber(s string) (*big.Rat, bool) {
-	if len(s) > maxNumberLen {
+	// The JSON number grammar only: big.Rat also takes hex, octal and
+	// binary mantissas, p exponents (0x1p9999999), fractions and
+	// underscores.
+	if len(s) > maxNumberLen || !jsonNumber.MatchString(s) {
 		return nil, false
 	}
 	if i := strings.IndexAny(s, "eE"); i >= 0 {

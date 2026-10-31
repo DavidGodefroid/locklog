@@ -1414,8 +1414,15 @@ func TestScannedCountKeepsRemoteRange(t *testing.T) {
 // TestHugeExponentsAreNotNumbers: a number literal beyond the bounds is not
 // parsed (its cost grows with the exponent, and log content chooses it).
 func TestHugeExponentsAreNotNumbers(t *testing.T) {
-	if _, ok := parseNumber("1e999999"); ok {
-		t.Fatal("1e999999 parsed")
+	for _, n := range []string{"1e999999", "0x1p9999999", "1p9999999", "0x1p-9999999", "1/3", "0o17", "0b1", "1_000", "+1", ".5", "01"} {
+		if _, ok := parseNumber(n); ok {
+			t.Fatalf("%s parsed", n)
+		}
+	}
+	for _, n := range []string{"0", "-1", "200", "2.5", "1e400", "-3.25E-7"} {
+		if _, ok := parseNumber(n); !ok {
+			t.Fatalf("%s not parsed", n)
+		}
 	}
 	if n, ok := parseNumber("2.5e3"); !ok || n.FloatString(0) != "2500" {
 		t.Fatal(n, ok)
@@ -1424,10 +1431,15 @@ func TestHugeExponentsAreNotNumbers(t *testing.T) {
 	for i := 0; i < 200; i++ {
 		fmt.Fprintf(&b, "{\"time\":\"2026-10-30T12:%02d:%02dZ\",\"n\":1e999999,\"msg\":\"m\"}\n", i/60, i%60)
 	}
+	for i := 0; i < 200; i++ {
+		fmt.Fprintf(&b, "{\"time\":\"2026-10-30T13:%02d:%02dZ\",\"status\":\"0x1p9999999\",\"msg\":\"m\"}\n", i/60, i%60)
+	}
 	f := newFixture(t, b.String(), nil)
 	start := time.Now()
 	recs, _ := allRecords(t, f.eng, q(func(q *Query) { q.Where = []Pred{{Field: "n", Op: "=", Value: raw(200)}} }))
-	if len(recs) != 0 || time.Since(start) > 2*time.Second {
-		t.Fatalf("%d records in %v", len(recs), time.Since(start))
+	// A hex string in a trusted field is not the number 2^9999999.
+	gt, _ := allRecords(t, f.eng, q(func(q *Query) { q.Where = []Pred{{Field: "status", Op: ">", Value: raw(200)}} }))
+	if len(recs) != 0 || len(gt) != 0 || time.Since(start) > 2*time.Second {
+		t.Fatalf("%d, %d records in %v", len(recs), len(gt), time.Since(start))
 	}
 }
