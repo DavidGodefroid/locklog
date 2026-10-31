@@ -31,6 +31,19 @@ uses [Semantic Versioning](https://semver.org/).
   no network for a local-only profile), an audit record per call written
   before the answer leaves (fail closed; never a predicate or a value), and
   `--allowed-uids`.
+- The console opens the engine of the approved policy: a masker per source
+  on one pseudonym epoch (rotated and pruned as the profile says), `K_ref`
+  and the local index in the home volume (a missing or corrupt key refuses
+  the start), the file, journald and docker sources given only the mount
+  roots the launcher checked (every planned root must be in
+  `LOCKLOG_EXPECT_ROOTS`, the containers root may be the launcher's "not
+  checked from the host" case; a Loki source is refused until it is
+  supported), the calibrated cost model, the profile's per-call budgets, and
+  `log.status`/`log.sources`. In its image the console confines itself with
+  Landlock before it opens any source, and a docker source on a production
+  profile needs Landlock or openat2; `:status` shows the Landlock state.
+  The mounts are checked again on every call, and a session lost under a
+  call ends it with a connection-lost error (the next call reconnects).
 - The MCP server (`locklog mcp`): `locklog_status`, `locklog_sources`,
   `locklog_search`, `locklog_count`, the PII rules and change requests, each
   a thin adapter over the console; a host agent (the launcher's `mcp`) is
@@ -53,8 +66,8 @@ uses [Semantic Versioning](https://semver.org/).
 - The Docker source: containers' `json-file` logs (rotated `.N[.gz]` files
   included) read by name from the containers root through a name → id map,
   approved globs checked again at read time, console containers never served,
-  no read across a mount point; the `docker-json` format with an `attrs`
-  allowlist. The launcher binds the containers root with gid 0, keeps the map
+  no read across a mount point; the `docker-json` format, and an `attrs`
+  allowlist on the `docker-json` frames. The launcher binds the containers root with gid 0, keeps the map
   current with a `docker events` loop, labels console containers, and gains
   `locklog refresh`. gid 0 applies to the whole console, so a docker source
   runs in a console of its own: the mount plan and the launcher refuse it
@@ -74,6 +87,14 @@ uses [Semantic Versioning](https://semver.org/).
   refused); public IP addresses (`ip`) join the default detectors;
   `person_name` and `phone_loose` are opt-in by naming them in a profile's
   `detectors`.
+- Patterns (`log.patterns`): the top templates of the masked message text
+  (pseudonyms keep their kind, `⟦email:…⟧`; digit-bearing parts become
+  `<*>`), with first/last times, an optional `baseline` offset (the same
+  window earlier: baseline counts, `new` and `gone` patterns, each granule
+  read once, even when a file grows between the two plans; the baseline's
+  patterns capped apart from the window's, `truncated` past the cap; with a
+  remote source both windows fit its range budget), plan-based admission
+  and free continuations; `count` gains `by_pattern`.
 
 ### Fixed
 

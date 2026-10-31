@@ -20,8 +20,10 @@ import (
 )
 
 const (
-	// Version of the on-disk format; another version is rebuilt.
-	Version = 1
+	// Version of the on-disk format; another version is rebuilt. 2:
+	// line fields and labels (LabelKey) are separate namespaces (1 fell
+	// back from a field to a frame attribute).
+	Version = 2
 	// MaxDistinct is the most distinct values a field may have in one
 	// stream and stay indexed.
 	MaxDistinct = 64
@@ -177,16 +179,42 @@ func sortedCounts(m map[string]*Count) []Count {
 	return out
 }
 
-// Values returns the record's values of fields, in order: the scalar text of
-// the field (dotted paths reach nested objects), Absent when missing or not
-// a scalar, Redacted when sensitive flags it.
-func Values(ev parse.Event, fields []string, sensitive func(field, value string) bool) []string {
-	out := make([]string, len(fields))
-	for i, f := range fields {
-		v, ok := Lookup(ev, f)
+// labelPrefix marks an indexed name as a label (a frame attribute): a
+// configured field name never holds a colon.
+const labelPrefix = "label:"
+
+// LabelKey is the indexed name of the label name: the index holds line
+// fields and labels side by side, each in its own namespace.
+func LabelKey(name string) string { return labelPrefix + name }
+
+// SplitKey returns the field or label an indexed name stands for.
+func SplitKey(key string) (name string, label bool) {
+	if n, ok := strings.CutPrefix(key, labelPrefix); ok {
+		return n, true
+	}
+	return key, false
+}
+
+// TermKey is the indexed name a field (label unset) or label stands for.
+func TermKey(name string, label bool) string {
+	if label {
+		return LabelKey(name)
+	}
+	return name
+}
+
+// Values returns the record's values of keys (line fields, and labels as
+// LabelKey), in order: the scalar text of the field or label (dotted paths
+// reach nested objects), Absent when missing or not a scalar, Redacted when
+// sensitive flags it.
+func Values(ev parse.Event, keys []string, sensitive func(field, value string) bool) []string {
+	out := make([]string, len(keys))
+	for i, k := range keys {
+		f, _ := SplitKey(k)
+		v := Value(ev, k)
 		switch {
-		case !ok:
-			out[i] = Absent
+		case v == Absent || v == Redacted:
+			out[i] = v
 		case sensitive != nil && sensitive(f, v):
 			out[i] = Redacted
 		default:
@@ -196,23 +224,88 @@ func Values(ev parse.Event, fields []string, sensitive func(field, value string)
 	return out
 }
 
-// Lookup returns the scalar text of a field of ev: an attribute (the
-// runtime's stream, a docker attrs.<key>, the source's container name)
-// first, so that a payload field of the same name cannot stand for it; on a
-// framed event, a frame key (parse.FrameKeys) resolves against the
-// attributes only; else a top-level member named name, else a dotted path
-// through nested objects.
+// Lookup returns the scalar text of a line field of ev: a top-level member
+// named name, else a dotted path through nested objects. Frame attributes
+// (labels) are another namespace (LookupAttr): the engine's scan reads a
+// field predicate on the line's fields only, and so does the index.
 func Lookup(ev parse.Event, name string) (string, bool) {
-	if v, ok := lookupMembers(ev.Attrs, name); ok {
-		return v, true
+	return lookupMembers(ev.Fields, name)
+}
+
+// LookupAttr returns the scalar text of a frame attribute (label) of ev.
+func LookupAttr(ev parse.Event, name string) (string, bool) {
+	return lookupMembers(ev.Attrs, name)
+}
+
+// Value returns the indexed value of key (a line field, or a label as
+// LabelKey) on ev: its scalar text, Absent when nothing is at the path, or
+// Redacted (unknown) when the path is ambiguous: several leaves (a repeated
+// key, an array, a dotted name also stored as one key) or an object or
+// other non-scalar. The scan matches a predicate on any leaf at the path,
+// so an ambiguous value must never prune a granule nor be counted by one.
+func Value(ev parse.Event, key string) string {
+	name, label := SplitKey(key)
+	ms := ev.Fields
+	if label {
+		ms = ev.Attrs
 	}
-	if ev.Framed {
-		head, _, _ := strings.Cut(name, ".")
-		if slices.Contains(parse.FrameKeys, head) {
-			return "", false
+	var c leafCount
+	c.walk(ms, name)
+	switch {
+	case c.n == 0:
+		return Absent
+	case c.n > 1:
+		return Redacted
+	}
+	if s, ok := scalar(c.first); ok {
+		return s
+	}
+	return Redacted
+}
+
+// leafCount counts the leaves at a dotted path, every reading of its dots
+// (nested objects, a key holding dots), arrays crossed, as the scan does.
+type leafCount struct {
+	n     int
+	first parse.Value
+}
+
+func (c *leafCount) walk(ms []parse.Member, path string) {
+	for _, m := range ms {
+		switch {
+		case m.Key == path:
+			c.leaf(m.Value)
+		case strings.HasPrefix(path, m.Key+"."):
+			c.down(m.Value, path[len(m.Key)+1:])
 		}
 	}
-	return lookupMembers(ev.Fields, name)
+}
+
+func (c *leafCount) down(v parse.Value, rest string) {
+	switch v.Kind {
+	case parse.KindObject:
+		c.walk(v.Members, rest)
+	case parse.KindArray:
+		for _, it := range v.Items {
+			c.down(it, rest)
+		}
+	}
+}
+
+func (c *leafCount) leaf(v parse.Value) {
+	if v.Kind == parse.KindArray {
+		if len(v.Items) == 0 {
+			c.n += 2 // an empty array: present, no scalar (unknown)
+		}
+		for _, it := range v.Items {
+			c.leaf(it)
+		}
+		return
+	}
+	if c.n == 0 {
+		c.first = v
+	}
+	c.n++
 }
 
 func lookupMembers(ms []parse.Member, name string) (string, bool) {

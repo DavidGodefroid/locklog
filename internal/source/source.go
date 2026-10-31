@@ -39,7 +39,12 @@ func (r Range) Overlaps(from, to time.Time) bool { return !to.Before(r.From) && 
 // value, "in" on a set. Values are the field's clear values (trusted fields
 // are shown to the agent in clear after the detectors).
 type Term struct {
-	Field  string
+	Field string
+	// Label is set for a term on a label of the source's frame (Loki
+	// stream labels, journald and docker attributes: parse.Event.Attrs),
+	// unset for a line field. They are separate namespaces: a source
+	// applies a term only in its own one.
+	Label  bool
 	Op     string // "=", "!=", "in"
 	Values []string
 }
@@ -50,10 +55,15 @@ type Selector struct {
 	Terms []Term
 }
 
-// Match reports whether a record whose trusted fields have values vals
-// (missing fields absent) satisfies every term.
-func (s Selector) Match(vals map[string]string) bool {
+// Match reports whether a record whose trusted line fields have values
+// fields and whose labels have values labels (missing ones absent) satisfies
+// every term.
+func (s Selector) Match(fields, labels map[string]string) bool {
 	for _, t := range s.Terms {
+		vals := fields
+		if t.Label {
+			vals = labels
+		}
 		v, ok := vals[t.Field]
 		switch t.Op {
 		case "=", "in":
@@ -91,6 +101,10 @@ type Granule struct {
 	Indexed  bool
 	From, To time.Time
 	Records  int64
+	// Bytes is the planned cost of the granule (its length for a byte
+	// stream); 0 when unknown before the fetch (a remote time slice,
+	// charged by the bytes actually fetched).
+	Bytes int64
 }
 
 // Chunk is a unit of a byte plan: consecutive granules of one stream.
@@ -170,7 +184,10 @@ type Iterator interface {
 
 // FieldInfo describes one field name a source has seen.
 type FieldInfo struct {
-	Name    string
+	Name string
+	// Label is set for a label of the source's frame (a Loki stream
+	// label, a docker container or stream), unset for a line field.
+	Label   bool
 	Trusted bool
 	// Values are the trusted field's distinct values (raw, masked by the
 	// caller), when the source knows them and they are few.
@@ -229,7 +246,10 @@ var ErrNotIndexable = errors.New("source: the count needs fields the index (or t
 type CountQuery struct {
 	Range    Range
 	Selector Selector
+	// By are line fields, ByLabels labels; a row's Vals are the By values
+	// then the ByLabels values.
 	By       []string
+	ByLabels []string
 	// Bucket is a whole number of minutes (0: one bucket for the range).
 	Bucket time.Duration
 }
@@ -260,3 +280,43 @@ type CountResult struct {
 type Counter interface {
 	IndexCounts(ctx context.Context, q CountQuery) (CountResult, error)
 }
+
+// Limiter paces the requests of a call to a backend (the rolling request
+// budget of free calls, an approved scan's own plan-based rate).
+type Limiter interface {
+	Wait(ctx context.Context) error
+}
+
+type limiterKey struct{}
+
+// WithLimiter attaches the call's request limiter to ctx.
+func WithLimiter(ctx context.Context, l Limiter) context.Context {
+	return context.WithValue(ctx, limiterKey{}, l)
+}
+
+// LimiterFrom returns the call's limiter, or nil.
+func LimiterFrom(ctx context.Context) Limiter {
+	l, _ := ctx.Value(limiterKey{}).(Limiter)
+	return l
+}
+
+type byteLimitKey struct{}
+
+// WithByteLimit attaches to ctx the bytes a scan may process (Iterator's
+// Processed). The engine checks Processed after every record; a source that
+// buffers before it yields (a remote slice, fetched page by page, sorted
+// whole) checks the limit itself as it fetches, and fails with ErrByteLimit
+// instead of buffering past it.
+func WithByteLimit(ctx context.Context, n int64) context.Context {
+	return context.WithValue(ctx, byteLimitKey{}, n)
+}
+
+// ByteLimitFrom returns the byte limit of ctx, or 0 (none).
+func ByteLimitFrom(ctx context.Context) int64 {
+	n, _ := ctx.Value(byteLimitKey{}).(int64)
+	return max(n, 0)
+}
+
+// ErrByteLimit is returned by a scan (or a source's bounded read) that would
+// process more than its byte limit.
+var ErrByteLimit = errors.New("source: past the byte limit of the call")
