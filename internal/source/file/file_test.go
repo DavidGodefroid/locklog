@@ -594,7 +594,7 @@ func TestRotationAndGrowth(t *testing.T) {
 
 	// copytruncate-style rewrite: another stream; old refs are stale.
 	os.WriteFile(p+".1", []byte("time=2026-10-30T14:00:00Z level=info msg=other content\n"), 0o644)
-	if _, err := s.Reread(ctx, ref); !errors.Is(err, source.ErrStale) && !errors.Is(err, source.ErrNotFound) {
+	if _, err := s.Reread(ctx, ref); !errors.Is(err, source.ErrStale) {
 		t.Fatalf("reread of a rewritten file: %v", err)
 	}
 	plan, _ = s.Plan(ctx, everything, source.Selector{})
@@ -661,7 +661,7 @@ func TestScanRefusesTruncatedStream(t *testing.T) {
 	s := e.source([]string{e.root + "/logs/app.log"})
 	plan, _ := s.Plan(ctx, everything, source.Selector{})
 	os.Truncate(p, 10)
-	if _, err := s.Scan(ctx, plan.Chunks[0]); !errors.Is(err, source.ErrStale) && !errors.Is(err, source.ErrNotFound) {
+	if _, err := s.Scan(ctx, plan.Chunks[0]); !errors.Is(err, source.ErrStale) {
 		t.Fatalf("scan of a truncated file: %v", err)
 	}
 }
@@ -960,5 +960,61 @@ func TestBackfillOnlyWithoutUpkeep(t *testing.T) {
 	s.IndexStep(ctx, 1<<40, true)
 	if sch, _ := s.Describe(ctx); !sch.FullyIndexed || !sch.IndexedUntil.IsZero() {
 		t.Fatalf("after upkeep: %+v", sch)
+	}
+}
+
+func TestCoverageClaimWithJitter(t *testing.T) {
+	e := newEnv(t)
+	// Ten records per second, timestamps jittered by up to 2 s.
+	gen := func(seed int) string {
+		var b strings.Builder
+		for i := 0; b.Len() < 3*source.GranuleBytes; i++ {
+			ts := t0.Add(time.Duration(i)*100*time.Millisecond - time.Duration((i*7919+seed)%20)*100*time.Millisecond)
+			fmt.Fprintf(&b, "time=%s level=%s msg=\"record %d with some padding\"\n", ts.Format(time.RFC3339), levels[i%5], i)
+		}
+		return b.String()
+	}
+	now := t0.Add(2 * time.Hour)
+	e.write("logs/a.log", gen(1), now.Add(time.Second))
+	e.write("logs/b.log", gen(5), now)
+	s := e.source([]string{e.root + "/logs/*.log"}, func(o *Options) { o.Now = func() time.Time { return now.Add(time.Hour) } })
+	for step := 0; step < 12; step++ {
+		sch, _ := s.Describe(ctx)
+		res, _ := s.IndexCounts(ctx, CountQuery{Range: source.Range{From: t0.Add(-time.Hour), To: now}, By: []string{"level"}})
+		for _, r := range scanPlan(t, s, res.Residual) {
+			if !sch.IndexedFrom.IsZero() && !r.Event.Time.Before(sch.IndexedFrom) {
+				t.Fatalf("step %d: record at %v unindexed, indexed_from %v", step, r.Event.Time, sch.IndexedFrom)
+			}
+		}
+		s.IndexStep(ctx, 1<<20, true)
+	}
+}
+
+func TestBlankTailAcrossBoundaryNotSealed(t *testing.T) {
+	e := newEnv(t)
+	var b strings.Builder
+	for i := 0; b.Len() < source.GranuleBytes-200; i++ {
+		fmt.Fprintf(&b, "2026-10-30T12:00:%02dZ INFO plain record %d\n", i%60, i)
+	}
+	// The blank line starts 50 bytes before the boundary and runs past it.
+	b.WriteString(strings.Repeat("x", source.GranuleBytes-50-1-b.Len()) + "\n")
+	head := b.String()
+	p := e.write("logs/app.log", head+strings.Repeat(" ", source.GranuleBytes+20-len(head)), time.Time{})
+	// Every line its own record, so the completed line is one more record.
+	np, _ := parse.New(parse.Options{Multiline: parse.MultilineNone})
+	s := e.source([]string{e.root + "/logs/app.log"}, func(o *Options) { o.Parser = np })
+	s.IndexStep(ctx, 1<<40, true)
+	f, _ := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0)
+	f.WriteString("at frame\n2026-10-30T12:00:59Z ERROR next\n")
+	f.Close()
+	s.IndexStep(ctx, 1<<40, true)
+	fs, _ := s.files(ctx)
+	_, _, gs := s.streamIndex(fs[0])
+	plan, _ := s.Plan(ctx, everything, source.Selector{})
+	c := plan.Chunks[0]
+	c.Granules = c.Granules[:1]
+	recs := scanPlan(t, s, source.Byteplan{Chunks: []source.Chunk{c}})
+	if g := gs[0]; g != nil && usable(g, fs[0].id.size) && g.Records != int64(len(recs)) {
+		t.Fatalf("granule 0 indexed with %d records, holds %d", g.Records, len(recs))
 	}
 }

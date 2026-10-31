@@ -133,7 +133,10 @@ func (s *Source) indexPlain(ctx context.Context, fi fileInfo, n int64) (int64, e
 	// Sealed only when the granule is whole and its last record was
 	// complete before the end of the file: a line still being written
 	// across the boundary is indexed again once complete.
-	sealed := end == (n+1)*source.GranuleBytes && !lastOpen && lastEnd <= size
+	// The reader must also have reached the boundary (a line starting at
+	// or after it): a held blank or partial tail line starting before it is
+	// not a record yet.
+	sealed := end == (n+1)*source.GranuleBytes && !lastOpen && lastEnd <= size && it.r.Offset() >= end
 	s.store(fi, -1, []index.Granule{b.Finish(n, start, end, sealed)})
 	return it.Processed(), nil
 }

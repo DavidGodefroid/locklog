@@ -77,6 +77,7 @@ func Run(ctx context.Context, srcs []Indexer, o RunOptions) {
 		}
 	}
 	defer flush(true)
+	pass := 0
 	for ctx.Err() == nil {
 		now := o.Now()
 		tokens = min(capacity, tokens+int64(float64(o.BytesPerHour)*now.Sub(last).Hours()))
@@ -90,7 +91,11 @@ func Run(ctx context.Context, srcs []Indexer, o RunOptions) {
 		}
 		worked, allDone := false, true
 		upkeep := o.Busy == nil || !o.Busy()
-		for _, src := range srcs {
+		// Rotate the first source each pass, so that one large backfill
+		// does not hold up the others.
+		pass++
+		for k := range srcs {
+			src := srcs[(k+pass)%len(srcs)]
 			if tokens <= 0 || ctx.Err() != nil {
 				allDone = false
 				break

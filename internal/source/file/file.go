@@ -256,6 +256,15 @@ func (s *Source) openStreamFile(ctx context.Context, stream string) (*os.File, f
 	return s.open(fi)
 }
 
+// stale maps a stream that is no longer found (rewritten, rotated away) to
+// source.ErrStale: refs and plans of this source name streams it served.
+func stale(err error) error {
+	if errors.Is(err, source.ErrNotFound) {
+		return source.ErrStale
+	}
+	return err
+}
+
 // lookup finds the file of a stream, from the cached listing when fresh.
 func (s *Source) lookup(ctx context.Context, stream string) (fileInfo, error) {
 	s.mu.Lock()
@@ -479,11 +488,14 @@ func (s *Source) Scan(ctx context.Context, c source.Chunk) (source.Iterator, err
 	}
 	f, fi, err := s.openStreamFile(ctx, c.Stream)
 	if err != nil {
-		return nil, err
+		return nil, stale(err)
 	}
-	if fi.id.compression == compNone && fi.id.size < c.End() && c.End() != math.MaxInt64 {
+	// A plain file may only have grown since the plan; a compressed one
+	// must be the file planned.
+	if fi.id.compression == compNone && fi.id.size < c.End() && c.End() != math.MaxInt64 ||
+		fi.id.compression != compNone && c.Version != "" && c.Version != strconv.FormatInt(fi.id.size, 10) {
 		f.Close()
-		return nil, source.ErrStale // truncated since the plan
+		return nil, source.ErrStale
 	}
 	it, err := s.newIter(ctx, f, fi, c.Start(), c.End())
 	if err != nil {
@@ -634,7 +646,7 @@ func (s *Source) Reread(ctx context.Context, ref source.RawRef) (source.RawRecor
 	}
 	f, fi, err := s.openStreamFile(ctx, ref.Stream)
 	if err != nil {
-		return source.RawRecord{}, err
+		return source.RawRecord{}, stale(err)
 	}
 	defer f.Close()
 	st, err := openStream(f, fi.id.compression, ref.Offset)
@@ -673,7 +685,7 @@ func (s *Source) Around(ctx context.Context, ref source.RawRef, before, after in
 func (s *Source) around(ctx context.Context, ref source.RawRef, fromGranule int64, before, after int) ([]source.RawRecord, bool, error) {
 	f, fi, err := s.openStreamFile(ctx, ref.Stream)
 	if err != nil {
-		return nil, false, err
+		return nil, false, stale(err)
 	}
 	it, err := s.newIter(ctx, f, fi, fromGranule*source.GranuleBytes, math.MaxInt64)
 	if err != nil {
@@ -784,6 +796,11 @@ func (s *Source) Describe(ctx context.Context) (source.Schema, error) {
 	return sch, nil
 }
 
+// ClaimMargin is the timestamp disorder the coverage claim allows for:
+// indexed_from is that much after (and indexed_until that much before) the
+// nearest record the index may lack, rounded to whole minutes.
+const ClaimMargin = time.Minute
+
 type coverage struct {
 	indexedFrom, indexedUntil time.Time
 	full                      bool
@@ -845,7 +862,8 @@ func (s *Source) coverage(files []fileInfo) coverage {
 			if !usable(g, size) {
 				c.full = false
 				if _, to, ok := g.Span(); ok && (c.indexedUntil.IsZero() || to.Before(c.indexedUntil)) {
-					c.indexedUntil = to
+					// Exclusive, minus the disorder margin.
+					c.indexedUntil = to.Add(-ClaimMargin).Truncate(time.Minute)
 				}
 			}
 			if from, _, ok := g.Span(); ok && (c.indexedFrom.IsZero() || from.Before(c.indexedFrom)) {
@@ -854,7 +872,10 @@ func (s *Source) coverage(files []fileInfo) coverage {
 		}
 	}
 	if !bound.IsZero() && !c.indexedFrom.IsZero() && !bound.Before(c.indexedFrom) {
-		c.indexedFrom = bound
+		// After the bound, plus the disorder margin: records at the
+		// bound's time, or written slightly out of order, may still be
+		// unindexed.
+		c.indexedFrom = bound.Add(ClaimMargin).Truncate(time.Minute).Add(time.Minute)
 		if !c.indexedUntil.IsZero() && c.indexedFrom.After(c.indexedUntil) || c.indexedFrom.After(s.opts.Now()) {
 			c.indexedFrom, c.indexedUntil = time.Time{}, time.Time{}
 		}
