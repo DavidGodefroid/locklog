@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 )
 
 // Agent methods served by the engine (IPC log.*).
@@ -20,7 +21,7 @@ func (e *Engine) Handle(ctx context.Context, method string, params json.RawMessa
 		d := json.NewDecoder(bytes.NewReader(params))
 		d.DisallowUnknownFields()
 		if err := d.Decode(v); err != nil {
-			return refuse(EBadQuery, "", "invalid parameters: %s", e.o.Masker.Text(err.Error()))
+			return decodeRefusal(err)
 		}
 		return nil
 	}
@@ -48,4 +49,20 @@ func (e *Engine) Handle(ctx context.Context, method string, params json.RawMessa
 		return nil, r, nil
 	}
 	return res, nil, err
+}
+
+// decodeRefusal describes a params decode error without echoing anything
+// the agent wrote: not even through the masker, whose pseudonym of a guessed
+// value would tell whether that value is in the logs. Only a byte offset is
+// named (a type error's field path may hold a map key the agent wrote).
+func decodeRefusal(err error) *Error {
+	var te *json.UnmarshalTypeError
+	var se *json.SyntaxError
+	switch {
+	case errors.As(err, &te):
+		return refuse(EBadQuery, "", "invalid parameters: a value of the wrong type at byte %d", te.Offset)
+	case errors.As(err, &se):
+		return refuse(EBadQuery, "", "invalid parameters: malformed JSON at byte %d", se.Offset)
+	}
+	return refuse(EBadQuery, "", "invalid parameters: an unknown field, or a value that does not parse (see the tool's schema)")
 }

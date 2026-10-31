@@ -672,10 +672,15 @@ func (e *Engine) Search(ctx context.Context, q Query) (_ SearchResult, retErr er
 		}
 	}
 	var failures int
+	// tooMany refuses a call whose matches the cache cannot keep for the
+	// next pages (never cut: that would lose matches). Collecting stops
+	// there, bounding the call's memory.
+	tooMany := &Error{Code: EOverBudget, Message: "too many matching records in one call to page through: narrow the query (a shorter range, fewer sources, a more selective predicate)"}
 	if len(pending) < q.Limit {
 		var sc Scanned
 		var err *Error
 		var found []match
+		size, over := matchesSize(pending), false
 		chunk, gran, sc, failures, err = e.run(ctx, f.plan, chunk, gran, needles, e.callBytes(q.Sources), func(raw source.RawRecord, rec mask.Record) {
 			// Granules hold records around the range: keep the
 			// range's (and the untimed ones).
@@ -689,11 +694,22 @@ func (e *Engine) Search(ctx context.Context, q Query) (_ SearchResult, retErr er
 			if oerr != nil {
 				return
 			}
+			if over {
+				return
+			}
 			t, ok := rec.Time()
-			found = append(found, match{ts: t, timed: ok, out: out, kinds: rec.Kinds()})
+			m := match{ts: t, timed: ok, out: out, kinds: rec.Kinds()}
+			if size += matchesSize([]match{m}); !e.cache.fits(size) {
+				over, found = true, nil
+				return
+			}
+			found = append(found, m)
 		})
 		if err != nil {
 			return SearchResult{}, err
+		}
+		if over {
+			return SearchResult{}, tooMany
 		}
 		sortMatches(found, q.Order)
 		pending = append(pending, found...)
@@ -727,7 +743,11 @@ func (e *Engine) Search(ctx context.Context, q Query) (_ SearchResult, retErr er
 		st := cursorState{Plan: f.id, Query: digest, Chunk: chunk, Granule: gran, Epoch: e.o.Masker.Epoch(), PolicyFP: e.o.PolicyFP(),
 			From: q.From, To: q.To, Last: last}
 		if len(rest) > 0 {
-			st.Cache = e.cache.put(rest)
+			id, ok := e.cache.put(rest)
+			if !ok {
+				return SearchResult{}, tooMany
+			}
+			st.Cache = id
 		}
 		res.Cursor = e.seal("Lc1", st)
 		if cu, ok := coveredUntil(f.plan, chunk, gran, q); ok {

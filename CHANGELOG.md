@@ -43,6 +43,12 @@ uses [Semantic Versioning](https://semver.org/).
   common/combined access logs) formats, detected by `auto` after JSON and
   logfmt, and the `cri` and `docker-json` container frames (runtime time,
   stream, split lines joined, payload decoded with `auto`).
+- Masking on lockkit v0.8.0: its secret detector (credentials, token
+  shapes, private keys, URL userinfo) and `LooksSecret` names are step 1,
+  always on and never a profile setting (`detectors = ["secret"]` is
+  refused); public IP addresses (`ip`) join the default detectors;
+  `person_name` and `phone_loose` are opt-in by naming them in a profile's
+  `detectors`.
 
 ### Fixed
 

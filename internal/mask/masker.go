@@ -39,14 +39,59 @@ type Detectors []pii.Detector
 // Find implements Finder.
 func (ds Detectors) Find(s string) []pii.Match { return pii.FindInViews(s, ds) }
 
+// SecretDetectorName is lockkit's secret detector: step 1, always on,
+// never a value detector a profile names.
+const SecretDetectorName = "secret"
+
+// SecretDetectors finds secrets with lockkit's secret detector
+// (credentials, token shapes, private keys, URL userinfo), in the text and
+// in its detection views. Every masker runs it in step 1, whatever
+// Options.Secrets adds.
+func SecretDetectors() Detectors {
+	ds, err := pii.Detectors([]string{SecretDetectorName})
+	if err != nil || len(ds) != 1 {
+		panic(fmt.Sprintf("mask: lockkit has no secret detector: %v", err))
+	}
+	return Detectors(ds)
+}
+
+// DefaultValueDetectors names the value detectors of a profile that sets
+// none, and of a masker given no Values: lockkit's default set
+// (pii.AllDetectors) and ip (public addresses; private and loopback ones
+// are infrastructure, never found).
+func DefaultValueDetectors() []string {
+	ds := pii.AllDetectors()
+	out := make([]string, 0, len(ds)+1)
+	for _, d := range ds {
+		out = append(out, d.Name())
+	}
+	return append(out, "ip")
+}
+
+// ValueDetectors returns the value detectors a profile names (step 4).
+// The secret detector is refused: secrets are step 1, always on.
+func ValueDetectors(names []string) (Detectors, error) {
+	if slices.Contains(names, SecretDetectorName) {
+		return nil, fmt.Errorf("mask: %q is not a value detector (secret detection is always on)", SecretDetectorName)
+	}
+	ds, err := pii.Detectors(names)
+	if err != nil {
+		return nil, fmt.Errorf("mask: %w", err)
+	}
+	return Detectors(ds), nil
+}
+
 // Options configure a Masker.
 type Options struct {
 	// Structured is StructuredRedactUnknown (default) or StructuredDetect.
 	Structured string
-	// Values are the value detectors of step 4 (personal data).
+	// Values are the value detectors of step 4 (personal data); left
+	// nil, DefaultValueDetectors.
 	Values Finder
 	// Secrets finds secret values (step 1); SecretName reports a field
-	// name whose value is a secret whole.
+	// name whose value is a secret whole. Both add to lockkit's secret
+	// detector (SecretDetectors) and pii.LooksSecret, which every masker
+	// runs: they can widen step 1, never replace it.
 	Secrets    Finder
 	SecretName func(name string) bool
 	// Trusted are the clear paths of trusted fields: shown after the
@@ -57,6 +102,24 @@ type Options struct {
 	Rules *Rules
 	// Pseudonyms is the current epoch.
 	Pseudonyms *pii.Pseudonymizer
+
+	// withoutLockkitSecrets drops lockkit's secret step: for the tests
+	// that prove the leak harness sees an unmasked secret, never settable
+	// outside this package.
+	withoutLockkitSecrets bool
+}
+
+// finders runs several finders; find merges their overlapping matches.
+type finders []Finder
+
+func (fs finders) Find(s string) []pii.Match {
+	var out []pii.Match
+	for _, f := range fs {
+		if f != nil {
+			out = append(out, f.Find(s)...)
+		}
+	}
+	return out
 }
 
 // Masker masks events. It is safe for concurrent use.
@@ -82,6 +145,25 @@ func New(o Options) (*Masker, error) {
 	}
 	if o.Rules == nil {
 		o.Rules = &Rules{}
+	}
+	if o.Values == nil {
+		ds, err := ValueDetectors(DefaultValueDetectors())
+		if err != nil {
+			return nil, err
+		}
+		o.Values = ds
+	}
+	if !o.withoutLockkitSecrets {
+		if o.Secrets == nil {
+			o.Secrets = SecretDetectors()
+		} else {
+			o.Secrets = finders{SecretDetectors(), o.Secrets}
+		}
+		if extra := o.SecretName; extra == nil {
+			o.SecretName = pii.LooksSecret
+		} else {
+			o.SecretName = func(n string) bool { return pii.LooksSecret(n) || extra(n) }
+		}
 	}
 	m := &Masker{o: o, trusted: map[string]bool{}, names: newNameBook()}
 	for _, t := range o.Trusted {

@@ -210,15 +210,11 @@ func TermKey(name string, label bool) string {
 func Values(ev parse.Event, keys []string, sensitive func(field, value string) bool) []string {
 	out := make([]string, len(keys))
 	for i, k := range keys {
-		f, label := SplitKey(k)
-		look := Lookup
-		if label {
-			look = LookupAttr
-		}
-		v, ok := look(ev, f)
+		f, _ := SplitKey(k)
+		v := Value(ev, k)
 		switch {
-		case !ok:
-			out[i] = Absent
+		case v == Absent || v == Redacted:
+			out[i] = v
 		case sensitive != nil && sensitive(f, v):
 			out[i] = Redacted
 		default:
@@ -239,6 +235,77 @@ func Lookup(ev parse.Event, name string) (string, bool) {
 // LookupAttr returns the scalar text of a frame attribute (label) of ev.
 func LookupAttr(ev parse.Event, name string) (string, bool) {
 	return lookupMembers(ev.Attrs, name)
+}
+
+// Value returns the indexed value of key (a line field, or a label as
+// LabelKey) on ev: its scalar text, Absent when nothing is at the path, or
+// Redacted (unknown) when the path is ambiguous: several leaves (a repeated
+// key, an array, a dotted name also stored as one key) or an object or
+// other non-scalar. The scan matches a predicate on any leaf at the path,
+// so an ambiguous value must never prune a granule nor be counted by one.
+func Value(ev parse.Event, key string) string {
+	name, label := SplitKey(key)
+	ms := ev.Fields
+	if label {
+		ms = ev.Attrs
+	}
+	var c leafCount
+	c.walk(ms, name)
+	switch {
+	case c.n == 0:
+		return Absent
+	case c.n > 1:
+		return Redacted
+	}
+	if s, ok := scalar(c.first); ok {
+		return s
+	}
+	return Redacted
+}
+
+// leafCount counts the leaves at a dotted path, every reading of its dots
+// (nested objects, a key holding dots), arrays crossed, as the scan does.
+type leafCount struct {
+	n     int
+	first parse.Value
+}
+
+func (c *leafCount) walk(ms []parse.Member, path string) {
+	for _, m := range ms {
+		switch {
+		case m.Key == path:
+			c.leaf(m.Value)
+		case strings.HasPrefix(path, m.Key+"."):
+			c.down(m.Value, path[len(m.Key)+1:])
+		}
+	}
+}
+
+func (c *leafCount) down(v parse.Value, rest string) {
+	switch v.Kind {
+	case parse.KindObject:
+		c.walk(v.Members, rest)
+	case parse.KindArray:
+		for _, it := range v.Items {
+			c.down(it, rest)
+		}
+	}
+}
+
+func (c *leafCount) leaf(v parse.Value) {
+	if v.Kind == parse.KindArray {
+		if len(v.Items) == 0 {
+			c.n += 2 // an empty array: present, no scalar (unknown)
+		}
+		for _, it := range v.Items {
+			c.leaf(it)
+		}
+		return
+	}
+	if c.n == 0 {
+		c.first = v
+	}
+	c.n++
 }
 
 func lookupMembers(ms []parse.Member, name string) (string, bool) {
