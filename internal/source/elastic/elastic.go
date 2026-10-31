@@ -115,6 +115,10 @@ type Source struct {
 	o   Options
 	seg string // the indices path segment
 	sem chan struct{}
+	// local are the trusted fields Check found with ignore_above in some
+	// index: their terms are evaluated locally only.
+	mu    sync.Mutex
+	local map[string]bool
 }
 
 // New validates o.
@@ -218,10 +222,15 @@ func readParams() url.Values { return url.Values{"expand_wildcards": {"open"}} }
 // none is (as != does locally), and a document without the field matches
 // != only, as locally. An empty value is kept local: whether "" is indexed
 // depends on the mapping (a normalizer, ignore_above, null_value), and an
-// absent and an empty field must not be confused. The engine evaluates
-// every term again after masking: a term not pushed only costs bytes.
+// absent and an empty field must not be confused. A field Check found
+// with ignore_above in some index is kept local too (a value past it is
+// not indexed). The engine evaluates every term again after masking: a
+// term not pushed only costs bytes.
 func (s *Source) pushable(t source.Term) bool {
-	return t.Label && (t.Op == "=" || t.Op == "in" || t.Op == "!=") && s.trusted(t.Field) &&
+	s.mu.Lock()
+	local := s.local[t.Field]
+	s.mu.Unlock()
+	return t.Label && (t.Op == "=" || t.Op == "in" || t.Op == "!=") && s.trusted(t.Field) && !local &&
 		len(t.Values) > 0 && !slices.Contains(t.Values, "")
 }
 
@@ -727,13 +736,18 @@ func (it *iter) Close() error {
 
 // Reread fetches the document at ref again: ref.Offset is its timestamp
 // and ref.Length its ordinal (from 1) among the documents of that
-// nanosecond.
+// nanosecond. The read is bounded by the byte limit of ctx, else
+// MaxAroundBytes.
 func (s *Source) Reread(ctx context.Context, ref source.RawRef) (source.RawRecord, error) {
 	f, err := s.streamFilter(ref.Stream)
 	if err != nil {
 		return source.RawRecord{}, err
 	}
-	hs, _, err := s.fetchSlice(ctx, f, ref.Offset, ref.Offset+1, nil)
+	m := &meter{limit: source.ByteLimitFrom(ctx)}
+	if m.limit == 0 {
+		m.limit = MaxAroundBytes
+	}
+	hs, _, err := s.fetchSlice(ctx, f, ref.Offset, ref.Offset+1, m)
 	if err != nil {
 		return source.RawRecord{}, fmt.Errorf("elasticsearch source: %w", err)
 	}

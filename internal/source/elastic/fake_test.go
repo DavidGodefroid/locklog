@@ -48,6 +48,8 @@ type fakeES struct {
 	flavour   string // "" (Elasticsearch) or "opensearch"
 	grants    string // the _privileges answer
 	resolved  string // the _resolve/index answer
+	mapping   string // the _mapping answer
+	termsErr  int    // doc_count_error_upper_bound of terms answers
 	roles     []string
 	security  bool // privilege endpoints answer
 	requests  []string
@@ -128,6 +130,10 @@ func (f *fakeES) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"indices": []string{"logs-a", "logs-b"}, "fields": fields})
 	case r.Method == "GET" && r.URL.Path == pre+"/_mapping":
+		if f.mapping != "" {
+			_, _ = w.Write([]byte(f.mapping))
+			return
+		}
 		_, _ = w.Write([]byte(`{"logs-a":{"mappings":{}}}`))
 	case r.Method == "POST" && r.URL.Path == pre+"/_count":
 		var cb CountBody
@@ -359,7 +365,7 @@ func (f *fakeES) aggs(aggs map[string]Agg, docs []fakeDoc) map[string]any {
 				}
 				buckets = append(buckets, b)
 			}
-			out[name] = map[string]any{"doc_count_error_upper_bound": 0, "sum_other_doc_count": other, "buckets": buckets}
+			out[name] = map[string]any{"doc_count_error_upper_bound": f.termsErr, "sum_other_doc_count": other, "buckets": buckets}
 		}
 	}
 	return out

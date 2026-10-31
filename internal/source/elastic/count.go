@@ -48,6 +48,9 @@ func (b *bucketJSON) UnmarshalJSON(data []byte) error {
 type aggJSON struct {
 	Buckets        []bucketJSON `json:"buckets"`
 	SumOtherDocCnt int64        `json:"sum_other_doc_count"`
+	// DocCountError is the bound of the error of the buckets' counts
+	// (shards each answering their top terms): 0 when they are exact.
+	DocCountError int64 `json:"doc_count_error_upper_bound"`
 }
 
 func termsName(i int) string { return "t" + strconv.Itoa(i) }
@@ -204,6 +207,11 @@ func walkTerms(subs map[string]json.RawMessage, by []string, i int, vals []strin
 	var a aggJSON
 	if json.Unmarshal(subs[termsName(i)], &a) != nil {
 		return errResponse
+	}
+	// An approximate answer (a term's count missed on some shard) is
+	// not served: the engine scans instead.
+	if a.DocCountError != 0 {
+		return source.ErrNotIndexable
 	}
 	sum := a.SumOtherDocCnt
 	for _, b := range a.Buckets {

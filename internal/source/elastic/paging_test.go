@@ -116,6 +116,18 @@ func TestAroundIsBounded(t *testing.T) {
 	if got, err := s.Around(ctx, ref, 2, 2); err != nil || len(got) != 5 || got[2].Event.Raw != recs[300].Event.Raw {
 		t.Fatalf("%v %d", err, len(got))
 	}
+	// Reread is bounded the same way.
+	if _, err := s.Reread(source.WithByteLimit(ctx, 1000), ref); !errors.Is(err, source.ErrByteLimit) {
+		t.Fatalf("reread under a call's limit: %v", err)
+	}
+	MaxAroundBytes = 1000
+	if _, err := s.Reread(ctx, ref); !errors.Is(err, source.ErrByteLimit) {
+		t.Fatalf("reread under MaxAroundBytes: %v", err)
+	}
+	MaxAroundBytes = old
+	if got, err := s.Reread(ctx, ref); err != nil || got.Event.Raw != recs[300].Event.Raw {
+		t.Fatalf("reread: %v", err)
+	}
 }
 
 func TestWidthEnforcesMaxSlices(t *testing.T) {

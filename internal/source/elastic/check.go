@@ -69,17 +69,52 @@ func (s *Source) detect(ctx context.Context) (string, string, error) {
 // than a reader (an allowlist: a privilege Elasticsearch adds later is
 // refused until listed here).
 var (
-	readCluster = []string{"monitor", "read_ilm", "read_slm", "read_pipeline", "read_ccr"}
-	readIndex   = []string{"read", "view_index_metadata", "monitor", "read_cross_cluster"}
+	readCluster = []string{"monitor", "read_ilm", "read_slm", "read_pipeline", "read_ccr",
+		// The monitor_* privileges of Elasticsearch 8, by name: a new
+		// one is refused until listed.
+		"monitor_connector", "monitor_data_frame_transforms", "monitor_enrich", "monitor_inference", "monitor_ml",
+		"monitor_rollup", "monitor_snapshot", "monitor_text_structure", "monitor_transform", "monitor_watcher"}
+	readIndex = []string{"read", "view_index_metadata", "monitor", "read_cross_cluster"}
 	// readOnlyRoles are the OpenSearch built-in roles that grant no write
 	// or manage permission.
 	readOnlyRoles = []string{"readall", "readall_and_monitor"}
 )
 
-// readOnlyCluster reports a cluster privilege of the allowlist. The
-// monitor_* privileges (monitor_ml, monitor_watcher, ...) read only.
-func readOnlyCluster(p string) bool {
-	return slices.Contains(readCluster, p) || strings.HasPrefix(p, "monitor_")
+// readOnlyCluster reports a cluster privilege of the allowlist.
+func readOnlyCluster(p string) bool { return slices.Contains(readCluster, p) }
+
+// indexGrantKeys are the members of an index grant locklog knows: the
+// document- and field-level restrictions only narrow it. Any other member
+// is refused (fail closed).
+var indexGrantKeys = []string{"names", "privileges", "field_security", "query", "allow_restricted_indices"}
+
+// checkGrantShape refuses an index grant list that is not a JSON array of
+// objects with known members (remote grants may also name clusters).
+func checkGrantShape(raw json.RawMessage, remote bool) error {
+	if raw == nil {
+		return nil
+	}
+	var gs []map[string]json.RawMessage
+	if !isArray(raw) || json.Unmarshal(raw, &gs) != nil {
+		return errResponse
+	}
+	for _, g := range gs {
+		if g == nil || !isArray(g["names"]) || !isArray(g["privileges"]) {
+			return errResponse
+		}
+		for k := range g {
+			if !slices.Contains(indexGrantKeys, k) && (!remote || k != "clusters") {
+				return fmt.Errorf("elasticsearch source: an index grant holds an unknown member %q", k)
+			}
+		}
+	}
+	return nil
+}
+
+// isArray reports a JSON array (not null).
+func isArray(raw json.RawMessage) bool {
+	t := strings.TrimSpace(string(raw))
+	return strings.HasPrefix(t, "[")
 }
 
 // indexGrant is one index grant of a _privileges answer.
@@ -234,8 +269,14 @@ func covers(names, readable []string) bool {
 // (the source's names and patterns and what they resolve to) are marked.
 func esWrite(body []byte, readable []string) ([]string, error) {
 	var raw map[string]json.RawMessage
-	if json.Unmarshal(body, &raw) != nil || raw["cluster"] == nil || raw["indices"] == nil {
+	if json.Unmarshal(body, &raw) != nil || !isArray(raw["cluster"]) || !isArray(raw["indices"]) {
 		return nil, errResponse
+	}
+	if err := checkGrantShape(raw["indices"], false); err != nil {
+		return nil, err
+	}
+	if err := checkGrantShape(raw["remote_indices"], true); err != nil {
+		return nil, err
 	}
 	var write []string
 	for k, v := range raw {
@@ -330,6 +371,11 @@ func (s *Source) osPrivileges(ctx context.Context) ([]string, error) {
 		return nil, errResponse
 	}
 	var write []string
+	if len(r.Roles) == 0 {
+		// No role at all: the plugin's admin certificate (admin_dn) and
+		// a superuser of another backend look like this. Fail closed.
+		write = append(write, "no security role (an admin certificate or an unmapped user cannot be told apart)")
+	}
 	for _, role := range r.Roles {
 		if !slices.Contains(readOnlyRoles, role) && !slices.Contains(s.o.ReadOnlyRoles, role) {
 			write = append(write, "role:"+role)
@@ -392,17 +438,30 @@ func (s *Source) Check(ctx context.Context, production bool) (Info, error) {
 	if production && len(info.Write) > 0 {
 		return info, fmt.Errorf("elasticsearch source: the key holds write or manage privileges (%s): a production profile needs a read-only key", strings.Join(info.Write, ", "))
 	}
-	fields := append([]string{s.o.TimeField}, s.o.TrustedFields...)
+	// The fields the source names in a body: the time field, the trusted
+	// and tiebreaker fields, and the selector's (its terms are the scope:
+	// on a text field a term matches a token, which widens it).
+	keywords := slices.Clone(s.o.TrustedFields)
 	if s.o.TieBreaker != "" {
-		fields = append(fields, s.o.TieBreaker)
+		keywords = append(keywords, s.o.TieBreaker)
 	}
+	for k := range s.o.Selector {
+		if !slices.Contains(keywords, k) {
+			keywords = append(keywords, k)
+		}
+	}
+	sort.Strings(keywords)
+	fields := append([]string{s.o.TimeField}, keywords...)
 	fc, err := s.fieldCaps(ctx, fields)
 	if err != nil {
 		return info, fmt.Errorf("elasticsearch source: %w", err)
 	}
 	for _, f := range fields {
 		types, ok := fc.Fields[f]
-		if !ok {
+		if !ok || len(types) == 0 {
+			if production {
+				return info, fmt.Errorf("elasticsearch source: no index of the source maps %s: a production profile refuses a field it cannot type-check", f)
+			}
 			continue // no index maps it yet
 		}
 		for t := range types {
@@ -412,11 +471,80 @@ func (s *Source) Check(ctx context.Context, production bool) (Info, error) {
 					return info, fmt.Errorf("elasticsearch source: the time field %s is a %s, not a date", f, t)
 				}
 			case t != "keyword" && t != "constant_keyword":
-				return info, fmt.Errorf("elasticsearch source: %s is a %s field; trusted and tiebreaker fields must be keyword fields", f, t)
+				return info, fmt.Errorf("elasticsearch source: %s is a %s field; trusted, selector and tiebreaker fields must be keyword fields", f, t)
 			}
 		}
 	}
+	// A normalizer makes the indexed term differ from the value: refused.
+	// ignore_above leaves long values unindexed: terms on such a field are
+	// kept local (pushable).
+	m, err := s.mappingFacts(ctx)
+	switch {
+	case err != nil && production:
+		return info, fmt.Errorf("elasticsearch source: reading the mappings (the key needs view_index_metadata), which a production profile requires: %w", err)
+	case err == nil:
+		local := map[string]bool{}
+		for _, f := range keywords {
+			if m.normalizer[f] {
+				return info, fmt.Errorf("elasticsearch source: %s has a normalizer in some index: its indexed terms are not its values; it cannot be trusted or selected on", f)
+			}
+			if m.ignoreAbove[f] {
+				local[f] = true
+			}
+		}
+		s.mu.Lock()
+		s.local = local
+		s.mu.Unlock()
+	}
 	return info, nil
+}
+
+// mappingFacts are what the mappings say about keyword fields, by dotted
+// name (multi-fields included), over every index of the source.
+type mappingFacts struct {
+	normalizer, ignoreAbove map[string]bool
+}
+
+// mappingFacts reads GET /{indices}/_mapping.
+func (s *Source) mappingFacts(ctx context.Context) (mappingFacts, error) {
+	body, err := s.do(ctx, http.MethodGet, "/"+s.seg+"/_mapping", readParams(), nil)
+	if err != nil {
+		return mappingFacts{}, err
+	}
+	var idx map[string]struct {
+		Mappings mappingDef `json:"mappings"`
+	}
+	if json.Unmarshal(body, &idx) != nil || idx == nil {
+		return mappingFacts{}, errResponse
+	}
+	m := mappingFacts{normalizer: map[string]bool{}, ignoreAbove: map[string]bool{}}
+	var walk func(prefix string, props map[string]mappingDef)
+	walk = func(prefix string, props map[string]mappingDef) {
+		for name, d := range props {
+			full := prefix + name
+			if d.Normalizer != "" {
+				m.normalizer[full] = true
+			}
+			if d.IgnoreAbove != nil {
+				m.ignoreAbove[full] = true
+			}
+			walk(full+".", d.Properties)
+			walk(full+".", d.Fields)
+		}
+	}
+	for _, i := range idx {
+		walk("", i.Mappings.Properties)
+	}
+	return m, nil
+}
+
+// mappingDef is one field of a mapping, as far as Check reads it.
+type mappingDef struct {
+	Type        string                `json:"type"`
+	Normalizer  string                `json:"normalizer"`
+	IgnoreAbove *json.Number          `json:"ignore_above"`
+	Properties  map[string]mappingDef `json:"properties"`
+	Fields      map[string]mappingDef `json:"fields"`
 }
 
 // MaxDescribeValues is the most values Describe lists of a trusted field.
@@ -471,7 +599,7 @@ func (s *Source) Describe(ctx context.Context) (source.Schema, error) {
 		}
 		for i, f := range s.o.TrustedFields {
 			var a aggJSON
-			if json.Unmarshal(top[termsName(i)], &a) != nil || a.SumOtherDocCnt > 0 {
+			if json.Unmarshal(top[termsName(i)], &a) != nil || a.SumOtherDocCnt > 0 || a.DocCountError != 0 {
 				continue
 			}
 			var vs []string

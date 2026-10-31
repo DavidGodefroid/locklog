@@ -534,6 +534,15 @@ func TestCountsOverflowAndMultiValues(t *testing.T) {
 	if _, err := s.IndexCounts(ctx, source.CountQuery{Range: r, ByLabels: []string{"app"}, Bucket: time.Hour}); !errors.Is(err, source.ErrNotIndexable) {
 		t.Fatalf("multi-valued: %v", err)
 	}
+	// Approximate terms counts (a shard's top terms missed some) are not
+	// served.
+	docs[0].fields["app"] = "a"
+	f := newFake(docs)
+	f.termsErr = 3
+	s = newSource(t, f, nil)
+	if _, err := s.IndexCounts(ctx, source.CountQuery{Range: r, ByLabels: []string{"app"}}); !errors.Is(err, source.ErrNotIndexable) {
+		t.Fatalf("approximate: %v", err)
+	}
 }
 
 // grants replaces members of the read-only _privileges answer.
@@ -596,6 +605,27 @@ func TestCheckPrivileges(t *testing.T) {
 		{"opensearch custom role on production", func(f *fakeES) { f.flavour, f.roles = "opensearch", []string{"logs_reader"} }, true, false},
 		{"opensearch security disabled off production", func(f *fakeES) { f.flavour, f.security = "opensearch", false }, false, true},
 		{"text trusted field", func(f *fakeES) { f.types["level"] = "text" }, false, false},
+		{"opensearch without any role on production", func(f *fakeES) { f.flavour, f.roles = "opensearch", []string{} }, true, false},
+		{"opensearch without any role off production", func(f *fakeES) { f.flavour, f.roles = "opensearch", []string{} }, false, true},
+		{"unlisted monitor_* privilege", grants(`"cluster":["monitor","monitor_future_thing"]`), true, false},
+		{"cluster null", grants(`"cluster":null`), true, false},
+		{"indices null", grants(`"indices":null`), true, false},
+		{"indices an object", grants(`"indices":{"names":["logs-*"],"privileges":["read"]}`), true, false},
+		{"unknown member in an index grant", grants(`"indices":[{"names":["logs-*"],"privileges":["read"],"extra":["write"]}]`), true, false},
+		{"grant without privileges array", grants(`"indices":[{"names":["logs-*"],"privileges":"read"}]`), true, false},
+		{"restricted grant members", grants(`"indices":[{"names":["logs-*"],"privileges":["read"],"field_security":[{"grant":["*"]}],"query":["{\"match_all\":{}}"],"allow_restricted_indices":false}]`), true, true},
+		{"remote read grant with clusters", grants(`"remote_indices":[{"names":["logs-*"],"privileges":["read"],"clusters":["c1"]}]`), true, true},
+		{"unknown member in a remote grant", grants(`"remote_indices":[{"names":["logs-*"],"privileges":["read"],"clusters":["c1"],"x":1}]`), true, false},
+		{"unmapped trusted field on production", func(f *fakeES) { delete(f.types, "level") }, true, false},
+		{"unmapped trusted field off production", func(f *fakeES) { delete(f.types, "level") }, false, true},
+		{"normalizer on a trusted field", func(f *fakeES) {
+			f.mapping = `{"logs-a":{"mappings":{"properties":{"level":{"type":"keyword","normalizer":"lowercase"}}}}}`
+		}, false, false},
+		{"normalizer on a multi-field", func(f *fakeES) {
+			f.mapping = `{"logs-a":{"mappings":{"properties":{"app":{"type":"text","fields":{"raw":{"type":"keyword","normalizer":"lc"}}},"level":{"type":"keyword"}}}}}`
+		}, false, true},
+		{"mappings unreadable on production", func(f *fakeES) { f.mapping = "nope" }, true, false},
+		{"mappings unreadable off production", func(f *fakeES) { f.mapping = "nope" }, false, true},
 		{"time field not a date", func(f *fakeES) { f.types["@timestamp"] = "keyword" }, false, false},
 	} {
 		f := newFake(nil)
@@ -618,6 +648,38 @@ func TestCheckPrivileges(t *testing.T) {
 	s := newSource(t, f, func(o *Options) { o.Kind, o.ReadOnlyRoles = KindOpenSearch, []string{"logs_reader"} })
 	if info, err := s.Check(ctx, true); err != nil || info.Flavour != FlavourOpenSearch || !info.Verified {
 		t.Fatalf("%+v %v", info, err)
+	}
+	// A selector on a text field is refused (a term on it matches a token:
+	// the scope widens); on a keyword field it passes.
+	f = newFake(nil)
+	f.types["env"] = "text"
+	s = newSource(t, f, func(o *Options) { o.Selector = map[string]string{"env": "prod"} })
+	if _, err := s.Check(ctx, false); err == nil || !strings.Contains(err.Error(), "env") {
+		t.Fatalf("a selector on a text field passed: %v", err)
+	}
+	f.types["env"] = "keyword"
+	if _, err := s.Check(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	delete(f.types, "env")
+	if _, err := s.Check(ctx, true); err == nil {
+		t.Fatal("an unmapped selector field passed on production")
+	}
+	// A trusted field with ignore_above in some index: its terms stay
+	// local once Check has read the mappings.
+	f = newFake(nil)
+	f.mapping = `{"logs-a":{"mappings":{"properties":{"level":{"type":"keyword","ignore_above":256},"app":{"type":"keyword"}}}}}`
+	s = newSource(t, f, nil)
+	lv := source.Term{Field: "level", Label: true, Op: "=", Values: []string{"error"}}
+	ap := source.Term{Field: "app", Label: true, Op: "=", Values: []string{"api"}}
+	if !s.pushable(lv) {
+		t.Fatal("level not pushable before Check")
+	}
+	if _, err := s.Check(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	if s.pushable(lv) || !s.pushable(ap) {
+		t.Fatalf("after Check: level pushable %t, app %t", s.pushable(lv), s.pushable(ap))
 	}
 	// An Elasticsearch backend for an opensearch source is refused.
 	s = newSource(t, newFake(nil), func(o *Options) { o.Kind = KindOpenSearch })

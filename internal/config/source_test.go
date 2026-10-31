@@ -334,6 +334,11 @@ func TestElasticProduction(t *testing.T) {
 		wantErr(t, prodSrc(ok+`tls = "verify-ca"`), `needs tls = "verify-full"`)
 		mustParse(t, prodSrc(ok+`credentials = "vault"`+"\n"+`vault_path = "secret/data/es"`))
 	}
+	// An OpenSearch admin certificate cannot be told from a reader's.
+	mtls := strings.Replace(openSearchOK, "auth = \"basic\"\nuser = \"reader\"", "auth = \"mtls\"\ntls_cert = \"/c.pem\"\ntls_key = \"/k.pem\"", 1)
+	wantErr(t, prodSrc(mtls), `auth = "mtls" is refused for kind = "opensearch"`)
+	mustParse(t, src(mtls))
+	mustParse(t, prodSrc(strings.Replace(mtls, `kind = "opensearch"`, `kind = "elastic"`, 1)))
 	// Off production, plain http on loopback and no auth are fine.
 	mustParse(t, src(strings.Replace(elasticOK, "https://es.example.com:9200", "http://127.0.0.1:9200", 1)))
 	mustParse(t, src(strings.Replace(strings.Replace(elasticOK, "https://es.example.com:9200", "http://es:9200", 1), `auth = "api_key"`, `auth = "none"`, 1)))
