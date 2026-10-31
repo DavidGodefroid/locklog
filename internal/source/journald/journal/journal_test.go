@@ -564,3 +564,49 @@ func TestXZSecondBlockDropped(t *testing.T) {
 		return true
 	})
 }
+
+type countingReaderAt struct {
+	r io.ReaderAt
+	n int64
+}
+
+func (c *countingReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	n, err := c.r.ReadAt(p, off)
+	c.n += int64(n)
+	return n, err
+}
+
+func TestCompressedNameReadIsBounded(t *testing.T) {
+	// A ZSTD payload whose name sits behind 300,000 empty raw blocks.
+	raw := build(true, "", journaltest.Entry{Realtime: 1, Fields: []string{"F=" + strings.Repeat("p", 1<<20)}})
+	off := xzObjectAny(t, raw)
+	frame := []byte{0x28, 0xB5, 0x2F, 0xFD, 0x00, 0x00} // magic, no content size, 1 KiB window
+	for i := 0; i < 300000; i++ {
+		frame = append(frame, 0, 0, 0) // an empty raw block, not the last
+	}
+	name := "F=" + strings.Repeat("a", 80)
+	frame = append(frame, byte(len(name)<<3|1), byte(len(name)>>5), 0)
+	frame = append(frame, name...)
+	raw[off+1] = objCompressedZSTD
+	copy(raw[off+72:], frame)
+	cr := &countingReaderAt{r: bytes.NewReader(raw)}
+	f, err := Open(cr, int64(len(raw)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cr.n = 0
+	f.name(off) // corrupt or not, it must stop early
+	if cr.n > 2*nameCompressedCost {
+		t.Fatalf("decoding one name read %d bytes", cr.n)
+	}
+}
+
+// xzObjectAny returns the offset of the only DATA object of a compact file.
+func xzObjectAny(t *testing.T, raw []byte) uint64 {
+	f, _ := Open(bytes.NewReader(raw), int64(len(raw)))
+	for off := range f.dataOffsets(t) {
+		return off
+	}
+	t.Fatal("no data object")
+	return 0
+}

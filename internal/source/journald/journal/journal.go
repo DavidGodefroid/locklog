@@ -293,8 +293,9 @@ type Entry struct {
 	// Fields are the kept fields in the file's item order; a name may
 	// repeat.
 	Fields []Field
-	// Dropped counts kept fields left out because their payload is over
-	// MaxData.
+	// Dropped counts fields left out: kept fields over MaxData or past the
+	// entry's budgets, and compressed fields left undecoded (their name
+	// unread) once the decode budget is spent.
 	Dropped int
 }
 
@@ -552,6 +553,12 @@ func (f *File) value(off uint64, nameLen int) ([]byte, error) {
 func (f *File) stream(flags uint8, off, n uint64, prefixOnly bool) (io.Reader, error) {
 	if off < f.h.HeaderSize || off+n < off || off+n > f.size {
 		return nil, corrupt("object out of bounds", off)
+	}
+	if prefixOnly {
+		// A field name lies in the first block: read no further, so a
+		// name hidden behind empty blocks or frames costs no more than
+		// it is charged.
+		n = min(n, nameCompressedCost+2048)
 	}
 	src := io.NewSectionReader(f.r, int64(off), int64(n))
 	if flags&objCompressedZSTD != 0 {
