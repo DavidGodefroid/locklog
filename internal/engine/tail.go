@@ -85,10 +85,11 @@ type held struct {
 // told apart by their position, and a copy of a stream made during the tail
 // (copytruncate) is recognised by a record of the original at the same
 // offset with the same keyed digest, so the records it shares with the
-// original are not returned again. A stream a poll planned that a later
-// poll no longer plans (renamed out of the paths, deleted, truncated) and
-// that no copy holds makes the tail incomplete: it may have grown after its
-// last read. The duration ends with a poll planned after it.
+// original are not returned again. A stream that existed at the start or
+// at a poll and is gone at a later one (renamed out of the paths, deleted,
+// truncated) and that no copy holds makes the tail incomplete: it may have
+// grown after its last read. Which streams exist and their ends come from a
+// plan of every stream whole, unfiltered, at each poll. The duration ends with a poll planned after it.
 //
 // Work follows the new data: a plan of every local stream at the start (no
 // record read) gives each stream's end in its granules, and a poll scans
@@ -149,24 +150,40 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 	defer tcancel()
 	cancelled := &Error{Code: ESource, Message: "cancelled"}
 
-	// Baseline: every local stream's end, in its granule units.
-	done := map[streamKey]int64{}
-	for _, s := range q.Sources {
-		if e.remote(s) {
-			continue
-		}
-		p, err := e.o.Sources[s].Plan(tctx, source.Range{From: time.Unix(0, 0).UTC(), To: start.Add(24 * time.Hour)}, source.Selector{})
-		if err != nil {
-			if ctx.Err() != nil {
-				return TailResult{}, cancelled
+	// listing plans every local stream whole, unfiltered (no record
+	// read): which streams exist and their ends, in their granule units
+	// (MaxInt64: not measured). A poll's own plan is filtered by the
+	// selector and the range, and drops indexed granules that cannot
+	// match: it tells neither.
+	listing := func() (map[streamKey]int64, error) {
+		ends := map[streamKey]int64{}
+		for _, s := range q.Sources {
+			if e.remote(s) {
+				continue
 			}
-			return TailResult{}, sourceError(err)
-		}
-		for _, c := range p.Chunks {
-			if c.End() != math.MaxInt64 {
+			p, err := e.o.Sources[s].Plan(tctx, source.Range{From: time.Unix(0, 0).UTC(), To: e.o.Now().Add(24 * time.Hour)}, source.Selector{})
+			if err != nil {
+				return nil, err
+			}
+			for _, c := range p.Chunks {
 				k := streamKey{c.Source, c.Stream}
-				done[k] = max(done[k], c.End())
+				ends[k] = max(ends[k], c.End())
 			}
+		}
+		return ends, nil
+	}
+	// Baseline: every local stream's end.
+	done := map[streamKey]int64{}
+	base, err := listing()
+	if err != nil {
+		if ctx.Err() != nil {
+			return TailResult{}, cancelled
+		}
+		return TailResult{}, sourceError(err)
+	}
+	for k, end := range base {
+		if end != math.MaxInt64 {
+			done[k] = end
 		}
 	}
 
@@ -189,10 +206,6 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 	}
 	anchor := map[streamKey][]anchorRec{}
 	link := map[streamKey]streamKey{}
-	// planned are the local streams a completed poll planned (they held
-	// records from the start on, or were not indexed yet): a later poll
-	// plans them again unless they are gone.
-	planned := map[streamKey]bool{}
 	type rkey struct {
 		k streamKey
 		p pos
@@ -261,22 +274,22 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 			covered = false
 			break
 		}
-		// A stream that shrank was truncated (copytruncate): it is new
-		// from its start, and its positions restart.
-		ends := map[streamKey]int64{}
-		present := map[streamKey]bool{} // the local streams planned
-		for _, c := range plan.Chunks {
-			if e.remote(c.Source) {
-				continue
+		// A stream that shrank was truncated: it is new from its
+		// start, and its positions restart.
+		ends, lerr := listing()
+		if lerr != nil {
+			if ctx.Err() != nil {
+				return TailResult{}, cancelled
 			}
-			k := streamKey{c.Source, c.Stream}
+			covered = false
+			break
+		}
+		present := map[streamKey]bool{} // the local streams that exist
+		for k := range ends {
 			present[k] = true
-			if c.End() != math.MaxInt64 {
-				ends[k] = max(ends[k], c.End())
-			}
 		}
 		for k, end := range ends {
-			if d, ok := done[k]; ok && end < d {
+			if d, ok := done[k]; ok && end != math.MaxInt64 && end < d {
 				done[k] = 0
 				delete(anchor, k)
 				delete(frontier, k)
@@ -479,21 +492,21 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 			as := append(anchor[k], a)
 			anchor[k] = as[max(0, len(as)-maxTailAnchors):]
 		}
-		// A stream planned before and gone now (renamed out of the
-		// paths, deleted, truncated) may have grown after its last
-		// read: unless a copy holds it, the tail may miss records.
+		// A stream seen before and gone now (renamed out of the paths,
+		// deleted, truncated to a new generation) may have grown after
+		// its last read: unless a copy holds it, the tail may miss
+		// records.
 		originals := map[streamKey]bool{}
 		for _, sk := range link {
 			originals[sk] = true
 		}
 		for k := range known {
-			if !present[k] && !originals[k] && planned[k] {
+			if !present[k] && !originals[k] {
 				covered = false
 			}
 		}
 		for k := range present {
 			known[k] = true
-			planned[k] = true
 		}
 		// The held record of an original that is no longer planned
 		// is its copy's to evaluate.

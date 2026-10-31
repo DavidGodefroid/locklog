@@ -1239,3 +1239,53 @@ func TestTailRenameAway(t *testing.T) {
 		t.Fatalf("%d records, complete %v", len(res.Records), res.Complete)
 	}
 }
+
+// indexDuringTail appends one matching line (when match) and about 2.7 MiB
+// of non-matching ones, then indexes them, as the console's indexer does
+// during a tail: indexed granules that cannot match drop out of the polls'
+// filtered plans.
+func indexDuringTail(t *testing.T, f *fixture, match bool) {
+	path := filepath.Join(f.root, "logs", "app.log")
+	time.Sleep(300 * time.Millisecond)
+	var lines []string
+	if match {
+		lines = append(lines, liveLine(1, "x"))
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	for range 6000 {
+		lines = append(lines, fmt.Sprintf("time=%s level=info msg=\"%s\"", now, strings.Repeat("p", 400)))
+	}
+	appendLines(t, path, lines...)
+	time.Sleep(400 * time.Millisecond)
+	for {
+		_, done, err := f.src.IndexStep(context.Background(), 1<<30, false)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		if done {
+			return
+		}
+	}
+}
+
+// TestTailIndexedDuringTail: a filtered tail over a stream indexed meanwhile
+// returns its match once, complete; with no match, it is complete and
+// empty.
+func TestTailIndexedDuringTail(t *testing.T) {
+	for _, match := range []bool{true, false} {
+		f := newFixture(t, genLog(time.Now().Add(-time.Hour), 5, "c@example.org"), func(o *Options) { o.TailPoll = 100 * time.Millisecond })
+		go indexDuringTail(t, f, match)
+		res, err := f.eng.Tail(ctx, TailQuery{Duration: "2s", Where: []Pred{{Field: "level", Op: "=", Value: raw("error")}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := 0
+		if match {
+			want = 1
+		}
+		if len(res.Records) != want || !res.Complete {
+			t.Fatalf("match %v: %d records, complete %v", match, len(res.Records), res.Complete)
+		}
+	}
+}
