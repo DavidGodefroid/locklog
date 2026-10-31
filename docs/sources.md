@@ -150,16 +150,26 @@ Consequences, for LL-11 and LL-09a:
   1. the console opens only `<id>/<id>-json.log[.N[.gz]]` for mapped ids, with
      `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS |
      RESOLVE_NO_XDEV)`. `RESOLVE_NO_XDEV` refuses a path that crosses into a
-     propagated mount. The component-wise fallback compares the mount id (`statx`
-     `STATX_MNT_ID`, kernel ≥ 5.8) of each component with the root's.
-     `st_dev` alone is not enough: a bind mount of the same filesystem keeps
-     it;
+     propagated mount. The fallback runs when `openat2` returns ENOSYS (kernel < 5.6)
+     or EPERM (a seccomp profile without it): one `openat(O_NOFOLLOW)` per
+     component, each checked against the root's mount, by mount id
+     (`statx` `STATX_MNT_ID`) on kernel ≥ 5.8, otherwise by `st_dev` plus a
+     check that no line of `/proc/self/mountinfo` has a mount point beneath
+     the root. `st_dev` alone catches the tmpfs submounts observed (shm,
+     secrets) but not a bind mount of the same filesystem;
   2. a Landlock ruleset (kernel ≥ 5.13), applied by the console to itself
      before it opens any source, grants only read rights beneath each mount
      root. A write to a propagated read-write mount then fails, even after a
-     parser exploit;
+     parser exploit. Landlock does **not** limit reads: beneath the root it
+     grants read on propagated mounts too, and no Landlock rule can exclude a
+     subdirectory of an allowed tree. After an exploit, the console could
+     therefore read other containers' `/dev/shm` files (1777) and, on a swarm
+     engine, `mounts/secrets` files (Docker's default 0444), traversing the
+     0710 directories with gid 0. Only counter-measure 1 limits reads, and only
+     while the process is not compromised;
   3. `doctor` names containers with `--ipc=shareable` and a swarm-mode
-     engine as a residual;
+     engine as a residual: their shared memory and secrets are readable by a
+     compromised console;
   4. `docs/security-model.md` states it.
 - The `LL14` test "no submount" must start the console first, then start an
   `--ipc=shareable` container, and assert that the console cannot open or
@@ -199,7 +209,9 @@ and locklog takes no `CAP_DAC_READ_SEARCH`. Supported Podman paths in v1:
 - the `journald` log driver (Podman's default where journald runs), read by
   the journald source;
 - `--log-opt path=/var/log/containers/<name>.log` with `k8s-file`, read by the
-  file source with `format = "cri"`.
+  file source with `format = "cri"`. The mode and owner Podman gives that file
+  and its directory were **not** recorded [NV]; LL-11 must check that uid
+  10051 with an allowlisted group can read it before calling this supported.
 
 `doctor` must say so. The CRI line format was confirmed:
 `2026-10-31T01:23:48.564078242+00:00 stdout F rootful line`.
@@ -212,3 +224,4 @@ and locklog takes no `CAP_DAC_READ_SEARCH`. Supported Podman paths in v1:
 - `bind-nonrecursive=true` on Engine and CLI 19.03-24, and with CLI 25-28.
 - Swarm secrets propagation.
 - Rootless Docker (unsupported in v1, named by `doctor`).
+- Mode and owner of a Podman `k8s-file` log written to `--log-opt path=`.
