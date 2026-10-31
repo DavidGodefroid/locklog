@@ -67,6 +67,28 @@ countable), plus per kind:
 | `docker` | `containers` (name globs; a glob matching a locklog console is refused), `attrs` (json-file log-opt attributes to keep) |
 | `loki` | `url`, `selector`, `trusted_labels`, `trusted_metadata`, `auth` (`none` refused on production, `basic`, `bearer`, `mtls`), `org_id`, `credentials` (`ask` or `vault`), `tls`, `tls_ca` |
 
+## Wiring an agent
+
+`locklog init <agent>` wires one agent into the project that holds the
+current directory; `locklog setup --agent host` runs it for each agent it
+detects. Every init also creates a commented `.locklog/config.toml` when the
+project has none.
+
+| Agent | What `locklog init` writes |
+|---|---|
+| `claude` | `.mcp.json` (the `locklog mcp` server), `.claude/skills/locklog/SKILL.md`, the allow list below |
+| `codex` | a locklog section in `AGENTS.md`; it prints the `~/.codex/config.toml` table to add yourself (it writes no file outside the project) |
+| `cursor` | `.cursor/mcp.json`, `.cursor/rules/locklog.mdc` |
+| `gemini` | `.gemini/settings.json` (timeout 600 s, which covers the console's 5-minute approval timeout), a locklog section in `GEMINI.md` |
+
+For Claude Code it also adds the **free** tools to `permissions.allow` in
+`.claude/settings.local.json`, the personal file, so they do not prompt.
+It never writes the shared `.claude/settings.json` or your user settings,
+and it warns when git does not ignore the personal file. Tools that ask
+the console (`locklog_request_change`, `locklog_scan`, `locklog_unmask`)
+are never on that list. Remove an entry to be asked again; a re-run adds
+it back and says so.
+
 ## The agent's tools
 
 | Tool | What it does | Cost |

@@ -101,8 +101,8 @@ curl -fsSL https://locklog.dev/install.sh | sh
 
 # 2. Describe your logs: setup detects files, journald and containers,
 #    asks whether the profile is production (answer "no" for the trial),
-#    and wires the detected agents (Claude Code, Codex, Gemini CLI)
-locklog setup --agent host
+#    and wires the detected agents (Claude Code, Codex, Cursor, Gemini CLI)
+locklog setup --agent host     # or wire one agent: locklog init claude
 
 # 3. The console, in a terminal you keep in view
 locklog console
@@ -111,7 +111,9 @@ locklog console
 Then, in another terminal, ask your agent: *"when did the 502s start?"*.
 It calls `locklog_count`, `locklog_patterns` and `locklog_trace`; the
 console shows each call and asks you only when the agent wants more than
-the free budgets or a value in clear.
+the free budgets or a value in clear. On the host, `locklog mcp` refuses
+every call on a production profile (`E_PRODUCTION_HOST_AGENT`): the host
+agent is the trial.
 
 ### For production
 
@@ -163,7 +165,7 @@ Your agent CLI's own login (Anthropic, OpenAI, Google) is yours to set up.
 | Operation | Who decides |
 |---|---|
 | `status`, `sources`, `search`, `count`, `patterns`, `context`, `trace`, `tail` within budgets | free, audited |
-| `lookup` (clear value → pseudonym), agent masking rules | free, rate-limited, audited |
+| `lookup` (clear value → pseudonym), `pii_list` / `pii_add` (agent masking rules, tighten only) | free, rate-limited, audited |
 | `locklog_scan` (beyond a budget, approved once for its whole plan) | you, at the console |
 | `locklog_unmask` (the clear value of exact spans, once) | you, on a terminal facade only; **off by default on production** |
 | `locklog_request_change` (any loosening) | you, at the console's `:review` |
