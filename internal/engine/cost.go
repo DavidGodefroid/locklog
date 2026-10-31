@@ -169,7 +169,9 @@ func worstCaseCorpus() []string {
 
 // granuleGroups splits the granules of a chunk, from index from, into
 // groups whose worst-case time each fits within per; a granule larger than
-// per is a group of its own.
+// per is a group of its own, and so is a granule of unknown bytes (a remote
+// slice, sized only by its fetch): stopping points then fall on its
+// boundaries, never after a run of them fetched as one.
 func granuleGroups(c source.Chunk, from int, per int64) [][2]int {
 	var out [][2]int
 	i := from
@@ -177,7 +179,7 @@ func granuleGroups(c source.Chunk, from int, per int64) [][2]int {
 		j, n := i, int64(0)
 		for j < len(c.Granules) {
 			b := granuleBytes(c.Granules[j], c)
-			if j > i && n+b > per {
+			if j > i && (n+b > per || b == 0 || n == 0) {
 				break
 			}
 			n += b

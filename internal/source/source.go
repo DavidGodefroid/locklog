@@ -299,3 +299,24 @@ func LimiterFrom(ctx context.Context) Limiter {
 	l, _ := ctx.Value(limiterKey{}).(Limiter)
 	return l
 }
+
+type byteLimitKey struct{}
+
+// WithByteLimit attaches to ctx the bytes a scan may process (Iterator's
+// Processed). The engine checks Processed after every record; a source that
+// buffers before it yields (a remote slice, fetched page by page, sorted
+// whole) checks the limit itself as it fetches, and fails with ErrByteLimit
+// instead of buffering past it.
+func WithByteLimit(ctx context.Context, n int64) context.Context {
+	return context.WithValue(ctx, byteLimitKey{}, n)
+}
+
+// ByteLimitFrom returns the byte limit of ctx, or 0 (none).
+func ByteLimitFrom(ctx context.Context) int64 {
+	n, _ := ctx.Value(byteLimitKey{}).(int64)
+	return max(n, 0)
+}
+
+// ErrByteLimit is returned by a scan (or a source's bounded read) that would
+// process more than its byte limit.
+var ErrByteLimit = errors.New("source: past the byte limit of the call")

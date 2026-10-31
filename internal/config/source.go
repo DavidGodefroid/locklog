@@ -466,6 +466,13 @@ func buildRemote(r rawSource, production bool, errf func(string, ...any) error) 
 			return nil, errf("trusted_labels / trusted_metadata: %q looks like personal data and cannot be trusted", l)
 		}
 	}
+	// Loki's | name="v" filter matches stream labels as well as
+	// structured metadata: a name that is both would select on either.
+	for _, m := range rem.TrustedMetadata {
+		if _, sel := rem.Selector[m]; sel || slices.Contains(rem.TrustedLabels, m) {
+			return nil, errf("trusted_metadata: %s cannot be both a stream label and structured metadata (it is in the selector or trusted_labels)", m)
+		}
+	}
 	if rem.OrgID != "" && !orgIDRe.MatchString(rem.OrgID) {
 		return nil, errf("org_id: invalid tenant id (one tenant: letters, digits and _.!*'()-; no '|' federation)")
 	}
