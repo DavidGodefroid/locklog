@@ -50,12 +50,15 @@ type Options struct {
 	// Roots are the read-only mount roots; every path must be under one.
 	Roots  []string
 	Parser *parse.Parser
-	// Trusted are the trusted low-cardinality fields the index counts.
+	// Trusted are the trusted low-cardinality line fields the index
+	// counts, and labels as index.LabelKey (a framer's attributes: the
+	// docker source's container and stream).
 	Trusted []string
 	// Index is the local index store (nil: no index).
 	Index *index.Store
-	// Sensitive reports a trusted value a detector flags: it is indexed
-	// as index.Redacted.
+	// Sensitive reports a trusted value the masker would change as a
+	// trusted leaf (mask.Masker.TrustedValue): it is indexed as
+	// index.Redacted, never held clear.
 	Sensitive func(field, value string) bool
 	// Now is the clock (tests).
 	Now func() time.Time
@@ -420,7 +423,7 @@ func (s *Source) Plan(ctx context.Context, r source.Range, sel source.Selector) 
 		n := (size + source.GranuleBytes - 1) / source.GranuleBytes
 		for i := int64(0); i < n; i++ {
 			start, end := granuleBounds(i, size)
-			g := source.Granule{Start: start, End: end}
+			g := source.Granule{Start: start, End: end, Bytes: end - start}
 			if ig := gs[i]; usable(ig, size) {
 				g.Indexed, g.Records = true, ig.Records
 				g.From, g.To, _ = ig.Span()
@@ -468,20 +471,23 @@ func granuleMayMatch(g *index.Granule, fields []string, r source.Range, sel sour
 	return match(g.Untimed)
 }
 
+// selectorIndexed reports whether every term is on an indexed line field or
+// label, each in its own namespace.
 func selectorIndexed(sel source.Selector, fields []string) bool {
 	for _, t := range sel.Terms {
-		if !slices.Contains(fields, t.Field) {
+		if !slices.Contains(fields, index.TermKey(t.Field, t.Label)) {
 			return false
 		}
 	}
 	return true
 }
 
-// termFields returns the fields a selector's terms name.
+// termFields returns the indexed names (index.TermKey) a selector's terms
+// name.
 func termFields(sel source.Selector) []string {
 	var out []string
 	for _, t := range sel.Terms {
-		out = append(out, t.Field)
+		out = append(out, index.TermKey(t.Field, t.Label))
 	}
 	return out
 }
@@ -499,15 +505,21 @@ func unknown(fields, vals, names []string) bool {
 	return false
 }
 
-// tupleMap maps fields to a tuple's values, leaving absent fields out.
-func tupleMap(fields, vals []string) map[string]string {
-	m := make(map[string]string, len(fields))
-	for i, f := range fields {
-		if vals[i] != index.Absent {
-			m[f] = vals[i]
+// tupleMap maps the indexed names to a tuple's values, line fields and
+// labels apart, leaving absent ones out.
+func tupleMap(keys, vals []string) (fields, labels map[string]string) {
+	fields, labels = map[string]string{}, map[string]string{}
+	for i, k := range keys {
+		if vals[i] == index.Absent {
+			continue
+		}
+		if n, label := index.SplitKey(k); label {
+			labels[n] = vals[i]
+		} else {
+			fields[n] = vals[i]
 		}
 	}
-	return m
+	return fields, labels
 }
 
 // Scan returns the records of a chunk.
@@ -557,7 +569,7 @@ func (s *Source) newIter(ctx context.Context, f *os.File, fi fileInfo, start, en
 	if start > 0 {
 		open = start - 1
 	}
-	st, err := openStream(f, fi.id.compression, open)
+	st, err := openStream(ctx, f, fi.id.compression, open)
 	if err != nil {
 		if errors.Is(err, errShort) {
 			return nil, source.ErrStale
@@ -678,7 +690,7 @@ func (s *Source) Reread(ctx context.Context, ref source.RawRef) (source.RawRecor
 		return source.RawRecord{}, stale(err)
 	}
 	defer f.Close()
-	st, err := openStream(f, fi.id.compression, ref.Offset)
+	st, err := openStream(ctx, f, fi.id.compression, ref.Offset)
 	if err != nil {
 		return source.RawRecord{}, source.ErrStale
 	}
@@ -813,7 +825,8 @@ func (s *Source) Describe(ctx context.Context) (source.Schema, error) {
 		}
 	}
 	for _, f := range s.opts.Trusted {
-		info := source.FieldInfo{Name: f, Trusted: true}
+		name, label := index.SplitKey(f)
+		info := source.FieldInfo{Name: name, Label: label, Trusted: true}
 		if !dropped[f] && len(values[f]) <= index.MaxDistinct {
 			for v := range values[f] {
 				info.Values = append(info.Values, v)

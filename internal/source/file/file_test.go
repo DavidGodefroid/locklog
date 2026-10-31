@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -1077,5 +1078,39 @@ func TestGrownCompressedFileIsANewStream(t *testing.T) {
 	}
 	if sch, _ := s.Describe(ctx); sch.FullyIndexed {
 		t.Fatal("grown compressed file claimed as indexed")
+	}
+}
+
+// TestDiscardHonoursCancel: opening a compressed stream past its start
+// stops discarding once ctx is done.
+func TestDiscardHonoursCancel(t *testing.T) {
+	var gz bytes.Buffer
+	w := gzip.NewWriter(&gz)
+	line := make([]byte, 48)
+	for i := 0; i < 1<<17; i++ { // 8 MiB, compressible below MaxRatio
+		rand.Read(line[:8])
+		fmt.Fprintf(w, "time=2026-10-30T12:00:00Z msg=%x\n", line)
+	}
+	w.Close()
+	path := filepath.Join(t.TempDir(), "a.log.gz")
+	if err := os.WriteFile(path, gz.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	cctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := openStream(cctx, f, compGzip, 4<<20); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled discard: %v", err)
+	}
+	st, err := openStream(context.Background(), f, compGzip, 4<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.processed() < 4<<20 {
+		t.Fatalf("processed %d", st.processed())
 	}
 }

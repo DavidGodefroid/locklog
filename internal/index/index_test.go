@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"testing"
 	"time"
 
@@ -260,41 +261,44 @@ func TestRunBusyPausesUpkeepNotBackfill(t *testing.T) {
 	}
 }
 
-// A frame attribute (the trusted container name, the runtime's stream) wins
-// over a payload field of the same name.
-func TestLookupPrefersFrameAttrs(t *testing.T) {
-	e := ev(t0, "container", "spoofed", "level", "warn")
-	e.Attrs = []parse.Member{{Key: "container", Value: parse.Value{Kind: parse.KindString, Str: "shop-api-1"}}}
-	if v, ok := Lookup(e, "container"); !ok || v != "shop-api-1" {
-		t.Errorf("container = %q %v", v, ok)
+// TestLookupNamespaces: the index reads line fields only; frame attributes
+// (labels) are a separate namespace.
+func TestLookupNamespaces(t *testing.T) {
+	ev := parse.Event{
+		Fields: []parse.Member{{Key: "env", Value: parse.Value{Kind: parse.KindString, Str: "field"}}},
+		Attrs: []parse.Member{{Key: "env", Value: parse.Value{Kind: parse.KindString, Str: "label"}},
+			{Key: "stream", Value: parse.Value{Kind: parse.KindString, Str: "stdout"}}},
 	}
-	if v, ok := Lookup(e, "level"); !ok || v != "warn" {
-		t.Errorf("level = %q %v", v, ok)
+	if v, _ := Lookup(ev, "env"); v != "field" {
+		t.Fatal(v)
+	}
+	if v, ok := Lookup(ev, "stream"); ok {
+		t.Fatalf("a label read as a field: %q", v)
+	}
+	if v, _ := LookupAttr(ev, "env"); v != "label" {
+		t.Fatal(v)
 	}
 }
 
-// On a framed event, the frame keys resolve against the attributes only:
-// a payload "stream" never stands for the runtime's; attrs.<key> reaches
-// into the frame's attrs object.
-func TestLookupFrameKeys(t *testing.T) {
-	e := ev(t0, "stream", "spoofed", "level", "warn")
+// Values reads a label key (LabelKey) from the frame attributes only and a
+// field key from the line fields only: a payload field never stands for the
+// trusted container name or the runtime's stream, nor the reverse.
+func TestValuesNamespaces(t *testing.T) {
+	e := ev(t0, "container", "spoofed", "stream", "spoofed", "level", "warn")
 	e.Framed = true
-	if v, ok := Lookup(e, "stream"); ok {
-		t.Errorf("framed: payload stream %q used", v)
+	e.Attrs = []parse.Member{{Key: "container", Value: parse.Value{Kind: parse.KindString, Str: "shop-api-1"}},
+		{Key: "attrs", Value: parse.Value{Kind: parse.KindObject,
+			Members: []parse.Member{{Key: "team", Value: parse.Value{Kind: parse.KindString, Str: "shop"}}}}}}
+	keys := []string{LabelKey("container"), "container", LabelKey("stream"), "stream", LabelKey("attrs.team"), LabelKey("attrs.other"), "level", LabelKey("level")}
+	got := Values(e, keys, nil)
+	want := []string{"shop-api-1", "spoofed", Absent, "spoofed", "shop", Absent, "warn", Absent}
+	if !slices.Equal(got, want) {
+		t.Fatalf("Values = %q, want %q", got, want)
 	}
-	e.Attrs = []parse.Member{{Key: "attrs", Value: parse.Value{Kind: parse.KindObject,
-		Members: []parse.Member{{Key: "team", Value: parse.Value{Kind: parse.KindString, Str: "shop"}}}}}}
-	if v, ok := Lookup(e, "attrs.team"); !ok || v != "shop" {
-		t.Errorf("attrs.team = %q %v", v, ok)
+	if n, l := SplitKey(LabelKey("attrs.team")); n != "attrs.team" || !l {
+		t.Fatal(n, l)
 	}
-	if _, ok := Lookup(e, "attrs.other"); ok {
-		t.Error("attrs.other found")
-	}
-	if v, ok := Lookup(e, "level"); !ok || v != "warn" {
-		t.Errorf("level = %q %v", v, ok)
-	}
-	e.Framed = false
-	if v, _ := Lookup(e, "stream"); v != "spoofed" {
-		t.Errorf("not framed: %q", v)
+	if n, l := SplitKey("level"); n != "level" || l {
+		t.Fatal(n, l)
 	}
 }

@@ -299,9 +299,10 @@ func (p *Parser) filterFrameAttrs(frame []Member) []Member {
 	return out
 }
 
-// FrameKeys are the attributes a framer sets (cri, docker-json): on a
-// framed event they resolve against Event.Attrs only, never against the
-// payload's fields, which may hold the same keys.
+// FrameKeys are the attributes a framer sets (cri, docker-json). They are
+// labels (Event.Attrs), a namespace apart from the payload's fields, which
+// may hold the same keys: a source of a framed format names them as labels
+// (index.LabelKey, source.Term.Label), never as line fields.
 var FrameKeys = []string{"stream", "attrs"}
 
 // plainFormat is free text: an optional leading timestamp (bare or in

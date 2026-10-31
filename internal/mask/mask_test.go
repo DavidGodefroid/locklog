@@ -925,3 +925,16 @@ func TestMaskRuleGlobMatchesReference(t *testing.T) {
 		}
 	}
 }
+
+// A record whose time the reader inherited from the previous timed record
+// (a stack-trace continuation) keeps that time in the masked view, as the
+// local index counts it: index counts and scans agree.
+func TestMaskKeepsInheritedTime(t *testing.T) {
+	m := newMasker(t, Options{Structured: StructuredDetect})
+	ev := event(t, `continuation line`)
+	at := time.Date(2026, 10, 30, 14, 2, 11, 0, time.UTC)
+	ev.Time, ev.HasTime, ev.Inherited = at, false, true
+	if ts, ok := m.Mask("api", ev).Time(); !ok || !ts.Equal(at) {
+		t.Errorf("Time() = %v, %v; want %v, true", ts, ok, at)
+	}
+}
