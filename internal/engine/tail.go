@@ -63,6 +63,10 @@ func (a pos) after(b pos) bool { return a.off > b.off || a.off == b.off && a.len
 
 type streamKey [2]string
 
+// maxTailAnchors bounds the anchors a tail keeps per stream (one per poll
+// the stream grew in) to recognise its copies.
+const maxTailAnchors = 64
+
 func keyOf(r source.RawRef) streamKey { return streamKey{r.Source, r.Stream} }
 
 // held is a local stream's last record seen: it may still be being written
@@ -77,8 +81,12 @@ type held struct {
 // Tail polls the sources until Duration ends or Max match, for the records
 // timestamped from the call's start (to the second): new records are told
 // by their time, which every source has; records without one are never
-// tailed. Each record is evaluated and returned once, and a copy of a
-// returned record in another stream (a rotation) is not returned again.
+// tailed. Each record is evaluated and returned once: identical records are
+// told apart by their position, and a copy of a stream made during the tail
+// (copytruncate) is recognised by a record of the original at the same
+// offset with the same keyed digest, so the records it shares with the
+// original are not returned again. The duration ends with a poll planned
+// after it.
 //
 // Work follows the new data: a plan of every local stream at the start (no
 // record read) gives each stream's end in its granules, and a poll scans
@@ -160,20 +168,31 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 		}
 	}
 
-	original := map[streamKey]bool{}
+	// known are the local streams seen at the start or in a completed
+	// poll; a stream first seen later may be a copy of one of them.
+	known := map[streamKey]bool{}
 	for k := range done {
-		original[k] = true
+		known[k] = true
 	}
-	copied := map[streamKey]bool{} // streams that are copies (rotations)
+	// A copy (copytruncate) holds its original's bytes at the same
+	// offsets: link[C] = S once C holds, at the offset of a record S
+	// evaluated last in one of its polls (S's anchors, the latest
+	// maxTailAnchors), a record of the same length and keyed digest. C's
+	// records up to S's frontier were evaluated as S's (C may be shorter
+	// than S: the copy was made before S's last polls); while S is still
+	// planned, S is read and C is not.
+	type anchorRec struct {
+		p pos
+		d string
+	}
+	anchor := map[streamKey][]anchorRec{}
+	link := map[streamKey]streamKey{}
 	type rkey struct {
 		k streamKey
 		p pos
 	}
 	frontier := map[streamKey]pos{} // local: the last record evaluated
 	seenRemote := map[rkey]bool{}   // remote: the records evaluated
-	// The streams each returned record (by keyed digest and time) was
-	// read from.
-	returned := map[string]map[streamKey]bool{}
 	var found []match
 	heldAll := map[streamKey]*held{} // each local stream's held record
 	res := TailResult{Epoch: e.o.Masker.Epoch(), Records: []json.RawMessage{}, Masking: Masking{Kinds: []string{}}}
@@ -192,12 +211,6 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 		}
 		k := keyOf(raw.Ref)
 		if t.Before(start) {
-			// A stream that appeared or restarted during the tail
-			// and holds records from before it is a copy (a
-			// rotation by copytruncate).
-			if !original[k] {
-				copied[k] = true
-			}
 			return
 		}
 		// Counted once per record; with the pre-filter on, not
@@ -208,27 +221,12 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 		if !q.match(rec, b) {
 			return
 		}
-		d := e.RecordDigest(raw.Event.Raw) + "|" + t.Format(time.RFC3339Nano)
-		// A record returned from one stream and also in another
-		// stream of the source, one of them a copy, is returned once
-		// (whichever is evaluated first). Identical records of one
-		// stream, of two replicas, of a new file or of two sources
-		// are distinct records.
-		other := func(sk streamKey) bool { return sk != k && sk[0] == k[0] && (copied[k] || copied[sk]) }
-		for sk := range returned[d] {
-			if other(sk) {
-				return
-			}
-		}
-		if slices.ContainsFunc(*out, func(m match) bool { return m.digest == d && other(m.stream) }) {
-			return
-		}
 		o, oerr := e.outRecord(raw, rec, q.Fields)
 		if oerr != nil {
 			outFailed = true // never a silently missing match
 			return
 		}
-		*out = append(*out, match{ts: t, timed: true, out: o, kinds: rec.Kinds(), digest: d, stream: k})
+		*out = append(*out, match{ts: t, timed: true, out: o, kinds: rec.Kinds(), stream: k, off: raw.Ref.Offset})
 		// Bounded memory: keep the earliest that can be returned.
 		if len(*out) > 2*q.Limit {
 			sortMatches(*out, "asc")
@@ -244,6 +242,7 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 			break
 		}
 		pq := q
+		planAt := time.Now()
 		pq.To = e.o.Now().UTC().Truncate(time.Second).Add(time.Second)
 		plan, perr := e.planQuery(tctx, &pq, math.MaxInt64, math.MaxInt64)
 		if perr != nil {
@@ -259,16 +258,21 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 		// A stream that shrank was truncated (copytruncate): it is new
 		// from its start, and its positions restart.
 		ends := map[streamKey]int64{}
+		present := map[streamKey]bool{} // the local streams planned
 		for _, c := range plan.Chunks {
-			if !e.remote(c.Source) && c.End() != math.MaxInt64 {
-				k := streamKey{c.Source, c.Stream}
+			if e.remote(c.Source) {
+				continue
+			}
+			k := streamKey{c.Source, c.Stream}
+			present[k] = true
+			if c.End() != math.MaxInt64 {
 				ends[k] = max(ends[k], c.End())
 			}
 		}
 		for k, end := range ends {
 			if d, ok := done[k]; ok && end < d {
 				done[k] = 0
-				delete(original, k)
+				delete(anchor, k)
 				delete(frontier, k)
 				delete(heldAll, k)
 			}
@@ -326,6 +330,8 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 
 		// The poll's matches are kept only if it completes.
 		var pollFound []match
+		pollLink := map[streamKey]streamKey{}
+		pollAnchor := map[streamKey]anchorRec{}
 		pollFrontier := map[streamKey]pos{}
 		pollSeen := map[rkey]bool{}
 		pollHeld := map[streamKey]*held{}
@@ -348,6 +354,47 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 				evaluate(raw, rec, b, &pollFound, &pollFailures, &pollUntimed)
 				return
 			}
+			journal := e.o.Sources[raw.Ref.Source].Kind() == "journald"
+			// A stream first seen during the tail: is it a copy?
+			if _, linked := link[k]; !linked && !journal && !known[k] {
+				if _, ok := pollLink[k]; !ok {
+					var dg string
+				search:
+					for sk, as := range anchor {
+						if sk == k || sk[0] != k[0] || !slices.ContainsFunc(as, func(a anchorRec) bool { return a.p == p }) {
+							continue
+						}
+						if dg == "" {
+							dg = e.RecordDigest(raw.Event.Raw)
+						}
+						if !slices.Contains(as, anchorRec{p, dg}) {
+							continue
+						}
+						// Its records up to S's frontier were S's.
+						pollLink[k] = sk
+						f := frontier[sk]
+						pollFound = slices.DeleteFunc(pollFound, func(m match) bool { return m.stream == k && m.off <= f.off })
+						if h := pollHeld[k]; h != nil && !(pos{h.raw.Ref.Offset, h.raw.Ref.Length}).after(f) {
+							delete(pollHeld, k)
+						}
+						if pf, ok := pollFrontier[k]; !ok || f.after(pf) {
+							pollFrontier[k] = f
+						}
+						break search
+					}
+				}
+			}
+			if sk, ok := link[k]; ok || pollLink[k] != (streamKey{}) {
+				if !ok {
+					sk = pollLink[k]
+				}
+				if present[sk] {
+					return // the original is read, not its copy
+				}
+				if f, ok := frontier[sk]; ok && !p.after(f) {
+					return // evaluated as the original's
+				}
+			}
 			if f, ok := frontier[k]; ok && !p.after(f) {
 				return // evaluated by an earlier poll
 			}
@@ -356,7 +403,7 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 			}
 			// A journal entry is atomic: evaluated at once, never
 			// held (its granule ends count entries, not bytes).
-			if e.o.Sources[raw.Ref.Source].Kind() == "journald" {
+			if journal {
 				pollFrontier[k] = p
 				evaluate(raw, rec, b, &pollFound, &pollFailures, &pollUntimed)
 				return
@@ -364,7 +411,9 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 			// The record before this one is complete: evaluate it;
 			// this one is held.
 			if h := pollHeld[k]; h != nil {
-				pollFrontier[k] = pos{h.raw.Ref.Offset, h.raw.Ref.Length}
+				hp := pos{h.raw.Ref.Offset, h.raw.Ref.Length}
+				pollFrontier[k] = hp
+				pollAnchor[k] = anchorRec{hp, e.RecordDigest(h.raw.Event.Raw)}
 				evaluate(h.raw, h.rec, b, &pollFound, &pollFailures, &pollUntimed)
 			}
 			pollHeld[k] = &held{raw: raw, rec: rec}
@@ -408,15 +457,26 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 		for k, p := range pollFrontier {
 			frontier[k] = p
 		}
-		for _, m := range pollFound {
-			if returned[m.digest] == nil {
-				returned[m.digest] = map[streamKey]bool{}
-			}
-			returned[m.digest][m.stream] = true
+		for k, a := range pollAnchor {
+			as := append(anchor[k], a)
+			anchor[k] = as[max(0, len(as)-maxTailAnchors):]
+		}
+		for k, sk := range pollLink {
+			link[k] = sk
 		}
 		found = append(found, pollFound...)
 		for k, h := range pollHeld {
 			heldAll[k] = h
+		}
+		for k := range present {
+			known[k] = true
+		}
+		// The held record of an original that is no longer planned
+		// is its copy's to evaluate.
+		for _, sk := range link {
+			if !present[sk] {
+				delete(heldAll, sk)
+			}
 		}
 		if chunk < len(pruned.Chunks) {
 			covered = false // more than one call scans: tail again
@@ -425,6 +485,11 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 		for _, c := range pruned.Chunks {
 			if !e.remote(c.Source) && c.End() != math.MaxInt64 {
 				k := streamKey{c.Source, c.Stream}
+				// A copy is scanned again once its original is
+				// gone.
+				if sk, ok := link[k]; ok && present[sk] {
+					continue
+				}
 				done[k] = max(done[k], c.End())
 			}
 		}
@@ -436,10 +501,15 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 			early = early || time.Now().Before(wallEnd)
 			break
 		}
-		wait := time.Until(wallEnd)
-		if wait <= 0 {
+		// The duration ended once a poll planned after it completed:
+		// a poll planned before covers the streams as they were then.
+		if !planAt.Before(wallEnd) {
 			ended = true
 			break
+		}
+		wait := time.Until(wallEnd)
+		if wait <= 0 {
+			continue // one more poll, within the grace
 		}
 		t := time.NewTimer(min(poll, wait))
 		select {

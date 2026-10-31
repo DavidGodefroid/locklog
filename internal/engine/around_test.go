@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -899,5 +900,211 @@ func TestContextEpochAndWork(t *testing.T) {
 	}
 	if res.Scanned.Granules < 17 {
 		t.Fatalf("scanned %+v: read-back not counted", res.Scanned)
+	}
+}
+
+func rotEngine(t *testing.T) (*Engine, string) {
+	f := newFixture(t, genLog(time.Now().Add(-time.Hour), 50, "c@example.org"), func(o *Options) { o.TailPoll = 50 * time.Millisecond })
+	p, _ := parse.New(parse.Options{})
+	src, err := file.New(file.Options{Name: "app", Paths: []string{f.root + "/logs/app.log*"}, Roots: []string{f.root}, Parser: p,
+		Trusted: []string{"level", "status"}, Index: f.store, Sensitive: func(fl, v string) bool { return f.masker.TrustedValue("app", fl, v) != v }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := f.eng.o
+	o.Sources = map[string]source.Source{"app": src}
+	eng, err := New(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return eng, filepath.Join(f.root, "logs", "app.log")
+}
+
+// Two identical lines; first returned, second held; copytruncate.
+func TestTailCopytruncateIdentical(t *testing.T) {
+	eng, path := rotEngine(t)
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		l := liveLine(1, "x")
+		appendLines(t, path, l, l)
+		time.Sleep(300 * time.Millisecond)
+		b, _ := os.ReadFile(path)
+		os.WriteFile(path+".1", b, 0o644)
+		os.Truncate(path, 0)
+		appendLines(t, path, liveLine(2, "x"))
+	}()
+	res, err := eng.Tail(ctx, TailQuery{Duration: "1500ms"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var s []string
+	for _, r := range res.Records {
+		s = append(s, string(r))
+	}
+	if len(res.Records) != 3 || !res.Complete {
+		t.Fatalf("want 3 got %d complete=%v\n%s", len(res.Records), res.Complete, strings.Join(s, "\n"))
+	}
+}
+
+// Rename rotation (create): app.log -> app.log.1, new app.log.
+func TestTailRenameRotation(t *testing.T) {
+	eng, path := rotEngine(t)
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		appendLines(t, path, liveLine(1, "x"), liveLine(2, "x"))
+		time.Sleep(300 * time.Millisecond)
+		os.Rename(path, path+".1")
+		os.WriteFile(path, nil, 0o644)
+		appendLines(t, path, liveLine(3, "x"))
+	}()
+	res, err := eng.Tail(ctx, TailQuery{Duration: "1500ms"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var s []string
+	for _, r := range res.Records {
+		s = append(s, string(r))
+	}
+	if len(res.Records) != 3 || !res.Complete {
+		t.Fatalf("want 3 got %d complete=%v\n%s", len(res.Records), res.Complete, strings.Join(s, "\n"))
+	}
+}
+
+// Truncate and regrow larger than before between polls (no copy).
+func TestTailTruncateRegrow(t *testing.T) {
+	eng, path := rotEngine(t)
+	var wrote atomic.Int64
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		appendLines(t, path, liveLine(1, "x"))
+		time.Sleep(300 * time.Millisecond)
+		st, _ := os.Stat(path)
+		os.Truncate(path, 0)
+		var lines []string
+		n := int64(0)
+		for i := 2; n < st.Size()+100; i++ {
+			l := liveLine(i, "x")
+			lines = append(lines, l)
+			n += int64(len(l) + 1)
+		}
+		appendLines(t, path, lines...)
+		wrote.Store(int64(len(lines)))
+	}()
+	res, err := eng.Tail(ctx, TailQuery{Duration: "1500ms", Max: 200})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := int64(len(res.Records)); n != 1+wrote.Load() || !res.Complete {
+		t.Fatalf("got %d of %d, complete=%v", n, 1+wrote.Load(), res.Complete)
+	}
+}
+
+// L returned, then an identical L appended just before a copytruncate.
+func TestTailIdenticalAcrossCopy(t *testing.T) {
+	eng, path := rotEngine(t)
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		nextSecondHalf()
+		l := liveLine(1, "x")
+		appendLines(t, path, l, liveLine(9, "y"))
+		time.Sleep(200 * time.Millisecond)
+		appendLines(t, path, l)
+		b, _ := os.ReadFile(path)
+		os.WriteFile(path+".1", b, 0o644)
+		os.Truncate(path, 0)
+		appendLines(t, path, liveLine(2, "x"))
+	}()
+	res, err := eng.Tail(ctx, TailQuery{Duration: "2s"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var s []string
+	for _, r := range res.Records {
+		s = append(s, string(r))
+	}
+	if len(res.Records) != 4 || !res.Complete {
+		t.Fatalf("want 4 got %d complete=%v", len(res.Records), res.Complete)
+	}
+}
+
+// waits until we are early in a second so two writes 200ms apart share it.
+func nextSecondHalf() {
+	now := time.Now()
+	if now.Sub(now.Truncate(time.Second)) > 300*time.Millisecond {
+		time.Sleep(now.Truncate(time.Second).Add(time.Second).Sub(now))
+	}
+}
+
+// Two copytruncate rotations in one tail (logrotate rotate N: .1 -> .2, copy -> .1).
+func TestTailDoubleCopytruncate(t *testing.T) {
+	eng, path := rotEngine(t)
+	ct := func() {
+		os.Rename(path+".1", path+".2")
+		b, _ := os.ReadFile(path)
+		os.WriteFile(path+".1", b, 0o644)
+		os.Truncate(path, 0)
+	}
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		appendLines(t, path, liveLine(1, "x"))
+		time.Sleep(300 * time.Millisecond)
+		ct()
+		appendLines(t, path, liveLine(2, "x"), liveLine(3, "x"))
+		time.Sleep(300 * time.Millisecond)
+		ct()
+		appendLines(t, path, liveLine(4, "x"))
+	}()
+	res, err := eng.Tail(ctx, TailQuery{Duration: "2s"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var s []string
+	for _, r := range res.Records {
+		s = append(s, string(r))
+	}
+	if len(res.Records) != 4 || !res.Complete {
+		t.Fatalf("want 4 got %d complete=%v", len(res.Records), res.Complete)
+	}
+}
+
+// stallSource stalls its next Scan (a slow poll).
+type stallSource struct {
+	source.Source
+	stall atomic.Int64
+}
+
+func (s *stallSource) Scan(ctx context.Context, c source.Chunk) (source.Iterator, error) {
+	if d := s.stall.Swap(0); d > 0 {
+		time.Sleep(time.Duration(d))
+	}
+	return s.Source.Scan(ctx, c)
+}
+
+// TestTailSlowLastPoll: a poll planned before the end that completes after
+// it does not end the tail: records written after its plan are read by one
+// more poll.
+func TestTailSlowLastPoll(t *testing.T) {
+	f := newFixture(t, genLog(time.Now().Add(-time.Hour), 5, "c@example.org"), func(o *Options) { o.TailPoll = 50 * time.Millisecond })
+	ss := &stallSource{Source: f.eng.o.Sources["app"]}
+	o := f.eng.o
+	o.Sources = map[string]source.Source{"app": ss}
+	eng, err := New(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(f.root, "logs", "app.log")
+	go func() {
+		time.Sleep(600 * time.Millisecond)
+		appendLines(t, path, liveLine(1, "x"))
+		ss.stall.Store(int64(700 * time.Millisecond))
+		time.Sleep(200 * time.Millisecond) // planned, stalled
+		appendLines(t, path, liveLine(2, "x"))
+	}()
+	res, err := eng.Tail(ctx, TailQuery{Duration: "1s"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Records) != 2 || !res.Complete {
+		t.Fatalf("%d records, complete %v", len(res.Records), res.Complete)
 	}
 }
