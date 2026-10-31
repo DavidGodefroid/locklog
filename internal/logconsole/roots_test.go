@@ -266,3 +266,36 @@ func TestPolicyChangeReopensEngine(t *testing.T) {
 		t.Errorf("reopened without a change: lost=%d engines=%d", env.lost, len(engines))
 	}
 }
+
+// A reopen on the policy in force that fails is audited as failed: no call
+// goes unrecorded because the engine never ran.
+func TestPolicyChangeFailedReopenIsAudited(t *testing.T) {
+	logs := t.TempDir()
+	root := project(t, filesCfg(logs))
+	opens := 0
+	b := New(Options{Profile: "staging", Root: root, Open: func(_ context.Context, o OpenOptions) (Engine, error) {
+		opens++
+		if opens > 1 {
+			return nil, errors.New("ref.key: corrupt")
+		}
+		return &fakeEngine{}, nil
+	}})
+	old, err := b.LoadPolicy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := b.Connect(context.Background(), console.Credentials{Policy: old})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cur := old.(Policy)
+	cur.Policy.Profile.Sources = nil
+	env := &reconnectEnv{fakeEnv: &fakeEnv{sess: s, policy: cur}, b: b}
+	resp := b.Methods()[MethodSearch](context.Background(), ipc.Request{ID: 1, Method: MethodSearch}, env)
+	if resp.Error == nil || resp.Error.Code != ipc.CodeConnLost || len(env.records) != 1 {
+		t.Fatalf("failed reopen: %+v records=%d", resp.Error, len(env.records))
+	}
+	if r := env.records[0].(Record); r.Decision != "failed" || r.Method != MethodSearch {
+		t.Errorf("record: %+v", r)
+	}
+}

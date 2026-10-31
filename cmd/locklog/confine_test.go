@@ -9,8 +9,10 @@ import (
 	"testing"
 
 	"github.com/DavidGodefroid/locklog/internal/config"
+	"github.com/DavidGodefroid/locklog/internal/engine/session"
 	"github.com/DavidGodefroid/locklog/internal/landlock"
 	"github.com/DavidGodefroid/locklog/internal/logconsole"
+	"github.com/DavidGodefroid/locklog/internal/source/docker"
 )
 
 func TestConfineRules(t *testing.T) {
@@ -103,5 +105,51 @@ func TestOpenerRefusesUnsupportedKindFirst(t *testing.T) {
 	pol := config.Policy{Profile: config.Profile{Name: "p", Sources: []config.Source{{Name: "l", Kind: config.KindLoki}}}}
 	if _, err := op.Open(context.Background(), logconsole.OpenOptions{Policy: pol}); err == nil || !strings.Contains(err.Error(), "does not read yet") {
 		t.Errorf("Open: %v", err)
+	}
+}
+
+// A failed first open (a missing key the human then fixes) leaves the
+// next open first: a per-session pseudonym rotation still rotates.
+func TestOpenerFirstOpenSurvivesAFailedOpen(t *testing.T) {
+	var firsts []bool
+	fail := true
+	op := &opener{openat2: func() bool { return false },
+		openSession: func(_ context.Context, o session.Options) (logconsole.Engine, error) {
+			firsts = append(firsts, o.FirstOpen)
+			if fail {
+				return nil, errors.New("ref.key: missing")
+			}
+			return nil, nil
+		}}
+	pol := config.Policy{Profile: config.Profile{Name: "p"}}
+	if _, err := op.Open(context.Background(), logconsole.OpenOptions{Policy: pol}); err == nil {
+		t.Fatal("the failing open succeeded")
+	}
+	fail = false
+	for range 2 {
+		if _, err := op.Open(context.Background(), logconsole.OpenOptions{Policy: pol}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !slices.Equal(firsts, []bool{true, true, false}) {
+		t.Errorf("FirstOpen per open: %v, want [true true false]", firsts)
+	}
+}
+
+// A reviewed policy that adds a docker source to a console confined
+// without one is refused with a restart message: the map directory is
+// not in the ruleset.
+func TestOpenerConfinedWithoutDockerRefusesDocker(t *testing.T) {
+	op := &opener{inContainer: true, lookPath: func(string) (string, error) { return "", errors.New("no") },
+		restrict: func(landlock.Rules) (landlock.Status, error) {
+			return landlock.Status{State: landlock.Enforced, ABI: 6}, nil
+		}}
+	files := logconsole.OpenOptions{Policy: config.Policy{Profile: config.Profile{Name: "p", Sources: []config.Source{{Name: "f", Kind: config.KindFile}}}}}
+	if _, err := op.confine(files); err != nil {
+		t.Fatal(err)
+	}
+	dock := logconsole.OpenOptions{Policy: config.Policy{Profile: config.Profile{Name: "p", Sources: []config.Source{{Name: "d", Kind: config.KindDocker}}}}}
+	if _, err := op.confine(dock); err == nil || !strings.Contains(err.Error(), "restart the console") || !strings.Contains(err.Error(), docker.DefaultMapDir) {
+		t.Errorf("docker after a ruleset without it: %v", err)
 	}
 }

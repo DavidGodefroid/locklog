@@ -108,12 +108,18 @@ type opener struct {
 	restrict    func(landlock.Rules) (landlock.Status, error)
 	openat2     func() bool
 	lookPath    func(string) (string, error)
+	// openSession opens the engine (session.Open; a test's stub).
+	openSession func(context.Context, session.Options) (logconsole.Engine, error)
 
 	mu       sync.Mutex
 	confined bool
 	status   landlock.Status
 	allowed  []string // the read-only roots of the ruleset
-	opens    int
+	docker   bool     // the ruleset reads the docker map directory
+	// opened is set by the first successful open: a failed first open
+	// (a missing key the human then fixes) leaves the next one first, so
+	// that a per-session pseudonym rotation still rotates.
+	opened bool
 }
 
 func newOpener(inContainer bool) *opener {
@@ -121,6 +127,9 @@ func newOpener(inContainer bool) *opener {
 }
 
 // notConfined is the status outside the image.
+// dockerMapDir is the docker source's map directory in the image.
+const dockerMapDir = docker.DefaultMapDir
+
 var notConfined = landlock.Status{State: landlock.Unsupported, Detail: "not applied: the console runs outside its image"}
 
 // confine applies the ruleset once per process: Landlock cannot be undone,
@@ -131,7 +140,12 @@ func (op *opener) confine(o logconsole.OpenOptions) (landlock.Status, error) {
 		return notConfined, nil
 	}
 	roots := o.Roots.All()
+	pr := o.Policy.Profile
+	docker := slices.ContainsFunc(pr.Sources, func(s config.Source) bool { return s.Kind == config.KindDocker })
 	if op.confined {
+		if docker && !op.docker {
+			return landlock.Status{}, fmt.Errorf("%s is not readable by this console (it was confined at start, before this policy named a docker source): restart the console", dockerMapDir)
+		}
 		for _, r := range roots {
 			if !slices.Contains(op.allowed, r) {
 				return landlock.Status{}, fmt.Errorf("%s is not readable by this console (it was confined at start, before this policy named it): restart the console", r)
@@ -139,14 +153,12 @@ func (op *opener) confine(o logconsole.OpenOptions) (landlock.Status, error) {
 		}
 		return op.status, nil
 	}
-	pr := o.Policy.Profile
-	docker := slices.ContainsFunc(pr.Sources, func(s config.Source) bool { return s.Kind == config.KindDocker })
 	rules := confineRules(confineInput{Roots: o.Roots, Docker: docker, Project: o.Project, StateDir: o.StateDir, Vault: vaultCLI(pr, op.lookPath)})
 	st, err := op.restrict(rules)
 	if err != nil {
 		return landlock.Status{}, fmt.Errorf("the console could not confine itself (Landlock): %w", err)
 	}
-	op.confined, op.status, op.allowed = true, st, roots
+	op.confined, op.status, op.allowed, op.docker = true, st, roots, docker
 	return st, nil
 }
 
@@ -162,9 +174,22 @@ func (op *opener) Open(ctx context.Context, o logconsole.OpenOptions) (logconsol
 	if err != nil {
 		return nil, err
 	}
-	op.opens++
-	s, err := session.Open(ctx, session.Options{OpenOptions: o, FirstOpen: op.opens == 1,
+	open := op.openSession
+	if open == nil {
+		open = openSession
+	}
+	s, err := open(ctx, session.Options{OpenOptions: o, FirstOpen: !op.opened,
 		Confinement: session.Confinement{Landlock: st, Openat2: op.openat2()}})
+	if err != nil {
+		return nil, err
+	}
+	op.opened = true
+	return s, nil
+}
+
+// openSession is session.Open as a logconsole.Engine.
+func openSession(ctx context.Context, o session.Options) (logconsole.Engine, error) {
+	s, err := session.Open(ctx, o)
 	if err != nil {
 		return nil, err
 	}

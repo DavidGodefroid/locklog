@@ -375,13 +375,20 @@ func (b *Backend) handler(method string) console.Handler {
 		if cred, ok := console.PeerFrom(ctx); ok {
 			c = Caller{UID: cred.UID, PID: cred.PID}
 		}
+		params := req.Params
+		if len(params) == 0 {
+			params = json.RawMessage("{}")
+		}
+		// Recorded first: a call refused before the engine runs (no
+		// session, a failed reopen) is audited too.
+		rec := newRecord(ctx, env, method, params)
 		sess, err := env.Session(ctx)
 		if err != nil {
-			return console.ErrResp(req.ID, ipc.CodeConnLost, env.Sanitizer().Error(err))
+			return failed(req.ID, env, rec, ipc.CodeConnLost, env.Sanitizer().Error(err))
 		}
 		ls, ok := console.Unwrap(sess).(*session)
 		if !ok {
-			return console.ErrResp(req.ID, ipc.CodeInternal, "no log engine")
+			return failed(req.ID, env, rec, ipc.CodeInternal, "no log engine")
 		}
 		// The engine serves the policy it was opened with: once the human
 		// approved another one (:review), the session is dropped and
@@ -389,17 +396,12 @@ func (b *Backend) handler(method string) console.Handler {
 		if p, ok := env.Policy().(Policy); ok && p.Fingerprint() != ls.policy.Fingerprint() {
 			env.Lost()
 			if sess, err = env.Session(ctx); err != nil {
-				return console.ErrResp(req.ID, ipc.CodeConnLost, env.Sanitizer().Error(err))
+				return failed(req.ID, env, rec, ipc.CodeConnLost, env.Sanitizer().Error(err))
 			}
 			if ls, ok = console.Unwrap(sess).(*session); !ok || ls.policy.Fingerprint() != p.Fingerprint() {
-				return console.ErrResp(req.ID, ipc.CodeInternal, "no log engine for the policy in force")
+				return failed(req.ID, env, rec, ipc.CodeInternal, "no log engine for the policy in force")
 			}
 		}
-		params := req.Params
-		if len(params) == 0 {
-			params = json.RawMessage("{}")
-		}
-		rec := newRecord(ctx, env, method, params)
 		// The mounts are checked again on every call (a root swapped
 		// after the start): a session whose logs are not the checked ones
 		// is dropped, and the next call reconnects, checking them all.
@@ -467,6 +469,16 @@ func lost(id int64, env console.Env, rec Record) ipc.Response {
 		return console.ErrResp(id, ipc.CodeInternal, "the call could not be audited: refused")
 	}
 	return console.ErrResp(id, ipc.CodeConnLost, errLostText)
+}
+
+// failed answers a call refused before the engine ran (no session, a
+// failed reopen) with code and msg, after auditing it as failed.
+func failed(id int64, env console.Env, rec Record, code int, msg string) ipc.Response {
+	rec.Decision, rec.Error = "failed", msg
+	if err := writeAudit(env, rec); err != nil {
+		return console.ErrResp(id, ipc.CodeInternal, "the call could not be audited: refused")
+	}
+	return console.ErrResp(id, code, msg)
 }
 
 func refusalResp(id int64, r *Refusal, env console.Env) ipc.Response {
