@@ -84,9 +84,12 @@ merged; until then the console refuses a profile that holds one (this build
 
 ## Wiring an agent
 
-`locklog init <agent>` wires one agent into the project that holds the
-current directory; `locklog setup --agent host` runs it for each agent it
-detects. Every init also creates a commented `.locklog/config.toml` when the
+`locklog setup --agent host` wires the agents it detects in the project
+(`--agents claude,codex` to choose). It runs `locklog init <agent>` for each,
+in a container that writes the project as you. In an agent's own container,
+where the recipe copies the `locklog` binary in, run `locklog init <agent>`
+there. The launcher on the host does not run `init` itself: it mounts the
+project read-only. Every init also creates a commented `.locklog/config.toml` when the
 project has none.
 
 | Agent | What `locklog init` writes |

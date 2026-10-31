@@ -73,7 +73,8 @@ with its own credentials, sends all of it to the model provider.
 - **Masked by construction.** Every record is masked inside the console
   before any predicate runs: a search for a clear email finds nothing,
   because the agent only ever works on the masked view. Equality on a
-  pseudonym works, so "every record of this user" still does.
+  pseudonym works, so "every record of this user" still does. (The opt-in
+  `prefilter`, refused on production, is the documented exception.)
 - **Investigation tools, not a query language.** `locklog_count` (with
   buckets and `first_last`), `locklog_patterns` (new templates against a
   baseline), `locklog_trace` (one request across sources),
@@ -104,7 +105,7 @@ curl -fsSL https://locklog.dev/install.sh | sh
 # 2. Describe your logs: setup detects files, journald and containers,
 #    asks whether the profile is production (answer "no" for the trial),
 #    and wires the detected agents (Claude Code, Codex, Cursor, Gemini CLI)
-locklog setup --agent host     # or wire one agent: locklog init claude
+locklog setup --agent host     # or only some agents: --agents claude
 
 # 3. The console, in a terminal you keep in view (setup prints the line;
 #    containers get a profile of their own, <profile>-docker)
@@ -145,7 +146,7 @@ Your agent CLI's own login (Anthropic, OpenAI, Google) is yours to set up.
      │    network: none, or the backend's network for Loki
      └─ map loop: docker events → container names and ids of the approved globs
 
- agent (yours: lea container, own container, or the host for the trial)
+ agent (yours: your own container, or the host for the trial; lea planned)
    MCP server `locklog mcp` → /run/locklog/locklog.sock (peer uid checked by the kernel)
 ```
 
