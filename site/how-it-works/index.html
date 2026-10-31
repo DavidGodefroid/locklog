@@ -44,7 +44,7 @@
 <h1>How locklog works</h1>
 <div class="prose">
   <p class="lead">A console held by a human reads the logs. The agent asks over MCP and gets masked, bounded, typed answers.</p>
-  <p>The console is the only component that reads logs, holds credentials, keeps the pseudonym keys and decides what leaves. The agent reaches it only through its Unix socket, with the MCP server <code>locklog mcp</code>, and nothing unmasked leaves the console except what you approve or reveal on your own screen.</p>
+  <p>The console is the only component that reads logs, holds credentials, keeps the pseudonym keys and decides what leaves. The agent reaches it only through its Unix socket, with the MCP server <code>locklog mcp</code>, and nothing unmasked leaves the console except an unmask you approve.</p>
 </div>
 
 <div class="notice" role="note"><p><strong>Pre-release, in development.</strong> No release of locklog is published yet. It is built on <a href="https://github.com/DavidGodefroid/lockkit">lockkit</a>, and its design is public in <a href="https://github.com/DavidGodefroid/locklog/blob/main/docs/security-model.md">docs/security-model.md</a>.</p></div>
@@ -70,7 +70,7 @@
   <ol class="steps prose">
     <li><strong>Approved sources only.</strong> The console reads the approved sources, and only those. The sources are reviewed at the console’s first start and on every loosening.</li>
     <li><strong>A byte plan first.</strong> For each call it builds a byte plan from the time range and the trusted selectors only (local index, Loki label stats, ES <code>_count</code>). Admission, cursors and stopping points depend on the plan, never on what matched.</li>
-    <li><strong>Masked first.</strong> Every record of a planned chunk is masked first: secrets (<code>⟦secret⟧</code>, final), then your rules, personal field names, value detectors (email, phone, IBAN, card, BE/FR/NL/US national ids, public IP, person names) and the structured or text mode. Then the agent’s predicates run on the masked view.</li>
+    <li><strong>Masked first.</strong> Every record of a planned chunk is masked first: secrets (<code>⟦secret⟧</code>, final), then your rules, personal field names, value detectors (email, phone, IBAN, card, BE/FR/NL/US national ids, public IP; person names and loose phone numbers opt-in) and the structured or text mode. Then the agent’s predicates run on the masked view.</li>
     <li><strong>Bounded, untrusted output.</strong> The answer leaves through <code>render</code> caps as JSON under an “untrusted content” header, with the pseudonym <code>epoch</code> and a sealed cursor to continue for free.</li>
   </ol>
 </section>
@@ -82,15 +82,16 @@
   <thead><tr><th scope="col">Operation</th><th scope="col">Who decides</th></tr></thead>
   <tbody>
   <tr><th scope="row"><code>status</code>, <code>sources</code>, <code>search</code>, <code>count</code>, <code>patterns</code>, <code>context</code>, <code>trace</code>, <code>tail</code> within budgets</th><td>free, audited</td></tr>
-  <tr><th scope="row"><code>lookup</code> (clear value → pseudonym), agent masking rules</th><td>free, rate-limited, audited</td></tr>
-  <tr><th scope="row"><code>locklog_scan</code> (beyond a budget, approved once for its whole plan)</th><td>you, at the console</td></tr>
-  <tr><th scope="row"><code>locklog_unmask</code> (the clear value of exact spans, once)</th><td>you, on a terminal facade only; <strong>off by default on production</strong></td></tr>
+  <tr><th scope="row"><code>lookup</code> (clear value → pseudonym, detector kinds only)</th><td>free, rate-limited, audited; or approved each time with <code>lookup = "approved"</code></td></tr>
+  <tr><th scope="row"><code>pii_list</code> / <code>pii_add</code> (agent masking rules, tighten only)</th><td>free, capped, audited (served once the console’s PII backend lands, <a href="https://github.com/DavidGodefroid/locklog/issues/64">#64</a>)</td></tr>
+  <tr><th scope="row"><code>locklog_scan</code> (beyond a budget, approved once for its whole plan; its cursor continues free for 30 minutes)</th><td>you, at the console</td></tr>
+  <tr><th scope="row"><code>locklog_unmask</code> (the clear value of exact spans of one record, once)</th><td>you, at the console, never auto-approved; <strong>off by default on production</strong></td></tr>
   <tr><th scope="row"><code>locklog_request_change</code> (any loosening)</th><td>you, at the console’s <code>:review</code></td></tr>
   <tr><th scope="row">write, delete, admin</th><td>does not exist</td></tr>
   </tbody>
   </table>
   </div>
-  <p class="prose"><code>:reveal &lt;ref&gt;</code> and Ctrl-O on an approval screen show you a record in clear on the console’s terminal only, with secrets still redacted.</p>
+  <p class="prose">The unmask screen shows the record <strong>masked</strong>, with the asked spans marked <code>» «</code>, the agent’s reason and what a yes lets the agent link. Secrets are never unmasked. On a non-production profile, auto mode (Shift+Tab) can approve scans for you; unmasks and approved lookups always wait for you, and production stays in manual mode.</p>
 </section>
 
 <section aria-labelledby="masking">
@@ -100,11 +101,11 @@
     <li><strong>Secret detectors</strong> and secret-looking names → <code>⟦secret⟧</code>. This step is final: later steps run on its output, so a rule that pseudonymises a whole field never hashes a secret.</li>
     <li><strong>Rules</strong>: field and label names in <code>.locklog/pii.toml</code>, and value lists and regexes in the console-held rule directory.</li>
     <li><strong>Personal field names</strong> → pseudonym.</li>
-    <li><strong>Value detectors</strong> on a detection view (folded, NFKC, without zero-width characters, with percent, JSON <code>\u</code> and HTML entities decoded): email, phone, IBAN, card, Belgian/French/Dutch/US national ids, public IP, person names.</li>
+    <li><strong>Value detectors</strong> on a detection view (folded, NFKC, without zero-width characters, with percent, JSON <code>\u</code> and HTML entities decoded): email, phone, IBAN, card, Belgian/French/Dutch/US national ids, public IP; person names and loose phone numbers are opt-in (<code>detectors</code>) for their false positives.</li>
     <li><strong>Structured mode</strong> (<code>redact-unknown</code>, the production default, or <code>detect</code>) or <strong>text mode</strong> (<code>detect</code>, or <code>template</code>).</li>
   </ol>
   <div class="prose">
-    <p>A pseudonym is <code>⟦kind:ID⟧</code>: 12 Crockford base32 characters (60 bits) of an HMAC-SHA256 under a random per-epoch key. The key rotates every 7 days by default, the previous key is deleted 24 hours later, and the epoch is refused once it is older than 30 days. There is no pseudonym-to-value store: an unmask or a reveal re-reads the record by its sealed reference.</p>
+    <p>A pseudonym is <code>⟦kind:ID⟧</code>: 12 Crockford base32 characters (60 bits) of an HMAC-SHA256 under a random per-epoch key. The key rotates every 7 days by default (<code>pseudonym_rotation</code>); a replaced key is deleted once it has been replaced for <code>pseudonym_max_age</code> (30 days by default), when the console opens the profile. There is no pseudonym-to-value store: an unmask re-reads the record by its sealed reference.</p>
     <p>Agent rules (<code>locklog_pii_add</code>) only tighten: they add masking and never remove it or change its kind. They are stored in the console’s home volume, never in the project’s <code>.locklog/</code>.</p>
   </div>
 </section>
@@ -119,10 +120,11 @@
   <tr><th scope="row">journald</th><td>v0.1.0</td><td>pure-Go reader, field allowlist; core dumps, command lines and audit fields are never served</td></tr>
   <tr><th scope="row">Docker containers</th><td>v0.1.0</td><td><code>json-file</code> logs by container name glob; the <code>journald</code> driver through journald. Podman through journald</td></tr>
   <tr><th scope="row">Loki</th><td>v0.1.0</td><td>trusted labels and structured metadata, server-side metric counts; text never sent to Loki</td></tr>
-  <tr><th scope="row">Elasticsearch, OpenSearch</th><td>v0.3.0</td><td>trusted keyword fields, <code>search_after</code></td></tr>
+  <tr><th scope="row">Elasticsearch, OpenSearch</th><td>v0.3.0</td><td>trusted keyword fields, <code>search_after</code>, a read-only privilege check</td></tr>
   </tbody>
   </table>
   </div>
+  <p class="prose">The console opens Loki, Elasticsearch and OpenSearch sources from the profile once <a href="https://github.com/DavidGodefroid/locklog/pull/97">#97</a> is merged; until then the console cannot open them (<code>unsupported source kind</code>).</p>
   <p class="prose"><code>docker compose up</code> deletes a recreated container’s <code>json-file</code> logs: use the journald driver or Loki for history across deploys.</p>
 </section>
 

@@ -54,7 +54,7 @@
 <p>It can, but it finds nothing. Every record is masked inside the console before any predicate runs, so the agent only ever works on the masked view. Equality on a pseudonym works, so “every record of this user” still does.</p>
 
 <h2 id="see-clear">Can I see a value in clear?</h2>
-<p>Yes, you can, at the console: <code>:reveal &lt;ref&gt;</code> or Ctrl-O on an approval screen shows you a record in clear on the console’s terminal only, with secrets still redacted. Handing a clear value to the agent (<code>locklog_unmask</code>) waits for your approval on a terminal facade, and is off by default on production. Secrets are never unmasked, revealed or pseudonymised.</p>
+<p>The console shows records masked, including on its approval screens. Handing a clear value to the agent (<code>locklog_unmask</code>) waits for your approval at the console, is never auto-approved, and is off by default on production. Secrets are never unmasked or pseudonymised.</p>
 
 <h2 id="write">Can locklog change my logs or my backends?</h2>
 <p>No. It reads, never writes: read-only mounts, a read-only root filesystem, an allowlist of backend endpoints, no Docker socket in any locklog container, and no write, delete or admin operation at all.</p>
@@ -63,7 +63,7 @@
 <p>No. Pseudonymised data is still personal data under the GDPR: the model provider receives pseudonyms, timestamps and the fields locklog does not mask. Pseudonyms link a person’s records within an epoch (7 days by default). See <a href="../security/#not-masked">what is not masked</a>.</p>
 
 <h2 id="lea">Do I need lea?</h2>
-<p>No. On production the agent must not be able to read the logs itself: run it in <a href="https://github.com/DavidGodefroid/lea">lea</a> (<code>lea init --locklog</code>) or in its own container (<code>locklog setup --agent container</code>). For a trial on non-production data, the agent can run on your own account (<code>locklog setup --agent host</code>).</p>
+<p>No. On production the agent must not be able to read the logs itself: run it in its own container (<code>locklog setup --agent container</code>); <a href="https://github.com/DavidGodefroid/lea">lea</a> support is planned. For a trial on non-production data, the agent can run on your own account (<code>locklog setup --agent host</code>).</p>
 
 <h2 id="sources">Which log sources are supported?</h2>
 <p>Files (globs, rotation, gzip, zstd), journald, Docker container logs and Loki in v0.1.0; Elasticsearch and OpenSearch in v0.3.0. Text is never sent to a backend.</p>

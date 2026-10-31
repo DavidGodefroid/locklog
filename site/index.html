@@ -67,10 +67,10 @@
   <h2 id="demo" class="visually-hidden">See it run</h2>
   <figure class="demo">
     <div class="demo-frame" role="region" aria-label="Animated demo" tabindex="0">
-      <img src="assets/demo.svg" alt="Claude Code asks when the PDF errors started on a staging profile. locklog_count shows the step at 14:02, locklog_patterns finds the new pattern with the email and the IP already pseudonymised, and locklog_trace follows order 4812: all free and masked. The agent then asks locklog_unmask for the email. The locklog console, in its own account and container, shows the approval screen with the span highlighted; the human presses Ctrl-O to see the record in clear on their screen only, and answers n. The agent gets denied and carries on without the address; the audit records every call with pseudonyms only." width="1200" height="620" aria-describedby="demo-caption">
+      <img src="assets/demo.svg" alt="Claude Code asks when the PDF errors started on a staging profile. locklog_count shows the step at 14:02, locklog_patterns finds the new pattern with the email and the IP already pseudonymised, and locklog_trace follows order 4812: all free and masked. The agent then asks locklog_unmask for the email. The locklog console, in its own account and container, shows the read-pii approval screen with the masked record and the span marked; the human answers n. The agent gets denied and carries on without the address; the audit records every call with pseudonyms only." width="1200" height="620" aria-describedby="demo-caption">
     </div>
     <p class="demo-hint">Swipe sideways to see both terminals.</p>
-    <figcaption id="demo-caption">Claude Code (left) finds when the PDF errors started with <code>locklog_count</code>, <code>locklog_patterns</code> and <code>locklog_trace</code>: free, and already masked. Its <code>locklog_unmask</code> for an email waits in the locklog console (right, its own account and container). You see the record in clear on your screen only, with Ctrl-O, and answer <code>n</code>: the agent carries on without the address, and the audit keeps every call with pseudonyms only.</figcaption>
+    <figcaption id="demo-caption">Claude Code (left) finds when the PDF errors started with <code>locklog_count</code>, <code>locklog_patterns</code> and <code>locklog_trace</code>: free, and already masked. Its <code>locklog_unmask</code> for an email waits in the locklog console (right, its own account and container). You see the masked record with the span marked and answer <code>n</code>: the agent carries on without the address, and the audit keeps every call with pseudonyms only.</figcaption>
   </figure>
 </section>
 
@@ -140,7 +140,7 @@ locklog console</code></pre>
 <section class="limits" aria-labelledby="limits">
   <h2 id="limits">Know the limits</h2>
   <div class="prose">
-    <p>locklog masks the values it <strong>detects</strong>. It does not detect names outside its gazetteer heuristics, usernames and logins in free text, postal addresses, private and loopback IPs, user agents and other quasi-identifiers, business ids, base64 or hex-encoded content, or secrets without a known shape.</p>
+    <p>locklog masks the values it <strong>detects</strong>. It does not detect person names unless you enable the opt-in <code>person_name</code> detector, usernames and logins in free text, postal addresses, private and loopback IPs, user agents and other quasi-identifiers, business ids, base64 or hex-encoded content, or secrets without a known shape.</p>
     <p>Pseudonymised data is still personal data under the GDPR: the model provider receives pseudonyms, timestamps and the fields locklog does not mask. And locklog protects the logs only from an agent that cannot reach them by another path: on production, that is lea’s job or your own container’s.</p>
     <p><a href="security/">Read the security model</a></p>
   </div>

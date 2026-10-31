@@ -94,7 +94,7 @@ locklog console</code></pre>
   <h2 id="production">For production</h2>
   <p class="prose">On production the agent must not be able to read the logs, the Docker socket or the backends itself (precondition <a href="../security/#p1">P1</a>). Run it:</p>
   <ul class="cards">
-    <li><h3>In lea</h3><p><code>lea init --locklog</code> mounts the socket volume and the project read-only into the agent’s container (<code>locklog setup --agent lea</code> prints the console’s <code>--allowed-uids</code>). <a href="https://github.com/DavidGodefroid/lea">lea on GitHub</a></p></li>
+    <li><h3>In lea</h3><p>Planned: no <a href="https://github.com/DavidGodefroid/lea">lea</a> release supports locklog yet (<code>locklog setup --agent lea</code> says so). Use your own container meanwhile.</p></li>
     <li><h3>In its own container</h3><p><code>locklog setup --agent container</code> prints a tested Dockerfile snippet for your agent image and the <code>docker run</code> line. The agent user must not have sudo.</p></li>
   </ul>
   <p class="prose">Your agent CLI’s own login (Anthropic, OpenAI, Google) is yours to set up. Then run <code>locklog doctor</code> where the agent runs: it checks the common ways P1 fails, and on a production profile its findings are errors.</p>

@@ -51,7 +51,7 @@
 <section aria-labelledby="protects">
   <h2 id="protects">What locklog protects</h2>
   <ul class="cards">
-    <li><span class="icon" aria-hidden="true">🕶️</span><h3>Clear values</h3><p>Nothing unmasked leaves the console. Two exceptions, both decided by a human: an approved unmask (the exact spans, once, decided on a terminal facade) and a reveal on the human’s own screen. Secrets are never unmasked, revealed or pseudonymised.</p></li>
+    <li><span class="icon" aria-hidden="true">🕶️</span><h3>Clear values</h3><p>Nothing unmasked leaves the console, except an unmask a human approves at the console (the exact spans, once). Secrets are never unmasked or pseudonymised.</p></li>
     <li><span class="icon" aria-hidden="true">🧪</span><h3>Clear-text oracles</h3><p>The agent cannot learn whether a clear value it chooses occurs in the logs, except through the documented <a href="#residuals">residuals</a>.</p></li>
     <li><span class="icon" aria-hidden="true">🗄️</span><h3>The log backends</h3><p>locklog reads, never writes. Backend credentials stay in the console.</p></li>
     <li><span class="icon" aria-hidden="true">📜</span><h3>The record of what happened</h3><p>Every call is audited in a hash chain, without clear values.</p></li>
@@ -93,10 +93,11 @@
       <li>membership of the groups <code>docker</code>, <code>adm</code> and <code>systemd-journal</code>;</li>
       <li><code>sudo -n</code> and euid 0;</li>
       <li>whether <code>/var/log/journal</code> and <code>/var/lib/docker</code> are readable;</li>
-      <li>unauthenticated reads of the configured backends and of host-published Loki, Elasticsearch, OpenSearch and Grafana ports;</li>
+      <li>cloud credential files in the agent’s account;</li>
+      <li>unauthenticated reads of the configured backends;</li>
       <li>the cloud metadata credential paths.</li>
     </ul>
-    <p>On a production profile, its findings are errors.</p>
+    <p>Each finding prints a remedy. On a production profile its findings are errors and it exits 1. It also lists residuals: whether Landlock confines the console, containers with <code>IpcMode</code> shareable, and swarm mode.</p>
     <h3 id="trial">The host-agent trial</h3>
     <p><code>locklog setup --agent host</code> runs the MCP server as the image’s <code>agent</code> account, launched from your own account. Your agent there can still read whatever your account can, so the trial is for non-production data. The launcher’s <code>mcp</code> refuses production profiles.</p>
   </div>
@@ -110,9 +111,9 @@
   <tbody>
   <tr><th scope="row">1</th><td>No locklog container has an engine socket</td><td>launcher; goldens</td></tr>
   <tr><th scope="row">2</th><td>The console shares only <code>locklog-run</code> with agents; the home volume, the map directory and the hub network never</td><td>launcher, <code>lock up</code>, lea’s label check</td></tr>
-  <tr><th scope="row">3</th><td>Nothing unmasked leaves the console except an approved unmask or a reveal on the human’s screen; secrets never</td><td>masking pipeline, typed masked responses; canary harness</td></tr>
+  <tr><th scope="row">3</th><td>Nothing unmasked leaves the console except an approved unmask; secrets never</td><td>masking pipeline, typed masked responses; canary harness</td></tr>
   <tr><th scope="row">4</th><td>Agent predicates see only the masked view; every record is masked before any predicate; no text is sent to a backend; plans, charges and stopping points depend on the plan, never on matches; agent rules only tighten</td><td>engine, oracle and equivalence suites</td></tr>
-  <tr><th scope="row">5</th><td>Approved operations run only on a decision bound to the plan hash (exact spans for an unmask, the whole plan for a scan) and the policy fingerprint, once; <code>read-pii</code> only from <code>tty</code>, <code>deck</code> or <code>mobile</code></td><td>lockkit plans and tickets, a facade check in the lock</td></tr>
+  <tr><th scope="row">5</th><td>Approved operations run only on a decision bound to the plan hash (exact spans for an unmask, the whole plan for a scan) and the policy fingerprint, once; never auto-approved for <code>read-pii</code>. With the hub (v0.2.0), <code>read-pii</code> only from <code>tty</code>, <code>deck</code> or <code>mobile</code></td><td>lockkit plans and tickets; the facade check lands with the hub</td></tr>
   <tr><th scope="row">6</th><td>No approve or reveal method on the agent socket</td><td>lockkit</td></tr>
   <tr><th scope="row">7</th><td>Hub unreachable ⇒ approvals wait; free reads continue with the local audit</td><td>hub client</td></tr>
   <tr><th scope="row">8</th><td>No hub auto-discovery</td><td>lockkit</td></tr>
@@ -134,7 +135,7 @@
   <div class="prose">
     <p>locklog masks the values it <strong>detects</strong>. It does not detect:</p>
     <ul>
-      <li>names outside its gazetteer heuristics;</li>
+      <li>person names, unless the opt-in <code>person_name</code> detector is on (and names outside its heuristics when it is);</li>
       <li>usernames and logins in free text;</li>
       <li>postal addresses;</li>
       <li>private and loopback IPs (infrastructure; configurable);</li>
@@ -174,10 +175,10 @@
   <thead><tr><th scope="col">Data</th><th scope="col">Where</th><th scope="col">Kept</th></tr></thead>
   <tbody>
   <tr><th scope="row">Audit (one chained line per call)</th><td>home volume</td><td>until you delete it. It holds pseudonyms, tool arguments and <strong>the predicates the agent typed</strong>: a personal value the agent typed in a form the detectors miss stays there</td></tr>
-  <tr><th scope="row">Approved plans and tickets</th><td>home volume</td><td>until used or expired (an approved scan: 30 minutes)</td></tr>
-  <tr><th scope="row">Result cache</th><td>console memory</td><td>≤ 64 MiB, dropped on a policy change and at exit</td></tr>
+  <tr><th scope="row">Plans and approved scans</th><td>console memory</td><td>until used or expired (an approved scan: 30 minutes); gone when the session ends</td></tr>
+  <tr><th scope="row">Result cache</th><td>console memory</td><td>≤ 64 MiB, gone when the session ends (a policy change, the console’s exit)</td></tr>
   <tr><th scope="row">Local index</th><td>home volume</td><td>per file identity, rebuilt when a file changes; trusted field values masked at answer time</td></tr>
-  <tr><th scope="row">Pseudonym keys</th><td>home volume</td><td>current epoch, plus the previous one for 24 h</td></tr>
+  <tr><th scope="row">Pseudonym keys</th><td>home volume</td><td>the current epoch’s key; a replaced key until it has been replaced for <code>pseudonym_max_age</code> (30 days by default), deleted when the console opens the profile</td></tr>
   </tbody>
   </table>
   </div>
