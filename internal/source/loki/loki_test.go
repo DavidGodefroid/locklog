@@ -51,6 +51,10 @@ type fakeLoki struct {
 	// ignoreFlags answers as a backend that ignores the encoding-flags
 	// header (metadata merged into the stream labels, no encodingFlags).
 	ignoreFlags bool
+	// inject adds an entry before the request of that index (counting
+	// /query and /query_range requests from 0): ingestion during a count.
+	inject map[int]fakeEntry
+	nQuery int
 	// offGrid writes metric points 1 s late (a backend whose grid is
 	// not the one asked for).
 	offGrid bool
@@ -58,14 +62,16 @@ type fakeLoki struct {
 
 func matches(ms [][3]string, l map[string]string) bool {
 	for _, m := range ms {
-		v, ok := l[m[0]]
+		v := l[m[0]]
 		switch m[1] {
 		case "=":
 			if v != m[2] {
 				return false
 			}
 		case "!=":
-			if ok && v == m[2] {
+			// An absent label is "" (Loki and Prometheus): x!="" means
+			// "present".
+			if v == m[2] {
 				return false
 			}
 		case "=~", "!~":
@@ -150,6 +156,8 @@ func (f *fakeLoki) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		sort.Strings(out)
 		json.NewEncoder(w).Encode(map[string]any{"status": "success", "data": out})
+	case (r.URL.Path == "/loki/api/v1/query" || r.URL.Path == "/loki/api/v1/query_range") && f.injectNow():
+		f.ServeHTTP(w, r) // after the injection
 	case r.URL.Path == "/loki/api/v1/query":
 		query := q.Get("query")
 		at, _ := strconv.ParseInt(q.Get("time"), 10, 64)
@@ -162,8 +170,9 @@ func (f *fakeLoki) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.metric(rec, m, at, at, "")
 		var mr map[string]any
 		json.Unmarshal(rec.Body.Bytes(), &mr)
-		var result []any
-		for _, s := range mr["data"].(map[string]any)["result"].([]any) {
+		result := []any{}
+		series, _ := mr["data"].(map[string]any)["result"].([]any)
+		for _, s := range series {
 			sm := s.(map[string]any)
 			vals := sm["values"].([]any)
 			result = append(result, map[string]any{"metric": sm["metric"], "value": vals[0]})
@@ -241,6 +250,21 @@ func (f *fakeLoki) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // count_over_time counts (t-range, t] to the nanosecond; the point's time
 // is t in milliseconds, written as seconds with a millisecond fraction
 // (model.Time.String). (Offsets are not modelled: locklog sends none.)
+// injectNow adds the entry to inject at this request, once; it reports
+// whether it did.
+func (f *fakeLoki) injectNow() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	e, ok := f.inject[f.nQuery]
+	delete(f.inject, f.nQuery)
+	f.nQuery++
+	if ok {
+		f.entries = append(f.entries, e)
+		f.nQuery-- // the same request again
+	}
+	return ok
+}
+
 func (f *fakeLoki) metric(w http.ResponseWriter, m []string, start, end int64, stepS string) {
 	by := []string{}
 	if m[1] != "" {
@@ -269,9 +293,15 @@ func (f *fakeLoki) metric(w http.ResponseWriter, m []string, start, end int64, s
 		metrics := map[string]map[string]string{}
 		for _, e := range f.entries {
 			if e.ts > t-rng && e.ts <= t && matches(sel.stream, e.labels) && matches(sel.meta, merged(e)) {
+				// Loki groups on the stream labels plus the entry's
+				// metadata, a metadata field taking the name of a label
+				// the stream lacks (LabelsBuilder.Add; L_extracted
+				// otherwise).
 				mm := map[string]string{}
 				for _, l := range by {
 					if v, ok := e.labels[l]; ok {
+						mm[l] = v
+					} else if v, ok := e.meta[l]; ok {
 						mm[l] = v
 					}
 				}
@@ -291,7 +321,7 @@ func (f *fakeLoki) metric(w http.ResponseWriter, m []string, start, end int64, s
 			series[k]["values"] = append(series[k]["values"].([][]any), []any{json.RawMessage(strconv.FormatFloat(float64(ms)/1000, 'f', -1, 64)), strconv.Itoa(c)})
 		}
 	}
-	var result []any
+	result := []any{}
 	for _, s := range series {
 		result = append(result, s)
 	}
@@ -676,7 +706,8 @@ func TestMetricCounts(t *testing.T) {
 	guards, logs := 0, 0
 	for _, q := range f.queries {
 		switch {
-		case strings.HasPrefix(q, "sum by (level) (count_over_time({") && strings.HasSuffix(q, " [300s]))"):
+		case strings.HasPrefix(q, "sum by (level) (count_over_time({") && strings.HasSuffix(q, `level!=""} [300s]))`):
+		case strings.HasPrefix(q, "sum by () (count_over_time({") && strings.HasSuffix(q, `level=""} [300s]))`):
 		case strings.HasPrefix(q, "sum by () (count_over_time({") && strings.HasSuffix(q, " [1ms]))"):
 			guards++
 		case strings.HasPrefix(q, "{"):
@@ -685,7 +716,7 @@ func TestMetricCounts(t *testing.T) {
 			t.Fatalf("query %s", q)
 		}
 	}
-	if guards != 1 || logs == 0 {
+	if guards != 2 || logs == 0 {
 		t.Fatalf("%d guard queries, %d boundary fetches", guards, logs)
 	}
 	// One bucket for the range: an instant query, [From, To).
@@ -926,5 +957,110 @@ func TestPlanEnforcesMaxSlices(t *testing.T) {
 		if err != nil || len(p.Chunks[0].Granules) > MaxSlices {
 			t.Fatalf("%v: %v", d, err)
 		}
+	}
+}
+
+func TestCountsNeverGroupOnMetadata(t *testing.T) {
+	// A stream without the level label, whose entries carry a level in
+	// their (untrusted) metadata: Loki would group them under it. They
+	// count as level absent, as a scan sees them.
+	r := source.Range{From: t0, To: t0.Add(10 * time.Minute)}
+	f := &fakeLoki{entries: dataset(100)}
+	for i := 0; i < 7; i++ {
+		f.entries = append(f.entries, fakeEntry{ts: t0.Add(time.Duration(i) * time.Second).UnixNano(), labels: map[string]string{"env": "prod", "app": "api"},
+			meta: map[string]string{"level": "forged"}, line: "no level label"})
+	}
+	s := newSource(t, f, nil)
+	sel := source.Selector{Terms: []source.Term{{Field: "app", Op: "=", Values: []string{"api"}}}}
+	for _, b := range []time.Duration{5 * time.Minute, 0} {
+		res, err := s.IndexCounts(ctx, source.CountQuery{Range: r, By: []string{"level"}, Bucket: b, Selector: sel})
+		if err != nil {
+			t.Fatal(err)
+		}
+		width := b
+		if b == 0 {
+			width = r.To.Sub(r.From)
+		}
+		want := wantCounts(f, r, width) // by the stream label: "" when absent
+		if got := gotCounts(res); !maps.Equal(got, want) {
+			t.Fatalf("bucket %v: got %v\nwant %v", b, got, want)
+		}
+	}
+}
+
+func TestCountsDetectIngestionDuringTheCount(t *testing.T) {
+	// An entry arrives before each request of a count's sequence: on a
+	// boundary inside the range, exactly at To (outside it), or in the
+	// millisecond before a boundary. The answer is exact for the data
+	// before or after it, or not served; never another count.
+	r := source.Range{From: t0, To: t0.Add(10 * time.Minute)}
+	base := func() []fakeEntry {
+		var es []fakeEntry
+		for i := 0; i < 3; i++ {
+			es = append(es, fakeEntry{ts: t0.Add(7*time.Minute + time.Duration(i)*time.Second).UnixNano(), labels: map[string]string{"env": "prod", "app": "api", "level": "info"}, line: fmt.Sprint("e", i)},
+				fakeEntry{ts: t0.Add(5 * time.Minute).UnixNano(), labels: map[string]string{"env": "prod", "app": "api", "level": "info"}, line: fmt.Sprint("on boundary ", i)})
+		}
+		return es
+	}
+	late := map[string]fakeEntry{
+		"on a boundary": {ts: t0.Add(5 * time.Minute).UnixNano(), labels: map[string]string{"env": "prod", "app": "api", "level": "info"}, line: "late"},
+		"at To":         {ts: r.To.UnixNano(), labels: map[string]string{"env": "prod", "app": "api", "level": "info"}, line: "late"},
+		"before To":     {ts: r.To.UnixNano() - 1, labels: map[string]string{"env": "prod", "app": "api", "level": "info"}, line: "late"},
+		"at From":       {ts: r.From.UnixNano(), labels: map[string]string{"env": "prod", "app": "api", "level": "info"}, line: "late"},
+	}
+	for _, b := range []time.Duration{5 * time.Minute, 0} {
+		width := b
+		if b == 0 {
+			width = r.To.Sub(r.From)
+		}
+		for name, e := range late {
+			for at := 0; at < 12; at++ {
+				f := &fakeLoki{entries: base(), inject: map[int]fakeEntry{at: e}}
+				before := wantCounts(f, r, width)
+				after := wantCounts(&fakeLoki{entries: append(base(), e)}, r, width)
+				s := newSource(t, f, nil)
+				res, err := s.IndexCounts(ctx, source.CountQuery{Range: r, By: []string{"level"}, Bucket: b})
+				if errors.Is(err, source.ErrNotIndexable) {
+					continue
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := gotCounts(res); !maps.Equal(got, before) && !maps.Equal(got, after) {
+					t.Fatalf("bucket %v, %s before request %d: got %v, want %v or %v", b, name, at, got, before, after)
+				}
+			}
+		}
+	}
+}
+
+func TestBoundaryFetchLimits(t *testing.T) {
+	r := source.Range{From: t0, To: t0.Add(100 * time.Minute)}
+	// More boundaries to fetch than MaxBoundaryFetches: not served.
+	f := &fakeLoki{}
+	for i := 0; i <= 100; i++ {
+		f.entries = append(f.entries, fakeEntry{ts: t0.Add(time.Duration(i) * time.Minute).UnixNano(), labels: map[string]string{"env": "prod"}, line: "x"})
+	}
+	s := newSource(t, f, nil)
+	if _, err := s.IndexCounts(ctx, source.CountQuery{Range: r, Bucket: time.Minute}); !errors.Is(err, source.ErrNotIndexable) {
+		t.Fatalf("101 boundaries: %v", err)
+	}
+	// Under the cap: served, through the call's limiter.
+	l := &countLimiter{}
+	f.requests = nil
+	if _, err := s.IndexCounts(source.WithLimiter(ctx, l), source.CountQuery{Range: source.Range{From: t0, To: t0.Add(10 * time.Minute)}, Bucket: time.Minute}); err != nil {
+		t.Fatal(err)
+	}
+	if int(l.n) != len(f.requests) {
+		t.Fatalf("limiter saw %d of %d requests", l.n, len(f.requests))
+	}
+	// A page or more of entries at a boundary nanosecond (Limit 7): not
+	// served (the engine scans), not an error.
+	f = &fakeLoki{entries: sameNanosecond(20, 0)}
+	for i := range f.entries {
+		f.entries[i].ts = t0.Add(5 * time.Minute).UnixNano()
+	}
+	if _, err := newSource(t, f, nil).IndexCounts(ctx, source.CountQuery{Range: source.Range{From: t0, To: t0.Add(10 * time.Minute)}, Bucket: 5 * time.Minute}); !errors.Is(err, source.ErrNotIndexable) {
+		t.Fatalf("crowded boundary: %v", err)
 	}
 }

@@ -96,6 +96,21 @@ func pushEdges(t *testing.T, base, run string, ats []time.Time) {
 	}
 }
 
+// pushRaw posts a push body as is.
+func pushRaw(t *testing.T, base string, body any) {
+	t.Helper()
+	b, _ := json.Marshal(body)
+	resp, err := http.Post(base+"/loki/api/v1/push", "application/json", bytes.NewReader(b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		msg, _ := io.ReadAll(resp.Body)
+		t.Fatalf("push: %d %s", resp.StatusCode, msg)
+	}
+}
+
 func newSource(t *testing.T, base, run string) *loki.Source {
 	t.Helper()
 	cl, err := egress.New(&config.Remote{URL: base, Auth: config.AuthNone}, egress.LokiRoutes, egress.Credentials{},
@@ -151,7 +166,15 @@ func TestLokiSourceAgainstLoki(t *testing.T) {
 	// The first pushed entry is exactly on From.
 	edges := []time.Time{start.Add(5*time.Minute - 1), start.Add(5 * time.Minute), r.To.Add(-1), r.To}
 	pushEdges(t, base, run, edges)
-	const inRange = n + 3
+	// A stream without the level label whose entries carry a level in
+	// their (untrusted) structured metadata: Loki would group a count by
+	// level on it; locklog counts them as level absent, as a scan does.
+	var forged [][]any
+	for i := 0; i < 3; i++ {
+		forged = append(forged, []any{strconv.FormatInt(start.Add(30*time.Second+time.Duration(i)*time.Second).UnixNano(), 10), fmt.Sprintf(`{"msg":"forged %d"}`, i), map[string]string{"level": "forged"}})
+	}
+	pushRaw(t, base, map[string]any{"streams": []any{map[string]any{"stream": map[string]string{"run": run, "app": "api", "pod": "p0"}, "values": forged}}})
+	const inRange = n + 3 + 3
 	s := newSource(t, base, run)
 	var recs []source.RawRecord
 	for i := 0; i < 60; i++ {
@@ -214,6 +237,7 @@ func TestLokiSourceAgainstLoki(t *testing.T) {
 			want[bucketOf(at)+" edge"]++
 		}
 	}
+	want[bucketOf(start)+" "] += 3 // the forged-metadata stream: no level label
 	res, err := s.IndexCounts(context.Background(), source.CountQuery{Range: r, By: []string{"level"}, Bucket: 5 * time.Minute})
 	if err != nil {
 		t.Fatal(err)

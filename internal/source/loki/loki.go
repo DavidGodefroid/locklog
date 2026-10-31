@@ -652,6 +652,11 @@ type vectorResponse struct {
 	} `json:"data"`
 }
 
+// MaxBoundaryFetches bounds the boundaries whose entries one count fetches
+// (each a log request under the call's limiter); past it, the count is not
+// served and the engine scans.
+const MaxBoundaryFetches = 64
+
 // IndexCounts answers a trusted-label count with server-side metric queries:
 // no line leaves the source.
 //
@@ -666,21 +671,38 @@ type vectorResponse struct {
 //   - sum by (labels) (count_over_time({selector}[bucket])) at the points
 //     From+bucket .. To, step bucket (one bucket for the range: an instant
 //     query at To): the point at t is bucket t-bucket;
-//   - the entries exactly on a boundary b (From .. To) belong to the
-//     bucket starting at b, not to the one Loki ends at b. A guard query,
+//   - the entries exactly on a boundary b belong to the bucket starting at
+//     b, not to the one Loki ends at b. A guard query,
 //     sum(count_over_time({selector}[1ms])) at From .. To, finds the
-//     boundaries with an entry in (b-1ms, b]; the entries of those are
-//     fetched at exactly b and moved (Loki's window misses those at From
-//     and counts those at To, which are outside the range).
+//     boundaries with an entry in (b-1ms, b] (an instant count: From and
+//     To); the entries of those are fetched at exactly b and moved (Loki's
+//     window misses those at From and counts those at To, outside the
+//     range).
 //
-// A point off the grid asked for makes the count not served
-// (source.ErrNotIndexable). Not served either: a count by anything but a
-// trusted stream label (structured metadata included); a term on anything
-// but a trusted stream label, or with no value or an empty one; an empty
-// range; a bucket under a second, not whole seconds, not dividing the
-// range, or cutting it into more than 11000 points; and a bucketed range
-// whose ends are not multiples of the bucket since the epoch.
+// Grouping: Loki adds each entry's structured metadata to the labels a
+// metric groups by, under the label's name unless the stream has that label
+// (pkg/logql/log/metrics_extraction.go, LabelsBuilder.Add). An untrusted
+// metadata field could then pass for a by-label's value. So each by-label is
+// counted present (L!="" in the stream selector: the metadata becomes
+// L_extracted) and absent (L="", not grouped on, value ""), one metric query
+// per combination.
+//
+// Ingestion during the count: the guard and the boundary fetches run before
+// and after the metric queries, and must agree, else the count is not
+// served.
+//
+// Not served (source.ErrNotIndexable): a point off the grid asked for; a
+// count by anything but a trusted stream label (structured metadata
+// included), or by more than two; a term on anything but a trusted stream
+// label, or with no value or an empty one; an empty range; a bucket under a
+// second, not whole seconds, not dividing the range, or cutting it into
+// more than 11000 points; a bucketed range whose ends are not multiples of
+// the bucket since the epoch; more than MaxBoundaryFetches boundaries to
+// fetch, or one with a page or more of entries at its nanosecond.
 func (s *Source) IndexCounts(ctx context.Context, q source.CountQuery) (source.CountResult, error) {
+	if len(q.By) > 2 {
+		return source.CountResult{}, source.ErrNotIndexable
+	}
 	for _, b := range q.By {
 		if !s.trustedLabel(b) || !nameRe.MatchString(b) {
 			return source.CountResult{}, source.ErrNotIndexable
@@ -705,7 +727,8 @@ func (s *Source) IndexCounts(ctx context.Context, q source.CountQuery) (source.C
 	if !instant && (q.Range.From.UnixNano()%int64(bucket) != 0 || q.Range.To.UnixNano()%int64(bucket) != 0) {
 		return source.CountResult{}, source.ErrNotIndexable
 	}
-	sel, err := s.selector(q.Selector).Render()
+	base := s.selector(q.Selector)
+	sel, err := base.Render()
 	if err != nil {
 		return source.CountResult{}, err
 	}
@@ -728,54 +751,119 @@ func (s *Source) IndexCounts(ctx context.Context, q source.CountQuery) (source.C
 		return k
 	}
 
-	// Loki's windows: (From+k*bucket, From+(k+1)*bucket].
-	expr := fmt.Sprintf("sum by (%s) (count_over_time(%s [%ds]))", strings.Join(by, ", "), sel, w/int64(time.Second))
-	series, err := s.metric(ctx, expr, instant, q.Range.From.Add(bucket), q.Range.To, bucket)
-	if err != nil {
-		return source.CountResult{}, err
-	}
-	for _, sr := range series {
-		vk := keyOf(sr.metric)
-		for _, p := range sr.points {
-			// The point at From+(k+1)*bucket ends bucket k.
-			if p.at <= from || (p.at-from)%w != 0 || (p.at-from)/w > n {
-				return source.CountResult{}, source.ErrNotIndexable
-			}
-			counts[key{(p.at-from)/w - 1, vk}] += p.n
+	// The boundaries to correct, and their entries, before and after.
+	guard := func() ([]int64, error) {
+		if instant {
+			return []int64{from, to}, nil
 		}
-	}
-
-	// The boundaries with an entry within the millisecond before them.
-	var bounds []int64
-	if instant {
-		bounds = []int64{from, to}
-	} else {
-		guard := fmt.Sprintf("sum by () (count_over_time(%s [1ms]))", sel)
-		gs, err := s.metric(ctx, guard, false, q.Range.From, q.Range.To, bucket)
+		gs, err := s.metric(ctx, fmt.Sprintf("sum by () (count_over_time(%s [1ms]))", sel), false, q.Range.From, q.Range.To, bucket)
 		if err != nil {
-			return source.CountResult{}, err
+			return nil, err
 		}
+		var bounds []int64
 		for _, sr := range gs {
 			for _, p := range sr.points {
 				if p.at < from || p.at > to || (p.at-from)%w != 0 {
-					return source.CountResult{}, source.ErrNotIndexable
+					return nil, source.ErrNotIndexable
 				}
 				if p.n > 0 {
 					bounds = append(bounds, p.at)
 				}
 			}
 		}
+		slices.Sort(bounds)
+		if len(bounds) > MaxBoundaryFetches {
+			return nil, source.ErrNotIndexable
+		}
+		return bounds, nil
 	}
+	fetch := func(bounds []int64) (map[int64][]entry, error) {
+		out := map[int64][]entry{}
+		for _, b := range bounds {
+			es, _, err := s.fetchSlice(ctx, sel, b, b+1)
+			if errors.Is(err, errCrowded) {
+				return nil, source.ErrNotIndexable
+			}
+			if err != nil {
+				return nil, fmt.Errorf("loki source: %w", err)
+			}
+			out[b] = es
+		}
+		return out, nil
+	}
+	bounds1, err := guard()
+	if err != nil {
+		return source.CountResult{}, err
+	}
+	fetched1, err := fetch(bounds1)
+	if err != nil {
+		return source.CountResult{}, err
+	}
+
+	// Loki's windows, (From+k*bucket, From+(k+1)*bucket], for each
+	// present/absent combination of the by-labels.
+	for combo := 0; combo < 1<<len(by); combo++ {
+		cs := Selector{Stream: slices.Clone(base.Stream)}
+		var grouped []string
+		for i, b := range by {
+			if combo&(1<<i) != 0 {
+				cs.Stream = append(cs.Stream, Matcher{Name: b, Op: "!=", Values: []string{""}})
+				grouped = append(grouped, b)
+			} else {
+				cs.Stream = append(cs.Stream, Matcher{Name: b, Op: "=", Values: []string{""}})
+			}
+		}
+		csel, err := cs.Render()
+		if err != nil {
+			return source.CountResult{}, err
+		}
+		expr := fmt.Sprintf("sum by (%s) (count_over_time(%s [%ds]))", strings.Join(grouped, ", "), csel, w/int64(time.Second))
+		series, err := s.metric(ctx, expr, instant, q.Range.From.Add(bucket), q.Range.To, bucket)
+		if err != nil {
+			return source.CountResult{}, err
+		}
+		for _, sr := range series {
+			labels := map[string]string{}
+			for _, g := range grouped {
+				if sr.metric[g] == "" {
+					return source.CountResult{}, errResponse
+				}
+				labels[g] = sr.metric[g]
+			}
+			vk := keyOf(labels)
+			for _, p := range sr.points {
+				// The point at From+(k+1)*bucket ends bucket k.
+				if p.at <= from || (p.at-from)%w != 0 || (p.at-from)/w > n {
+					return source.CountResult{}, source.ErrNotIndexable
+				}
+				counts[key{(p.at-from)/w - 1, vk}] += p.n
+			}
+		}
+	}
+
+	bounds2, err := guard()
+	if err != nil {
+		return source.CountResult{}, err
+	}
+	if !slices.Equal(bounds1, bounds2) {
+		return source.CountResult{}, source.ErrNotIndexable
+	}
+	fetched2, err := fetch(bounds2)
+	if err != nil {
+		return source.CountResult{}, err
+	}
+	for _, b := range bounds1 {
+		if !sameEntries(fetched1[b], fetched2[b]) {
+			return source.CountResult{}, source.ErrNotIndexable
+		}
+	}
+
 	// Move the entries exactly on a boundary b: out of the bucket Loki
 	// ends at b (b-bucket, if it is in the range), into the one starting
 	// at b (if it is in the range).
-	for _, b := range bounds {
-		es, _, err := s.fetchSlice(ctx, sel, b, b+1)
-		if err != nil {
-			return source.CountResult{}, fmt.Errorf("loki source: %w", err)
-		}
+	for _, b := range bounds1 {
 		k := (b - from) / w
-		for _, e := range es {
+		for _, e := range fetched1[b] {
 			vk := keyOf(e.stream)
 			if b > from {
 				counts[key{k - 1, vk}]--
@@ -790,8 +878,8 @@ func (s *Source) IndexCounts(ctx context.Context, q source.CountQuery) (source.C
 	for k, c := range counts {
 		switch {
 		case c < 0:
-			// Loki's counts and its entries disagree (ingestion between
-			// the queries): not an exact answer.
+			// Loki's counts and its entries disagree: not an exact
+			// answer.
 			return source.CountResult{}, source.ErrNotIndexable
 		case c > 0:
 			res.Rows = append(res.Rows, source.CountRow{Bucket: time.Unix(0, from+k.k*w).UTC(), Vals: slices.Clone(valsOf[k.vals]), N: c})
@@ -805,6 +893,26 @@ func (s *Source) IndexCounts(ctx context.Context, q source.CountQuery) (source.C
 	})
 	res.IndexedFrom = q.Range.From
 	return res, nil
+}
+
+// sameEntries reports whether a and b hold the same entries (stream, line
+// and time), as multisets.
+func sameEntries(a, b []entry) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	m := map[string]int{}
+	for _, e := range a {
+		m[fmt.Sprintf("%d\x00%s\x00%s", e.ts, e.key, e.line)]++
+	}
+	for _, e := range b {
+		k := fmt.Sprintf("%d\x00%s\x00%s", e.ts, e.key, e.line)
+		if m[k] == 0 {
+			return false
+		}
+		m[k]--
+	}
+	return true
 }
 
 type metricPoint struct {
