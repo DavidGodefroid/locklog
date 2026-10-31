@@ -53,7 +53,7 @@ func ContainerRecipe(w io.Writer, o RecipeOptions) {
 	fmt.Fprintf(w, `# locklog's client, its root-owned system file (the console account and
 # the clients group the socket admits), and the accounts it names.
 COPY --from=%[1]s --chown=root:root --chmod=0755 /usr/local/bin/locklog /usr/local/bin/locklog
-COPY --from=%[1]s --chown=root:root --chmod=0644 /etc/locklog/system.toml /etc/locklog/system.toml
+COPY --from=%[1]s --chown=root:root /etc/locklog/system.toml /etc/locklog/system.toml
 # The console account (%[4]d) only names the socket's owner, which the client
 # checks: no shell, no home, no password, nothing runs as it here. The agent
 # user is not root, has no sudo, and is in locklog-clients (%[3]s).
@@ -67,6 +67,7 @@ RUN set -eu; \
       adduser -D -H -u %[4]d -s /sbin/nologin locklog; \
       adduser -D -u %[2]s -G locklog-clients -s /bin/sh agent; \
     fi; \
+    chmod 0755 /etc/locklog; chmod 0644 /etc/locklog/system.toml; \
     if command -v sudo >/dev/null 2>&1; then echo "the agent image must not have sudo" >&2; exit 1; fi
 USER %[2]s:%[3]s
 
