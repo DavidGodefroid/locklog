@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -78,6 +79,27 @@ const (
 // Names lists every tool name, in a fixed order.
 func Names() []string {
 	return []string{ToolStatus, ToolSources, ToolSearch, ToolCount, ToolPIIList, ToolPIIAdd, ToolRequestChange}
+}
+
+// approved are the tools whose operation the human approves at the
+// console (a policy change; later a scan, an unmask, an export). Every
+// other tool is free: it answers masked data within the budgets, or only
+// tightens the masking.
+var approved = map[string]bool{ToolRequestChange: true}
+
+// Free reports whether the tool name is a free one.
+func Free(name string) bool { return slices.Contains(Names(), name) && !approved[name] }
+
+// FreeNames lists the free tools, in Names order: the ones an agent may
+// call without a prompt.
+func FreeNames() []string {
+	var out []string
+	for _, n := range Names() {
+		if Free(n) {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 // Inputs.

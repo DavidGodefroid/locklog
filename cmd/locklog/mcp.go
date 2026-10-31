@@ -17,7 +17,6 @@ import (
 	"github.com/DavidGodefroid/locklog/internal/agentassets"
 	"github.com/DavidGodefroid/locklog/internal/config"
 	"github.com/DavidGodefroid/locklog/internal/mcptools"
-	"github.com/DavidGodefroid/locklog/internal/product"
 )
 
 // profileNames lists the configured profiles of cwd's project, sorted.
@@ -67,7 +66,8 @@ func mcpCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 }
 
 // initCmd is `locklog init <agent>`: the project's agent files (MCP
-// server, skill, instructions, Cursor rule, an example .locklog/config.toml).
+// server, skill, instructions, Cursor rule, an example .locklog/config.toml;
+// for Claude Code, the free tools in .claude/settings.local.json).
 func initCmd(args []string, stdout, stderr io.Writer) int {
 	if len(args) != 1 {
 		fmt.Fprintf(stderr, "usage: locklog init <%s>\n", strings.Join(agentwire.Agents(), "|"))
@@ -78,20 +78,11 @@ func initCmd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "locklog init:", err)
 		return 1
 	}
-	res, err := agentassets.Wiring.Init(agentwire.ProjectRoot(product.P, cwd), args[0])
+	res, err := agentassets.InitProject(cwd, args[0])
 	if err != nil {
 		fmt.Fprintln(stderr, "locklog init:", err)
 		return 2
 	}
-	for _, a := range res.Actions {
-		line := a.Status + " " + a.Path
-		if a.Detail != "" {
-			line += " (" + a.Detail + ")"
-		}
-		fmt.Fprintln(stdout, line)
-	}
-	if res.Notes != "" {
-		fmt.Fprintln(stdout, res.Notes)
-	}
+	agentassets.Report(stdout, res)
 	return 0
 }

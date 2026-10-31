@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__locklog__locklog_status",
+      "mcp__locklog__locklog_sources",
+      "mcp__locklog__locklog_search",
+      "mcp__locklog__locklog_count",
+      "mcp__locklog__locklog_pii_list",
+      "mcp__locklog__locklog_pii_add"
+    ]
+  }
+}

@@ -114,6 +114,21 @@ func TestToolList(t *testing.T) {
 	}
 }
 
+// Only locklog_request_change is approved among this PR's tools; the
+// free list is what an agent may call without a prompt.
+func TestFreeNames(t *testing.T) {
+	want := []string{ToolStatus, ToolSources, ToolSearch, ToolCount, ToolPIIList, ToolPIIAdd}
+	if got := FreeNames(); !slices.Equal(got, want) {
+		t.Errorf("FreeNames = %v, want %v", got, want)
+	}
+	if Free(ToolRequestChange) {
+		t.Error("locklog_request_change is approved, not free")
+	}
+	if Free("locklog_unknown") {
+		t.Error("an unknown tool counts as free")
+	}
+}
+
 func TestSearchForwards(t *testing.T) {
 	c := &fakeConn{}
 	cs := connect(t, withConn(c))

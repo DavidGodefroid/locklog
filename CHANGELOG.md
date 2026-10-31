@@ -35,7 +35,11 @@ uses [Semantic Versioning](https://semver.org/).
   `locklog_search`, `locklog_count`, the PII rules and change requests, each
   a thin adapter over the console; a host agent (the launcher's `mcp`) is
   refused on production profiles, as the console's status reports them.
-  `locklog init <agent>` wires Claude Code, Codex, Cursor or Gemini CLI.
+  `locklog init <agent>` wires Claude Code, Codex, Cursor or Gemini CLI;
+  for Claude Code it merges the free tools (never an approved one such as
+  `locklog_request_change`) into the project's `.claude/settings.local.json`
+  `permissions.allow`, keeping the human's entries; the shared
+  `.claude/settings.json` is never written.
 - The Docker source: containers' `json-file` logs (rotated `.N[.gz]` files
   included) read by name from the containers root through a name → id map,
   approved globs checked again at read time, console containers never served,
