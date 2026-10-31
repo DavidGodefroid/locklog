@@ -493,6 +493,7 @@ func TestTailHeldAtGranuleEnd(t *testing.T) {
 	f := newFixture(t, genLog(time.Now().Add(-time.Hour), 5, "c@example.org"), func(o *Options) { o.TailPoll = 50 * time.Millisecond })
 	path := filepath.Join(f.root, "logs", "app.log")
 	for _, short := range []int64{0, 100} {
+		nextSecond()
 		st, err := os.Stat(path)
 		if err != nil {
 			t.Fatal(err)
