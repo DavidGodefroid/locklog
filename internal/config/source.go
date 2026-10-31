@@ -29,7 +29,6 @@ const (
 // Kinds lists the source kinds in a fixed order.
 var Kinds = []string{KindFile, KindJournald, KindDocker, KindLoki, KindElastic, KindOpenSearch}
 
-
 // Formats of log lines. "auto" detects the format per line.
 var Formats = []string{"auto", "json", "logfmt", "syslog", "cri", "docker-json", "combined", "plain"}
 
