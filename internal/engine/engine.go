@@ -586,6 +586,7 @@ func (e *Engine) run(ctx context.Context, plan source.Byteplan, chunk, gran int,
 			if b.check() {
 				return chunk, gran, sc, failures, overEval(ctx)
 			}
+			b.chunk = chunk
 			visit(raws[i], recs[i], b)
 			if b.exceeded() {
 				return chunk, gran, sc, failures, overEval(ctx)

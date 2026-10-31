@@ -121,6 +121,8 @@ type budget struct {
 	stop    func() bool
 	pending int64
 	over    bool
+	// chunk is the plan chunk of the record being visited (run sets it).
+	chunk int
 }
 
 const (

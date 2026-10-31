@@ -52,6 +52,10 @@ type CountQuery struct {
 	// values, then the ByLabels values.
 	By       []string `json:"by,omitempty"`
 	ByLabels []string `json:"by_labels,omitempty"`
+	// ByPattern also groups by the Template of the masked message (the
+	// last key; null without a message). It counts as one of MaxBy and is
+	// never served from the index.
+	ByPattern bool `json:"by_pattern,omitempty"`
 	// FirstLast adds each group's first and last timestamp.
 	FirstLast bool `json:"first_last,omitempty"`
 
@@ -88,11 +92,19 @@ type CountResult struct {
 type agg struct {
 	groups  map[string]*Group
 	untimed int64
-	indexed bool
-	from    time.Time
-	until   time.Time
-	noFrom  bool
-	bytes   int64 // memory of the groups (keys twice, plus overhead)
+	noText  int64 // patterns: matching records without a message
+	// patterns: the baseline's groups (capped on their own), and the
+	// number of plan chunks of the window (the baseline's follow).
+	base      *agg
+	winChunks int
+	// truncated is set once a group went to Other for MaxGroups or
+	// MaxGroupBytes.
+	truncated bool
+	indexed   bool
+	from      time.Time
+	until     time.Time
+	noFrom    bool
+	bytes     int64 // memory of the groups (keys twice, plus overhead)
 }
 
 func newAgg() *agg { return &agg{groups: map[string]*Group{}} }
@@ -116,6 +128,7 @@ func (a *agg) add(b time.Time, key []*string, n int64, t time.Time, timed bool) 
 	if g == nil {
 		size := groupOverhead + 2*int64(len(k))
 		if len(a.groups) >= MaxGroups || a.bytes+size > MaxGroupBytes {
+			a.truncated = true
 			o := Other
 			key = make([]*string, len(key))
 			for i := range key {
@@ -160,12 +173,12 @@ func (c *aggCache) put(a *agg) string {
 	if c.m == nil {
 		c.m = map[string]*agg{}
 	}
-	for len(c.o) > 0 && (len(c.o) >= maxAggs || c.bytes+a.bytes > maxAggBytes) {
-		c.bytes -= c.m[c.o[0]].bytes
+	for len(c.o) > 0 && (len(c.o) >= maxAggs || c.bytes+a.size() > maxAggBytes) {
+		c.bytes -= c.m[c.o[0]].size()
 		delete(c.m, c.o[0])
 		c.o = c.o[1:]
 	}
-	c.bytes += a.bytes
+	c.bytes += a.size()
 	var b [12]byte
 	rand.Read(b[:])
 	id := hex.EncodeToString(b[:])
@@ -195,7 +208,7 @@ func (c *aggCache) drop(id string) {
 	if !ok {
 		return
 	}
-	c.bytes -= a.bytes
+	c.bytes -= a.size()
 	delete(c.m, id)
 	c.o = slices.DeleteFunc(c.o, func(o string) bool { return o == id })
 }
@@ -208,7 +221,18 @@ func (a *agg) clone() *agg {
 		gg := *g
 		b.groups[k] = &gg // Key and the times are never mutated in place
 	}
+	if a.base != nil {
+		b.base = a.base.clone()
+	}
 	return &b
+}
+
+// size is the memory of a's groups, its baseline's included.
+func (a *agg) size() int64 {
+	if a.base == nil {
+		return a.bytes
+	}
+	return a.bytes + a.base.size()
 }
 
 func (q *CountQuery) bucketOf(t time.Time) time.Time {
@@ -232,13 +256,16 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 	cursor := q.Cursor
 	q.Cursor = ""
 	// The caps first: the trust loops below are sources × predicates.
-	if len(q.Sources) > MaxSources || len(q.Where) > MaxPredicates || len(q.By)+len(q.ByLabels) > MaxBy {
+	if len(q.Sources) > MaxSources || len(q.Where) > MaxPredicates || q.byCount() > MaxBy {
 		return CountResult{}, refuse(EBadQuery, "", "at most %d sources, %d predicates and %d fields and labels to count by", MaxSources, MaxPredicates, MaxBy)
 	}
 	trustedOnly := q.trustedOnly(e.o.Trusted)
 	if len(q.Sources) == 0 {
 		q.Sources = append([]string(nil), e.names...)
 		trustedOnly = q.trustedOnly(e.o.Trusted)
+	}
+	if q.ByPattern {
+		trustedOnly = false // a template is of masked text
 	}
 	for _, p := range q.groupBy() {
 		for _, s := range q.Sources {
@@ -275,8 +302,8 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 	if err := v.validate(&q.Query); err != nil {
 		return CountResult{}, err
 	}
-	if len(q.By)+len(q.ByLabels) > MaxBy {
-		return CountResult{}, refuse(EBadQuery, "by", "at most %d fields and labels", MaxBy)
+	if q.byCount() > MaxBy {
+		return CountResult{}, refuse(EBadQuery, "by", "at most %d fields, labels and the pattern", MaxBy)
 	}
 	for i, b := range q.By {
 		if err := v.path(&q.Query, b, fmt.Sprintf("by[%d]", i)); err != nil {
@@ -360,7 +387,11 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 
 	sc, failures := Scanned{}, 0
 	var err *Error
-	chunk, gran, sc, failures, err = e.run(ctx, f.plan, chunk, gran, nil, e.callBytes(q.Sources), q.evalFactor(), func(raw source.RawRecord, rec mask.Record, b *budget) {
+	factor := q.evalFactor()
+	if q.ByPattern {
+		factor++ // templating reads every matching message
+	}
+	chunk, gran, sc, failures, err = e.run(ctx, f.plan, chunk, gran, nil, e.callBytes(q.Sources), factor, func(raw source.RawRecord, rec mask.Record, b *budget) {
 		if rec.Failed() && trustedOnly {
 			// The index counts every record by its trusted values;
 			// a scan of a trusted-only count does the same for a
@@ -391,6 +422,17 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 				s := vs[0].text
 				key[i] = &s
 			}
+		}
+		if q.ByPattern {
+			var p *string
+			if m := rec.Message(); m != "" {
+				if b.charge(leafCost + int64(len(m))) {
+					return
+				}
+				tp := Template(m)
+				p = &tp
+			}
+			key = append(key, p)
 		}
 		a.add(q.bucketOf(t), key, 1, t, true)
 	})
@@ -506,6 +548,15 @@ func (e *Engine) countFailed(q *CountQuery, raw source.RawRecord, rec mask.Recor
 		return
 	}
 	a.add(q.bucketOf(t), key, 1, t, true)
+}
+
+// byCount is the number of keys a count groups by.
+func (q *CountQuery) byCount() int {
+	n := len(q.By) + len(q.ByLabels)
+	if q.ByPattern {
+		n++
+	}
+	return n
 }
 
 // groupBy is the group key's parts: By fields, then ByLabels labels.
