@@ -123,7 +123,7 @@ func TestToolList(t *testing.T) {
 // Only locklog_request_change is approved among this PR's tools; the
 // free list is what an agent may call without a prompt.
 func TestFreeNames(t *testing.T) {
-	want := []string{ToolStatus, ToolSources, ToolSearch, ToolCount, ToolPatterns, ToolPIIList, ToolPIIAdd}
+	want := []string{ToolStatus, ToolSources, ToolSearch, ToolCount, ToolPatterns, ToolContext, ToolTrace, ToolTail, ToolPIIList, ToolPIIAdd}
 	if got := FreeNames(); !slices.Equal(got, want) {
 		t.Errorf("FreeNames = %v, want %v", got, want)
 	}
@@ -202,6 +202,47 @@ func TestPatternsForwards(t *testing.T) {
 	}
 }
 
+// locklog_context, locklog_trace and locklog_tail forward their params to
+// the console methods (without the profile); the schemas bound them.
+func TestAroundForwards(t *testing.T) {
+	for _, c := range []struct {
+		tool, method string
+		args         map[string]any
+		want         map[string]any
+		bad          map[string]any
+	}{
+		{ToolContext, logconsole.MethodContext, map[string]any{"profile": "dev", "ref": "Lr1.x", "before": 5, "after": 7},
+			map[string]any{"ref": "Lr1.x", "before": float64(5), "after": float64(7)}, map[string]any{"ref": "Lr1.x", "before": 51}},
+		{ToolTrace, logconsole.MethodTrace, map[string]any{"profile": "dev", "id": "⟦email:7F3KQ2M9ZD4X⟧", "last": "1h", "limit": 20},
+			map[string]any{"id": "⟦email:7F3KQ2M9ZD4X⟧", "last": "1h", "limit": float64(20)}, map[string]any{"id": "x", "limit": 1000}},
+		{ToolTail, logconsole.MethodTail, map[string]any{"profile": "dev", "text": "timeout", "duration": "10s", "max": 3},
+			map[string]any{"text": "timeout", "duration": "10s", "max": float64(3)}, map[string]any{"max": 1000}},
+	} {
+		fc := &fakeConn{}
+		cs := connect(t, withConn(fc))
+		if res := call(t, cs, c.tool, c.args); res.IsError {
+			t.Fatalf("%s: %s", c.tool, text(res))
+		}
+		calls := fc.methods()
+		if len(calls) != 1 || !strings.HasPrefix(calls[0], c.method+" ") {
+			t.Fatalf("%s: calls = %q", c.tool, calls)
+		}
+		var p map[string]any
+		_ = json.Unmarshal([]byte(strings.TrimPrefix(calls[0], c.method+" ")), &p)
+		for k, v := range c.want {
+			if p[k] != v {
+				t.Errorf("%s: params = %v", c.tool, p)
+			}
+		}
+		if p["profile"] != nil {
+			t.Errorf("%s: profile forwarded", c.tool)
+		}
+		if res := call(t, cs, c.tool, c.bad); !res.IsError || len(fc.methods()) != 1 {
+			t.Errorf("%s: out-of-schema call accepted or forwarded: %s", c.tool, text(res))
+		}
+	}
+}
+
 // locklog_pii_add only tightens the masking: free, and served on a
 // production profile to an agent that is not a host agent (lea, its own
 // container). The console audits it and shows it in its status (#64).
@@ -232,8 +273,8 @@ func TestHostAgentGuard(t *testing.T) {
 	o := withConn(c)
 	o.HostAgent = true
 	cs := connect(t, o)
-	args := map[string]map[string]any{ToolPIIAdd: {"pattern": "x"}, ToolRequestChange: {"change": "y"}}
-	for _, tool := range []string{ToolSearch, ToolCount, ToolPatterns, ToolSources, ToolPIIList, ToolPIIAdd, ToolRequestChange} {
+	args := map[string]map[string]any{ToolPIIAdd: {"pattern": "x"}, ToolRequestChange: {"change": "y"}, ToolContext: {"ref": "r"}, ToolTrace: {"id": "i"}}
+	for _, tool := range []string{ToolSearch, ToolCount, ToolPatterns, ToolContext, ToolTrace, ToolTail, ToolSources, ToolPIIList, ToolPIIAdd, ToolRequestChange} {
 		res := call(t, cs, tool, args[tool])
 		if !res.IsError || !strings.Contains(text(res), "non-production trial") {
 			t.Errorf("%s on production from a host agent: %s", tool, text(res))
@@ -381,7 +422,7 @@ func TestHostAgentStatusStructured(t *testing.T) {
 // The guard fails closed: a status that does not decode or does not say
 // production refuses every tool, structured, before any log method.
 func TestHostAgentGuardFailsClosed(t *testing.T) {
-	args := map[string]map[string]any{ToolPIIAdd: {"pattern": "x"}, ToolRequestChange: {"change": "y"}}
+	args := map[string]map[string]any{ToolPIIAdd: {"pattern": "x"}, ToolRequestChange: {"change": "y"}, ToolContext: {"ref": "r"}, ToolTrace: {"id": "i"}}
 	for _, st := range []string{`[1,`, `{"profile":"dev"}`, `{"production":"yes"}`} {
 		c := &fakeConn{status: []byte(st)}
 		o := withConn(c)

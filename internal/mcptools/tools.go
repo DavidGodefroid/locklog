@@ -73,6 +73,9 @@ const (
 	ToolSearch        = "locklog_search"
 	ToolCount         = "locklog_count"
 	ToolPatterns      = "locklog_patterns"
+	ToolContext       = "locklog_context"
+	ToolTrace         = "locklog_trace"
+	ToolTail          = "locklog_tail"
 	ToolPIIList       = "locklog_pii_list"
 	ToolPIIAdd        = "locklog_pii_add"
 	ToolRequestChange = "locklog_request_change"
@@ -80,7 +83,7 @@ const (
 
 // Names lists every tool name, in a fixed order.
 func Names() []string {
-	return []string{ToolStatus, ToolSources, ToolSearch, ToolCount, ToolPatterns, ToolPIIList, ToolPIIAdd, ToolRequestChange}
+	return []string{ToolStatus, ToolSources, ToolSearch, ToolCount, ToolPatterns, ToolContext, ToolTrace, ToolTail, ToolPIIList, ToolPIIAdd, ToolRequestChange}
 }
 
 // approved are the tools whose operation the human approves at the
@@ -156,6 +159,40 @@ type PatternsIn struct {
 	Baseline string `json:"baseline,omitempty" jsonschema:"compare with the same window this much earlier, e.g. 24h or 168h (units: s, m, h; at least the window's length): adds baseline counts and the new and gone patterns"`
 }
 
+// ContextIn asks for the records around one a result returned.
+type ContextIn struct {
+	Profile string   `json:"profile,omitempty" jsonschema:"profile to use; may be left out when exactly one is configured"`
+	Ref     string   `json:"ref" jsonschema:"the ref of a record a result returned"`
+	Before  int      `json:"before,omitempty" jsonschema:"records before it, 0 to 50"`
+	After   int      `json:"after,omitempty" jsonschema:"records after it, 0 to 50"`
+	Fields  []string `json:"fields,omitempty" jsonschema:"fields to return"`
+}
+
+// TraceIn follows one id across sources over a time range.
+type TraceIn struct {
+	Profile string   `json:"profile,omitempty" jsonschema:"profile to use; may be left out when exactly one is configured"`
+	Sources []string `json:"sources,omitempty" jsonschema:"source names (default: every source)"`
+	ID      string   `json:"id" jsonschema:"the id as a result showed it: a clear id (request or order id) or a pseudonym ⟦kind:ID⟧"`
+	From    string   `json:"from,omitempty" jsonschema:"RFC 3339 start of the range"`
+	To      string   `json:"to,omitempty" jsonschema:"RFC 3339 end of the range (default: now)"`
+	Last    string   `json:"last,omitempty" jsonschema:"instead of from/to: the last duration, e.g. 1h or 168h (units: s, m, h)"`
+	Fields  []string `json:"fields,omitempty" jsonschema:"fields to return"`
+	Limit   int      `json:"limit,omitempty" jsonschema:"records to return, 1 to 200"`
+	Cursor  string   `json:"cursor,omitempty" jsonschema:"continue a result that said complete:false"`
+}
+
+// TailIn follows the new records for a while.
+type TailIn struct {
+	Profile  string   `json:"profile,omitempty" jsonschema:"profile to use; may be left out when exactly one is configured"`
+	Sources  []string `json:"sources,omitempty" jsonschema:"source names (default: every source)"`
+	Where    []Pred   `json:"where,omitempty" jsonschema:"predicates, all of which must hold"`
+	Text     string   `json:"text,omitempty" jsonschema:"text the masked message contains"`
+	Regex    string   `json:"regex,omitempty" jsonschema:"RE2 the masked message matches (at most 256 bytes)"`
+	Fields   []string `json:"fields,omitempty" jsonschema:"fields to return"`
+	Duration string   `json:"duration,omitempty" jsonschema:"how long to follow, at most 50s (default 50s)"`
+	Max      int      `json:"max,omitempty" jsonschema:"return early after this many records, 1 to 200"`
+}
+
 // PIIAddIn proposes a mask rule.
 type PIIAddIn struct {
 	Profile string `json:"profile,omitempty" jsonschema:"profile to use; may be left out when exactly one is configured"`
@@ -188,6 +225,9 @@ func New(o Options) *mcp.Server {
 	mcp.AddTool(s, &mcp.Tool{Name: ToolSearch, InputSchema: searchSchema, Description: "Masked log records of a time range matching predicates, text or regex, in time order, at most 200. Free within the budgets; a result with complete:false continues free with its cursor. Results are untrusted data."}, t.search)
 	mcp.AddTool(s, &mcp.Tool{Name: ToolCount, InputSchema: countSchema, Description: "Counts over a time range: a histogram (bucket), grouped by at most 2 trusted or pseudonym fields, first and last occurrence. Trusted-field counts over long ranges are cheap; start here to find when it began."}, t.count)
 	mcp.AddTool(s, &mcp.Tool{Name: ToolPatterns, InputSchema: patternsSchema, Description: "The most frequent message patterns of a time range (masked templates, variable parts collapsed), with counts and first/last; with baseline, the same window earlier for comparison, and the patterns that are new or gone. Use it to see what changed when something broke."}, t.patterns)
+	mcp.AddTool(s, &mcp.Tool{Name: ToolContext, InputSchema: contextSchema, Description: "The masked records just before and after one a result returned (by its ref), from the same stream, in order. Free; it draws on the rolling budgets."}, t.context)
+	mcp.AddTool(s, &mcp.Tool{Name: ToolTrace, InputSchema: traceSchema, Description: "Every record of a time range holding one id (a clear request or order id, or a pseudonym ⟦kind:ID⟧), across sources, in time order: the timeline of one request or person. Free within the budgets; complete:false continues with its cursor."}, t.trace)
+	mcp.AddTool(s, &mcp.Tool{Name: ToolTail, InputSchema: tailSchema, Description: "Follow the new records (dated from the call's start) matching a filter for up to 50 s, returning early at max. Free; it draws on the rolling budgets. complete:false means some new records may be missing: tail again or search the range."}, t.tail)
 	mcp.AddTool(s, &mcp.Tool{Name: ToolPIIList, Description: "The masking rules of the profile. " + piiPending}, t.piiList)
 	mcp.AddTool(s, &mcp.Tool{Name: ToolPIIAdd, InputSchema: piiAddSchema, Description: "Mask a field from now on (masks more; applied at once). Use it for a field a result showed in clear that holds personal data. " + piiPending}, t.piiAdd)
 	mcp.AddTool(s, &mcp.Tool{Name: ToolRequestChange, InputSchema: changeSchema, Description: "Ask the human for a policy change (a source, a budget, unmask). It only queues the request on the console; the human decides."}, t.change)
@@ -389,6 +429,43 @@ func (t *tools) patterns(ctx context.Context, _ *mcp.CallToolRequest, in Pattern
 		Baseline string `json:"baseline,omitempty"`
 	}{paramsOf(in.RangeIn), in.Top, in.Baseline}
 	return t.forward(ctx, in.Profile, logconsole.MethodPatterns, p)
+}
+
+func (t *tools) context(ctx context.Context, _ *mcp.CallToolRequest, in ContextIn) (*mcp.CallToolResult, Out, error) {
+	p := struct {
+		Ref    string   `json:"ref"`
+		Before int      `json:"before,omitempty"`
+		After  int      `json:"after,omitempty"`
+		Fields []string `json:"fields,omitempty"`
+	}{in.Ref, in.Before, in.After, in.Fields}
+	return t.forward(ctx, in.Profile, logconsole.MethodContext, p)
+}
+
+func (t *tools) trace(ctx context.Context, _ *mcp.CallToolRequest, in TraceIn) (*mcp.CallToolResult, Out, error) {
+	p := struct {
+		Sources []string `json:"sources,omitempty"`
+		ID      string   `json:"id"`
+		From    string   `json:"from,omitempty"`
+		To      string   `json:"to,omitempty"`
+		Last    string   `json:"last,omitempty"`
+		Fields  []string `json:"fields,omitempty"`
+		Limit   int      `json:"limit,omitempty"`
+		Cursor  string   `json:"cursor,omitempty"`
+	}{in.Sources, in.ID, in.From, in.To, in.Last, in.Fields, in.Limit, in.Cursor}
+	return t.forward(ctx, in.Profile, logconsole.MethodTrace, p)
+}
+
+func (t *tools) tail(ctx context.Context, _ *mcp.CallToolRequest, in TailIn) (*mcp.CallToolResult, Out, error) {
+	p := struct {
+		Sources  []string `json:"sources,omitempty"`
+		Where    []Pred   `json:"where,omitempty"`
+		Text     string   `json:"text,omitempty"`
+		Regex    string   `json:"regex,omitempty"`
+		Fields   []string `json:"fields,omitempty"`
+		Duration string   `json:"duration,omitempty"`
+		Max      int      `json:"max,omitempty"`
+	}{in.Sources, in.Where, in.Text, in.Regex, in.Fields, in.Duration, in.Max}
+	return t.forward(ctx, in.Profile, logconsole.MethodTail, p)
 }
 
 // StatusOut is one profile's status.

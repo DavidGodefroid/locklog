@@ -43,10 +43,16 @@ const (
 	// MethodPatterns is the top message templates of a range, optionally
 	// against a baseline window (locklog_patterns).
 	MethodPatterns = "log.patterns"
+	// MethodContext, MethodTrace and MethodTail read around a ref, follow
+	// an id across sources and follow new records (locklog_context,
+	// locklog_trace, locklog_tail).
+	MethodContext = "log.context"
+	MethodTrace   = "log.trace"
+	MethodTail    = "log.tail"
 )
 
 // Methods lists the methods served, in a fixed order.
-var Methods = []string{MethodStatus, MethodSources, MethodSearch, MethodCount, MethodPatterns}
+var Methods = []string{MethodStatus, MethodSources, MethodSearch, MethodCount, MethodPatterns, MethodContext, MethodTrace, MethodTail}
 
 // Caller is the kernel-verified peer of a call.
 type Caller struct{ UID, PID int }

@@ -97,6 +97,13 @@ uses [Semantic Versioning](https://semver.org/).
   patterns capped apart from the window's, `truncated` past the cap; with a
   remote source both windows fit its range budget), plan-based admission
   and free continuations; `count` gains `by_pattern`.
+- Engine read-around calls: `log.context` (the records around a ref, before
+  and after up to 50, the ref's record checked by its keyed digest),
+  `log.trace` (one clear id or pseudonym over a range, whole words of the
+  masked view only, with search's plans, budgets and cursors) and `log.tail`
+  (new records matching a filter for up to 50 s, at most 200), served by
+  the console and as the `locklog_context`, `locklog_trace` and
+  `locklog_tail` tools.
 - `locklog setup`: the trusted `.locklog/` (yours, 0755, writable by no one
   else; checked again by the launcher afterwards) and a first
   `config.toml` from the host's facts, which the launcher gathers on the
@@ -142,6 +149,33 @@ uses [Semantic Versioning](https://semver.org/).
   from the printed snippet calls the console as uid 10052, not root, no
   sudo), and `production guard (e2e)` (the launcher's `mcp` against a
   production console is refused with `E_PRODUCTION_HOST_AGENT`).
+- The Elasticsearch 8 / OpenSearch 2 source (`kind = "elastic"` or
+  `"opensearch"`): allowlisted read routes on the source's own indices
+  (`_search`, `_count`, `_field_caps`, `_mapping`, `_settings`, `/`,
+  `_security/user/_privileges`, `_resolve/index`, OpenSearch's
+  `authinfo`), each with its own query-parameter allowlist (the egress
+  layer now checks parameters per route, Loki's included); typed query
+  bodies (time range, `term`/`terms` on trusted keyword fields, sort with
+  an optional tiebreaker, `search_after`, size and timeout caps,
+  `date_histogram` and `terms` counts) with text matched locally,
+  untrusted fields dropped, multi-valued fields and `!=` evaluated alike
+  by the server and the engine (empty values kept local); the Loki paging
+  and byte model (lazy slices, bytes counted per page against the call's
+  limit, bounded Around and Reread, `MaxSlices`, `Split` of an
+  over-budget slice); `auth = "api_key"` (Elasticsearch `ApiKey`). A
+  production privilege check that fails closed: any grant beyond a
+  read-only allowlist, on any pattern, alias or data stream, any
+  OpenSearch role not known read-only (or vouched for in
+  `read_only_roles`), an OpenSearch answer without a role, and a client
+  certificate for OpenSearch are refused. Field checks over every index:
+  trusted, selector and tiebreaker fields must be plain keyword fields
+  (aliases judged by their target; normalizers, scripts, runtime fields
+  and `copy_to` into them refused; dynamic templates accepted only when
+  provably harmless; `dynamic` other than a boolean, true, false or
+  strict refused); `ignore_above`, `null_value` and non-standard index
+  modes keep terms local. Until the newest `Check` has succeeded, no
+  trusted term is pushed and no count is served on the server, and a
+  stream whose pushed term is no longer server-side is stale.
 
 ### Fixed
 
