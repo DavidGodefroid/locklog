@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"runtime"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -49,6 +50,33 @@ func TestBuilderCountsPerMinute(t *testing.T) {
 	}
 	if !reflect.DeepEqual(g.Untimed, []Count{{Vals: []string{"info", ""}, N: 1}}) {
 		t.Fatalf("%+v", g.Untimed)
+	}
+}
+
+// TestBuilderMemoizesSensitivity: the masker is asked once per distinct
+// (field, value) of a granule, up to memoMax entries; long values are
+// always asked; the answers are the same as without the memo.
+func TestBuilderMemoizesSensitivity(t *testing.T) {
+	asked := map[string]int{}
+	b := NewBuilder([]string{"level"}, func(f, v string) bool { asked[v]++; return v == "secret" })
+	long := strings.Repeat("x", memoValueMax+1)
+	for i := range 8 * memoMax {
+		v := []string{"error", "secret", long, fmt.Sprint(i)}[min(i%4, 3)]
+		b.Add(ev(t0.Add(time.Duration(i)*time.Millisecond), "level", v))
+	}
+	if asked["error"] != 1 || asked["secret"] != 1 || asked[long] != 2*memoMax {
+		t.Fatalf("asked error %d secret %d long %d", asked["error"], asked["secret"], asked[long])
+	}
+	if len(b.memo) != memoMax {
+		t.Fatalf("memo holds %d entries", len(b.memo))
+	}
+	g := b.Finish(0, 0, 1, true)
+	for _, m := range g.Minutes {
+		for _, c := range m.Counts {
+			if c.Vals[0] == "secret" {
+				t.Fatal("a sensitive value indexed clear")
+			}
+		}
 	}
 }
 
