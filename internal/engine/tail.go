@@ -81,8 +81,11 @@ type held struct {
 // record read) gives each stream's end in its granules, and a poll scans
 // only granules past what was there or already scanned whole (the growing
 // last one again, from its start); within a stream, records up to the last
-// one evaluated are skipped. These granule ends are used for pruning only,
-// never compared with record positions (their units differ by source). A
+// one evaluated are skipped. These granule ends are used for pruning only;
+// they are compared with record positions only for byte streams (file,
+// docker), whose granules and positions are both byte offsets: there the
+// granule of a stream's held record is read again once the stream grows.
+// Journal entries are atomic and never held. A
 // stream first seen during the tail is scanned from its start (its records
 // still need a time from the start on). Residuals: a record dated in the
 // future that was already in a growing last granule is returned; one
@@ -154,6 +157,10 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 		}
 	}
 
+	original := map[streamKey]bool{}
+	for k := range done {
+		original[k] = true
+	}
 	type rkey struct {
 		k streamKey
 		p pos
@@ -192,11 +199,18 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 		}
 		d := e.RecordDigest(raw.Event.Raw) + "|" + t.Format(time.RFC3339Nano)
 		k := keyOf(raw.Ref)
-		// A copy of a record already returned from another stream (a
-		// rotation) is not returned again. Identical records of one
+		// A copy of a record already returned from another stream of
+		// the source (a rotation) is not returned again. Identical records of one
 		// stream are distinct records (each position is evaluated
 		// once).
-		other := func(sk streamKey) bool { return sk != k }
+		other := func(sk streamKey) bool { return sk != k && sk[0] == k[0] }
+		// Streams known at the start and never restarted hold
+		// originals: only a stream that appeared or restarted during
+		// the tail may hold a copy. Identical records of two replicas
+		// or two sources are distinct.
+		if original[k] {
+			other = func(streamKey) bool { return false }
+		}
 		for sk := range returned[d] {
 			if other(sk) {
 				return
@@ -250,6 +264,7 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 		for k, end := range ends {
 			if d, ok := done[k]; ok && end < d {
 				done[k] = 0
+				delete(original, k)
 				delete(frontier, k)
 				delete(heldAll, k)
 			}
@@ -329,6 +344,13 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 				return // evaluated by an earlier poll
 			}
 			if f, ok := pollFrontier[k]; ok && !p.after(f) {
+				return
+			}
+			// A journal entry is atomic: evaluated at once, never
+			// held (its granule ends count entries, not bytes).
+			if e.o.Sources[raw.Ref.Source].Kind() == "journald" {
+				pollFrontier[k] = p
+				evaluate(raw, rec, b, &pollFound, &pollFailures, &pollUntimed)
 				return
 			}
 			// The record before this one is complete: evaluate it;

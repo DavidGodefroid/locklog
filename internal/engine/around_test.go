@@ -572,6 +572,86 @@ func TestTailJournald(t *testing.T) {
 	}
 }
 
+// TestTailJournaldGranuleEnd: a journal ending exactly on a granule's end
+// (256 entries) at a poll loses no entry: entries are never held.
+func TestTailJournaldGranuleEnd(t *testing.T) {
+	root := t.TempDir()
+	const mid = "0123456789abcdef0123456789abcdef"
+	os.Mkdir(filepath.Join(root, mid), 0o755)
+	jpath := filepath.Join(root, mid, "system.journal")
+	var es []journaltest.Entry
+	old := uint64(time.Now().Add(-time.Hour).UnixMicro())
+	for i := 0; i < 255; i++ {
+		es = append(es, journaltest.Entry{Realtime: old + uint64(i)*1000, Fields: []string{fmt.Sprintf("MESSAGE=entry %d", i), "PRIORITY=6"}})
+	}
+	write := func(es []journaltest.Entry) {
+		tmp := jpath + ".tmp"
+		os.WriteFile(tmp, journaltest.Build(journaltest.Options{Compact: true, PerArray: 100}, es), 0o644)
+		os.Rename(tmp, jpath)
+	}
+	write(es)
+	p, _ := parse.New(parse.Options{Format: "plain"})
+	js, err := journald.New(journald.Options{Name: "journal", Roots: []string{root}, Parser: p})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := newFixture(t, "", func(o *Options) { o.Sources["journal"] = js; o.TailPoll = 50 * time.Millisecond })
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		live := func(m string) journaltest.Entry {
+			return journaltest.Entry{Realtime: uint64(time.Now().UnixMicro()), Fields: []string{"MESSAGE=" + m, "PRIORITY=6"}}
+		}
+		es = append(es, live("live A"))
+		write(es)
+		time.Sleep(300 * time.Millisecond)
+		es = append(es, live("live B"), live("live C"))
+		write(es)
+	}()
+	res, err := f.eng.Tail(ctx, TailQuery{Sources: []string{"journal"}, Duration: "1500ms"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Records) != 3 || !res.Complete || !strings.Contains(string(res.Records[0]), "live A") {
+		t.Fatalf("%d records, complete %v: %s", len(res.Records), res.Complete, res.Records)
+	}
+}
+
+// TestTailReplicas: the same line written by two replicas (two streams
+// known at the start) in the same second is returned from each.
+func TestTailReplicas(t *testing.T) {
+	f := newFixture(t, genLog(time.Now().Add(-time.Hour), 5, "c@example.org"), func(o *Options) { o.TailPoll = 50 * time.Millisecond })
+	bpath := filepath.Join(f.root, "logs", "b.log")
+	if err := os.WriteFile(bpath, []byte(genLog(time.Now().Add(-time.Hour), 5, "c@example.org")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := parse.New(parse.Options{})
+	src, err := file.New(file.Options{Name: "app", Paths: []string{f.root + "/logs/*.log"}, Roots: []string{f.root}, Parser: p,
+		Trusted: []string{"level", "status"}, Index: f.store, Sensitive: func(fl, v string) bool { return f.masker.TrustedValue("app", fl, v) != v }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := f.eng.o
+	o.Sources = map[string]source.Source{"app": src}
+	eng, err := New(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(f.root, "logs", "app.log")
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		l := liveLine(1, "x")
+		appendLines(t, path, l)
+		appendLines(t, bpath, l)
+	}()
+	res, err := eng.Tail(ctx, TailQuery{Duration: "1s"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Records) != 2 || !res.Complete {
+		t.Fatalf("%d records, complete %v", len(res.Records), res.Complete)
+	}
+}
+
 // TestTailBudgetOnNewData: admission applies to what a poll scans for new
 // records, not to the whole unindexed file.
 func TestTailBudgetOnNewData(t *testing.T) {
