@@ -91,10 +91,10 @@ type Builder struct {
 	// (status, method, level), and asking the masker for every record
 	// dominated the backfill (R6-P1: backfill at full speed). Bounded by
 	// memoMax entries of values up to memoValueMax bytes.
-	memo map[memoKey]bool
-	g    Granule
-	minutes   map[int64]map[string]*Count
-	untimed   map[string]*Count
+	memo    map[memoKey]bool
+	g       Granule
+	minutes map[int64]map[string]*Count
+	untimed map[string]*Count
 }
 
 // NewBuilder indexes the given fields; sensitive reports values a detector
