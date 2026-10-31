@@ -115,10 +115,14 @@ type Source struct {
 	o   Options
 	seg string // the indices path segment
 	sem chan struct{}
-	// local are the trusted fields Check found with ignore_above in some
-	// index: their terms are evaluated locally only.
-	mu    sync.Mutex
-	local map[string]bool
+	// checked is set once Check has completed: before, no trusted term is
+	// pushed and no count served on the server. local are the fields
+	// Check found with ignore_above, null_value or an index mode that
+	// may skip values, in some index: their terms are evaluated locally
+	// only.
+	mu      sync.Mutex
+	checked bool
+	local   map[string]bool
 }
 
 // New validates o.
@@ -222,16 +226,25 @@ func readParams() url.Values { return url.Values{"expand_wildcards": {"open"}} }
 // none is (as != does locally), and a document without the field matches
 // != only, as locally. An empty value is kept local: whether "" is indexed
 // depends on the mapping (a normalizer, ignore_above, null_value), and an
-// absent and an empty field must not be confused. A field Check found
-// with ignore_above in some index is kept local too (a value past it is
-// not indexed). The engine evaluates every term again after masking: a
+// absent and an empty field must not be confused. Until Check has
+// completed, and for a field it found with ignore_above, null_value or a
+// non-standard index mode in some index, terms are kept local too. The engine evaluates every term again after masking: a
 // term not pushed only costs bytes.
 func (s *Source) pushable(t source.Term) bool {
-	s.mu.Lock()
-	local := s.local[t.Field]
-	s.mu.Unlock()
-	return t.Label && (t.Op == "=" || t.Op == "in" || t.Op == "!=") && s.trusted(t.Field) && !local &&
+	if !s.serverSide(t.Field) {
+		return false
+	}
+	return t.Label && (t.Op == "=" || t.Op == "in" || t.Op == "!=") && s.trusted(t.Field) &&
 		len(t.Values) > 0 && !slices.Contains(t.Values, "")
+}
+
+// serverSide reports whether the backend may answer for field f: Check
+// has completed, and found nothing on f that makes its indexed terms
+// differ from its documents' values.
+func (s *Source) serverSide(f string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.checked && !s.local[f]
 }
 
 // filter builds the server-side filter: the profile's selector, plus the

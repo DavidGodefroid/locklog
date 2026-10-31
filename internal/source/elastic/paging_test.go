@@ -169,7 +169,8 @@ func TestMultiValuedTermsServerSide(t *testing.T) {
 	}
 	f := newFake(docs)
 	f.types["tag"] = "keyword"
-	s := newSource(t, f, func(o *Options) { o.TrustedFields = []string{"tag"} })
+	f.mapping = `{"logs-a":{"mappings":{"properties":{"@timestamp":{"type":"date"},"tag":{"type":"keyword"}}}}}`
+	s := newChecked(t, f, func(o *Options) { o.TrustedFields = []string{"tag"} })
 	local := func(term source.Term, rec source.RawRecord) bool {
 		var vals []string
 		for _, a := range rec.Event.Attrs {
@@ -364,9 +365,20 @@ func TestCheckMappings(t *testing.T) {
 		{"runtime field", both(good, `{"runtime":{"level":{"type":"keyword","script":{"source":"emit('x')"}}},"properties":{"@timestamp":{"type":"date"},"app":{"type":"keyword"}}}`), "", false, false, false},
 		{"runtime field shadowing a mapped one", both(good, `{"runtime":{"level":{"type":"keyword"}},"properties":{"@timestamp":{"type":"date"},"app":{"type":"keyword"},"level":{"type":"keyword"}}}`), "", true, false, false},
 		{"field missing in one index on production", both(good, `{"properties":{"@timestamp":{"type":"date"},"app":{"type":"keyword"}}}`), "", true, false, false},
-		{"field missing in one index off production", both(good, `{"properties":{"@timestamp":{"type":"date"},"app":{"type":"keyword"}}}`), "", false, true, false},
+		{"field missing in one index off production", both(good, `{"properties":{"@timestamp":{"type":"date"},"app":{"type":"keyword"}}}`), "", false, true, true},
 		{"text in one index", both(good, `{"properties":{"@timestamp":{"type":"date"},"app":{"type":"keyword"},"level":{"type":"text"}}}`), "", false, false, false},
 		{"ignore_above on the field", both(good, `{"properties":{"@timestamp":{"type":"date"},"app":{"type":"keyword"},"level":{"type":"keyword","ignore_above":1024}}}`), "", true, true, true},
+		{"copy_to into a trusted field", both(good, `{"properties":{"@timestamp":{"type":"date"},"app":{"type":"keyword"},"level":{"type":"keyword"},"other":{"type":"keyword","copy_to":"level"}}}`), "", false, false, false},
+		{"copy_to array from a multi-field", both(good, `{"properties":{"@timestamp":{"type":"date"},"app":{"type":"keyword"},"level":{"type":"keyword"},"msg":{"type":"text","fields":{"kw":{"type":"keyword","copy_to":["x","app"]}}}}}`), "", false, false, false},
+		{"copy_to from a nested property", both(good, `{"properties":{"@timestamp":{"type":"date"},"app":{"type":"keyword"},"level":{"type":"keyword"},"o":{"properties":{"p":{"type":"keyword","copy_to":"level"}}}}}`), "", false, false, false},
+		{"copy_to above a trusted field", both(good, `{"properties":{"@timestamp":{"type":"date"},"app":{"type":"keyword"},"level":{"type":"keyword"},"z":{"type":"keyword","copy_to":"level.x"}}}`), "", false, false, false},
+		{"copy_to elsewhere", both(good, `{"properties":{"@timestamp":{"type":"date"},"app":{"type":"keyword"},"level":{"type":"keyword"},"z":{"type":"keyword","copy_to":"all_text"}}}`), "", true, true, false},
+		{"copy_to not a string", both(good, `{"properties":{"@timestamp":{"type":"date"},"app":{"type":"keyword"},"level":{"type":"keyword"},"z":{"type":"keyword","copy_to":{"a":1}}}}`), "", true, false, false},
+		{"composite runtime subfield", both(good, `{"runtime":{"level":{"type":"composite","script":"emit(...)","fields":{"x":{"type":"keyword"}}}},"properties":{"@timestamp":{"type":"date"},"app":{"type":"keyword"}}}`), "", false, false, false},
+		{"composite runtime parent of a trusted field", both(good, `{"runtime":{"lv":{"type":"composite","fields":{"x":{"type":"keyword"}}}},"properties":{"@timestamp":{"type":"date"},"app":{"type":"keyword"},"level":{"type":"alias","path":"lv.x"}}}`), "", false, false, false},
+		{"script on a keyword field", both(good, `{"properties":{"@timestamp":{"type":"date"},"app":{"type":"keyword"},"level":{"type":"keyword","script":{"source":"emit('a')"}}}}`), "", false, false, false},
+		{"null_value on a trusted field", both(good, `{"properties":{"@timestamp":{"type":"date"},"app":{"type":"keyword"},"level":{"type":"keyword","null_value":"none"}}}`), "", true, true, true},
+		{"nested settings object", both(good, good), `{"logs-a":{"settings":{},` + stdDefaults + `},"logs-b":{"settings":{"index":{"mode":"standard"}},` + stdDefaults + `}}`, true, true, true},
 		{"index-level ignore_above", both(good, good), `{"logs-a":{"settings":{},` + stdDefaults + `},"logs-b":{"settings":{"index.mapping.ignore_above":"256"},` + stdDefaults + `}}`, true, true, true},
 		// A logsdb index's settings, in the shape Elasticsearch
 		// documents (not recorded from a server): no explicit
@@ -425,5 +437,76 @@ func TestIndexIgnoresAbove(t *testing.T) {
 		if got := indexIgnoresAbove(j(tt.settings), j(tt.defaults), tt.flavour); got != tt.want {
 			t.Errorf("%s %s %s: %t", tt.settings, tt.defaults, tt.flavour, got)
 		}
+	}
+}
+
+func TestSelectorMappingRules(t *testing.T) {
+	for _, tt := range []struct {
+		name, props string
+		ok          bool
+	}{
+		{"keyword selector", `"env":{"type":"keyword"}`, true},
+		{"null_value on the selector", `"env":{"type":"keyword","null_value":"prod"}`, false},
+		{"copy_to into the selector", `"env":{"type":"keyword"},"other":{"type":"keyword","copy_to":"env"}`, false},
+		{"script on the selector", `"env":{"type":"keyword","script":{"source":"emit('prod')"}}`, false},
+	} {
+		f := newFake(nil)
+		f.types["env"] = "keyword"
+		props := `{"@timestamp":{"type":"date"},"app":{"type":"keyword"},"level":{"type":"keyword"},` + tt.props + `}`
+		f.mapping = `{"logs-a":{"mappings":{"properties":` + props + `}},"logs-b":{"mappings":{"properties":` + props + `}}}`
+		s := newSource(t, f, func(o *Options) { o.Selector = map[string]string{"env": "prod"} })
+		if _, err := s.Check(ctx, true); (err == nil) != tt.ok {
+			t.Errorf("%s: %v", tt.name, err)
+		}
+	}
+}
+
+func TestNothingServerSideBeforeCheck(t *testing.T) {
+	f := newFake(dataset(40))
+	s := newSource(t, f, nil)
+	lv := source.Term{Field: "level", Label: true, Op: "=", Values: []string{"error"}}
+	r := source.Range{From: t0, To: t0.Add(time.Hour)}
+	if s.pushable(lv) {
+		t.Fatal("pushable before Check")
+	}
+	if _, err := s.IndexCounts(ctx, source.CountQuery{Range: r}); !errors.Is(err, source.ErrNotIndexable) {
+		t.Fatalf("count before Check: %v", err)
+	}
+	// A failed Check leaves it so.
+	f.types["level"] = "text"
+	if _, err := s.Check(ctx, false); err == nil {
+		t.Fatal("check passed")
+	}
+	if s.pushable(lv) {
+		t.Fatal("pushable after a failed Check")
+	}
+	f.types["level"] = "keyword"
+	if _, err := s.Check(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	if !s.pushable(lv) {
+		t.Fatal("not pushable after Check")
+	}
+	if _, err := s.IndexCounts(ctx, source.CountQuery{Range: r, ByLabels: []string{"level"}}); err != nil {
+		t.Fatal(err)
+	}
+	// A field kept local is not counted on the server.
+	f.mapping = `{"logs-a":{"mappings":{"properties":{"@timestamp":{"type":"date"},"app":{"type":"keyword"},"level":{"type":"keyword","ignore_above":256}}}}}`
+	if _, err := s.Check(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.IndexCounts(ctx, source.CountQuery{Range: r, ByLabels: []string{"level"}}); !errors.Is(err, source.ErrNotIndexable) {
+		t.Fatalf("count by a local field: %v", err)
+	}
+	if _, err := s.IndexCounts(ctx, source.CountQuery{Range: r, ByLabels: []string{"app"}}); err != nil {
+		t.Fatalf("count by app: %v", err)
+	}
+	// Mappings unreadable off production: every term local.
+	f.mapping = "nope"
+	if _, err := s.Check(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	if s.pushable(lv) || s.pushable(source.Term{Field: "app", Label: true, Op: "=", Values: []string{"api"}}) {
+		t.Fatal("pushable with unreadable mappings")
 	}
 }

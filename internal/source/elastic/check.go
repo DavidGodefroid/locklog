@@ -278,6 +278,22 @@ func esWrite(body []byte, readable []string) ([]string, error) {
 	if err := checkGrantShape(raw["remote_indices"], true); err != nil {
 		return nil, err
 	}
+	if rc := raw["remote_cluster"]; rc != nil {
+		var es []map[string]json.RawMessage
+		if !isArray(rc) || json.Unmarshal(rc, &es) != nil {
+			return nil, errResponse
+		}
+		for _, e := range es {
+			if e == nil || !isArray(e["privileges"]) || !isArray(e["clusters"]) {
+				return nil, errResponse
+			}
+			for k := range e {
+				if k != "privileges" && k != "clusters" {
+					return nil, fmt.Errorf("elasticsearch source: a remote_cluster grant holds an unknown member %q", k)
+				}
+			}
+		}
+	}
 	var write []string
 	for k, v := range raw {
 		if !slices.Contains(knownPrivilegeKeys, k) {
@@ -417,6 +433,11 @@ func (s *Source) fieldCaps(ctx context.Context, fields []string) (fieldCapsRespo
 func (s *Source) Check(ctx context.Context, production bool) (Info, error) {
 	var info Info
 	var err error
+	// Until this Check completes, no trusted term is pushed and no count
+	// is served on the server.
+	s.mu.Lock()
+	s.checked = false
+	s.mu.Unlock()
 	if info.Flavour, info.Version, err = s.detect(ctx); err != nil {
 		return info, err
 	}
@@ -478,43 +499,66 @@ func (s *Source) Check(ctx context.Context, production bool) (Info, error) {
 	// Every keyword field the source names must be, in every index the
 	// source reads, a concrete keyword or constant_keyword field (an
 	// alias resolved to its target) without a normalizer (the indexed
-	// term would differ from the value): else refused. A runtime field is
-	// refused (computed by a script, not indexed). ignore_above (on the
-	// field, or index.mapping.ignore_above on the index) leaves long
-	// values unindexed: terms on such a field are kept local (pushable).
-	// A field missing from an index, or mappings or settings that cannot
-	// be read, are refused on production only.
+	// term would differ from the value) or a script, that no copy_to
+	// writes into and no runtime field (composite subfields included)
+	// shadows: else refused. ignore_above (on the field, index-level, or
+	// a non-standard index mode) leaves long values unindexed, null_value
+	// indexes a value for an absent field: terms on such a field are kept
+	// local (pushable), counts by it are not served; a selector field
+	// with a null_value is refused (it would select absent ones). A
+	// field missing from an index is refused on production; mappings or
+	// settings that cannot be read are refused on production, and keep
+	// every term local elsewhere.
+	selector := func(f string) bool { _, ok := s.o.Selector[f]; return ok }
+	related := func(a, b string) bool { return a == b || strings.HasPrefix(a, b+".") || strings.HasPrefix(b, a+".") }
+	local := map[string]bool{}
 	m, err := s.mappingFacts(ctx, info.Flavour)
 	switch {
 	case err != nil && production:
 		return info, fmt.Errorf("elasticsearch source: reading the mappings and settings (the key needs view_index_metadata), which a production profile requires: %w", err)
-	case err == nil:
-		local := map[string]bool{}
+	case err != nil:
+		for _, f := range keywords {
+			local[f] = true
+		}
+	default:
 		for _, f := range keywords {
 			for _, ix := range m.indices {
-				d, ok := ix.field(f)
+				d, path, ok := ix.field(f)
+				for _, r := range ix.runtime {
+					if f == r || strings.HasPrefix(f, r+".") || path == r || strings.HasPrefix(path, r+".") {
+						return info, fmt.Errorf("elasticsearch source: %s is (under) a runtime field in some index: it cannot be trusted or selected on", f)
+					}
+				}
+				for _, t := range ix.copyTo {
+					if related(t, f) || (ok && related(t, path)) {
+						return info, fmt.Errorf("elasticsearch source: a copy_to writes into %s in some index: its terms are not its documents' values; it cannot be trusted or selected on", f)
+					}
+				}
 				switch {
-				case ix.runtime[f]:
-					return info, fmt.Errorf("elasticsearch source: %s is a runtime field in some index: it cannot be trusted or selected on", f)
 				case !ok:
 					if production {
 						return info, fmt.Errorf("elasticsearch source: %s is not mapped in every index of the source: a production profile refuses it", f)
 					}
+					local[f] = true
 					continue
 				case d.Type != "keyword" && d.Type != "constant_keyword":
 					return info, fmt.Errorf("elasticsearch source: %s is mapped as %q in some index; trusted, selector and tiebreaker fields must be keyword fields", f, d.Type)
 				case d.Normalizer != "":
 					return info, fmt.Errorf("elasticsearch source: %s has a normalizer in some index: its indexed terms are not its values; it cannot be trusted or selected on", f)
+				case d.Script != nil:
+					return info, fmt.Errorf("elasticsearch source: %s is computed by a script in some index: it cannot be trusted or selected on", f)
+				case d.NullValue != nil && selector(f):
+					return info, fmt.Errorf("elasticsearch source: selector field %s has a null_value in some index: the selector would match documents without it", f)
 				}
-				if d.IgnoreAbove != nil || ix.ignoreAbove {
+				if d.IgnoreAbove != nil || d.NullValue != nil || ix.ignoreAbove {
 					local[f] = true
 				}
 			}
 		}
-		s.mu.Lock()
-		s.local = local
-		s.mu.Unlock()
 	}
+	s.mu.Lock()
+	s.local, s.checked = local, true
+	s.mu.Unlock()
 	return info, nil
 }
 
@@ -522,25 +566,31 @@ func (s *Source) Check(ctx context.Context, production bool) (Info, error) {
 // included), its runtime fields and whether index.mapping.ignore_above is
 // set.
 type indexMapping struct {
-	fields      map[string]mappingDef
-	runtime     map[string]bool
-	ignoreAbove bool
+	fields map[string]mappingDef
+	// runtime are the runtime field names (a composite's subfields
+	// included), copyTo every copy_to target.
+	runtime, copyTo []string
+	ignoreAbove     bool
 }
 
-// field returns the definition of f, an alias resolved to its target
-// (Elasticsearch allows no alias of an alias).
-func (ix indexMapping) field(f string) (mappingDef, bool) {
+// field returns the definition of f and its concrete path, an alias
+// resolved to its target (Elasticsearch allows no alias of an alias). An
+// alias whose target is not a mapped field returns the target's path and
+// false.
+func (ix indexMapping) field(f string) (mappingDef, string, bool) {
 	d, ok := ix.fields[f]
 	if ok && d.Type == "alias" {
 		if d.Path == "" || d.Path == f {
-			return mappingDef{}, false
+			return mappingDef{}, "", false
 		}
-		d, ok = ix.fields[d.Path]
-		if ok && d.Type == "alias" {
-			return mappingDef{}, false
+		p := d.Path
+		d, ok = ix.fields[p]
+		if !ok || d.Type == "alias" {
+			return mappingDef{}, p, false // the target, for the runtime check
 		}
+		return d, p, true
 	}
-	return d, ok
+	return d, f, ok
 }
 
 // mappingFacts are the mappings of every index of the source.
@@ -556,8 +606,10 @@ func (s *Source) mappingFacts(ctx context.Context, flavour string) (mappingFacts
 	}
 	var idx map[string]struct {
 		Mappings struct {
-			Properties map[string]mappingDef      `json:"properties"`
-			Runtime    map[string]json.RawMessage `json:"runtime"`
+			Properties map[string]mappingDef `json:"properties"`
+			Runtime    map[string]struct {
+				Fields map[string]json.RawMessage `json:"fields"`
+			} `json:"runtime"`
 		} `json:"mappings"`
 	}
 	if json.Unmarshal(body, &idx) != nil || idx == nil {
@@ -579,19 +631,33 @@ func (s *Source) mappingFacts(ctx context.Context, flavour string) (mappingFacts
 	}
 	m := mappingFacts{indices: map[string]indexMapping{}}
 	for name, i := range idx {
-		ix := indexMapping{fields: map[string]mappingDef{}, runtime: map[string]bool{}}
+		ix := indexMapping{fields: map[string]mappingDef{}}
+		var bad error
 		var walk func(prefix string, props map[string]mappingDef)
 		walk = func(prefix string, props map[string]mappingDef) {
 			for n, d := range props {
 				full := prefix + n
 				ix.fields[full] = d
+				if d.CopyTo != nil {
+					ts, ok := stringOrArray(d.CopyTo)
+					if !ok {
+						bad = errResponse
+					}
+					ix.copyTo = append(ix.copyTo, ts...)
+				}
 				walk(full+".", d.Properties)
 				walk(full+".", d.Fields)
 			}
 		}
 		walk("", i.Mappings.Properties)
-		for n := range i.Mappings.Runtime {
-			ix.runtime[n] = true
+		if bad != nil {
+			return mappingFacts{}, bad
+		}
+		for n, r := range i.Mappings.Runtime {
+			ix.runtime = append(ix.runtime, n)
+			for sub := range r.Fields {
+				ix.runtime = append(ix.runtime, n+"."+sub)
+			}
 		}
 		st, ok := settings[name]
 		if !ok {
@@ -601,6 +667,19 @@ func (s *Source) mappingFacts(ctx context.Context, flavour string) (mappingFacts
 		m.indices[name] = ix
 	}
 	return m, nil
+}
+
+// stringOrArray decodes a string or an array of strings.
+func stringOrArray(raw json.RawMessage) ([]string, bool) {
+	var one string
+	if json.Unmarshal(raw, &one) == nil {
+		return []string{one}, true
+	}
+	var many []string
+	if json.Unmarshal(raw, &many) == nil {
+		return many, true
+	}
+	return nil, false
 }
 
 // noLimit is the default of index.mapping.ignore_above on a standard
@@ -615,6 +694,15 @@ const noLimit = "2147483647"
 // it is not known to be standard (fail closed). OpenSearch 2.x has no index
 // modes: absent, the index is standard.
 func indexIgnoresAbove(settings, defaults map[string]json.RawMessage, flavour string) bool {
+	// Flat settings hold strings and arrays: an object (nested settings)
+	// is an answer not understood, so unknown.
+	for _, m := range []map[string]json.RawMessage{settings, defaults} {
+		for _, raw := range m {
+			if strings.HasPrefix(strings.TrimSpace(string(raw)), "{") {
+				return true
+			}
+		}
+	}
 	get := func(k string) (string, bool) {
 		for _, m := range []map[string]json.RawMessage{settings, defaults} {
 			if raw, ok := m[k]; ok {
@@ -643,6 +731,9 @@ type mappingDef struct {
 	Type        string                `json:"type"`
 	Path        string                `json:"path"`
 	Normalizer  string                `json:"normalizer"`
+	Script      json.RawMessage       `json:"script"`
+	NullValue   json.RawMessage       `json:"null_value"`
+	CopyTo      json.RawMessage       `json:"copy_to"`
 	IgnoreAbove *json.Number          `json:"ignore_above"`
 	Properties  map[string]mappingDef `json:"properties"`
 	Fields      map[string]mappingDef `json:"fields"`

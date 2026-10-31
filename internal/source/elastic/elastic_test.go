@@ -169,7 +169,7 @@ func TestBodyBuildersKeepHostileValuesValues(t *testing.T) {
 }
 
 func TestStreamRoundTripsAndRefusesForeignStreams(t *testing.T) {
-	s := newSource(t, newFake(nil), func(o *Options) { o.Selector = map[string]string{"env": "prod"} })
+	s := newChecked(t, newFake(nil), func(o *Options) { o.Selector = map[string]string{"env": "prod"} })
 	sel := source.Selector{Terms: []source.Term{{Field: "level", Label: true, Op: "in", Values: []string{"warn", "error", "warn"}},
 		{Field: "app", Label: true, Op: "!=", Values: []string{"x"}}, {Field: "pod", Label: true, Op: "=", Values: []string{"pod-1"}}}}
 	plan, err := s.Plan(ctx, source.Range{From: t0, To: t0.Add(time.Hour)}, sel)
@@ -288,7 +288,7 @@ func TestTiesBeyondAPageWithoutTiebreakerFail(t *testing.T) {
 
 func TestTrustedTermsGoServerSide(t *testing.T) {
 	f := newFake(dataset(200))
-	s := newSource(t, f, func(o *Options) { o.Selector = map[string]string{"app": "api"} })
+	s := newChecked(t, f, func(o *Options) { o.Selector = map[string]string{"app": "api"} })
 	sel := source.Selector{Terms: []source.Term{
 		{Field: "level", Label: true, Op: "in", Values: []string{"error", "warn"}},
 		{Field: "status", Label: true, Op: "=", Values: []string{"500"}}, // not trusted: local
@@ -337,7 +337,7 @@ func TestPartialAnswersFail(t *testing.T) {
 	for _, mod := range []func(*fakeES){func(f *fakeES) { f.timedOut = true }, func(f *fakeES) { f.shardFail = true }} {
 		f := newFake(dataset(10))
 		mod(f)
-		s := newSource(t, f, nil)
+		s := newChecked(t, f, nil)
 		if _, _, err := s.fetchSlice(ctx, Filter{}, t0.UnixNano(), t0.Add(time.Hour).UnixNano(), nil); err == nil {
 			t.Fatal("a partial answer was served")
 		}
@@ -359,10 +359,10 @@ func TestRequestsGoThroughTheCallLimiter(t *testing.T) {
 	plan, _ := s.Plan(ctx, source.Range{From: t0, To: t0.Add(time.Hour)}, source.Selector{})
 	it, _ := s.Scan(lctx, plan.Chunks[0])
 	drain(t, it)
-	if _, err := s.IndexCounts(lctx, source.CountQuery{Range: source.Range{From: t0, To: t0.Add(time.Hour)}}); err != nil {
+	if _, err := s.Check(lctx, true); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Check(lctx, true); err != nil {
+	if _, err := s.IndexCounts(lctx, source.CountQuery{Range: source.Range{From: t0, To: t0.Add(time.Hour)}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Describe(lctx); err != nil {
@@ -410,7 +410,7 @@ func TestCounts(t *testing.T) {
 	docs := dataset(600)
 	delete(docs[2].fields, "level") // absent
 	f := newFake(docs)
-	s := newSource(t, f, nil)
+	s := newChecked(t, f, nil)
 	r := source.Range{From: t0, To: t0.Add(20 * time.Minute)}
 	sel := source.Selector{Terms: []source.Term{{Field: "app", Label: true, Op: "=", Values: []string{"api"}}}}
 	want := map[string]int64{}
@@ -513,7 +513,7 @@ func TestCountsOverflowAndMultiValues(t *testing.T) {
 		docs = append(docs, fakeDoc{index: "logs-a", id: string(rune('a' + i%26)), ts: t0.Add(time.Duration(i) * time.Second),
 			fields: map[string]any{"app": "a" + strings.Repeat("x", i%120)}})
 	}
-	s := newSource(t, newFake(docs), nil)
+	s := newChecked(t, newFake(docs), nil)
 	r := source.Range{From: t0, To: t0.Add(time.Hour)}
 	res, err := s.IndexCounts(ctx, source.CountQuery{Range: r, ByLabels: []string{"app"}})
 	if err != nil {
@@ -530,7 +530,7 @@ func TestCountsOverflowAndMultiValues(t *testing.T) {
 		t.Fatalf("sum %d other %d rows %d", sum, other, len(res.Rows))
 	}
 	docs[0].fields["app"] = []string{"p", "q"}
-	s = newSource(t, newFake(docs), nil)
+	s = newChecked(t, newFake(docs), nil)
 	if _, err := s.IndexCounts(ctx, source.CountQuery{Range: r, ByLabels: []string{"app"}, Bucket: time.Hour}); !errors.Is(err, source.ErrNotIndexable) {
 		t.Fatalf("multi-valued: %v", err)
 	}
@@ -539,7 +539,7 @@ func TestCountsOverflowAndMultiValues(t *testing.T) {
 	docs[0].fields["app"] = "a"
 	f := newFake(docs)
 	f.termsErr = 3
-	s = newSource(t, f, nil)
+	s = newChecked(t, f, nil)
 	if _, err := s.IndexCounts(ctx, source.CountQuery{Range: r, ByLabels: []string{"app"}}); !errors.Is(err, source.ErrNotIndexable) {
 		t.Fatalf("approximate: %v", err)
 	}
@@ -615,6 +615,13 @@ func TestCheckPrivileges(t *testing.T) {
 		{"grant without privileges array", grants(`"indices":[{"names":["logs-*"],"privileges":"read"}]`), true, false},
 		{"restricted grant members", grants(`"indices":[{"names":["logs-*"],"privileges":["read"],"field_security":[{"grant":["*"]}],"query":["{\"match_all\":{}}"],"allow_restricted_indices":false}]`), true, true},
 		{"remote read grant with clusters", grants(`"remote_indices":[{"names":["logs-*"],"privileges":["read"],"clusters":["c1"]}]`), true, true},
+		{"remote_cluster read-only", grants(`"remote_cluster":[{"privileges":["monitor_enrich"],"clusters":["c1"]}]`), true, true},
+		{"remote_cluster null entry", grants(`"remote_cluster":[null]`), true, false},
+		{"remote_cluster null privileges", grants(`"remote_cluster":[{"privileges":null,"clusters":["c1"]}]`), true, false},
+		{"remote_cluster without clusters", grants(`"remote_cluster":[{"privileges":["monitor_enrich"]}]`), true, false},
+		{"remote_cluster unknown member", grants(`"remote_cluster":[{"privileges":["monitor_enrich"],"clusters":["c1"],"x":["y"]}]`), true, false},
+		{"remote_cluster an object", grants(`"remote_cluster":{"privileges":["monitor_enrich"]}`), true, false},
+		{"remote_cluster write", grants(`"remote_cluster":[{"privileges":["manage"],"clusters":["c1"]}]`), true, false},
 		{"unknown member in a remote grant", grants(`"remote_indices":[{"names":["logs-*"],"privileges":["read"],"clusters":["c1"],"x":1}]`), true, false},
 		{"unmapped trusted field on production", func(f *fakeES) { delete(f.types, "level") }, true, false},
 		{"unmapped trusted field off production", func(f *fakeES) { delete(f.types, "level") }, false, true},
@@ -674,8 +681,8 @@ func TestCheckPrivileges(t *testing.T) {
 	s = newSource(t, f, nil)
 	lv := source.Term{Field: "level", Label: true, Op: "=", Values: []string{"error"}}
 	ap := source.Term{Field: "app", Label: true, Op: "=", Values: []string{"api"}}
-	if !s.pushable(lv) {
-		t.Fatal("level not pushable before Check")
+	if s.pushable(lv) || s.pushable(ap) {
+		t.Fatal("a term pushable before Check")
 	}
 	if _, err := s.Check(ctx, true); err != nil {
 		t.Fatal(err)
@@ -767,4 +774,15 @@ func TestBackendErrorsCarryNoBody(t *testing.T) {
 	if err == nil || strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), "@") || strings.Contains(err.Error(), "prod") {
 		t.Fatalf("%v", err)
 	}
+}
+
+// newChecked is newSource after a Check off production: until Check has
+// completed, the source pushes no trusted term and serves no count.
+func newChecked(t *testing.T, f *fakeES, mod func(*Options)) *Source {
+	t.Helper()
+	s := newSource(t, f, mod)
+	if _, err := s.Check(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	return s
 }

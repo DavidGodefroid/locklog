@@ -42,6 +42,8 @@ type fakeElastic struct {
 	// in and maxIn the requests in flight.
 	served, maxPage int64
 	in, maxIn       int
+	// pushed counts the searches carrying a term or must_not.
+	pushed int
 }
 
 func (f *fakeElastic) Send(_ context.Context, method, path string, _ url.Values, body []byte) (egress.Response, error) {
@@ -54,6 +56,19 @@ func (f *fakeElastic) Send(_ context.Context, method, path string, _ url.Values,
 		f.in--
 		f.mu.Unlock()
 	}()
+	// What Check reads (privileges are not answered: off production,
+	// unverified).
+	kw := `{"type":"keyword"}`
+	switch {
+	case method == "GET" && path == "/":
+		return egress.Response{Status: 200, Body: []byte(`{"version":{"number":"8.15.3"}}`)}, nil
+	case method == "GET" && strings.HasSuffix(path, "/_field_caps"):
+		return egress.Response{Status: 200, Body: []byte(`{"indices":["logs"],"fields":{"@timestamp":{"date":{"type":"date"}},"level":{"keyword":{"type":"keyword"}},"tag":{"keyword":{"type":"keyword"}}}}`)}, nil
+	case method == "GET" && strings.HasSuffix(path, "/_mapping"):
+		return egress.Response{Status: 200, Body: []byte(`{"logs":{"mappings":{"properties":{"@timestamp":{"type":"date"},"level":` + kw + `,"tag":` + kw + `}}}}`)}, nil
+	case method == "GET" && strings.HasSuffix(path, "/_settings"):
+		return egress.Response{Status: 200, Body: []byte(`{"logs":{"settings":{},"defaults":{"index.mode":"standard","index.mapping.ignore_above":"2147483647"}}}`)}, nil
+	}
 	if method != "POST" || !strings.HasSuffix(path, "/_search") {
 		return egress.Response{Status: 404}, fmt.Errorf("fake: %s %s", method, path)
 	}
@@ -63,6 +78,11 @@ func (f *fakeElastic) Send(_ context.Context, method, path string, _ url.Values,
 	dec.UseNumber()
 	if err := dec.Decode(&sb); err != nil {
 		return egress.Response{Status: 400}, err
+	}
+	if len(sb.Query.Bool.Filter) > 1 || len(sb.Query.Bool.MustNot) > 0 {
+		f.mu.Lock()
+		f.pushed++
+		f.mu.Unlock()
 	}
 	var after int64 = -1 << 63
 	if len(sb.SearchAfter) > 0 {
@@ -143,6 +163,10 @@ func newElastic(t *testing.T, f *fakeElastic, inFlight int) *elastic.Source {
 	src, err := elastic.New(elastic.Options{Name: "es", Client: f, Parser: p, Indices: []string{"logs"},
 		TrustedFields: []string{"level", "tag"}, InFlight: inFlight, Size: 4, Now: func() time.Time { return t0.Add(2 * time.Hour) }})
 	if err != nil {
+		t.Fatal(err)
+	}
+	// Terms are pushed only once Check has completed.
+	if _, err := src.Check(ctx, false); err != nil {
 		t.Fatal(err)
 	}
 	return src
@@ -284,6 +308,13 @@ func TestElasticMultiValuedTerms(t *testing.T) {
 			t.Errorf("tag %s %q: %d records, want %d", tt.op, tt.vals, got, w)
 		}
 	}
+	// The terms went to the server (Check completed).
+	fe.mu.Lock()
+	pushed := fe.pushed
+	fe.mu.Unlock()
+	if pushed == 0 {
+		t.Fatal("no term reached the server")
+	}
 	// Sorted: the docs' times are distinct.
 	if !sort.SliceIsSorted(fe.docs, func(i, j int) bool { return fe.docs[i].ts < fe.docs[j].ts }) {
 		t.Fatal("fake docs out of order")
@@ -316,6 +347,9 @@ func TestElasticDenseSliceSplit(t *testing.T) {
 			src, err := elastic.New(elastic.Options{Name: "es", Client: fe, Parser: p, Indices: []string{"logs"},
 				TrustedFields: []string{"level"}, InFlight: 2, Size: 8, Now: func() time.Time { return t0.Add(2 * time.Hour) }})
 			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := src.Check(ctx, false); err != nil {
 				t.Fatal(err)
 			}
 			f := newFixture(t, "x\n", func(o *Options) {

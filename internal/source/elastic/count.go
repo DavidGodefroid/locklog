@@ -77,8 +77,14 @@ func (s *Source) IndexCounts(ctx context.Context, q source.CountQuery) (source.C
 	if len(q.By) > 0 || len(q.ByLabels) > MaxCountBy {
 		return source.CountResult{}, source.ErrNotIndexable
 	}
+	s.mu.Lock()
+	checked := s.checked
+	s.mu.Unlock()
+	if !checked {
+		return source.CountResult{}, source.ErrNotIndexable // Check first
+	}
 	for _, b := range q.ByLabels {
-		if !s.trusted(b) {
+		if !s.trusted(b) || !s.serverSide(b) {
 			return source.CountResult{}, source.ErrNotIndexable
 		}
 	}

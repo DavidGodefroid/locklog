@@ -387,6 +387,10 @@ func TestOpenSearch(t *testing.T) {
 		s, cl := newSource(t, elastic.KindOpenSearch, base, config.AuthBasic, reader, []string{idx}, tie)
 		// A custom role is not known read-only: refused until vouched for.
 		checkProduction(t, "an unvouched custom role", s, false)
+		// Off production it is checked (and terms then go to the server).
+		if _, err := s.Check(context.Background(), false); err != nil {
+			t.Fatal(err)
+		}
 		if err := egress.CheckElasticUnauthenticated(context.Background(), cl, true, []string{idx}); err != nil {
 			t.Fatalf("security on, yet: %v", err)
 		}
