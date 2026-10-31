@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -16,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -642,6 +644,84 @@ func TestNumericTermsColdEqualsIndexed(t *testing.T) {
 	for _, c := range cases {
 		if cold[c.name] != [2]int{c.want, c.want} || indexed[c.name] != cold[c.name] {
 			t.Errorf("%s: cold %v, indexed %v, want %d", c.name, cold[c.name], indexed[c.name], c.want)
+		}
+	}
+}
+
+// errSource injects source errors.
+type errSource struct {
+	countingSource
+	plan, scan, count func() error
+}
+
+func (s errSource) Plan(ctx context.Context, r source.Range, sel source.Selector) (source.Byteplan, error) {
+	if s.plan != nil {
+		if err := s.plan(); err != nil {
+			return source.Byteplan{}, err
+		}
+	}
+	return s.countingSource.Plan(ctx, r, sel)
+}
+
+func (s errSource) Scan(ctx context.Context, ch source.Chunk) (source.Iterator, error) {
+	if s.scan != nil {
+		if err := s.scan(); err != nil {
+			return nil, err
+		}
+	}
+	return s.countingSource.Scan(ctx, ch)
+}
+
+func (s errSource) IndexCounts(ctx context.Context, cq source.CountQuery) (source.CountResult, error) {
+	if s.count != nil {
+		if err := s.count(); err != nil {
+			return source.CountResult{}, err
+		}
+	}
+	return s.countingSource.IndexCounts(ctx, cq)
+}
+
+// TestSourceErrorsAreContentFree: errors of sources (which may name files)
+// reach the agent as fixed messages of their class only.
+func TestSourceErrorsAreContentFree(t *testing.T) {
+	const secret = "/srv/customer-acme/billing"
+	pathErr := func() error {
+		return fmt.Errorf("file source: %w", &fs.PathError{Op: "open", Path: secret + "/app.log", Err: syscall.EIO})
+	}
+	permErr := func() error {
+		return &fs.PathError{Op: "open", Path: secret + "/app.log", Err: syscall.EACCES}
+	}
+	staleErr := func() error { return fmt.Errorf("%s: %w", secret, source.ErrStale) }
+	for name, tc := range map[string]struct {
+		es    func(*errSource)
+		count bool
+		code  string
+	}{
+		"plan":       {func(s *errSource) { s.plan = pathErr }, false, ESource},
+		"scan":       {func(s *errSource) { s.scan = pathErr }, false, ESource},
+		"permission": {func(s *errSource) { s.scan = permErr }, false, ESource},
+		"stale":      {func(s *errSource) { s.scan = staleErr }, false, EStale},
+		"index":      {func(s *errSource) { s.count = pathErr }, true, ESource},
+		"count scan": {func(s *errSource) { s.scan = pathErr }, true, ESource},
+	} {
+		f := newFixture(t, genLog(t0, 100, "c@example.org"), nil)
+		es := errSource{countingSource: f.eng.o.Sources["app"].(countingSource)}
+		tc.es(&es)
+		f.eng.o.Sources["app"] = es
+		var err error
+		if tc.count {
+			_, err = f.eng.Count(ctx, CountQuery{Query: q(nil), By: []string{"level"}})
+		} else {
+			_, err = f.eng.Search(ctx, q(nil))
+		}
+		var e *Error
+		if !errors.As(err, &e) || e.Code != tc.code {
+			t.Errorf("%s: %v, want %s", name, err, tc.code)
+			continue
+		}
+		b, _ := json.Marshal(e)
+		if strings.Contains(string(b), "customer-acme") || strings.Contains(e.Error(), "/srv") {
+			t.Errorf("%s: path in the agent's error: %s", name, b)
 		}
 	}
 }

@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"slices"
 	"sort"
 	"sync"
@@ -233,7 +234,7 @@ func (e *Engine) planQuery(ctx context.Context, q *Query, remoteBudget, localBud
 		src := e.o.Sources[name]
 		p, err := src.Plan(ctx, r, q.selector(name, e.o.Trusted))
 		if err != nil {
-			return source.Byteplan{}, &Error{Code: ESource, Message: "source " + name + ": " + e.o.Masker.Text(err.Error())}
+			return source.Byteplan{}, sourceError(err)
 		}
 		if e.remote(name) {
 			bytesRemote += p.Bytes()
@@ -250,6 +251,25 @@ func (e *Engine) planQuery(ctx context.Context, q *Query, remoteBudget, localBud
 		slices.Reverse(plan.Chunks) // sources plan newest stream first
 	}
 	return plan, nil
+}
+
+// sourceError maps an error of a source to a fixed, content-free refusal of
+// its class. Source errors may name files, hosts or label values, so their
+// text never reaches the agent.
+func sourceError(err error) *Error {
+	switch {
+	case errors.Is(err, source.ErrStale), errors.Is(err, source.ErrNotFound), errors.Is(err, fs.ErrNotExist):
+		return &Error{Code: EStale, Message: "a log stream changed since the plan was made: run the query again"}
+	case errors.Is(err, context.Canceled):
+		return &Error{Code: ESource, Message: "cancelled"}
+	case errors.Is(err, context.DeadlineExceeded):
+		return &Error{Code: ESource, Message: "the source did not answer in time; try again"}
+	case errors.Is(err, fs.ErrPermission):
+		return &Error{Code: ESource, Message: "the console may not read a log of this source (permission denied)"}
+	case errors.Is(err, source.ErrNotIndexable):
+		return &Error{Code: ESource, Message: "the count needs fields the index does not hold"}
+	}
+	return &Error{Code: ESource, Message: "the source failed to read its logs"}
 }
 
 // callBytes is the bytes one call may process (remote sources, whose
@@ -374,13 +394,10 @@ func (e *Engine) run(ctx context.Context, plan source.Byteplan, chunk, gran int,
 				}
 				return chunk, gran, sc, failures, nil
 			}
-			if errors.Is(err, source.ErrStale) || errors.Is(err, source.ErrNotFound) {
-				return chunk, gran, sc, failures, &Error{Code: EStale, Message: "a log stream changed since the plan was made: run the query again"}
-			}
 			if ctx.Err() != nil {
 				return chunk, gran, sc, failures, &Error{Code: ESource, Message: "cancelled"}
 			}
-			return chunk, gran, sc, failures, &Error{Code: ESource, Message: e.o.Masker.Text(err.Error())}
+			return chunk, gran, sc, failures, sourceError(err)
 		}
 		if took := time.Since(maskStart); took > e.o.Cost.Time(fetched)*3/2 && took > 100*time.Millisecond {
 			e.o.Cost.Recalibrate() // overrun: recalibrate at once

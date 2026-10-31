@@ -239,7 +239,7 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (CountResult, error) {
 			if err == nil {
 				plan = p
 			} else if !errors.Is(err, source.ErrNotIndexable) {
-				return CountResult{}, &Error{Code: ESource, Message: e.o.Masker.Text(err.Error())}
+				return CountResult{}, sourceError(err)
 			} else {
 				a = newAgg()
 			}
