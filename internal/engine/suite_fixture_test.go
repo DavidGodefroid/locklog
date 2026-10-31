@@ -166,10 +166,12 @@ type suiteConfig struct {
 	Rules       string
 	NoAgentMeta bool
 	Prefilter   bool
-	// Cost defaults to fixedCost(1) (whole plans in one call).
-	Cost    *CostModel
-	Workers int
-	Limits  func(*Limits)
+	// Cost defaults to fixedCost(1) (whole plans in one call);
+	// RealCost calibrates one on the masker, as the console does.
+	Cost     *CostModel
+	RealCost bool
+	Workers  int
+	Limits   func(*Limits)
 	// Epoch shares a pseudonym epoch between fixtures.
 	Epoch *pii.Pseudonymizer
 	// Index builds the local index of the indexable sources.
@@ -342,7 +344,11 @@ func newSuite(t testing.TB, recs map[string][]suiteRecord, cfg suiteConfig) *sui
 	rand.Read(key)
 	sealer, _ := NewSealer(key)
 	cost := cfg.Cost
-	if cost == nil {
+	switch {
+	case cfg.RealCost:
+		p, _ := parse.New(parse.Options{})
+		cost = NewCostModel(p, func(ev parse.Event) { m.Mask("", ev) }, max(cfg.Workers, 1), time.Now)
+	case cost == nil:
 		cost = fixedCost(1)
 	}
 	o := Options{
