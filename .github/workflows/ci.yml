@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
     name: test (${{ matrix.os }})
@@ -16,6 +20,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     env:
       CGO_ENABLED: "0"
     steps:
@@ -44,6 +49,7 @@ jobs:
   test-windows:
     name: test (windows-latest)
     runs-on: windows-latest
+    timeout-minutes: 15
     env:
       CGO_ENABLED: "0"
     steps:
@@ -76,6 +82,7 @@ jobs:
   lint:
     name: lint
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     env:
       CGO_ENABLED: "0"
     steps:

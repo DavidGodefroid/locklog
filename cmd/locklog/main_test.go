@@ -20,6 +20,7 @@ func TestRun(t *testing.T) {
 		{name: "no command", args: nil, code: 2, stderrPart: "usage: locklog"},
 		{name: "unknown command", args: []string{"nope"}, code: 2, stderrPart: `unknown command "nope"`},
 		{name: "help", args: []string{"help"}, code: 0, stdout: usage},
+		{name: "help with an argument", args: []string{"help", "x"}, code: 2, stderrPart: "usage: locklog"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

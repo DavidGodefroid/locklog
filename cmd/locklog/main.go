@@ -38,6 +38,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "locklog %s\n", version)
 		return 0
 	case "help", "-h", "--help":
+		if len(args) > 1 {
+			fmt.Fprint(stderr, usage)
+			return 2
+		}
 		fmt.Fprint(stdout, usage)
 		return 0
 	default:

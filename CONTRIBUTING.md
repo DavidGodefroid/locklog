@@ -25,7 +25,7 @@ lock* tools; its GUIDE.md is the contract. This repository keeps what is
 logs: the sources, the parsers, the masking pipeline, the query engine and
 its budgets, locklog's console, its MCP tools and its agent texts.
 
-lockkit is pinned in `go.mod`. Do not copy a lockkit package here or work
+Once locklog depends on lockkit, lockkit is pinned in `go.mod`. Do not copy a lockkit package here or work
 around it: a change to a shared package is asked for and made in lockkit
 first, then locklog pins the new lockkit version. To work on both at once,
 add an uncommitted `go.work` (`use (. ../lockkit)`; `go.work` is ignored).

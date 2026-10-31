@@ -2,8 +2,10 @@
 
 locklog lets an AI agent search and count across logs while a console held
 by a human reads them: the personal data and secrets locklog detects are
-masked before anything reaches the agent. The console runs in Docker, in a
-container and under an account of its own, which the agent cannot reach. A
+masked before anything reaches the agent. locklog is in development and
+has no release yet; this policy describes the target design, in which the
+console runs in Docker, in a container and under an account of its own,
+which the agent cannot reach. A
 flaw in the masking, the console or its socket is a security issue.
 
 ## Reporting a vulnerability
@@ -49,8 +51,8 @@ Issues of interest include, among others:
 - log content that can spoof the console's approval screen or make locklog
   act beyond the agent's call.
 
-What locklog does not detect is listed in the README and is not a
-vulnerability by itself. Attacks that require running code as the console's
+What locklog does not detect will be listed in the README with the first
+release, and is not a vulnerability by itself. Attacks that require running code as the console's
 OS account, or an agent that can already read the logs, the Docker socket or
 the backends directly (a deployment precondition), are out of scope.
 

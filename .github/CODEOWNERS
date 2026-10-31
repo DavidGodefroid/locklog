@@ -1,4 +1,4 @@
-# Every change needs a review from a code owner. Paths that decide what
+# Code owners are requested as reviewers on every change. Paths that decide what
 # is masked or approved can be listed apart later so that a second reviewer can be
 # added to them alone.
 * @DavidGodefroid
