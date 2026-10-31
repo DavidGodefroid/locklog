@@ -35,7 +35,10 @@ For every entry, the reader's fields (each value as a string, or as an
 array of bytes when it is not printable UTF-8; a field that repeats becomes
 an array), plus `__CURSOR`, `__REALTIME_TIMESTAMP`, `__MONOTONIC_TIMESTAMP`,
 `_BOOT_ID`, `__SEQNUM` and `__SEQNUM_ID`, were compared as JSON values with
-journalctl's output for the same entry.
+journalctl's output for the same entry. The reference is the journalctl of
+the image that wrote the file (the host's 255.4 for the variants and the
+real files). Debian 12's journalctl (252) does not print `__SEQNUM` and
+`__SEQNUM_ID`, so those two were compared only where the reference has them.
 
 | Distribution | systemd | Default file flags | remote fixture | native fixture |
 |---|---|---|---|---|
@@ -63,7 +66,8 @@ Notes for LL-10:
   Without the cache the reader is 5.6 times slower, because entries share
   their `_HOSTNAME`, `_SYSTEMD_UNIT`, … DATA objects.
 - Caps are checked before allocation. For ZSTD, the frame header's content
-  size; for LZ4, the 8-byte size prefix; for XZ and uncompressed data, a
+  size when present, and in every case a decode limited to the cap (the
+  size is optional and written by whoever wrote the file); for LZ4, the 8-byte size prefix; for XZ and uncompressed data, a
   limited read; on disk, the object size. A field over the 1 MiB DATA cap
   is dropped, not truncated.
 - A DATA object holds the field name inside its (possibly compressed)
@@ -146,8 +150,10 @@ Consequences, for LL-11 and LL-09a:
   1. the console opens only `<id>/<id>-json.log[.N[.gz]]` for mapped ids, with
      `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS |
      RESOLVE_NO_XDEV)`. `RESOLVE_NO_XDEV` refuses a path that crosses into a
-     propagated mount. The component-wise fallback compares `st_dev` with the
-     root's;
+     propagated mount. The component-wise fallback compares the mount id (`statx`
+     `STATX_MNT_ID`, kernel ≥ 5.8) of each component with the root's.
+     `st_dev` alone is not enough: a bind mount of the same filesystem keeps
+     it;
   2. a Landlock ruleset (kernel ≥ 5.13), applied by the console to itself
      before it opens any source, grants only read rights beneath each mount
      root. A write to a propagated read-write mount then fails, even after a
