@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -25,6 +26,8 @@ type Line struct {
 	Text     string
 	Format   string // json, logfmt, plain
 	Canaries []Canary
+	// Position and Encoding index Positions and Encodings.
+	Position, Encoding int
 }
 
 // Kinds the generator plants. Every one is covered by a lockkit detector
@@ -33,7 +36,9 @@ type Line struct {
 var Kinds = []string{"email", "phone", "iban", "card", "be_niss", "fr_nir", "nl_bsn", "us_ssn", "secret", "ip", "person_name"}
 
 // ValueDetectors are the value detectors that cover every kind of Kinds
-// but "secret".
+// but "secret". phone_loose plants nothing of its own: it widens phone to
+// national numbers without a trunk 0, an opt-in for its false positives
+// whose recall is lockkit's to test.
 var ValueDetectors = []string{"email", "phone", "iban", "card", "be_niss", "fr_nir", "nl_bsn", "us_ssn", "ip", "person_name"}
 
 // Given names and surnames of the synthetic people (all in lockkit's
@@ -112,10 +117,18 @@ func (g *Gen) Value(kind string) string {
 	case "secret":
 		return g.secret()
 	case "ip":
-		if g.r.IntN(2) == 0 {
-			return fmt.Sprintf("%d.%d.%d.%d", []int{81, 91, 145, 185, 212}[g.r.IntN(5)], g.r.IntN(256), g.r.IntN(256), 1+g.r.IntN(254))
+		v4 := fmt.Sprintf("%d.%d.%d.%d", []int{81, 91, 145, 185, 212}[g.r.IntN(5)], g.r.IntN(256), g.r.IntN(256), 1+g.r.IntN(254))
+		v6 := fmt.Sprintf("2a02:%x:%x::%x", 0x1000+g.r.IntN(0xefff), 1+g.r.IntN(0xfffe), 1+g.r.IntN(0xfffe))
+		switch g.r.IntN(4) {
+		case 0:
+			return v4
+		case 1:
+			return v6
+		case 2:
+			return strings.ToUpper(v6)
+		default:
+			return "::ffff:" + v4 // IPv4-mapped
 		}
-		return fmt.Sprintf("2a02:%x:%x::%x", 0x1000+g.r.IntN(0xefff), 1+g.r.IntN(0xfffe), 1+g.r.IntN(0xfffe))
 	case "person_name":
 		return givenNames[g.r.IntN(len(givenNames))] + " " + surnames[g.r.IntN(len(surnames))]
 	}
@@ -258,7 +271,8 @@ func (g *Gen) Lines(n int) []Line {
 	out := make([]Line, 0, n)
 	for i := range n {
 		kind := Kinds[i%len(Kinds)]
-		enc := Encodings[(i/len(Kinds))%len(Encodings)]
+		encI := (i / len(Kinds)) % len(Encodings)
+		enc := Encodings[encI]
 		v := g.Value(kind)
 		w := Encode(v, enc)
 		ts := fmt.Sprintf("2026-10-30T14:%02d:%02d.%03dZ", (i/60)%60, i%60, i%1000)
@@ -267,7 +281,8 @@ func (g *Gen) Lines(n int) []Line {
 		if enc == "json-u" {
 			jsonW = w
 		}
-		switch pos := (i / (len(Kinds) * len(Encodings))) % Positions; pos {
+		pos := (i / (len(Kinds) * len(Encodings))) % Positions
+		switch pos {
 		case 0:
 			text, format = fmt.Sprintf(`{"ts":"%s","level":"error","detail":"%s","status":502}`, ts, jsonW), "json"
 		case 1:
@@ -295,7 +310,7 @@ func (g *Gen) Lines(n int) []Line {
 		case 10: // under an object an agent rule names ("meta")
 			text, format = fmt.Sprintf(`{"ts":"%s","meta":{"note":"%s","deep":{"x":"%s"}}}`, ts, jsonW, jsonW), "json"
 		}
-		out = append(out, Line{Text: text, Format: format, Canaries: []Canary{{kind, v}}})
+		out = append(out, Line{Text: text, Format: format, Canaries: []Canary{{kind, v}}, Position: pos, Encoding: encI})
 	}
 	return out
 }
@@ -325,14 +340,44 @@ func Forms(c Canary) []string {
 	if number || c.Kind == "person_name" {
 		forms = append(forms, compact)
 	}
-	if c.Kind == "secret" {
-		forms = append(forms, SecretBody(v))
+	switch c.Kind {
+	case "secret":
+		// The body, its head and tail, and each JWT segment: a part of a
+		// secret is a leak.
+		body := SecretBody(v)
+		forms = append(forms, body)
+		if len(body) >= 16 {
+			forms = append(forms, body[:8], body[len(body)-8:])
+		}
+		if strings.HasPrefix(v, "eyJ") {
+			for _, seg := range strings.Split(v, ".") {
+				if len(seg) >= 8 {
+					forms = append(forms, seg)
+				}
+			}
+		}
+	case "ip":
+		// The address without its last group (its /24 or /112): a network
+		// prefix is a leak.
+		if i := strings.LastIndexAny(v, ".:"); i > 0 {
+			forms = append(forms, v[:i+1])
+		}
 	}
 	// Digit runs of 6+ of the value: a partial leak of a number.
 	if number && len(compact) >= 9 {
 		forms = append(forms, compact[:7], compact[len(compact)-7:])
 	}
 	return forms
+}
+
+// WordForms are the forms of a canary the scan looks for as whole words:
+// each part of a person's name (a masker hiding the given name but showing
+// the surname leaks).
+func WordForms(c Canary) []string {
+	if c.Kind != "person_name" {
+		return nil
+	}
+	return strings.Fields(c.Value)
 }
 
 func jsonUEscape(v string) string {
@@ -371,6 +416,15 @@ func Scan(where string, out []byte, cs []Canary) []Hit {
 			}
 			for _, s := range texts {
 				if strings.Contains(s, f) || strings.Contains(strings.ToLower(s), strings.ToLower(f)) {
+					hits = append(hits, Hit{c, f, where})
+					break
+				}
+			}
+		}
+		for _, f := range WordForms(c) {
+			re := regexp.MustCompile(`(?i)(?:^|[^\p{L}\p{N}_])` + regexp.QuoteMeta(f) + `(?:$|[^\p{L}\p{N}_])`)
+			for _, s := range texts {
+				if re.MatchString(s) {
 					hits = append(hits, Hit{c, f, where})
 					break
 				}

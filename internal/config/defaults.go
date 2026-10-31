@@ -3,7 +3,7 @@ package config
 import (
 	"time"
 
-	"github.com/DavidGodefroid/lockkit/pii"
+	"github.com/DavidGodefroid/locklog/internal/mask"
 )
 
 // Structured modes: how the leaves of structured records (JSON, logfmt,
@@ -11,9 +11,9 @@ import (
 const (
 	// StructuredRedactUnknown redacts every leaf that is neither trusted
 	// nor named by an allow rule (the production default).
-	StructuredRedactUnknown = "redact-unknown"
+	StructuredRedactUnknown = mask.StructuredRedactUnknown
 	// StructuredDetect masks what rules, names and detectors find.
-	StructuredDetect = "detect"
+	StructuredDetect = mask.StructuredDetect
 )
 
 // Text modes: how free text is masked.
@@ -129,28 +129,16 @@ func DefaultLimits(production bool) Limits {
 	return l
 }
 
-// DefaultDetectors is the detector set of a profile that sets none:
-// lockkit's default value detectors (pii.AllDetectors) and ip (public
-// addresses; private and loopback ones are infrastructure, never found).
-// person_name and phone_loose are opt-in for their false positives
-// (OptInDetectors). Secret detection is not a detector setting: it is
-// always on, and a profile naming "secret" is refused.
-func DefaultDetectors() []string {
-	ds := pii.AllDetectors()
-	out := make([]string, 0, len(ds)+1)
-	for _, d := range ds {
-		out = append(out, d.Name())
-	}
-	return append(out, "ip")
-}
+// DefaultDetectors is the detector set of a profile that sets none
+// (mask.DefaultValueDetectors: lockkit's defaults and ip). person_name and
+// phone_loose are opt-in for their false positives (OptInDetectors).
+// Secret detection is not a detector setting: it is always on, and a
+// profile naming "secret" is refused.
+func DefaultDetectors() []string { return mask.DefaultValueDetectors() }
 
 // OptInDetectors are the value detectors a profile may add to the
 // default set by naming them in `detectors`.
 func OptInDetectors() []string { return []string{"person_name", "phone_loose"} }
-
-// SecretDetector is lockkit's secret detector: always on, never named in
-// a profile.
-const SecretDetector = "secret"
 
 // DefaultStructured is redact-unknown on production, detect elsewhere.
 func DefaultStructured(production bool) string {

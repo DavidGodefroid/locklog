@@ -9,6 +9,8 @@ import (
 	"time"
 
 	kconfig "github.com/DavidGodefroid/lockkit/config"
+
+	"github.com/DavidGodefroid/locklog/internal/mask"
 )
 
 const fileSrc = `
@@ -150,7 +152,7 @@ func TestProfileValues(t *testing.T) {
 // are opt-in, and a profile may name them.
 func TestDetectorDefaultsAndOptIn(t *testing.T) {
 	def := DefaultDetectors()
-	if !slices.Contains(def, "ip") || slices.Contains(def, SecretDetector) {
+	if !slices.Contains(def, "ip") || slices.Contains(def, mask.SecretDetectorName) {
 		t.Errorf("default detectors = %v", def)
 	}
 	for _, n := range OptInDetectors() {

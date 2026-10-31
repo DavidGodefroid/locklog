@@ -15,7 +15,6 @@ import (
 
 	"github.com/DavidGodefroid/lockkit/pii"
 
-	"github.com/DavidGodefroid/locklog/internal/config"
 	"github.com/DavidGodefroid/locklog/internal/mask/masktest"
 	"github.com/DavidGodefroid/locklog/internal/parse"
 )
@@ -135,15 +134,15 @@ func TestMaskSecretFirst(t *testing.T) {
 	g := masktest.New(1)
 	secret := g.Value("secret")
 	m := newMasker(t, Options{Structured: StructuredDetect, SecretName: func(n string) bool { return n == "password" },
-		Rules: &Rules{Mask: []Rule{{Field: "auth", Mode: ModePseudonym}}}})
-	r := m.Mask("api", event(t, `{"auth":"token `+secret+`","password":"jean@example.com","detail":"key `+secret+` for a@example.com"}`))
+		Rules: &Rules{Mask: []Rule{{Field: "note", Mode: ModePseudonym}}}})
+	r := m.Mask("api", event(t, `{"note":"token `+secret+`","password":"jean@example.com","detail":"key `+secret+` for a@example.com"}`))
 	got := encode(t, r)
 	if strings.Contains(got, secret) || strings.Contains(got, masktest.SecretBody(secret)) {
 		t.Fatalf("secret leaked: %s", got)
 	}
 	id, _ := m.o.Pseudonyms.ID(PersonalKind, "token "+Secret)
-	if v, _ := r.Lookup("auth"); v.Text() != Token(PersonalKind, id) {
-		t.Errorf("auth = %q, want the pseudonym of the step-1 string", v.Text())
+	if v, _ := r.Lookup("note"); v.Text() != Token(PersonalKind, id) {
+		t.Errorf("note = %q, want the pseudonym of the step-1 string", v.Text())
 	}
 	if v, _ := r.Lookup("password"); v.Text() != Secret {
 		t.Errorf("password = %q, want %s (a secret name wins over every later step)", v.Text(), Secret)
@@ -151,7 +150,7 @@ func TestMaskSecretFirst(t *testing.T) {
 	if v, _ := r.Lookup("detail"); !strings.HasPrefix(v.Text(), "key "+Secret+" for ⟦email:") {
 		t.Errorf("detail = %q", v.Text())
 	}
-	for _, p := range []string{"auth", "password", "detail"} {
+	for _, p := range []string{"note", "password", "detail"} {
 		if !r.HadSecret(p) {
 			t.Errorf("HadSecret(%s) = false", p)
 		}
@@ -428,8 +427,12 @@ func TestLeakHarnessNewKinds(t *testing.T) {
 				own = append(own, l)
 			}
 		}
-		if len(own) < masktest.Positions*len(masktest.Encodings) {
-			t.Fatalf("%s: %d lines, want every position and encoding", kind, len(own))
+		seen := map[[2]int]bool{}
+		for _, l := range own {
+			seen[[2]int{l.Position, l.Encoding}] = true
+		}
+		if len(seen) != masktest.Positions*len(masktest.Encodings) {
+			t.Fatalf("%s: %d (position, encoding) pairs, want every one", kind, len(seen))
 		}
 		var without []string
 		for _, n := range masktest.ValueDetectors {
@@ -443,7 +446,7 @@ func TestLeakHarnessNewKinds(t *testing.T) {
 		}
 		off := Options{Structured: StructuredDetect, Values: values}
 		if kind == "secret" {
-			off = Options{Structured: StructuredDetect, Secrets: noFinder{}, SecretName: func(string) bool { return false }}
+			off = Options{Structured: StructuredDetect, withoutLockkitSecrets: true}
 		}
 		for _, mode := range []string{StructuredDetect, StructuredRedactUnknown} {
 			m := newMasker(t, Options{Structured: mode, Trusted: []string{"ts", "level", "status"}})
@@ -458,30 +461,47 @@ func TestLeakHarnessNewKinds(t *testing.T) {
 			}
 		}
 		m := newMasker(t, off)
-		leaked := 0
+		leaked, leakedText := 0, 0
 		for _, l := range own {
 			out, _ := json.Marshal(m.Mask("api", p.Line(l.Text)))
 			if len(masktest.Scan("", out, l.Canaries)) > 0 {
 				leaked++
 			}
+			if len(masktest.Scan("", []byte(m.Text(l.Text)), l.Canaries)) > 0 {
+				leakedText++
+			}
 		}
-		if leaked < len(own)*80/100 {
-			t.Errorf("%s detector off: %d of %d lines leaked; the canary does not exercise it", kind, leaked, len(own))
+		if leaked < len(own)*80/100 || leakedText < len(own)*80/100 {
+			t.Errorf("%s detector off: %d (records) and %d (Text) of %d lines leaked; the canary does not exercise it", kind, leaked, leakedText, len(own))
 		}
 	}
 }
 
-// A masker left without finders still masks secrets (lockkit's detector,
-// pii.LooksSecret names) and the default value detectors.
-func TestMaskerDefaultsFailClosed(t *testing.T) {
-	m, err := New(Options{Pseudonyms: epoch(t)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	r := m.Mask("api", event(t, `{"client_secret":"plain words here","detail":"auth with ghp_0123456789abcdefghijABCDEFGHIJ012345 by jean@example.com"}`))
-	got := encode(t, r)
-	if strings.Contains(got, "plain words") || strings.Contains(got, "ghp_") || strings.Contains(got, "jean@") {
-		t.Fatalf("defaults leaked: %s", got)
+// Every masker runs lockkit's secret step and pii.LooksSecret, whatever
+// finders it is given (none, an empty set, one of its own); a masker
+// given no value detectors runs the default set, ip included.
+func TestMaskerSecretStepAlwaysOn(t *testing.T) {
+	line := `{"client_secret":"plain words here","detail":"auth with ghp_0123456789abcdefghijABCDEFGHIJ012345 by jean@example.com from 81.2.3.4 and 2A02:1234:5::1"}`
+	for name, o := range map[string]Options{
+		"defaults":     {},
+		"empty set":    {Secrets: Detectors{}, SecretName: func(string) bool { return false }},
+		"own finder":   {Secrets: noFinder{}},
+		"no detectors": {Secrets: Detectors(nil), Values: nil},
+	} {
+		o.Pseudonyms = epoch(t)
+		m, err := New(o)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := encode(t, m.Mask("api", event(t, line)))
+		for _, clear := range []string{"plain words", "ghp_", "0123456789abcdefghij", "jean@", "81.2.3.4", "2A02:1234"} {
+			if strings.Contains(got, clear) {
+				t.Errorf("%s: %q in clear: %s", name, clear, got)
+			}
+		}
+		if got := m.Text("ghp_0123456789abcdefghijABCDEFGHIJ012345"); got != Secret {
+			t.Errorf("%s: Text = %q", name, got)
+		}
 	}
 	if _, err := ValueDetectors([]string{"email", SecretDetectorName}); err == nil {
 		t.Error("the secret detector accepted as a value detector")
@@ -497,7 +517,7 @@ func (noFinder) Find(string) []pii.Match { return nil }
 func TestLeakHarnessFindsLeaks(t *testing.T) {
 	lines := masktest.New(42).Lines(2000)
 	p, _ := parse.New(parse.Options{})
-	m := newMasker(t, Options{Structured: StructuredDetect, Values: noFinder{}, Secrets: noFinder{}})
+	m := newMasker(t, Options{Structured: StructuredDetect, Values: noFinder{}, withoutLockkitSecrets: true})
 	leaked := 0
 	for _, l := range lines {
 		out, _ := json.Marshal(m.Mask("api", p.Line(l.Text)))
@@ -585,13 +605,6 @@ func fuzzOneNoLeak(t *testing.T, m *Masker, p *parse.Parser, values, secrets Det
 	}
 }
 
-// The masker's modes are the profile's.
-func TestModesMatchConfig(t *testing.T) {
-	if StructuredRedactUnknown != config.StructuredRedactUnknown || StructuredDetect != config.StructuredDetect {
-		t.Error("structured modes differ from internal/config")
-	}
-}
-
 // A secret name, a human rule or an agent rule on an object or an array
 // decides for everything under it (design §4.2: secrets first and final).
 func TestContainerNamesAndRulesCoverChildren(t *testing.T) {
@@ -639,7 +652,7 @@ func TestLeakHarnessRulePositions(t *testing.T) {
 	per := len(masktest.Kinds) * len(masktest.Encodings)
 	lines := masktest.New(7).Lines(per * masktest.Positions * 3)
 	for _, mode := range []string{StructuredDetect, StructuredRedactUnknown} {
-		m := newMasker(t, Options{Structured: mode, Rules: &rules, Values: noFinder{}, Secrets: noFinder{}, SecretName: masktest.SecretNameForCorpus, Trusted: []string{"ts"}})
+		m := newMasker(t, Options{Structured: mode, Rules: &rules, Values: noFinder{}, withoutLockkitSecrets: true, SecretName: masktest.SecretNameForCorpus, Trusted: []string{"ts"}})
 		m.Mask("api", p.Line(`{"meta":{"note":"x"}}`))
 		if err := m.AgentAdd("api", "meta", ModePseudonym, t0, AgentLimits{PerHour: 10, Total: 50}); err != nil && !errors.Is(err, ErrRuleExists) {
 			t.Fatal(err)

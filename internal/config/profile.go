@@ -17,8 +17,8 @@ import (
 	"time"
 
 	kconfig "github.com/DavidGodefroid/lockkit/config"
-	"github.com/DavidGodefroid/lockkit/pii"
 
+	"github.com/DavidGodefroid/locklog/internal/mask"
 	"github.com/DavidGodefroid/locklog/internal/product"
 )
 
@@ -208,10 +208,7 @@ func buildProfile(name string, r rawProfile, detectorsSet bool) (Profile, error)
 	if !detectorsSet {
 		p.Detectors = DefaultDetectors()
 	}
-	if slices.Contains(p.Detectors, SecretDetector) {
-		return Profile{}, errf("detectors: %q is not a value detector (secret detection is always on)", SecretDetector)
-	}
-	if _, err := pii.Detectors(p.Detectors); err != nil {
+	if _, err := mask.ValueDetectors(p.Detectors); err != nil {
 		return Profile{}, errf("detectors: %v", err)
 	}
 	p.Detectors = kconfig.SortedSet(p.Detectors)
