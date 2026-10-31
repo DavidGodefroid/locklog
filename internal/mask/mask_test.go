@@ -754,3 +754,51 @@ func TestMaskGlobOverDottedKeys(t *testing.T) {
 		}
 	}
 }
+
+func TestMaskRuleGlobMatchesReference(t *testing.T) {
+	ref := func(fs, ps []string) bool {
+		var rec func(i, j int) bool
+		rec = func(i, j int) bool {
+			if i == len(fs) {
+				return j == len(ps)
+			}
+			if fs[i] == "*" {
+				for k := j + 1; k <= len(ps); k++ {
+					if rec(i+1, k) {
+						return true
+					}
+				}
+				return false
+			}
+			return j < len(ps) && fs[i] == ps[j] && rec(i+1, j+1)
+		}
+		return rec(0, 0)
+	}
+	segs := []string{"a", "b", "*"}
+	paths := []string{"a", "b", "c"}
+	var gen func(n int, alpha []string) [][]string
+	gen = func(n int, alpha []string) [][]string {
+		if n == 0 {
+			return [][]string{nil}
+		}
+		var out [][]string
+		for _, p := range gen(n-1, alpha) {
+			for _, x := range alpha {
+				out = append(out, append(slices.Clone(p), x))
+			}
+		}
+		return out
+	}
+	for fn := 1; fn <= 4; fn++ {
+		for _, fs := range gen(fn, segs) {
+			for pn := 1; pn <= 5; pn++ {
+				for _, ps := range gen(pn, paths) {
+					r := Rule{Field: strings.Join(fs, "."), Mode: ModeRedact}
+					if got, want := maskRuleMatches(r, "api", strings.Join(ps, ".")), ref(fs, ps) || ruleMatches(r, "api", strings.Join(ps, ".")); got != want {
+						t.Fatalf("%s on %s = %v, want %v", r.Field, strings.Join(ps, "."), got, want)
+					}
+				}
+			}
+		}
+	}
+}

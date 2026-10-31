@@ -29,7 +29,9 @@ const (
 )
 
 // Rule is a human rule of .locklog/pii.toml: field names and modes only.
-// Field is a clear dotted path; "*" matches one segment.
+// Field is a clear dotted path; "*" matches one segment (in a mask rule,
+// also a key holding dots: one or more segments, so a mask rule covers
+// more, never less).
 type Rule struct {
 	Sources []string // source names; empty: every source
 	Field   string
@@ -269,22 +271,27 @@ func maskRuleMatches(r Rule, source, clearPath string) bool {
 		return false
 	}
 	ps, fs := strings.Split(clearPath, "."), strings.Split(r.Field, ".")
-	// ok[i][j]: fs[:i] matches ps[:j], "*" taking one or more segments.
-	ok := make([][]bool, len(fs)+1)
-	for i := range ok {
-		ok[i] = make([]bool, len(ps)+1)
+	if len(ps) < len(fs) {
+		return false
 	}
-	ok[0][0] = true
-	for i := 1; i <= len(fs); i++ {
-		for j := 1; j <= len(ps); j++ {
-			if fs[i-1] == "*" {
-				ok[i][j] = ok[i-1][j-1] || ok[i][j-1]
-			} else {
-				ok[i][j] = ok[i-1][j-1] && fs[i-1] == ps[j-1]
-			}
+	// Wildcard matching, "*" taking one or more segments: the classic
+	// two-pointer walk with one backtrack point, no allocation.
+	i, j, star, mark := 0, 0, -1, 0
+	for j < len(ps) {
+		switch {
+		case i < len(fs) && fs[i] == "*":
+			star, mark = i, j // "*" takes ps[j] (through ps[mark])
+			i, j = i+1, j+1
+		case i < len(fs) && fs[i] == ps[j]:
+			i, j = i+1, j+1
+		case star >= 0:
+			mark++ // "*" takes one more segment
+			i, j = star+1, mark+1
+		default:
+			return false
 		}
 	}
-	return ok[len(fs)][len(ps)]
+	return i == len(fs)
 }
 
 func ruleMatches(r Rule, source, clearPath string) bool {

@@ -218,15 +218,20 @@ func (m *Masker) AgentAdd(source, shownPath, mode string, now time.Time, lim Age
 	}
 	cp := strings.Join(clear, ".")
 	// A path through a masked name is matched by its digest only: its
-	// shape is not checked, so the answer tells nothing of the clear name.
+	// shape is not checked.
 	if err := checkPath(cp, false); err != nil && !masked {
 		return ErrUnknownField
 	}
-	if _, ok := m.o.Rules.human(source, cp); ok {
-		return ErrRuleExists
-	}
-	if m.trusted[cp] {
-		return ErrRuleExists // trusted by the human: only the human changes it
+	// Through a masked name, the human's rules and trusted fields are not
+	// consulted either (their answer would tell of the clear name): the
+	// agent's rule only tightens, and a human rule still wins.
+	if !masked {
+		if _, ok := m.o.Rules.human(source, cp); ok {
+			return ErrRuleExists
+		}
+		if m.trusted[cp] {
+			return ErrRuleExists // trusted by the human: only the human changes it
+		}
 	}
 	return m.o.Rules.Agent.add(source, cp, mode, now, lim)
 }
