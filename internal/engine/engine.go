@@ -346,6 +346,7 @@ func (e *Engine) run(ctx context.Context, plan source.Byteplan, chunk, gran int,
 	deadline := start.Add(e.o.Limits.Deadline)
 	var sc Scanned
 	failures := 0
+	filtered := e.o.Prefilter && len(needles) > 0
 	for chunk < len(plan.Chunks) {
 		if callBytes > 0 && sc.Bytes >= callBytes {
 			return chunk, gran, sc, failures, nil
@@ -370,7 +371,7 @@ func (e *Engine) run(ctx context.Context, plan source.Byteplan, chunk, gran int,
 			return chunk, gran, sc, failures, nil
 		}
 		groupCtx, cancel := context.WithDeadline(ctx, deadline.Add(e.o.Limits.Deadline/2))
-		raws, fetched, err := e.fetch(groupCtx, sub, needles)
+		raws, total, fetched, err := e.fetch(groupCtx, sub, needles)
 		if err == nil && sc.Granules > 0 && e.o.Cost.Time(fetched) > time.Until(deadline) {
 			// Fetched more than the time left can mask: drop the group
 			// unmasked; the next call fetches it again.
@@ -403,7 +404,12 @@ func (e *Engine) run(ctx context.Context, plan source.Byteplan, chunk, gran int,
 			e.o.Cost.Recalibrate() // overrun: recalibrate at once
 		}
 		for i := range raws {
-			if recs[i].Failed() {
+			// With the pre-filter on, only the records whose clear
+			// text holds the needles are masked: their failures
+			// would tell which ones do, so they are not counted
+			// (failed records are still withheld whole); see
+			// prefilter.go.
+			if recs[i].Failed() && !filtered {
 				failures++
 			}
 			visit(raws[i], recs[i])
@@ -419,7 +425,7 @@ func (e *Engine) run(ctx context.Context, plan source.Byteplan, chunk, gran int,
 		} else {
 			sc.Bytes += fetched
 		}
-		sc.Records += int64(len(raws))
+		sc.Records += int64(total) // before the pre-filter
 		sc.Granules += len(sub.Granules)
 		gran = g[1]
 		if gran >= len(c.Granules) {
@@ -429,24 +435,28 @@ func (e *Engine) run(ctx context.Context, plan source.Byteplan, chunk, gran int,
 	return chunk, gran, sc, failures, nil
 }
 
-// fetch reads the records of a group of granules and the bytes it cost.
-// With the opt-in pre-filter, a record whose clear text cannot contain every
-// needle is dropped before masking (non-production only).
-func (e *Engine) fetch(ctx context.Context, c source.Chunk, needles []string) ([]source.RawRecord, int64, error) {
+// fetch reads the records of a group of granules: those to mask, how many
+// the group holds (before any filtering: scanned.records never depends on
+// the clear text) and the bytes it cost. With the opt-in pre-filter, a
+// record whose clear text cannot contain every needle is dropped before
+// masking (non-production only).
+func (e *Engine) fetch(ctx context.Context, c source.Chunk, needles []string) ([]source.RawRecord, int, int64, error) {
 	it, err := e.o.Sources[c.Source].Scan(ctx, c)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 	defer it.Close()
 	var raws []source.RawRecord
+	total := 0
 	for {
 		raw, err := it.Next()
 		if errors.Is(err, io.EOF) {
-			return raws, it.Processed(), nil
+			return raws, total, it.Processed(), nil
 		}
 		if err != nil {
-			return nil, it.Processed(), err
+			return nil, total, it.Processed(), err
 		}
+		total++
 		if e.o.Prefilter && len(needles) > 0 && !prefilterPass(raw.Event, needles) {
 			continue
 		}

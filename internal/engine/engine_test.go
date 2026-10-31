@@ -81,6 +81,24 @@ func (c countingSource) IndexCounts(ctx context.Context, q source.CountQuery) (s
 
 func newFixture(t *testing.T, content string, opt func(*Options)) *fixture {
 	t.Helper()
+	return newFixtureMask(t, content, nil, opt)
+}
+
+// boomFinder is a secret finder that panics on a text holding BOOM: the
+// masker withholds such a record whole (Failed).
+type boomFinder struct{ masktest.SecretFinder }
+
+func (b boomFinder) Find(s string) []pii.Match {
+	if strings.Contains(s, "BOOM") {
+		panic("boom")
+	}
+	return b.SecretFinder.Find(s)
+}
+
+func withBoom(o *mask.Options) { o.Secrets = boomFinder{} }
+
+func newFixtureMask(t *testing.T, content string, mopt func(*mask.Options), opt func(*Options)) *fixture {
+	t.Helper()
 	root, _ := filepath.EvalSymlinks(t.TempDir())
 	os.MkdirAll(filepath.Join(root, "logs"), 0o755)
 	if err := os.WriteFile(filepath.Join(root, "logs", "app.log"), []byte(content), 0o644); err != nil {
@@ -95,8 +113,12 @@ func newFixture(t *testing.T, content string, opt func(*Options)) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, err := mask.New(mask.Options{Pseudonyms: ep, Values: mask.Detectors(pii.AllDetectors()), Secrets: masktest.SecretFinder{},
-		Trusted: []string{"level", "status"}, Structured: mask.StructuredDetect})
+	mo := mask.Options{Pseudonyms: ep, Values: mask.Detectors(pii.AllDetectors()), Secrets: masktest.SecretFinder{},
+		Trusted: []string{"level", "status"}, Structured: mask.StructuredDetect}
+	if mopt != nil {
+		mopt(&mo)
+	}
+	m, err := mask.New(mo)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -373,24 +395,115 @@ func TestStoppingPointsIndependentOfPredicates(t *testing.T) {
 	_ = b
 }
 
+// normalize renders a result for comparison: refs and cursors are opened
+// (they are sealed with fresh nonces; plan and cache ids are random).
+func normalize(t *testing.T, e *Engine, res any) string {
+	t.Helper()
+	b, _ := json.Marshal(res)
+	var m map[string]any
+	json.Unmarshal(b, &m)
+	if c, ok := m["cursor"].(string); ok {
+		var st cursorState
+		if err := e.o.Sealer.Open("Lc1", c, &st); err != nil {
+			t.Fatal(err)
+		}
+		m["cursor"] = fmt.Sprintf("chunk %d granule %d cached %v", st.Chunk, st.Granule, st.Cache != "")
+	}
+	if rs, ok := m["records"].([]any); ok {
+		for _, r := range rs {
+			rec := r.(map[string]any)
+			var st refState
+			if err := e.o.Sealer.Open("Lr1", rec["ref"].(string), &st); err != nil {
+				t.Fatal(err)
+			}
+			rec["ref"] = st
+		}
+	}
+	out, _ := json.Marshal(m)
+	return string(out)
+}
+
+// allPages runs a search to completion and returns its normalised pages.
+func allPages(t *testing.T, e *Engine, qq Query) []string {
+	t.Helper()
+	_, pages := allRecords(t, e, qq)
+	var out []string
+	for _, p := range pages {
+		out = append(out, normalize(t, e, p))
+	}
+	return out
+}
+
+// TestPrefilterEquivalence: the opt-in pre-filter changes nothing a call
+// returns (records, scanned work, failures, completeness, cursor
+// positions), whichever needle, including needles found only inside masked
+// values.
 func TestPrefilterEquivalence(t *testing.T) {
-	content := genLog(t0, 5000, "canary@example.org") + "time=2026-10-30T13:00:00Z level=info msg=\"caf\\u00e9 ok\"\n"
-	for _, qq := range []Query{
+	content := genLog(t0, 20000, "canary@example.org") + "time=2026-10-30T13:00:00Z level=info msg=\"caf\\u00e9 ok\"\n"
+	f := newFixture(t, content, oneGranulePerCall)
+	queries := []Query{
 		q(func(q *Query) { q.Text = "order 12"; q.Limit = 200 }),
 		q(func(q *Query) { q.Text = "café"; q.Limit = 200 }),
 		q(func(q *Query) {
 			q.Where = []Pred{{Field: "msg", Op: "contains", Value: raw("timed out (order 4")}}
 			q.Limit = 200
 		}),
+		// Found only inside masked values (the e-mails).
 		q(func(q *Query) { q.Text = "example.org"; q.Limit = 200 }),
-	} {
-		off := newFixture(t, content, nil)
-		on := newFixture(t, content, func(o *Options) { o.Prefilter = true })
-		a, _ := allRecords(t, off.eng, qq)
-		b, _ := allRecords(t, on.eng, qq)
-		if len(a) != len(b) {
-			t.Fatalf("%q: %d without the pre-filter, %d with", qq.Text, len(a), len(b))
+		q(func(q *Query) { q.Text = "canary"; q.Limit = 200 }),
+		q(func(q *Query) { q.Text = "user1"; q.Limit = 200 }),
+		q(func(q *Query) { q.Text = "no such words"; q.Limit = 200 }),
+	}
+	for _, qq := range queries {
+		f.eng.o.Prefilter = false
+		off := allPages(t, f.eng, qq)
+		f.eng.o.Prefilter = true
+		on := allPages(t, f.eng, qq)
+		if !slices.Equal(off, on) {
+			t.Errorf("%q: the pre-filter changes the result:\n%v\n%v", qq.Text, off, on)
 		}
+		cq := CountQuery{Query: qq, By: []string{"level"}}
+		cq.Limit = 0
+		f.eng.o.Prefilter = false
+		a, err := f.eng.Count(ctx, cq)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.eng.o.Prefilter = true
+		b, err := f.eng.Count(ctx, cq)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if x, y := normalize(t, f.eng, a), normalize(t, f.eng, b); x != y {
+			t.Errorf("%q: the pre-filter changes the count:\n%s\n%s", qq.Text, x, y)
+		}
+	}
+	f.eng.o.Prefilter = true
+	// scanned.records counts every record of the plan.
+	res, err := f.eng.Search(ctx, q(func(q *Query) { q.Text = "canary"; q.Limit = 200 }))
+	if err != nil || res.Scanned.Records < 4000 || res.Complete {
+		t.Fatalf("scanned %+v: %v", res.Scanned, err)
+	}
+}
+
+// TestPrefilterMaskFailures: with the pre-filter, masked failures (and
+// E_MASK) do not depend on whether the failing records' clear text holds
+// the needle.
+func TestPrefilterMaskFailures(t *testing.T) {
+	content := genLog(t0, 100, "c@example.org") +
+		"time=2026-10-30T12:05:00Z level=info msg=\"kaboom BOOM 1\"\n" +
+		"time=2026-10-30T12:05:01Z level=info msg=\"kaboom BOOM 2\"\n"
+	f := newFixtureMask(t, content, withBoom, func(o *Options) { o.Prefilter = true })
+	var got []string
+	for _, text := range []string{"kaboom", "upstream", "nowhere"} {
+		res, err := f.eng.Search(ctx, q(func(q *Query) { q.Text = text }))
+		if err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, fmt.Sprintf("failures %d scanned %+v", res.MaskedFailures, res.Scanned))
+	}
+	if got[0] != got[1] || got[1] != got[2] {
+		t.Fatalf("failures depend on the needle: %v", got)
 	}
 }
 
