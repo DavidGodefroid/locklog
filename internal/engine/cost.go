@@ -176,7 +176,7 @@ func granuleGroups(c source.Chunk, from int, per int64) [][2]int {
 	for i < len(c.Granules) {
 		j, n := i, int64(0)
 		for j < len(c.Granules) {
-			b := granuleBytes(c.Granules[j], c.Bytes)
+			b := granuleBytes(c.Granules[j], c)
 			if j > i && n+b > per {
 				break
 			}
@@ -189,14 +189,19 @@ func granuleGroups(c source.Chunk, from int, per int64) [][2]int {
 	return out
 }
 
-// granuleBytes is the planned bytes of a granule (an open-ended granule of
-// a compressed stream not yet measured counts as the chunk's estimate).
-func granuleBytes(g source.Granule, chunkBytes int64) int64 {
-	if g.Bytes > 0 {
+// granuleBytes is the planned bytes of a granule of c: its own; for an
+// open-ended granule of a compressed stream not yet measured, the chunk's
+// estimate; for a granule of unknown bytes in a chunk of known bytes, its
+// share of the chunk (never a whole chunk as one group); else 0, unknown
+// before the fetch (remote).
+func granuleBytes(g source.Granule, c source.Chunk) int64 {
+	switch {
+	case g.Bytes > 0:
 		return g.Bytes
+	case g.End == math.MaxInt64:
+		return c.Bytes
+	case c.Bytes > 0:
+		return max(c.Bytes/int64(len(c.Granules)), 1)
 	}
-	if g.End == math.MaxInt64 {
-		return chunkBytes
-	}
-	return 0 // unknown before the fetch (remote)
+	return 0
 }

@@ -3,6 +3,7 @@ package file
 import (
 	"bufio"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -128,8 +129,9 @@ type stream struct {
 
 // openStream returns f's content from offset off of the decompressed
 // stream. For a plain file it seeks; for a compressed one it decompresses
-// from the start and discards up to off.
-func openStream(f *os.File, comp string, off int64) (*stream, error) {
+// from the start and discards up to off, checking ctx every discardStep
+// bytes.
+func openStream(ctx context.Context, f *os.File, comp string, off int64) (*stream, error) {
 	if comp == compNone {
 		if _, err := f.Seek(off, io.SeekStart); err != nil {
 			return nil, err
@@ -162,8 +164,12 @@ func openStream(f *os.File, comp string, off int64) (*stream, error) {
 	}
 	rr := &ratioReader{r: dec, in: in}
 	s := &stream{Reader: rr, in: in, ratio: rr, close: closeFn}
-	if off > 0 {
-		if _, err := io.CopyN(io.Discard, rr, off); err != nil {
+	for left := off; left > 0; left -= discardStep {
+		if err := ctx.Err(); err != nil {
+			closeFn()
+			return nil, err
+		}
+		if _, err := io.CopyN(io.Discard, rr, min(left, discardStep)); err != nil {
 			closeFn()
 			if errors.Is(err, io.EOF) {
 				return nil, errShort
@@ -173,6 +179,10 @@ func openStream(f *os.File, comp string, off int64) (*stream, error) {
 	}
 	return s, nil
 }
+
+// discardStep is how many decompressed bytes are discarded between two
+// cancellation checks.
+const discardStep = 1 << 20
 
 var errShort = errors.New("stream shorter than planned")
 

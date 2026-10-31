@@ -237,12 +237,25 @@ func TestGranulesAreFixedAndNarrowingDropsNothing(t *testing.T) {
 	}
 	bounds := map[[2]int64]bool{}
 	for _, c := range full.Chunks {
+		// Every granule's bytes are known before the fetch (the engine
+		// sizes its groups by them) and add up to the chunk's.
+		var sum int64
 		for _, g := range c.Granules {
 			if g.Start%GranuleEntries != 0 {
 				t.Fatalf("granule %+v not aligned", g)
 			}
+			if g.Bytes <= 0 {
+				t.Fatalf("granule %+v of unknown bytes", g)
+			}
+			sum += g.Bytes
 			bounds[[2]int64{g.Start, g.End}] = true
 		}
+		if sum != c.Bytes {
+			t.Fatalf("granules of %d bytes in a chunk of %d", sum, c.Bytes)
+		}
+	}
+	if full.Granules() < 2 {
+		t.Fatalf("%d granules: the fixture is one granule", full.Granules())
 	}
 	first, last := all[0].Event.Time, all[len(all)-1].Event.Time
 	span := last.Sub(first)

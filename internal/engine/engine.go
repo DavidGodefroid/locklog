@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"slices"
 	"sort"
 	"sync"
@@ -34,6 +35,10 @@ import (
 type Masker interface {
 	Mask(source string, ev parse.Event) mask.Record
 	Text(s string) string
+	// TrustedValue masks a trusted value read outside a record (index
+	// values, values compared with trusted fields) as Mask masks a
+	// trusted leaf at that path.
+	TrustedValue(source, path, v string) string
 	Epoch() string
 }
 
@@ -143,7 +148,7 @@ func (e *Engine) remote(src string) bool {
 // range to the count budget.
 func (e *Engine) validator(maxRange time.Duration) *validator {
 	return &validator{now: e.o.Now(), sources: e.names, trusted: e.o.Trusted, detect: e.o.Detect,
-		nameMasked: e.o.NameMasked, maxRange: maxRange, limitMax: e.o.Limits.MaxRecords}
+		trustedValue: e.o.Masker.TrustedValue, nameMasked: e.o.NameMasked, maxRange: maxRange, limitMax: e.o.Limits.MaxRecords}
 }
 
 // queryDigest is the keyed digest of a validated query (cursor excluded).
@@ -241,28 +246,108 @@ type SearchResult struct {
 func (e *Engine) planQuery(ctx context.Context, q *Query, remoteBudget, localBudget int64) (source.Byteplan, *Error) {
 	var plan source.Byteplan
 	r := source.Range{From: q.From, To: q.To}
-	var bytesLocal, bytesRemote int64
 	for _, name := range q.Sources {
 		src := e.o.Sources[name]
 		p, err := src.Plan(ctx, r, q.selector(name, e.o.Trusted))
 		if err != nil {
 			return source.Byteplan{}, sourceError(err)
 		}
-		if e.remote(name) {
-			bytesRemote += p.Bytes()
-		} else {
-			bytesLocal += p.Bytes()
-		}
 		plan.Chunks = append(plan.Chunks, p.Chunks...)
 	}
-	if bytesLocal > localBudget || bytesRemote > remoteBudget {
+	plan, maxRead := orderPlan(plan, q.Order)
+	var bytesLocal, bytesRemote int64
+	for _, c := range plan.Chunks {
+		if e.remote(c.Source) {
+			bytesRemote += c.Bytes
+		} else {
+			bytesLocal += c.Bytes
+		}
+	}
+	// A chunk read alone processes at most the call's budget (for a
+	// descending granule of a compressed stream, all it decompresses).
+	if bytesLocal > localBudget || bytesRemote > remoteBudget || maxRead > localBudget {
 		return source.Byteplan{}, &Error{Code: EOverBudget, Message: "the plan exceeds this call's byte budget (narrow the range or the sources, or ask for locklog_scan)",
 			Estimate: &Estimate{Bytes: plan.Bytes(), Granules: plan.Granules(), Range: q.To.Sub(q.From)}}
 	}
-	if q.Order == "asc" {
-		slices.Reverse(plan.Chunks) // sources plan newest stream first
-	}
 	return plan, nil
+}
+
+// orderPlan puts a plan (sources plan newest stream first, stream order
+// within a stream) in the query's time order, so that pages across calls
+// follow it within each stream: ascending, oldest stream first and every
+// stream's chunks in stream order; descending, newest stream first and every
+// stream's chunks and granules in reverse. A descending chunk is split into
+// one chunk per granule, each costing what reading that granule alone costs
+// (for a compressed stream, decompressing everything before it, charged at
+// decompression cost). Granules
+// of unknown bytes (an unmeasured compressed stream, a remote slice) stay
+// as planned. Streams of several sources are not merged by time across
+// calls: each call's matches are sorted, streams follow each other.
+//
+// It also returns the most bytes reading one descending granule of a
+// compressed stream processes (decompressing from the start), which
+// admission bounds by the byte budget as it bounds an ascending chunk.
+func orderPlan(plan source.Byteplan, order string) (source.Byteplan, int64) {
+	var streams [][]source.Chunk
+	for i, c := range plan.Chunks {
+		if i == 0 || c.Source != plan.Chunks[i-1].Source || c.Stream != plan.Chunks[i-1].Stream {
+			streams = append(streams, nil)
+		}
+		streams[len(streams)-1] = append(streams[len(streams)-1], c)
+	}
+	var out source.Byteplan
+	if order != "desc" {
+		slices.Reverse(streams)
+		for _, cs := range streams {
+			out.Chunks = append(out.Chunks, cs...)
+		}
+		return out, 0
+	}
+	var maxRead int64
+	for _, cs := range streams {
+		for i := len(cs) - 1; i >= 0; i-- {
+			split, read := descGranules(cs[i])
+			out.Chunks = append(out.Chunks, split...)
+			maxRead = max(maxRead, read)
+		}
+	}
+	return out, maxRead
+}
+
+// decompressShare is how many bytes decompressed and discarded cost as
+// much as one masked byte (gzip and zstd decompress hundreds of MB/s; worst
+// case masking about 1 MB/s per core).
+const decompressShare = 64
+
+// descGranules splits a chunk into single-granule chunks, last first, and
+// returns the most bytes reading one of a compressed stream processes.
+func descGranules(c source.Chunk) ([]source.Chunk, int64) {
+	if len(c.Granules) < 2 || c.Bytes == 0 || c.End() == math.MaxInt64 {
+		return []source.Chunk{c}, 0 // unknown bytes: as planned
+	}
+	var maxRead int64
+	var sum int64
+	for _, g := range c.Granules {
+		sum += granuleBytes(g, c)
+	}
+	prefix := max(c.Bytes-sum, 0) // a compressed stream's bytes decompressed and discarded
+	out := make([]source.Chunk, 0, len(c.Granules))
+	for i := len(c.Granules) - 1; i >= 0; i-- {
+		g := c.Granules[i]
+		one := c
+		one.Granules = []source.Granule{g}
+		one.Bytes = granuleBytes(g, c)
+		if prefix > 0 {
+			// Re-decompressing what precedes the granule is charged at
+			// decompression cost, a fraction of masking's: a descending
+			// read stays proportionate to an ascending one.
+			discard := prefix + g.Start - c.Start()
+			one.Bytes += (discard + decompressShare - 1) / decompressShare
+			maxRead = max(maxRead, discard+one.Granules[0].Bytes)
+		}
+		out = append(out, one)
+	}
+	return out, maxRead
 }
 
 // sourceError maps an error of a source to a fixed, content-free refusal of
@@ -368,10 +453,17 @@ func (e *Engine) resume(st cursorState, query string) (*frozen, *Error) {
 // Stopping points are group boundaries, decided from planned bytes before a
 // fetch and from the bytes actually fetched before masking (remote sources:
 // their deadline starts when the fetch completes). Both depend only on the
-// range and the trusted selector, never on the predicates. It returns the
+// range, the trusted selector and the query's shape (factor), never on what
+// the predicates find in the data. It returns the
 // position reached and the work done.
-func (e *Engine) run(ctx context.Context, plan source.Byteplan, chunk, gran int, needles []string, callBytes int64,
-	visit func(raw source.RawRecord, rec mask.Record)) (int, int, Scanned, int, *Error) {
+//
+// factor (at least 1, a function of the query only) multiplies the cost of a
+// group's bytes for the evaluation of its text predicates. visit evaluates
+// under the budget it is passed: once that is exceeded (the group's hard
+// deadline, or ctx cancelled) the call is refused.
+func (e *Engine) run(ctx context.Context, plan source.Byteplan, chunk, gran int, needles []string, callBytes, factor int64,
+	visit func(raw source.RawRecord, rec mask.Record, b *budget)) (int, int, Scanned, int, *Error) {
+	factor = max(factor, 1)
 	// Deadlines are wall-clock (Options.Now is the query clock).
 	start := time.Now()
 	deadline := start.Add(e.o.Limits.Deadline)
@@ -384,7 +476,7 @@ func (e *Engine) run(ctx context.Context, plan source.Byteplan, chunk, gran int,
 		}
 		c := plan.Chunks[chunk]
 		remaining := time.Until(deadline)
-		groups := granuleGroups(c, gran, max(e.o.Cost.Budget(remaining), 1))
+		groups := granuleGroups(c, gran, max(e.o.Cost.Budget(remaining)/factor, 1))
 		if len(groups) == 0 {
 			chunk, gran = chunk+1, 0
 			continue
@@ -394,16 +486,47 @@ func (e *Engine) run(ctx context.Context, plan source.Byteplan, chunk, gran int,
 		sub.Granules = c.Granules[g[0]:g[1]]
 		var planned int64
 		for _, gr := range sub.Granules {
-			planned += granuleBytes(gr, c.Bytes)
+			planned += granuleBytes(gr, c)
 		}
 		// Stop before a group that would not fit (but always make
 		// progress on the first group of a call).
-		if sc.Granules > 0 && e.o.Cost.Time(planned) > remaining {
+		if sc.Granules > 0 && e.o.Cost.Time(planned*factor) > remaining {
 			return chunk, gran, sc, failures, nil
 		}
 		groupCtx, cancel := context.WithDeadline(ctx, deadline.Add(e.o.Limits.Deadline/2))
-		raws, total, fetched, err := e.fetch(groupCtx, sub, needles)
-		if err == nil && sc.Granules > 0 && e.o.Cost.Time(fetched) > time.Until(deadline) {
+		// The group may process its planned bytes or what is left of
+		// the call's budget, whichever is more: a group whose bytes
+		// are under-estimated (a compressed stream not yet measured, a
+		// remote slice) stops there instead of buffering all of it.
+		limit := planned
+		if callBytes > 0 {
+			limit = max(limit, callBytes-sc.Bytes)
+		}
+		// The records' own bytes (what masking costs) are bounded the
+		// same way, and by what can be masked before the hard
+		// deadline: deduplicated payloads (journald shares one DATA
+		// object between entries) make them exceed the bytes
+		// processed.
+		hard := deadline.Add(e.o.Limits.Deadline / 2)
+		recLimit := min(limit, max(e.o.Cost.Budget(time.Until(hard)), 1))
+		// A compressed stream decompresses from its start: the bytes
+		// before the group are processed (and discarded) too. Admission
+		// bounds them (orderPlan, the chunk's bytes).
+		if compressed(c) {
+			limit += sub.Start()
+		}
+		raws, total, fetched, recBytes, err := e.fetch(groupCtx, sub, needles, limit, recLimit)
+		if errors.Is(err, errFetchCap) {
+			cancel()
+			if sc.Granules > 0 {
+				return chunk, gran, sc, failures, nil // the next call has a whole budget
+			}
+			return chunk, gran, sc, failures, &Error{Code: EOverBudget, Message: "a log stream holds more data than one call can process (a compressed file expanding more than estimated, or large repeated records): narrow the range or the sources, or ask for locklog_scan"}
+		}
+		// Masking costs the records' bytes (a compressed stream's
+		// discarded prefix is decompressed, not masked), counted before
+		// the pre-filter.
+		if err == nil && sc.Granules > 0 && e.o.Cost.Time(recBytes) > time.Until(deadline) {
 			// Fetched more than the time left can mask: drop the group
 			// unmasked; the next call fetches it again.
 			cancel()
@@ -431,7 +554,7 @@ func (e *Engine) run(ctx context.Context, plan source.Byteplan, chunk, gran int,
 			}
 			return chunk, gran, sc, failures, sourceError(err)
 		}
-		if took := time.Since(maskStart); took > e.o.Cost.Time(fetched)*3/2 && took > 100*time.Millisecond {
+		if took := time.Since(maskStart); took > e.o.Cost.Time(recBytes)*3/2 && took > 100*time.Millisecond {
 			e.o.Cost.Recalibrate() // overrun: recalibrate at once
 		}
 		// With the pre-filter on, only the records whose clear text
@@ -439,6 +562,7 @@ func (e *Engine) run(ctx context.Context, plan source.Byteplan, chunk, gran int,
 		// which ones do, so they are not counted (failed records are
 		// still withheld whole, as they never match); see
 		// prefilter.go.
+		b := &budget{stop: func() bool { return ctx.Err() != nil || time.Now().After(hard) }}
 		for i := range raws {
 			// A record masking failed on is withheld whole (it
 			// never matches nor counts by masked values) and
@@ -451,25 +575,32 @@ func (e *Engine) run(ctx context.Context, plan source.Byteplan, chunk, gran int,
 				failures++
 			}
 			// Evaluation is bounded by the group's hard deadline
-			// too: predicates on large records (numbers in long
-			// arrays) can cost more than masking. The call is
-			// refused whole (visit's effects are the call's own:
-			// a cached page or partial count is left as it was).
-			if i%64 == 0 && (ctx.Err() != nil || time.Now().After(deadline.Add(e.o.Limits.Deadline/2))) {
-				if ctx.Err() != nil {
-					return chunk, gran, sc, failures, &Error{Code: ESource, Message: "cancelled"}
-				}
-				return chunk, gran, sc, failures, &Error{Code: EOverBudget, Message: "evaluating the predicates on this data did not finish in time: use fewer or simpler predicates, or narrow the range"}
+			// too: predicates on large records (regexes on many
+			// leaves, numbers in long arrays) can cost more than
+			// masking. The clock is checked before every record and,
+			// through the budget, within one. The call is refused
+			// whole (visit's effects are the call's own: a cached
+			// page or partial count is left as it was).
+			if b.check() {
+				return chunk, gran, sc, failures, overEval(ctx)
 			}
-			visit(raws[i], recs[i])
+			visit(raws[i], recs[i], b)
+			if b.exceeded() {
+				return chunk, gran, sc, failures, overEval(ctx)
+			}
 		}
 		// Reported work is granule-rounded: the planned bytes of the
 		// granules (a remote slice, unknown before the fetch, by the
 		// bytes fetched, which depend on time and selector only).
-		if planned > 0 {
-			sc.Bytes += planned
-		} else {
+		// A group planned by estimate (an unmeasured compressed
+		// stream) reports what it processed when that is more.
+		switch {
+		case planned == 0:
 			sc.Bytes += fetched
+		case estimated(sub.Granules):
+			sc.Bytes += max(planned, fetched)
+		default:
+			sc.Bytes += planned
 		}
 		sc.Records += int64(total) // before the pre-filter
 		sc.Granules += len(sub.Granules)
@@ -481,28 +612,94 @@ func (e *Engine) run(ctx context.Context, plan source.Byteplan, chunk, gran int,
 	return chunk, gran, sc, failures, nil
 }
 
+// overEval is the error of a call whose evaluation was stopped.
+func overEval(ctx context.Context) *Error {
+	if ctx.Err() != nil {
+		return &Error{Code: ESource, Message: "cancelled"}
+	}
+	return &Error{Code: EOverBudget, Message: "evaluating the predicates on this data did not finish in time: use fewer or simpler predicates, or narrow the range"}
+}
+
+// compressed reports a chunk of a compressed stream: one costing more than
+// its granules (the decompressed bytes before it, the file).
+func compressed(c source.Chunk) bool {
+	var sum int64
+	for _, g := range c.Granules {
+		sum += granuleBytes(g, c)
+	}
+	return c.Bytes > sum
+}
+
+// estimated reports a group holding a granule whose bytes are an estimate.
+func estimated(gs []source.Granule) bool {
+	return slices.ContainsFunc(gs, func(g source.Granule) bool { return g.Bytes == 0 })
+}
+
+// maskBytes is what masking an event costs, in bytes: its text, or its
+// message and every key and value of its fields and attributes when more
+// (a journald entry's fields are not in its text, and its source serves a
+// value shared by many entries at no read cost).
+func maskBytes(ev parse.Event) int64 {
+	n := int64(len(ev.Message))
+	var walk func(v parse.Value)
+	walk = func(v parse.Value) {
+		n += int64(len(v.Str))
+		for _, m := range v.Members {
+			n += int64(len(m.Key))
+			walk(m.Value)
+		}
+		for _, it := range v.Items {
+			walk(it)
+		}
+	}
+	for _, ms := range [][]parse.Member{ev.Fields, ev.Attrs} {
+		for _, m := range ms {
+			n += int64(len(m.Key))
+			walk(m.Value)
+		}
+	}
+	return max(n, int64(len(ev.Raw)))
+}
+
+// errFetchCap stops a fetch past its byte limit.
+var errFetchCap = errors.New("engine: group past its byte limit")
+
 // fetch reads the records of a group of granules: those to mask, how many
 // the group holds (before any filtering: scanned.records never depends on
 // the clear text) and the bytes it cost. With the opt-in pre-filter, a
 // record whose clear text cannot contain every needle is dropped before
 // masking (non-production only).
-func (e *Engine) fetch(ctx context.Context, c source.Chunk, needles []string) ([]source.RawRecord, int, int64, error) {
+//
+// A positive limit bounds the bytes the group may process, a positive
+// recLimit the bytes of its records: past either, fetch stops with
+// errFetchCap.
+//
+// It also returns the bytes of the records read (before the pre-filter),
+// what masking them costs.
+func (e *Engine) fetch(ctx context.Context, c source.Chunk, needles []string, limit, recLimit int64) ([]source.RawRecord, int, int64, int64, error) {
 	it, err := e.o.Sources[c.Source].Scan(ctx, c)
 	if err != nil {
-		return nil, 0, 0, err
+		return nil, 0, 0, 0, err
 	}
 	defer it.Close()
 	var raws []source.RawRecord
 	total := 0
+	var recBytes int64
 	for {
 		raw, err := it.Next()
 		if errors.Is(err, io.EOF) {
-			return raws, total, it.Processed(), nil
+			return raws, total, it.Processed(), recBytes, nil
 		}
 		if err != nil {
-			return nil, total, it.Processed(), err
+			return nil, total, it.Processed(), recBytes, err
+		}
+		if limit > 0 && it.Processed() > limit {
+			return nil, total, it.Processed(), recBytes, errFetchCap
 		}
 		total++
+		if recBytes += maskBytes(raw.Event); recLimit > 0 && recBytes > recLimit {
+			return nil, total, it.Processed(), recBytes, errFetchCap
+		}
 		if e.o.Prefilter && len(needles) > 0 && !prefilterPass(raw.Event, needles) {
 			continue
 		}
@@ -615,6 +812,9 @@ type match struct {
 
 // Search runs a search (locklog_search).
 func (e *Engine) Search(ctx context.Context, q Query) (_ SearchResult, retErr error) {
+	// The caller's predicates are not shared: validation and evaluation
+	// write into them.
+	q.Where = slices.Clone(q.Where)
 	cursor := q.Cursor
 	q.Cursor = ""
 	maxRange := e.o.Limits.LocalRange
@@ -696,18 +896,19 @@ func (e *Engine) Search(ctx context.Context, q Query) (_ SearchResult, retErr er
 		var sc Scanned
 		var err *Error
 		var found []match
-		size, over := matchesSize(pending), false
-		chunk, gran, sc, failures, err = e.run(ctx, f.plan, chunk, gran, needles, e.callBytes(q.Sources), func(raw source.RawRecord, rec mask.Record) {
+		size, over, outFailed := matchesSize(pending), false, false
+		chunk, gran, sc, failures, err = e.run(ctx, f.plan, chunk, gran, needles, e.callBytes(q.Sources), q.evalFactor(), func(raw source.RawRecord, rec mask.Record, b *budget) {
 			// Granules hold records around the range: keep the
 			// range's (and the untimed ones).
 			if t, ok := rec.Time(); ok && !q.rangeContains(t, false) {
 				return
 			}
-			if !q.match(rec) {
+			if !q.match(rec, b) {
 				return
 			}
 			out, oerr := e.outRecord(raw, rec, q.Fields)
 			if oerr != nil {
+				outFailed = true // never a silently missing match
 				return
 			}
 			if over {
@@ -726,6 +927,9 @@ func (e *Engine) Search(ctx context.Context, q Query) (_ SearchResult, retErr er
 		}
 		if over {
 			return SearchResult{}, tooMany
+		}
+		if outFailed {
+			return SearchResult{}, &Error{Code: ESource, Message: "a matching record could not be rendered; try again"}
 		}
 		sortMatches(found, q.Order)
 		pending = append(pending, found...)

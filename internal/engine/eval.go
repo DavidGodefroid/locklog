@@ -3,8 +3,10 @@ package engine
 import (
 	"math/big"
 	"regexp"
+	"regexp/syntax"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"github.com/DavidGodefroid/locklog/internal/mask"
 )
@@ -110,38 +112,127 @@ func leaves(fields []mask.Field, path string) []val {
 	return out
 }
 
-// match evaluates the query's predicates, text and regex on a masked record.
-func (q *Query) match(rec mask.Record) bool {
+// budget bounds the evaluation of one group of records: work is charged
+// as bytes of evaluated text (a fixed cost per leaf, the text's length,
+// weighted by the regex program for matches) and the clock is checked every
+// budgetStep bytes, across predicates and leaves, so a single large record
+// cannot run past the deadline. A nil budget never stops.
+type budget struct {
+	stop    func() bool
+	pending int64
+	over    bool
+}
+
+const (
+	budgetStep = 64 << 10
+	leafCost   = 16
+)
+
+// charge adds n bytes of work and reports whether evaluation must stop.
+func (b *budget) charge(n int64) bool {
+	if b == nil {
+		return false
+	}
+	if b.over {
+		return true
+	}
+	if b.pending += n; b.pending >= budgetStep {
+		b.pending = 0
+		b.over = b.stop()
+	}
+	return b.over
+}
+
+// check consults the clock now and reports whether evaluation must stop.
+func (b *budget) check() bool {
+	if b == nil {
+		return false
+	}
+	if !b.over {
+		b.pending = 0
+		b.over = b.stop()
+	}
+	return b.over
+}
+
+// exceeded reports whether evaluation was stopped (its results are void).
+func (b *budget) exceeded() bool { return b != nil && b.over }
+
+// match evaluates the query's predicates, text and regex on a masked record
+// under b. Once b is exceeded it returns false, and the caller refuses the
+// call.
+func (q *Query) match(rec mask.Record, b *budget) bool {
 	if !rec.Valid() || rec.Failed() {
 		return false
 	}
 	for i := range q.Where {
-		if !predMatch(&q.Where[i], lookup(rec, &q.Where[i])) {
+		p := &q.Where[i]
+		vs := lookup(rec, p)
+		if b.charge(int64(len(vs)) * leafCost) {
+			return false
+		}
+		if !predMatch(p, vs, b) || b.exceeded() {
 			return false
 		}
 	}
-	if q.Text != "" && !anyText(rec, func(e string) bool { return strings.Contains(e, q.Text) }) {
+	if q.Text != "" && !anyText(rec, b, 1, func(e string) bool { return strings.Contains(e, q.Text) }) {
 		return false
 	}
-	if q.textRe != nil && !anyText(rec, q.textRe.MatchString) {
+	if q.textRe != nil && !anyText(rec, b, regexWeight(q.textReCost), q.textRe.MatchString) {
 		return false
 	}
-	return true
+	return !b.exceeded()
 }
 
-// anyText applies fn to E of the message and of every string leaf.
-func anyText(rec mask.Record, fn func(string) bool) bool {
-	if m := rec.Message(); m != "" && fn(evalString(m)) {
-		return true
+// textPreds is how many text predicates (contains, matches, text, regex)
+// the query evaluates on every leaf: the cost model sizes groups by it.
+func (q *Query) textPreds() int64 {
+	var n int64
+	for i := range q.Where {
+		if q.Where[i].Op == OpContains || q.Where[i].Op == OpMatches {
+			n++
+		}
+	}
+	if q.Text != "" {
+		n++
+	}
+	if q.textRe != nil {
+		n++
+	}
+	return n
+}
+
+// evalFactor is the multiplier the cost model applies to a group's bytes
+// for the evaluation of the query's text predicates (a function of the
+// query only, never of the data).
+func (q *Query) evalFactor() int64 { return 1 + q.textPreds()/4 }
+
+// regexWeight is the charge per byte of a regex of expanded size cost (see
+// regexCost): a match costs up to bytes × program size.
+func regexWeight(cost int) int64 { return 1 + int64(cost)/32 }
+
+// anyText applies fn to E of the message and of every string leaf, charging
+// b weight per byte.
+func anyText(rec mask.Record, b *budget, weight int64, fn func(string) bool) bool {
+	if m := rec.Message(); m != "" {
+		if b.charge(leafCost + int64(len(m))*weight) {
+			return false
+		}
+		if fn(evalString(m)) {
+			return true
+		}
 	}
 	found := false
 	var walk func(v mask.Value)
 	walk = func(v mask.Value) {
-		if found {
+		if found || b.exceeded() {
 			return
 		}
 		switch v.Kind() {
 		case mask.String:
+			if b.charge(leafCost + int64(len(v.Text()))*weight) {
+				return
+			}
 			found = fn(evalString(v.Text()))
 		case mask.Object:
 			for _, f := range v.Members() {
@@ -156,15 +247,24 @@ func anyText(rec mask.Record, fn func(string) bool) bool {
 	for _, f := range rec.Fields() {
 		walk(f.Value())
 	}
-	return found
+	return found && !b.exceeded()
 }
 
-func predMatch(p *Pred, vs []val) bool {
+// predMatch evaluates a predicate on the values at its path, charging b per
+// leaf; once b is exceeded its result is void.
+func predMatch(p *Pred, vs []val, b *budget) bool {
+	weight := int64(1)
+	if p.Op == OpMatches {
+		weight = regexWeight(p.reCost)
+	}
 	switch p.Op {
 	case OpExists:
 		return len(vs) > 0
 	case OpNe:
 		for _, v := range vs {
+			if b.charge(leafCost + int64(len(v.text))) {
+				return false
+			}
 			if equal(p, 0, v) {
 				return false
 			}
@@ -172,6 +272,9 @@ func predMatch(p *Pred, vs []val) bool {
 		return true
 	}
 	for _, v := range vs {
+		if b.charge(leafCost + int64(len(v.text))*weight) {
+			return false
+		}
 		switch p.Op {
 		case OpEq:
 			if equal(p, 0, v) {
@@ -258,10 +361,15 @@ const (
 	maxNumberExponent = 400
 )
 
+// numberParses counts parseNumber calls (tests bound the work of numeric
+// predicates by it, not by wall-clock time).
+var numberParses atomic.Int64
+
 // parseNumber returns the exact value of a number literal within the
 // bounds; a literal beyond them is not a number to compare (equality falls
 // back to its text).
 func parseNumber(s string) (*big.Rat, bool) {
+	numberParses.Add(1)
 	// The JSON number grammar only: big.Rat also takes hex, octal and
 	// binary mantissas, p exponents (0x1p9999999), fractions and
 	// underscores.
@@ -317,4 +425,41 @@ func (p *Pred) inMatch(v val) bool {
 		}
 	}
 	return s.text[v.text]
+}
+
+// Regex size bounds: a repetition count above maxRepeat, or an expanded size
+// (repetitions multiplied out) above maxRegexCost, is refused. RE2 matches
+// in time bytes × program size, and the program of [ab ]{1,250} alone is
+// hundreds of instructions.
+const (
+	maxRepeat    = 100
+	maxRegexCost = 1000
+)
+
+// regexCost returns the expanded size of a parsed regex, saturating past
+// maxRegexCost, and whether every repetition count is within maxRepeat.
+func regexCost(re *syntax.Regexp) (int, bool) {
+	switch re.Op {
+	case syntax.OpLiteral:
+		return max(len(re.Rune), 1), true
+	case syntax.OpRepeat:
+		if re.Min > maxRepeat || re.Max > maxRepeat {
+			return 0, false
+		}
+		sub, ok := regexCost(re.Sub[0])
+		if !ok {
+			return 0, false
+		}
+		n := max(re.Max, re.Min, 1)
+		return min(n*sub, maxRegexCost+1), true
+	}
+	c := 1
+	for _, sub := range re.Sub {
+		sc, ok := regexCost(sub)
+		if !ok {
+			return 0, false
+		}
+		c = min(c+sc, maxRegexCost+1)
+	}
+	return c, true
 }

@@ -3,6 +3,8 @@
 package engine
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -29,6 +31,8 @@ import (
 	"github.com/DavidGodefroid/locklog/internal/parse"
 	"github.com/DavidGodefroid/locklog/internal/source"
 	"github.com/DavidGodefroid/locklog/internal/source/file"
+	"github.com/DavidGodefroid/locklog/internal/source/journald"
+	"github.com/DavidGodefroid/locklog/internal/source/journald/journal/journaltest"
 )
 
 var (
@@ -123,7 +127,7 @@ func newFixtureMask(t *testing.T, content string, mopt func(*mask.Options), opt 
 		t.Fatal(err)
 	}
 	src, err := file.New(file.Options{Name: "app", Paths: []string{root + "/logs/app.log"}, Roots: []string{root}, Parser: p,
-		Trusted: []string{"level", "status"}, Index: st, Sensitive: func(_, v string) bool { return m.Text(v) != v }})
+		Trusted: []string{"level", "status"}, Index: st, Sensitive: func(f, v string) bool { return m.TrustedValue("app", f, v) != v }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -440,7 +444,11 @@ func allPages(t *testing.T, e *Engine, qq Query) []string {
 // a log with records masking fails on, only masked_failures differs (0 with
 // the filter, see prefilter.go).
 func TestPrefilterEquivalence(t *testing.T) {
-	content := genLog(t0, 20000, "canary@example.org") + "time=2026-10-30T13:00:00Z level=info msg=\"caf\\u00e9 ok\"\n"
+	content := genLog(t0, 20000, "canary@example.org") + "time=2026-10-30T13:00:00Z level=info msg=\"caf\\u00e9 ok\"\n" +
+		// Invisible runes and invalid bytes the masker drops join text.
+		"time=2026-10-30T13:00:01Z level=info msg=\"ab\\u200bcd joined\"\n" +
+		"{\"time\":\"2026-10-30T13:00:02Z\",\"msg\":\"x\",\"note\":\"ef\u00adgh\"}\n" +
+		"time=2026-10-30T13:00:03Z level=info msg=\"ij\xffkl\"\n"
 	t.Run("plain", func(t *testing.T) { prefilterEquivalence(t, newFixture(t, content, oneGranulePerCall), false) })
 	t.Run("failing granule", func(t *testing.T) {
 		prefilterEquivalence(t, newFixtureMask(t, boomLog(10000), withBoom, oneGranulePerCall), true)
@@ -469,6 +477,9 @@ func prefilterEquivalence(t *testing.T, f *fixture, failing bool) {
 		q(func(q *Query) { q.Text = "kaboom"; q.Limit = 200 }),
 		q(func(q *Query) { q.Text = "order 12"; q.Limit = 200 }),
 		q(func(q *Query) { q.Text = "café"; q.Limit = 200 }),
+		q(func(q *Query) { q.Text = "abcd"; q.Limit = 200 }),
+		q(func(q *Query) { q.Text = "efgh"; q.Limit = 200 }),
+		q(func(q *Query) { q.Text = "ijkl"; q.Limit = 200 }),
 		q(func(q *Query) {
 			q.Where = []Pred{{Field: "msg", Op: "contains", Value: raw("timed out (order 4")}}
 			q.Limit = 200
@@ -1491,9 +1502,572 @@ func TestNumericInOnLongArrays(t *testing.T) {
 	for i := 0; i < 32; i++ {
 		preds = append(preds, Pred{Field: "v", Op: OpIn, Value: raw(vals)})
 	}
-	start := time.Now()
+	before := numberParses.Load()
 	recs, _ := allRecords(t, f.eng, q(func(q *Query) { q.Where = preds }))
-	if len(recs) != 4 || time.Since(start) > 3*time.Second {
-		t.Fatalf("%d records in %v", len(recs), time.Since(start))
+	// Each leaf is parsed at most once per predicate (never once per
+	// value): leaves × predicates, plus the predicates' own values.
+	parses, bound := numberParses.Load()-before, int64(4*5001*32+32*64)
+	if len(recs) != 4 || parses > bound {
+		t.Fatalf("%d records, %d number parses (bound %d)", len(recs), parses, bound)
+	}
+}
+
+// heavyRecords returns n records each holding a v array of leaves strings
+// of "ab ab …", the last one ending in "ab END".
+func heavyRecords(n, leaves int) string {
+	var b strings.Builder
+	item := strings.TrimSpace(strings.Repeat("ab ", 6))
+	for r := 0; r < n; r++ {
+		fmt.Fprintf(&b, "{\"time\":\"2026-10-30T12:00:%02dZ\",\"v\":[", r)
+		for i := 0; i < leaves-1; i++ {
+			b.WriteString("\"" + item + "\",")
+		}
+		b.WriteString("\"ab END\"],\"msg\":\"m\"}\n")
+	}
+	return b.String()
+}
+
+// heavyPreds are 31 regexes matching only the last leaf of heavyRecords and
+// one matching none: every leaf is evaluated by every predicate.
+func heavyPreds() []Pred {
+	const g = "[ab ]{1,100}[ab ]{1,100}[ab ]{1,100}"
+	var preds []Pred
+	for i := 0; i < 31; i++ {
+		preds = append(preds, Pred{Field: "v", Op: OpMatches, Value: raw(fmt.Sprintf("%s(E|q%d)ND", g, i))})
+	}
+	return append(preds, Pred{Field: "v", Op: OpMatches, Value: raw(g + "ENDZ")})
+}
+
+// TestEvalDeadlineInsideRecords: predicates costing seconds per record
+// stop at the hard deadline (checked within a record), not after the work.
+func TestEvalDeadlineInsideRecords(t *testing.T) {
+	// The work takes over 5 s (much more under the race detector, which
+	// also slows masking: the deadline is scaled with it).
+	d := time.Second
+	if raceEnabled {
+		d = 4 * time.Second
+	}
+	// Masking without value detectors: the cost is the evaluation's.
+	f := newFixtureMask(t, heavyRecords(12, 2400), func(o *mask.Options) { o.Values = nil },
+		func(o *Options) { o.Limits.Deadline = d })
+	start := time.Now()
+	_, err := f.eng.Search(ctx, q(func(q *Query) { q.Where = heavyPreds() }))
+	if took := time.Since(start); code(err) != EOverBudget || took > 3*d {
+		t.Fatalf("search: %v after %v", err, took)
+	}
+	start = time.Now()
+	_, err = f.eng.Count(ctx, CountQuery{Query: q(func(q *Query) { q.Where = heavyPreds() })})
+	if took := time.Since(start); code(err) != EOverBudget || took > 3*d {
+		t.Fatalf("count: %v after %v", err, took)
+	}
+	// Cancellation is seen within a record too.
+	f.eng.o.Limits.Deadline = 10 * time.Minute
+	cctx, cancel := context.WithTimeout(ctx, d/2)
+	defer cancel()
+	start = time.Now()
+	_, err = f.eng.Search(cctx, q(func(q *Query) { q.Where = heavyPreds() }))
+	if took := time.Since(start); err == nil || took > 2*d {
+		t.Fatalf("cancelled: %v after %v", err, took)
+	}
+}
+
+// TestRegexSizeBounds: large repetition counts and expanded sizes are
+// refused; bounded patterns are taken.
+func TestRegexSizeBounds(t *testing.T) {
+	f := newFixture(t, genLog(t0, 10, "c@example.org"), nil)
+	for re, want := range map[string]string{
+		"[ab ]{1,250}END":      EBadQuery,
+		"a{101}":               EBadQuery,
+		"(a{50}){50}":          EBadQuery,
+		"(((ab){10}){10}){10}": EBadQuery,
+		"[ab ]{1,100}END":      "",
+		"(ab){10}x{3,}":        "",
+		"upstream|timeout":     "",
+	} {
+		_, err := f.eng.Search(ctx, q(func(q *Query) { q.Regex = re }))
+		if code(err) != want {
+			t.Errorf("regex %q: %v, want %q", re, err, want)
+		}
+		_, err = f.eng.Search(ctx, q(func(q *Query) { q.Where = []Pred{{Field: "msg", Op: OpMatches, Value: raw(re)}} }))
+		if code(err) != want {
+			t.Errorf("matches %q: %v, want %q", re, err, want)
+		}
+	}
+}
+
+// epochMasker is a masker under another pseudonym epoch.
+type epochMasker struct {
+	*mask.Masker
+	epoch string
+}
+
+func (m epochMasker) Epoch() string { return m.epoch }
+
+// TestRefStaleAfterEpochChange: a ref made under another pseudonym epoch is
+// refused as stale.
+func TestRefStaleAfterEpochChange(t *testing.T) {
+	f := newFixture(t, genLog(t0, 100, "c@example.org"), nil)
+	res, err := f.eng.Search(ctx, q(func(q *Query) { q.Limit = 1 }))
+	if err != nil || len(res.Records) != 1 {
+		t.Fatal(err)
+	}
+	var first map[string]any
+	json.Unmarshal(res.Records[0], &first)
+	ref := first["ref"].(string)
+	if _, _, err := f.eng.Ref(ref); err != nil {
+		t.Fatal(err)
+	}
+	f.eng.o.Masker = epochMasker{f.masker, "another-epoch"}
+	if _, _, err := f.eng.Ref(ref); code(err) != EStale {
+		t.Fatalf("ref after the epoch changed: %v", err)
+	}
+}
+
+// TestCallerPredicatesUntouched: Search and Count do not write into the
+// caller's predicates.
+func TestCallerPredicatesUntouched(t *testing.T) {
+	f := newFixture(t, genLog(t0, 100, "c@example.org"), nil)
+	where := []Pred{{Field: "status", Op: OpIn, Value: raw([]int{500, 502})}, {Field: "msg", Op: OpMatches, Value: raw("up")}}
+	if _, err := f.eng.Search(ctx, q(func(q *Query) { q.Where = where })); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.eng.Count(ctx, CountQuery{Query: q(func(q *Query) { q.Where = where })}); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range where {
+		if p.re != nil || p.in != nil || p.vals != nil || p.nums != nil {
+			t.Fatalf("predicate written into: %+v", p)
+		}
+	}
+}
+
+// processedSource records the bytes its iterators processed.
+type processedSource struct {
+	source.Source
+	n *int64
+}
+
+type processedIter struct {
+	source.Iterator
+	n *int64
+}
+
+func (s processedSource) Scan(ctx context.Context, c source.Chunk) (source.Iterator, error) {
+	it, err := s.Source.Scan(ctx, c)
+	if err != nil {
+		return nil, err
+	}
+	return processedIter{it, s.n}, nil
+}
+
+func (it processedIter) Close() error {
+	*it.n += it.Processed()
+	return it.Iterator.Close()
+}
+
+// TestUnmeasuredCompressedBudget: a compressed file never measured, planned
+// by estimate, that expands beyond the call's byte budget is refused once
+// the budget is processed, never buffered whole.
+func TestUnmeasuredCompressedBudget(t *testing.T) {
+	// About 30:1: repeated blocks, each with a random id.
+	var pb strings.Builder
+	block := genLog(t0, 50, "c@example.org")
+	for i := 0; i < 2500; i++ {
+		id := make([]byte, 96)
+		rand.Read(id)
+		fmt.Fprintf(&pb, "time=2026-10-30T12:30:00Z level=info msg=\"batch %x\"\n%s", id, block)
+	}
+	plain := pb.String()
+	var gz bytes.Buffer
+	w := gzip.NewWriter(&gz)
+	w.Write([]byte(plain))
+	w.Close()
+	budget := int64(gz.Len())*10 + 1<<20
+	if int64(len(plain)) < 3*budget {
+		t.Fatalf("fixture: %d plain bytes (%d compressed) for a %d budget", len(plain), gz.Len(), budget)
+	}
+	var processed int64
+	f := newFixture(t, gz.String(), func(o *Options) {
+		o.Limits.LocalBytes = budget
+		o.Sources["app"] = processedSource{o.Sources["app"], &processed}
+	})
+	if _, err := f.eng.Search(ctx, q(func(q *Query) { q.Text = "upstream" })); code(err) != EOverBudget {
+		t.Fatalf("search: %v", err)
+	}
+	if _, err := f.eng.Count(ctx, CountQuery{Query: q(func(q *Query) { q.Text = "upstream" })}); code(err) != EOverBudget {
+		t.Fatalf("count: %v", err)
+	}
+	// Each call stopped about its budget (a read buffer past it).
+	if processed > 2*(budget+1<<20) {
+		t.Fatalf("processed %d bytes for two calls of %d", processed, budget)
+	}
+	// Within the budget, the same file is searched whole (masking it in
+	// one group takes long under the race detector: the deadline is not
+	// what this tests).
+	f.eng.o.Limits.LocalBytes = 4 * int64(len(plain))
+	f.eng.o.Limits.Deadline = 10 * time.Minute
+	if _, err := f.eng.Search(ctx, q(func(q *Query) { q.Text = "upstream" })); err != nil {
+		t.Fatalf("within the budget: %v", err)
+	}
+}
+
+// TestTrustedValueMaskedInIndex: a trusted value the masker masks as a
+// field (a card number in exponent form) is never shown nor matched clear
+// through the index, nor accepted as a predicate value.
+func TestTrustedValueMaskedInIndex(t *testing.T) {
+	const card = "4.111111111111111E15"
+	var b strings.Builder
+	for i := 0; i < 200; i++ {
+		st := "200"
+		if i%10 == 0 {
+			st = card
+		}
+		fmt.Fprintf(&b, "time=2026-10-30T12:%02d:%02dZ level=info status=%s msg=\"req %d\"\n", i/60, i%60, st, i)
+	}
+	f := newFixture(t, b.String(), nil)
+	res, err := f.eng.Search(ctx, q(func(q *Query) { q.Fields = []string{"status"}; q.Limit = 200 }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, _ := json.Marshal(res)
+	if strings.Contains(string(out), card) || strings.Contains(string(out), "4111111111111111") || !strings.Contains(string(out), "⟦card:") {
+		t.Fatalf("search does not mask the card: %.300s", out)
+	}
+	count := func() string {
+		c, err := f.eng.Count(ctx, CountQuery{Query: q(nil), By: []string{"status"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		js, _ := json.Marshal(c)
+		return string(js)
+	}
+	cold := count()
+	for i := 0; ; i++ {
+		_, done, err := f.src.IndexStep(ctx, 64<<20, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if done || i > 20 {
+			break
+		}
+	}
+	indexed := count()
+	if !strings.Contains(indexed, `"from_index":true`) {
+		t.Fatalf("not answered from the index: %s", indexed)
+	}
+	for name, js := range map[string]string{"cold": cold, "indexed": indexed} {
+		if strings.Contains(js, card) || strings.Contains(js, "4111111111111111") {
+			t.Fatalf("%s count shows the card clear: %s", name, js)
+		}
+	}
+	for _, v := range []json.RawMessage{raw(card), raw("4111111111111111")} {
+		_, err := f.eng.Count(ctx, CountQuery{Query: q(func(q *Query) { q.Where = []Pred{{Field: "status", Op: OpEq, Value: v}} })})
+		if code(err) != EPIIInQuery {
+			t.Errorf("status = %s: %v", v, err)
+		}
+	}
+	// An index holding the value raw (built with a Sensitive that missed
+	// it) still never shows it.
+	if v := f.eng.indexValue("app", "status", card); *v != mask.Redacted {
+		t.Fatalf("index value shown as %q", *v)
+	}
+	if v := f.eng.indexValue("app", "status", "200"); *v != "200" {
+		t.Fatalf("plain index value shown as %q", *v)
+	}
+}
+
+// TestCountMemoryBound: a count's groups are bounded in bytes (long keys
+// fold into ⟦other⟧ past MaxGroupBytes), and the partial counts kept
+// between continuations in total.
+func TestCountMemoryBound(t *testing.T) {
+	long := strings.Repeat("x", 64<<10)
+	a := newAgg()
+	for i := 0; i < 1000; i++ {
+		k := fmt.Sprintf("%d%s", i, long)
+		a.add(t0, []*string{&k}, 1, t0, true)
+	}
+	if a.bytes > MaxGroupBytes || len(a.groups) >= 1000 {
+		t.Fatalf("%d groups, %d bytes", len(a.groups), a.bytes)
+	}
+	o := Other
+	if g := a.groups[groupKey(t0, []*string{&o})]; g == nil || g.N == 0 {
+		t.Fatal("no ⟦other⟧ group")
+	}
+	var c aggCache
+	for i := 0; i < maxAggs; i++ {
+		c.put(a.clone())
+	}
+	if c.bytes > maxAggBytes || len(c.o) > maxAggBytes/int(a.bytes)+1 {
+		t.Fatalf("cache: %d partial counts, %d bytes", len(c.o), c.bytes)
+	}
+	for len(c.o) > 0 {
+		c.drop(c.o[0])
+	}
+	if c.bytes != 0 {
+		t.Fatalf("cache bytes after dropping all: %d", c.bytes)
+	}
+}
+
+// recordTimes returns the ts of every record, failing on an untimed one.
+func recordTimes(t *testing.T, recs []json.RawMessage) []time.Time {
+	t.Helper()
+	var out []time.Time
+	for _, r := range recs {
+		var m struct {
+			TS time.Time `json:"ts"`
+		}
+		if err := json.Unmarshal(r, &m); err != nil || m.TS.IsZero() {
+			t.Fatalf("record without ts: %.200s", r)
+		}
+		out = append(out, m.TS)
+	}
+	return out
+}
+
+// checkOrder fails on the first record out of the query's order.
+func checkOrder(t *testing.T, ts []time.Time, want int, desc bool) {
+	t.Helper()
+	if len(ts) != want {
+		t.Fatalf("%d records, want %d", len(ts), want)
+	}
+	for i := 1; i < len(ts); i++ {
+		if desc && ts[i].After(ts[i-1]) || !desc && ts[i].Before(ts[i-1]) {
+			t.Fatalf("record %d at %v after one at %v", i, ts[i], ts[i-1])
+		}
+	}
+}
+
+// TestOrderAcrossCalls: pages follow the query's order across calls, for a
+// descending search over a stream larger than a call (plain and
+// compressed) and for an ascending one over a stream the index prunes into
+// several chunks.
+func TestOrderAcrossCalls(t *testing.T) {
+	errors := q(func(q *Query) {
+		q.Where = []Pred{{Field: "level", Op: OpEq, Value: raw("error")}}
+		q.Limit = 200
+	})
+	desc := errors
+	desc.Order = "desc"
+	t.Run("desc", func(t *testing.T) {
+		f := newFixture(t, genLog(t0, 30000, "c@example.org"), oneGranulePerCall)
+		recs, pages := allRecords(t, f.eng, desc)
+		if len(pages) < 3 {
+			t.Fatalf("%d pages: the stream fits one call", len(pages))
+		}
+		checkOrder(t, recordTimes(t, recs), 6000, true)
+	})
+	t.Run("desc compressed", func(t *testing.T) {
+		var gz bytes.Buffer
+		w := gzip.NewWriter(&gz)
+		w.Write([]byte(genLog(t0, 30000, "c@example.org")))
+		w.Close()
+		f := newFixture(t, gz.String(), oneGranulePerCall)
+		for i := 0; ; i++ { // measured: granules of known bytes
+			_, done, err := f.src.IndexStep(ctx, 64<<20, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if done || i > 20 {
+				break
+			}
+		}
+		recs, _ := allRecords(t, f.eng, desc)
+		checkOrder(t, recordTimes(t, recs), 6000, true)
+	})
+	t.Run("desc compressed proportionate", func(t *testing.T) {
+		// Reading granules newest first re-decompresses what precedes
+		// each one, charged at decompression cost: a budget of twice
+		// the stream admits it as it admits an ascending read.
+		plain := genLog(t0, 40000, "c@example.org")
+		var gz bytes.Buffer
+		w := gzip.NewWriter(&gz)
+		w.Write([]byte(plain))
+		w.Close()
+		f := newFixture(t, gz.String(), func(o *Options) {
+			oneGranulePerCall(o)
+			o.Limits.LocalBytes = 2 * int64(len(plain))
+		})
+		for i := 0; ; i++ {
+			_, done, err := f.src.IndexStep(ctx, 64<<20, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if done || i > 20 {
+				break
+			}
+		}
+		recs, pages := allRecords(t, f.eng, desc)
+		if len(pages) < 3 {
+			t.Fatalf("%d pages: the stream fits one call", len(pages))
+		}
+		checkOrder(t, recordTimes(t, recs), 8000, true)
+		// A count reads its plan in stream order, whatever its order.
+		count := func(order string) string {
+			cq := CountQuery{Query: q(func(q *Query) { q.Order = order }), By: []string{"level"}}
+			var groups []Group
+			for i := 0; ; i++ {
+				c, err := f.eng.Count(ctx, cq)
+				if err != nil {
+					t.Fatalf("count %s: %v", order, err)
+				}
+				groups = append(groups, c.Groups...)
+				if c.Complete || i > 1000 {
+					break
+				}
+				cq.Cursor = c.Cursor
+			}
+			js, _ := json.Marshal(groups)
+			return string(js)
+		}
+		if a, d := count("asc"), count("desc"); a != d {
+			t.Fatalf("counts differ by order:\n%s\n%s", a, d)
+		}
+	})
+	t.Run("asc pruned", func(t *testing.T) {
+		var b strings.Builder
+		for i := 0; i < 45000; i++ {
+			lvl := "error"
+			if i >= 15000 && i < 30000 {
+				lvl = "info"
+			}
+			fmt.Fprintf(&b, "time=%s level=%s msg=\"m %d\"\n", t0.Add(time.Duration(i)*time.Second).Format(time.RFC3339), lvl, i)
+		}
+		f := newFixture(t, b.String(), oneGranulePerCall)
+		for i := 0; ; i++ {
+			_, done, err := f.src.IndexStep(ctx, 64<<20, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if done || i > 20 {
+				break
+			}
+		}
+		qq := errors
+		qq.To = t0.Add(48 * time.Hour)
+		f.eng.o.Limits.LocalRange = 72 * time.Hour
+		recs, _ := allRecords(t, f.eng, qq)
+		checkOrder(t, recordTimes(t, recs), 30000, false)
+		qq.Order = "desc"
+		recs, _ = allRecords(t, f.eng, qq)
+		checkOrder(t, recordTimes(t, recs), 30000, true)
+	})
+}
+
+// unknownGranules is a local source whose granules carry no bytes (only
+// their chunk's), as journald planned them before.
+type unknownGranules struct{ source.Source }
+
+func (u unknownGranules) Plan(ctx context.Context, r source.Range, sel source.Selector) (source.Byteplan, error) {
+	p, err := u.Source.Plan(ctx, r, sel)
+	for i := range p.Chunks {
+		gs := slices.Clone(p.Chunks[i].Granules)
+		for j := range gs {
+			gs[j].Bytes = 0
+		}
+		p.Chunks[i].Granules = gs
+	}
+	return p, err
+}
+
+// TestUnknownGranuleBytesStillGrouped: granules of unknown bytes in a chunk
+// of known bytes are sized by their share of it: a call takes the groups
+// that fit, never the whole chunk, and order holds across calls.
+func TestUnknownGranuleBytesStillGrouped(t *testing.T) {
+	f := newFixture(t, genLog(t0, 30000, "c@example.org"), func(o *Options) {
+		oneGranulePerCall(o)
+		o.Sources["app"] = unknownGranules{o.Sources["app"]}
+	})
+	for _, order := range []string{"asc", "desc"} {
+		qq := q(func(q *Query) {
+			q.Where = []Pred{{Field: "level", Op: OpEq, Value: raw("error")}}
+			q.Limit = 200
+			q.Order = order
+		})
+		res, err := f.eng.Search(ctx, qq)
+		if err != nil || res.Complete || res.Scanned.Granules != 1 {
+			t.Fatalf("%s: first call %+v, %v", order, res.Scanned, err)
+		}
+		recs, _ := allRecords(t, f.eng, qq)
+		checkOrder(t, recordTimes(t, recs), 6000, order == "desc")
+	}
+}
+
+// TestDedupRecordsBounded: journald shares one DATA object between entries,
+// so records can hold far more bytes than the stream processes: a call
+// buffers at most its budget of record bytes, then refuses.
+func TestDedupRecordsBounded(t *testing.T) {
+	frames := strings.Repeat("stack frame at service.handler(line 42) ", 5000) // ~200 KB
+	for name, fields := range map[string][]string{
+		"message":       {"MESSAGE=" + frames, "PRIORITY=3"},
+		"trusted field": {"MESSAGE=frame x", "CODE_FUNC=" + frames, "PRIORITY=3"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var es []journaltest.Entry
+			base := uint64(t0.Add(time.Hour).UnixMicro())
+			for i := 0; i < 2048; i++ {
+				es = append(es, journaltest.Entry{Realtime: base + uint64(i)*1000, Fields: fields})
+			}
+			root := t.TempDir()
+			const mid = "0123456789abcdef0123456789abcdef"
+			os.Mkdir(filepath.Join(root, mid), 0o755)
+			if err := os.WriteFile(filepath.Join(root, mid, "system.journal"), journaltest.Build(journaltest.Options{Compact: true, PerArray: 100}, es), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			p, _ := parse.New(parse.Options{Format: "plain"})
+			js, err := journald.New(journald.Options{Name: "journal", Roots: []string{root}, Parser: p})
+			if err != nil {
+				t.Fatal(err)
+			}
+			f := newFixture(t, genLog(t0, 10, "c@example.org"), func(o *Options) {
+				o.Sources["journal"] = js
+				o.Limits.LocalBytes = 4 << 20
+			})
+			start := time.Now()
+			_, err = f.eng.Search(ctx, q(func(q *Query) { q.Sources = []string{"journal"}; q.Text = "frame" }))
+			if code(err) != EOverBudget || time.Since(start) > 10*time.Second {
+				t.Fatalf("search: %v after %v", err, time.Since(start))
+			}
+		})
+	}
+}
+
+// TestDescCompressedTailAdmission: reading the newest granule of a large
+// compressed stream decompresses all before it; a descending query whose
+// granule cannot be read within the byte budget is refused at admission,
+// as the ascending one is, before reading anything.
+func TestDescCompressedTailAdmission(t *testing.T) {
+	start := t0.Add(-30 * time.Hour)
+	plain := genLog(start, 120000, "c@example.org") // ~14 MiB, 33 h
+	var gz bytes.Buffer
+	w := gzip.NewWriter(&gz)
+	w.Write([]byte(plain))
+	w.Close()
+	var processed int64
+	f := newFixture(t, gz.String(), func(o *Options) {
+		o.Sources["app"] = processedSource{o.Sources["app"], &processed}
+		o.Limits.LocalBytes = 4 << 20
+	})
+	for i := 0; ; i++ {
+		_, done, err := f.src.IndexStep(ctx, 64<<20, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if done || i > 40 {
+			break
+		}
+	}
+	end := start.Add(120000 * time.Second)
+	for _, order := range []string{"asc", "desc"} {
+		processed = 0
+		_, err := f.eng.Search(ctx, Query{From: end.Add(-5 * time.Hour), To: end, Text: "upstream", Order: order})
+		if code(err) != EOverBudget || processed != 0 {
+			t.Errorf("%s: %v, %d bytes processed", order, err, processed)
+		}
+	}
+	// The head of the stream is read either way.
+	for _, order := range []string{"asc", "desc"} {
+		if _, err := f.eng.Search(ctx, Query{From: start, To: start.Add(10 * time.Minute), Text: "upstream", Order: order}); err != nil {
+			t.Errorf("%s head: %v", order, err)
+		}
 	}
 }

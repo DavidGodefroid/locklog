@@ -3,6 +3,7 @@ package engine
 import (
 	"strings"
 
+	"github.com/DavidGodefroid/locklog/internal/mask"
 	"github.com/DavidGodefroid/locklog/internal/parse"
 )
 
@@ -10,8 +11,10 @@ import (
 // masked only if its clear text could contain every needle. It is exact:
 // a needle (printable, without placeholder brackets or U+FFFD, validated)
 // found in the evaluation string E lies inside one unmasked segment of a
-// masked string, which is a substring of the clear message or of a clear
-// string leaf; so a record skipped here could not have matched. Its residual
+// masked string, which is a substring of the cleaned clear message or
+// string leaf (mask.Clean: the masker drops invisible runes and invalid
+// bytes first, which can join text); so a record skipped here could not
+// have matched. Its residual
 // (latency reveals how many records contain a clear substring) is shown at
 // the policy review and documented.
 //
@@ -31,8 +34,8 @@ import (
 // only purpose. The weaker failure signal is one reason the filter is refused
 // on production.
 
-// prefilterPass reports whether the record's clear message or one of its
-// string or number leaves contains every needle.
+// prefilterPass reports whether the record's cleaned clear message or one
+// of its cleaned string or number leaves contains every needle.
 func prefilterPass(ev parse.Event, needles []string) bool {
 	texts := clearTexts(ev)
 	for _, n := range needles {
@@ -51,12 +54,12 @@ func prefilterPass(ev parse.Event, needles []string) bool {
 }
 
 func clearTexts(ev parse.Event) []string {
-	out := []string{ev.Message}
+	out := []string{mask.Clean(ev.Message)}
 	var walk func(v parse.Value)
 	walk = func(v parse.Value) {
 		switch v.Kind {
 		case parse.KindString, parse.KindNumber, parse.KindBool:
-			out = append(out, v.Str)
+			out = append(out, mask.Clean(v.Str))
 		case parse.KindObject:
 			for _, m := range v.Members {
 				walk(m.Value)
