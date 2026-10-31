@@ -383,6 +383,18 @@ func (b *Backend) handler(method string) console.Handler {
 		if !ok {
 			return console.ErrResp(req.ID, ipc.CodeInternal, "no log engine")
 		}
+		// The engine serves the policy it was opened with: once the human
+		// approved another one (:review), the session is dropped and
+		// reopened on the policy in force before the call runs.
+		if p, ok := env.Policy().(Policy); ok && p.Fingerprint() != ls.policy.Fingerprint() {
+			env.Lost()
+			if sess, err = env.Session(ctx); err != nil {
+				return console.ErrResp(req.ID, ipc.CodeConnLost, env.Sanitizer().Error(err))
+			}
+			if ls, ok = console.Unwrap(sess).(*session); !ok || ls.policy.Fingerprint() != p.Fingerprint() {
+				return console.ErrResp(req.ID, ipc.CodeInternal, "no log engine for the policy in force")
+			}
+		}
 		params := req.Params
 		if len(params) == 0 {
 			params = json.RawMessage("{}")

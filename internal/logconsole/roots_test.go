@@ -204,3 +204,65 @@ func TestLostSession(t *testing.T) {
 		t.Errorf("console line: %q", env.lines)
 	}
 }
+
+// reconnectEnv reconnects through the backend after Lost, on the policy in
+// force, as lockkit's console does (ReconnectPolicy).
+type reconnectEnv struct {
+	*fakeEnv
+	b    *Backend
+	lost int
+}
+
+func (e *reconnectEnv) Lost() {
+	e.lost++
+	if e.sess != nil {
+		e.sess.Close()
+		e.sess = nil
+	}
+}
+
+func (e *reconnectEnv) Session(ctx context.Context) (console.Session, error) {
+	if e.sess == nil {
+		s, err := e.b.Connect(ctx, console.Credentials{Policy: e.policy})
+		if err != nil {
+			return nil, err
+		}
+		e.sess = s
+	}
+	return e.sess, nil
+}
+
+func TestPolicyChangeReopensEngine(t *testing.T) {
+	logs := t.TempDir()
+	root := project(t, filesCfg(logs))
+	var engines []*fakeEngine
+	b := New(Options{Profile: "staging", Root: root, Open: func(_ context.Context, o OpenOptions) (Engine, error) {
+		e := &fakeEngine{result: o.Policy.Fingerprint()}
+		engines = append(engines, e)
+		return e, nil
+	}})
+	old, err := b.LoadPolicy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := b.Connect(context.Background(), console.Credentials{Policy: old})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The human approves a tightened policy: one source fewer.
+	cur := old.(Policy)
+	cur.Policy.Profile.Sources = nil
+	env := &reconnectEnv{fakeEnv: &fakeEnv{sess: s, policy: cur}, b: b}
+	resp := b.Methods()[MethodSearch](context.Background(), ipc.Request{ID: 1, Method: MethodSearch}, env)
+	if resp.Error != nil || env.lost != 1 || len(engines) != 2 || !engines[0].closed || engines[0].method != "" || engines[1].method != MethodSearch {
+		t.Fatalf("policy change: %+v lost=%d engines=%d", resp.Error, env.lost, len(engines))
+	}
+	if !strings.Contains(string(resp.Result), cur.Fingerprint()) {
+		t.Errorf("served by the engine of %s, want the policy in force", resp.Result)
+	}
+	// The same policy: the session is kept.
+	b.Methods()[MethodCount](context.Background(), ipc.Request{ID: 2, Method: MethodCount}, env)
+	if env.lost != 1 || len(engines) != 2 {
+		t.Errorf("reopened without a change: lost=%d engines=%d", env.lost, len(engines))
+	}
+}
