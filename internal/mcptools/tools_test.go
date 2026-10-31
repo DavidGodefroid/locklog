@@ -120,15 +120,18 @@ func TestToolList(t *testing.T) {
 	}
 }
 
-// Only locklog_request_change is approved among this PR's tools; the
-// free list is what an agent may call without a prompt.
+// locklog_request_change, locklog_scan and locklog_unmask are approved;
+// locklog_lookup is free (rate-limited); the free list is what an agent
+// may call without a prompt.
 func TestFreeNames(t *testing.T) {
-	want := []string{ToolStatus, ToolSources, ToolSearch, ToolCount, ToolPatterns, ToolContext, ToolTrace, ToolTail, ToolPIIList, ToolPIIAdd}
+	want := []string{ToolStatus, ToolSources, ToolSearch, ToolCount, ToolPatterns, ToolContext, ToolTrace, ToolTail, ToolLookup, ToolPIIList, ToolPIIAdd}
 	if got := FreeNames(); !slices.Equal(got, want) {
 		t.Errorf("FreeNames = %v, want %v", got, want)
 	}
-	if Free(ToolRequestChange) {
-		t.Error("locklog_request_change is approved, not free")
+	for _, n := range []string{ToolRequestChange, ToolScan, ToolUnmask} {
+		if Free(n) {
+			t.Errorf("%s is approved, not free", n)
+		}
 	}
 	if Free("locklog_unknown") {
 		t.Error("an unknown tool counts as free")
@@ -273,8 +276,10 @@ func TestHostAgentGuard(t *testing.T) {
 	o := withConn(c)
 	o.HostAgent = true
 	cs := connect(t, o)
-	args := map[string]map[string]any{ToolPIIAdd: {"pattern": "x"}, ToolRequestChange: {"change": "y"}, ToolContext: {"ref": "r"}, ToolTrace: {"id": "i"}}
-	for _, tool := range []string{ToolSearch, ToolCount, ToolPatterns, ToolContext, ToolTrace, ToolTail, ToolSources, ToolPIIList, ToolPIIAdd, ToolRequestChange} {
+	args := map[string]map[string]any{ToolPIIAdd: {"pattern": "x"}, ToolRequestChange: {"change": "y"}, ToolContext: {"ref": "r"}, ToolTrace: {"id": "i"},
+		ToolScan: {"tool": "search", "query": map[string]any{"text": "x"}}, ToolUnmask: {"ref": "r", "pseudonyms": []string{"⟦email:A⟧"}, "reason": "y"},
+		ToolLookup: {"kind": "email", "values": []string{"a@example.com"}}}
+	for _, tool := range []string{ToolSearch, ToolCount, ToolPatterns, ToolContext, ToolTrace, ToolTail, ToolScan, ToolUnmask, ToolLookup, ToolSources, ToolPIIList, ToolPIIAdd, ToolRequestChange} {
 		res := call(t, cs, tool, args[tool])
 		if !res.IsError || !strings.Contains(text(res), "non-production trial") {
 			t.Errorf("%s on production from a host agent: %s", tool, text(res))
@@ -422,7 +427,9 @@ func TestHostAgentStatusStructured(t *testing.T) {
 // The guard fails closed: a status that does not decode or does not say
 // production refuses every tool, structured, before any log method.
 func TestHostAgentGuardFailsClosed(t *testing.T) {
-	args := map[string]map[string]any{ToolPIIAdd: {"pattern": "x"}, ToolRequestChange: {"change": "y"}, ToolContext: {"ref": "r"}, ToolTrace: {"id": "i"}}
+	args := map[string]map[string]any{ToolPIIAdd: {"pattern": "x"}, ToolRequestChange: {"change": "y"}, ToolContext: {"ref": "r"}, ToolTrace: {"id": "i"},
+		ToolScan: {"tool": "search", "query": map[string]any{"text": "x"}}, ToolUnmask: {"ref": "r", "pseudonyms": []string{"⟦email:A⟧"}, "reason": "y"},
+		ToolLookup: {"kind": "email", "values": []string{"a@example.com"}}}
 	for _, st := range []string{`[1,`, `{"profile":"dev"}`, `{"production":"yes"}`} {
 		c := &fakeConn{status: []byte(st)}
 		o := withConn(c)
@@ -461,7 +468,9 @@ func TestLargeIntegersExact(t *testing.T) {
 // served, refused by the console, on production with and without a host
 // agent, and without a console.
 func TestStructuredParity(t *testing.T) {
-	args := map[string]map[string]any{ToolSearch: {"text": "x"}, ToolCount: {"text": "x"}, ToolPIIAdd: {"pattern": "x"}, ToolRequestChange: {"change": "y"}}
+	args := map[string]map[string]any{ToolSearch: {"text": "x"}, ToolCount: {"text": "x"}, ToolPIIAdd: {"pattern": "x"}, ToolRequestChange: {"change": "y"},
+		ToolScan: {"tool": "search", "query": map[string]any{"text": "x"}}, ToolUnmask: {"ref": "r", "pseudonyms": []string{"⟦email:A⟧"}, "reason": "y"},
+		ToolLookup: {"kind": "email", "values": []string{"a@example.com"}}}
 	refused := &ipc.RPCError{Code: ipc.CodeRefused, Message: "over the budget", Data: &refusal.Info{Code: "E_OVER_BUDGET", Retry: refusal.RetryRewrite, Hint: "narrow the range", Span: &refusal.Span{Line: 1, Col: 7, Token: "regex"}}}
 	cases := []struct {
 		name string
@@ -535,6 +544,18 @@ func TestInputSchemas(t *testing.T) {
 			t.Errorf("%s regex = %v", tool, r)
 		}
 	}
+	if c := prop(ToolRequestChange, "properties", "change"); c["maxLength"] != float64(500) {
+		t.Errorf("change = %v, want the console's 500", c)
+	}
+	if r := prop(ToolUnmask, "properties", "reason"); r["minLength"] != float64(1) || r["maxLength"] != float64(300) {
+		t.Errorf("unmask reason = %v", r)
+	}
+	if v := prop(ToolLookup, "properties", "values"); v["maxItems"] != float64(10) {
+		t.Errorf("lookup values = %v", v)
+	}
+	if e, _ := prop(ToolScan, "properties", "tool")["enum"].([]any); len(e) != 4 {
+		t.Errorf("scan tools = %v", e)
+	}
 	for tool, f := range map[string]string{ToolPIIAdd: "pattern", ToolRequestChange: "change"} {
 		if p := prop(tool, "properties", f); p["minLength"] != float64(1) || p["maxLength"] == nil {
 			t.Errorf("%s %s = %v", tool, f, p)
@@ -562,9 +583,41 @@ func TestInputSchemas(t *testing.T) {
 			t.Errorf("search accepted %v", bad)
 		}
 	}
-	for tool, bad := range map[string]map[string]any{ToolPIIAdd: {"pattern": ""}, ToolRequestChange: {"change": ""}, ToolCount: {"limit": 5}} {
+	for tool, bad := range map[string]map[string]any{ToolPIIAdd: {"pattern": ""}, ToolRequestChange: {"change": ""}, ToolCount: {"limit": 5},
+		ToolScan:   {"tool": "tail", "query": map[string]any{}},
+		ToolUnmask: {"ref": "r", "pseudonyms": []string{}, "reason": "y"},
+		ToolLookup: {"kind": "email", "values": []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k"}},
+	} {
 		if r, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: tool, Arguments: bad}); err == nil && !r.IsError {
 			t.Errorf("%s accepted %v", tool, bad)
+		}
+	}
+}
+
+// locklog_scan, locklog_unmask and locklog_lookup forward their
+// parameters, without the profile, to log.scan, log.unmask and log.lookup.
+func TestValueToolsForward(t *testing.T) {
+	c := &fakeConn{}
+	cs := connect(t, withConn(c))
+	for _, tc := range []struct {
+		tool, method string
+		args         map[string]any
+		want         string
+	}{
+		{ToolScan, logconsole.MethodScan, map[string]any{"profile": "dev", "tool": "count", "query": map[string]any{"text": "x", "from": "2026-10-30T13:00:00Z"}, "reason": "r"},
+			`{"tool":"count","query":{"from":"2026-10-30T13:00:00Z","text":"x"},"reason":"r"}`},
+		{ToolUnmask, logconsole.MethodUnmask, map[string]any{"profile": "dev", "ref": "Lr1.x", "pseudonyms": []string{"⟦email:A⟧"}, "reason": "r"},
+			`{"ref":"Lr1.x","pseudonyms":["⟦email:A⟧"],"reason":"r"}`},
+		{ToolLookup, logconsole.MethodLookup, map[string]any{"kind": "email", "values": []string{"a@example.com"}},
+			`{"kind":"email","values":["a@example.com"]}`},
+	} {
+		res := call(t, cs, tc.tool, tc.args)
+		if res.IsError {
+			t.Fatalf("%s: %s", tc.tool, text(res))
+		}
+		calls := c.methods()
+		if last := calls[len(calls)-1]; last != tc.method+" "+tc.want {
+			t.Errorf("%s: call %q, want %q", tc.tool, last, tc.method+" "+tc.want)
 		}
 	}
 }

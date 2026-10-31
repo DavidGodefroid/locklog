@@ -28,6 +28,12 @@ const (
 	EMask          = "E_MASK"
 	EPolicyChanged = "E_POLICY_CHANGED"
 	EStale         = "E_STALE"
+	// EApproval: the call needs a human approval this console cannot ask
+	// (no approver on the call).
+	EApproval = "E_APPROVAL"
+	// EUnmaskNever: the profile's unmask = "never" (the production
+	// default) refuses every unmask.
+	EUnmaskNever = "E_UNMASK_NEVER"
 )
 
 // Error is a structured refusal. Its text never holds log content: query

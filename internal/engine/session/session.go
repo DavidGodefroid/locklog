@@ -28,6 +28,7 @@ import (
 	"time"
 
 	kconfig "github.com/DavidGodefroid/lockkit/config"
+	"github.com/DavidGodefroid/lockkit/console"
 	"github.com/DavidGodefroid/lockkit/pii"
 	"github.com/DavidGodefroid/lockkit/refusal"
 
@@ -104,6 +105,7 @@ type Session struct {
 	store    *index.Store
 	conf     Confinement
 	docker   bool
+	prod     bool
 	notes    []string
 	inflight atomic.Int64
 
@@ -129,7 +131,7 @@ func Open(ctx context.Context, o Options) (_ *Session, err error) {
 	if o.Workers <= 0 {
 		o.Workers = min(2, runtime.NumCPU())
 	}
-	s := &Session{srcs: map[string]source.Source{}, cfg: map[string]config.Source{}, conf: o.Confinement}
+	s := &Session{srcs: map[string]source.Source{}, cfg: map[string]config.Source{}, conf: o.Confinement, prod: pr.Production}
 	defer func() {
 		if err != nil {
 			s.Close()
@@ -212,9 +214,19 @@ func Open(ctx context.Context, o Options) (_ *Session, err error) {
 		Detect:     func(v string) bool { return s.maskers.base.Text(v) != v },
 		NameMasked: s.maskers.nameMasked,
 		Limits:     limits(pr.Limits),
+		Budgets:    budgets(pr.Limits),
 		Prefilter:  pr.Prefilter,
 		Workers:    o.Workers,
 		Now:        o.Now,
+		Unmask:     pr.Unmask,
+		// lookup = "approved" makes every lookup a read-pii approval.
+		LookupApproved: pr.Lookup == config.LookupApproved,
+		Production:     pr.Production,
+		// An approved scan paces its remote requests at the profile's
+		// remote rate (S3: 600/min, 240/min on production), its own and
+		// not drawn from the rolling budget (R6-P2); the source's
+		// in-flight cap (4) bounds its concurrency.
+		ScanRequestsPerMinute: pr.Limits.Remote.RequestsPerMinute,
 	})
 	if err != nil {
 		return nil, err
@@ -391,6 +403,15 @@ func limits(l config.Limits) engine.Limits {
 	}
 }
 
+// budgets are the engine's rolling budgets from the profile's.
+func budgets(l config.Limits) engine.Budgets {
+	return engine.Budgets{
+		LocalBytesPerHour: l.Local.BytesPerHour, RemoteBytesPerHour: l.Remote.BytesPerHour,
+		RemoteRequestsPerMinute: l.Remote.RequestsPerMinute, MetricQueriesPerHour: l.Remote.MetricQueriesPerHour,
+		LookupsPerHour: l.LookupsPerHour, LookupsPerHourPerUID: l.LookupsPerHourPerUID,
+	}
+}
+
 // attrKeys are the attribute keys of a source's events: the frame keys of
 // a framed format (and of the docker source), and the docker source's
 // static container name.
@@ -534,9 +555,12 @@ func (s *Session) Close() error {
 }
 
 // Handle implements logconsole.Engine.
-func (s *Session) Handle(ctx context.Context, method string, params json.RawMessage, _ logconsole.Caller) (any, *logconsole.Refusal, error) {
+func (s *Session) Handle(ctx context.Context, method string, params json.RawMessage, c logconsole.Caller) (any, *logconsole.Refusal, error) {
 	s.inflight.Add(1)
 	defer s.inflight.Add(-1)
+	// The caller: its kernel-verified uid (an approved scan and the
+	// lookup limits are bound to it) and the console's approval screen.
+	ctx = engine.WithPeer(ctx, engine.Peer{UID: c.UID, Known: c.PID != 0 || c.UID != 0, Approve: s.approver(ctx)})
 	switch method {
 	case logconsole.MethodStatus:
 		if r := noParams(params); r != nil {
@@ -556,6 +580,23 @@ func (s *Session) Handle(ctx context.Context, method string, params json.RawMess
 	return res, nil, err
 }
 
+// approver asks the human at the console for the call's approval: nil when
+// the call came without one (no console).
+func (s *Session) approver(ctx context.Context) engine.Approver {
+	ap := logconsole.ApproveFrom(ctx)
+	if ap == nil {
+		return nil
+	}
+	return func(ctx context.Context, a engine.Approval) error {
+		r := ap(ctx, console.Screen{Header: a.Header, Note: a.Note, Body: a.Body, Warnings: a.Warnings, Production: s.prod,
+			NeverAuto: a.NeverAuto, Red: a.Class == "read-pii"})
+		if r.Approved {
+			return nil
+		}
+		return &logconsole.Declined{Resp: r.Refusal}
+	}
+}
+
 // noParams refuses parameters to a method that takes none.
 func noParams(params json.RawMessage) *logconsole.Refusal {
 	var m map[string]json.RawMessage
@@ -570,6 +611,7 @@ var retries = map[string]refusal.Retry{
 	engine.EBadQuery: refusal.RetryRewrite, engine.EUnknownField: refusal.RetryRewrite, engine.EPIIInQuery: refusal.RetryRewrite,
 	engine.EOverBudget: refusal.RetryRewrite, engine.EPolicyChanged: refusal.RetryRewrite, engine.EStale: refusal.RetryRewrite,
 	engine.ESource: refusal.RetryStop, engine.EMask: refusal.RetryStop,
+	engine.EApproval: refusal.RetryAskUser, engine.EUnmaskNever: refusal.RetryAskUser,
 }
 
 // hints are the default rewrite hints.
@@ -579,6 +621,7 @@ var hints = map[string]string{
 	engine.EStale:         "run the query again",
 	engine.EPIIInQuery:    "address personal values by their pseudonym (⟦kind:ID⟧) as the records show them",
 	engine.EUnknownField:  "use a field name the records or log.sources show",
+	engine.EUnmaskNever:   "ask the human to read the record at the console (:reveal), or to set unmask = \"approved\"",
 }
 
 // refusalOf is the console's form of an engine refusal. Its text holds no
@@ -607,6 +650,8 @@ type Status struct {
 	// Residuals name the docker source's missing guards.
 	Residuals []string `json:"residuals,omitempty"`
 	Notes     []string `json:"notes,omitempty"`
+	// Budgets is what is left of the rolling budgets.
+	Budgets engine.BudgetStatus `json:"budgets"`
 }
 
 // SourceStatus names one source.
@@ -617,7 +662,7 @@ type SourceStatus struct {
 
 // Status implements logconsole.Engine.
 func (s *Session) Status(context.Context) any {
-	st := Status{Epoch: s.maskers.base.Epoch(), Landlock: s.conf.Landlock.String(), Notes: s.notes}
+	st := Status{Epoch: s.maskers.base.Epoch(), Landlock: s.conf.Landlock.String(), Notes: s.notes, Budgets: s.eng.BudgetStatus()}
 	for _, n := range s.names {
 		st.Sources = append(st.Sources, SourceStatus{Name: n, Kind: s.srcs[n].Kind()})
 	}
@@ -674,7 +719,7 @@ func (s *Session) describe(ctx context.Context) Sources {
 	for _, n := range s.names {
 		src := s.srcs[n]
 		info := SourceInfo{Name: n, Kind: src.Kind()}
-		sch, err := src.Describe(ctx)
+		sch, err := src.Describe(s.eng.Paced(ctx, n))
 		if err != nil {
 			info.Error = "the source could not be described"
 			out.Sources = append(out.Sources, info)

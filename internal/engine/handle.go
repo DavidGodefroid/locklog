@@ -70,10 +70,29 @@ func (e *Engine) Handle(ctx context.Context, method string, params json.RawMessa
 			return nil, r, nil
 		}
 		res, err = e.Patterns(ctx, q)
+	case MethodScan:
+		var q ScanQuery
+		if r := decode(&q); r != nil {
+			return nil, r, nil
+		}
+		res, err = e.Scan(ctx, q)
+	case MethodUnmask:
+		var q UnmaskQuery
+		if r := decode(&q); r != nil {
+			return nil, r, nil
+		}
+		res, err = e.Unmask(ctx, q)
+	case MethodLookup:
+		var q LookupQuery
+		if r := decode(&q); r != nil {
+			return nil, r, nil
+		}
+		res, err = e.Lookup(ctx, q)
 	default:
 		return nil, refuse(EBadQuery, "", "unknown method"), nil
 	}
-	if r, ok := err.(*Error); ok {
+	var r *Error
+	if errors.As(err, &r) {
 		return nil, r, nil
 	}
 	return res, nil, err

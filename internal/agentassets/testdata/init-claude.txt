@@ -10,6 +10,7 @@ added to permissions.allow in .claude/settings.local.json: mcp__locklog__locklog
 added to permissions.allow in .claude/settings.local.json: mcp__locklog__locklog_context
 added to permissions.allow in .claude/settings.local.json: mcp__locklog__locklog_trace
 added to permissions.allow in .claude/settings.local.json: mcp__locklog__locklog_tail
+added to permissions.allow in .claude/settings.local.json: mcp__locklog__locklog_lookup
 added to permissions.allow in .claude/settings.local.json: mcp__locklog__locklog_pii_list
 added to permissions.allow in .claude/settings.local.json: mcp__locklog__locklog_pii_add
 Claude Code asks once whether to use the project MCP server "locklog"; approve it.
@@ -26,6 +27,7 @@ asked again:
   "mcp__locklog__locklog_context",
   "mcp__locklog__locklog_trace",
   "mcp__locklog__locklog_tail",
+  "mcp__locklog__locklog_lookup",
   "mcp__locklog__locklog_pii_list",
   "mcp__locklog__locklog_pii_add"
 
