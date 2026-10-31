@@ -55,6 +55,13 @@ type fakeLoki struct {
 	// /query and /query_range requests from 0): ingestion during a count.
 	inject map[int]fakeEntry
 	nQuery int
+	// reverseTies returns the entries of one nanosecond in reverse
+	// insertion order (Loki orders ties by its own label string).
+	reverseTies bool
+	// refuse answers metric queries with this status and message (a
+	// Loki limit).
+	refuseStatus int
+	refuseMsg    string
 	// offGrid writes metric points 1 s late (a backend whose grid is
 	// not the one asked for).
 	offGrid bool
@@ -158,6 +165,8 @@ func (f *fakeLoki) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{"status": "success", "data": out})
 	case (r.URL.Path == "/loki/api/v1/query" || r.URL.Path == "/loki/api/v1/query_range") && f.injectNow():
 		f.ServeHTTP(w, r) // after the injection
+	case f.refuseStatus != 0 && metricRe.MatchString(q.Get("query")):
+		http.Error(w, f.refuseMsg, f.refuseStatus)
 	case r.URL.Path == "/loki/api/v1/query":
 		query := q.Get("query")
 		at, _ := strconv.ParseInt(q.Get("time"), 10, 64)
@@ -201,6 +210,9 @@ func (f *fakeLoki) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if e.ts >= start && e.ts < end && matches(sel.stream, e.labels) && matches(sel.meta, merged(e)) {
 				hits = append(hits, e)
 			}
+		}
+		if f.reverseTies {
+			slices.Reverse(hits)
 		}
 		sort.SliceStable(hits, func(i, j int) bool { return hits[i].ts < hits[j].ts })
 		if len(hits) > limit {
@@ -1062,5 +1074,101 @@ func TestBoundaryFetchLimits(t *testing.T) {
 	}
 	if _, err := newSource(t, f, nil).IndexCounts(ctx, source.CountQuery{Range: source.Range{From: t0, To: t0.Add(10 * time.Minute)}, Bucket: 5 * time.Minute}); !errors.Is(err, source.ErrNotIndexable) {
 		t.Fatalf("crowded boundary: %v", err)
+	}
+}
+
+func TestOrdinalsStableAcrossPages(t *testing.T) {
+	// A page cut inside a nanosecond holding several streams (Limit 7: 5
+	// entries, then A and B of {app="aaa"} and C of {app="zz"} at one
+	// nanosecond): the scan's order, its ordinals, and Reread and Around
+	// agree, whatever order Loki returns the ties in.
+	tie := t0.Add(time.Minute).UnixNano()
+	mk := func() []fakeEntry {
+		var es []fakeEntry
+		for i := 0; i < 5; i++ {
+			es = append(es, fakeEntry{ts: t0.Add(time.Duration(i+1) * time.Second).UnixNano(), labels: map[string]string{"env": "prod", "app": "api"}, line: fmt.Sprint("early ", i)})
+		}
+		return append(es,
+			fakeEntry{ts: tie, labels: map[string]string{"env": "prod", "app": "zz"}, line: "C"},
+			fakeEntry{ts: tie, labels: map[string]string{"env": "prod", "app": "aaa"}, line: "B"},
+			fakeEntry{ts: tie, labels: map[string]string{"env": "prod", "app": "aaa"}, line: "A"},
+			fakeEntry{ts: t0.Add(2 * time.Minute).UnixNano(), labels: map[string]string{"env": "prod", "app": "api"}, line: "late"})
+	}
+	var orders [][]string
+	for _, rev := range []bool{false, true} {
+		s := newSource(t, &fakeLoki{entries: mk(), reverseTies: rev}, nil)
+		recs := scanAll(t, s, source.Range{From: t0, To: t0.Add(time.Hour)}, source.Selector{})
+		var order []string
+		for i, r := range recs {
+			order = append(order, r.Event.Raw)
+			got, err := s.Reread(ctx, r.Ref)
+			if err != nil || got.Event.Raw != r.Event.Raw {
+				t.Fatalf("reverse %t: record %d (%s): reread %q, %v", rev, i, r.Event.Raw, got.Event.Raw, err)
+			}
+			around, err := s.Around(ctx, r.Ref, 1, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var mid string
+			for j, a := range around {
+				if a.Ref == r.Ref {
+					mid = a.Event.Raw
+					if j > 0 && around[j-1].Event.Raw != recs[i-1].Event.Raw {
+						t.Fatalf("around %d: before is %q", i, around[j-1].Event.Raw)
+					}
+				}
+			}
+			if mid != r.Event.Raw {
+				t.Fatalf("reverse %t: around record %d (%s) is %q", rev, i, r.Event.Raw, mid)
+			}
+		}
+		orders = append(orders, order)
+	}
+	if !slices.Equal(orders[0], orders[1]) {
+		t.Fatalf("order depends on Loki's tie order: %v / %v", orders[0], orders[1])
+	}
+}
+
+func TestSmallGuards(t *testing.T) {
+	p, _ := parse.New(parse.Options{})
+	// An empty profile-selector value would mean "absent" to Loki.
+	if _, err := New(Options{Name: "l", Client: &egress.Client{}, Parser: p, Selector: map[string]string{"env": ""}}); err == nil {
+		t.Fatal("an empty selector value accepted")
+	}
+	f := &fakeLoki{entries: dataset(50)}
+	s := newSource(t, f, nil)
+	r := source.Range{From: t0, To: t0.Add(10 * time.Minute)}
+	// An unknown operator is never taken as applied by a count.
+	if _, err := s.IndexCounts(ctx, source.CountQuery{Range: r, Bucket: 5 * time.Minute,
+		Selector: source.Selector{Terms: []source.Term{{Field: "app", Op: "~", Values: []string{"api"}}}}}); !errors.Is(err, source.ErrNotIndexable) {
+		t.Fatalf("unknown op: %v", err)
+	}
+	// Loki's limit refusals of a metric query: not served (the engine
+	// scans); other failures stay errors.
+	for _, tc := range []struct {
+		status int
+		msg    string
+		ok     bool
+	}{
+		{400, "maximum of series (500) reached for a single query", true},
+		{400, "the query time range exceeds the limit (query length: 721h, limit: 720h)", true},
+		{429, "too many outstanding requests", true},
+		{504, "request timed out, decrease the duration of the request or add more label matchers", true},
+		{400, "parse error at line 1", false},
+		{500, "too many outstanding requests", false},
+	} {
+		f.refuseStatus, f.refuseMsg = tc.status, tc.msg
+		_, err := s.IndexCounts(ctx, source.CountQuery{Range: r, Bucket: 5 * time.Minute})
+		if errors.Is(err, source.ErrNotIndexable) != tc.ok || err == nil {
+			t.Fatalf("%d %q: %v", tc.status, tc.msg, err)
+		}
+	}
+	f.refuseStatus = 0
+	// The boundary fetches' bytes are capped per count.
+	prev := maxBoundaryBytes
+	maxBoundaryBytes = 100
+	defer func() { maxBoundaryBytes = prev }()
+	if _, err := s.IndexCounts(ctx, source.CountQuery{Range: r, Bucket: 5 * time.Minute}); !errors.Is(err, source.ErrNotIndexable) {
+		t.Fatalf("over the boundary byte cap: %v", err)
 	}
 }

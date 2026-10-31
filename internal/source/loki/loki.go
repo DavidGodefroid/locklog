@@ -92,9 +92,13 @@ func New(o Options) (*Source, error) {
 	if len(o.Selector) == 0 {
 		return nil, errors.New("loki source: an empty selector would read every stream")
 	}
-	for k := range o.Selector {
+	for k, v := range o.Selector {
 		if !nameRe.MatchString(k) {
 			return nil, fmt.Errorf("loki source: invalid selector label %q", k)
+		}
+		if v == "" {
+			// x="" means "x absent" to Loki: it would widen the scope.
+			return nil, fmt.Errorf("loki source: selector label %s needs a value", k)
 		}
 	}
 	// A | name="v" filter matches stream labels too: a trusted metadata
@@ -136,7 +140,7 @@ func (s *Source) trustedMeta(n string) bool  { return slices.Contains(s.o.Truste
 // stream. They are evaluated locally, on the metadata the categorized
 // response returns apart from the labels.
 func (s *Source) pushable(t source.Term) bool {
-	return s.trustedLabel(t.Field) && len(t.Values) > 0 && !slices.Contains(t.Values, "")
+	return (t.Op == "=" || t.Op == "in" || t.Op == "!=") && s.trustedLabel(t.Field) && len(t.Values) > 0 && !slices.Contains(t.Values, "")
 }
 
 // selector builds the server-side selector: the profile's, plus the
@@ -171,22 +175,52 @@ func (s *Source) selector(sel source.Selector) Selector {
 
 // do sends one request under the call's limiter and the in-flight cap.
 func (s *Source) do(ctx context.Context, path string, q url.Values) ([]byte, error) {
+	resp, err := s.doResp(ctx, path, q)
+	if err != nil {
+		return nil, err
+	}
+	return resp.Body, nil
+}
+
+// doResp is do, returning the response (its status and body, also on a
+// non-2xx answer) with the error.
+func (s *Source) doResp(ctx context.Context, path string, q url.Values) (egress.Response, error) {
 	if l := source.LimiterFrom(ctx); l != nil {
 		if err := l.Wait(ctx); err != nil {
-			return nil, err
+			return egress.Response{}, err
 		}
 	}
 	select {
 	case s.sem <- struct{}{}:
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return egress.Response{}, ctx.Err()
 	}
 	defer func() { <-s.sem }()
-	resp, err := s.o.Client.GetWith(ctx, path, q, requestHeaders)
-	if err != nil {
-		return nil, err
+	return s.o.Client.GetWith(ctx, path, q, requestHeaders)
+}
+
+// limitRefusals are Loki 3.5's answers to a query over one of its limits
+// (status, message prefix): pkg/querier/queryrange/limits.go,
+// pkg/util/validation/validate.go, pkg/lokifrontend, pkg/util/server/error.go.
+var limitRefusals = []struct {
+	status int
+	prefix string
+}{
+	{400, "maximum of series ("},
+	{400, "the query time range exceeds the limit"},
+	{429, "too many outstanding requests"},
+	{504, "request timed out"},
+}
+
+// limitRefused reports whether resp is Loki refusing a query over a limit.
+func limitRefused(resp egress.Response) bool {
+	body := strings.TrimSpace(string(resp.Body))
+	for _, r := range limitRefusals {
+		if resp.Status == r.status && strings.HasPrefix(body, r.prefix) {
+			return true
+		}
 	}
-	return resp.Body, nil
+	return false
 }
 
 // sliceCount returns the number of epoch-aligned slices of width w covering r.
@@ -393,6 +427,10 @@ func (s *Source) fetchSlice(ctx context.Context, q string, from, to int64) ([]en
 		}
 		switch {
 		case done:
+			// One order for the whole slice, whatever the page cuts and
+			// Loki's order of ties: ordinals within a nanosecond (Reread,
+			// Around) then point at the same entries.
+			sortEntries(out)
 			return out, fetched, nil
 		case last < 0:
 			// A full page with nothing in [start, to): not Loki's paging.
@@ -657,6 +695,10 @@ type vectorResponse struct {
 // served and the engine scans.
 const MaxBoundaryFetches = 64
 
+// maxBoundaryBytes bounds the response bytes of one count's boundary
+// fetches (both rounds); past it, the count is not served. A var for tests.
+var maxBoundaryBytes int64 = 8 << 20
+
 // IndexCounts answers a trusted-label count with server-side metric queries:
 // no line leaves the source.
 //
@@ -691,14 +733,22 @@ const MaxBoundaryFetches = 64
 // and after the metric queries, and must agree, else the count is not
 // served.
 //
-// Not served (source.ErrNotIndexable): a point off the grid asked for; a
+// Cost: one metric query per by-label combination (up to 4), two guard
+// queries, and twice one log request per boundary to correct (at most
+// MaxBoundaryFetches, at most 8 MiB of responses in all), every request
+// under the call's limiter. The boundary lines never leave the source.
+//
+// Not served (source.ErrNotIndexable): a Loki limit refusal (too many
+// series, too long a range, too many outstanding requests, a timeout); a
+// point off the grid asked for; a
 // count by anything but a trusted stream label (structured metadata
 // included), or by more than two; a term on anything but a trusted stream
 // label, or with no value or an empty one; an empty range; a bucket under a
 // second, not whole seconds, not dividing the range, or cutting it into
 // more than 11000 points; a bucketed range whose ends are not multiples of
 // the bucket since the epoch; more than MaxBoundaryFetches boundaries to
-// fetch, or one with a page or more of entries at its nanosecond.
+// fetch or more than 8 MiB of them, or one with a page or more of entries
+// at its nanosecond.
 func (s *Source) IndexCounts(ctx context.Context, q source.CountQuery) (source.CountResult, error) {
 	if len(q.By) > 2 {
 		return source.CountResult{}, source.ErrNotIndexable
@@ -777,10 +827,14 @@ func (s *Source) IndexCounts(ctx context.Context, q source.CountQuery) (source.C
 		}
 		return bounds, nil
 	}
+	var boundaryBytes int64
 	fetch := func(bounds []int64) (map[int64][]entry, error) {
 		out := map[int64][]entry{}
 		for _, b := range bounds {
-			es, _, err := s.fetchSlice(ctx, sel, b, b+1)
+			es, n, err := s.fetchSlice(ctx, sel, b, b+1)
+			if boundaryBytes += n; boundaryBytes > maxBoundaryBytes {
+				return nil, source.ErrNotIndexable
+			}
 			if errors.Is(err, errCrowded) {
 				return nil, source.ErrNotIndexable
 			}
@@ -939,10 +993,15 @@ func (s *Source) metric(ctx context.Context, expr string, instant bool, start, e
 		v.Set("end", strconv.FormatInt(end.UnixNano(), 10))
 		v.Set("step", strconv.FormatInt(int64(step/time.Second), 10))
 	}
-	body, err := s.do(ctx, path, v)
+	resp, err := s.doResp(ctx, path, v)
 	if err != nil {
+		if limitRefused(resp) {
+			// Over a Loki limit: the engine scans instead.
+			return nil, source.ErrNotIndexable
+		}
 		return nil, fmt.Errorf("loki source: %w", err)
 	}
+	body := resp.Body
 	var mr matrixResponse
 	if instant {
 		var vr vectorResponse
