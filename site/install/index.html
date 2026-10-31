@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Install — locklog</title>
+  <meta name="description" content="Install the locklog launcher with curl -fsSL https://locklog.dev/install.sh | sh, try it on a non-production profile, and place the agent for production.">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0b1120" media="(prefers-color-scheme: dark)">
+  <link rel="canonical" href="https://locklog.dev/install/">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="locklog">
+  <meta property="og:title" content="Install — locklog">
+  <meta property="og:description" content="Install the locklog launcher with curl -fsSL https://locklog.dev/install.sh | sh, try it on a non-production profile, and place the agent for production.">
+  <meta property="og:url" content="https://locklog.dev/install/">
+  <meta property="og:locale" content="en_US">
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="Install — locklog">
+  <meta name="twitter:description" content="Install the locklog launcher with curl -fsSL https://locklog.dev/install.sh | sh, try it on a non-production profile, and place the agent for production.">
+  <link rel="icon" href="../assets/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="../assets/style.css">
+  <script src="../assets/anchors.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header">
+    <div class="wrap">
+      <a class="brand" href="../"><img src="../assets/logo.svg" alt="" width="32" height="32"><span class="wordmark">lock<span>log</span></span></a>
+      <nav class="site-nav" aria-label="Main">
+        <ul>
+          <li><a href="../">Home</a></li>
+          <li><a href="../install/" aria-current="page">Install</a></li>
+          <li><a href="../how-it-works/">How it works</a></li>
+          <li><a href="../security/">Security</a></li>
+          <li><a href="../faq/">FAQ</a></li>
+          <li><a href="https://github.com/DavidGodefroid/locklog">GitHub</a></li>
+        </ul>
+      </nav>
+    </div>
+  </header>
+  <main id="main" tabindex="-1">
+    <div class="wrap">
+<h1>Install locklog</h1>
+<div class="prose">
+  <p class="lead">A launcher on the host, the console in its own container, and your agent placed where it cannot read the logs itself.</p>
+</div>
+
+<div class="notice" role="note"><p><strong>Pre-release, in development.</strong> No release of locklog is published yet. It is built on <a href="https://github.com/DavidGodefroid/lockkit">lockkit</a>, and its design is public in <a href="https://github.com/DavidGodefroid/locklog/blob/main/docs/security-model.md">docs/security-model.md</a>.</p></div>
+
+<section aria-labelledby="status">
+  <h2 id="status">Status</h2>
+  <p class="prose">locklog is a pre-release, in development. <code>install.sh</code> installs the latest <strong>published</strong> release, so until the first one is published it has nothing to install. Follow the <a href="https://github.com/DavidGodefroid/locklog/blob/main/CHANGELOG.md">CHANGELOG</a> and the <a href="https://github.com/DavidGodefroid/locklog/releases">releases page</a>.</p>
+</section>
+
+<section aria-labelledby="prerequisites">
+  <h2 id="prerequisites">Prerequisites</h2>
+  <ul class="prose">
+    <li>A Linux host with the logs.</li>
+    <li>Docker ≥ 19.03.</li>
+    <li><a href="https://docs.sigstore.dev/cosign/system_config/installation/">cosign</a>, to verify the release and the image.</li>
+    <li>sudo for <code>/usr/local/bin</code>.</li>
+    <li>A terminal you keep in view, where the console stays open.</li>
+  </ul>
+</section>
+
+<section aria-labelledby="install">
+  <h2 id="install">Install the launcher</h2>
+  <pre tabindex="0" class="term"><code>curl -fsSL https://locklog.dev/install.sh | sh</code></pre>
+  <div class="prose">
+    <p><code>install.sh</code> installs the latest published release, or <code>LOCKLOG_VERSION=vX.Y.Z</code>. It verifies the release with cosign before it installs a root-owned <code>/usr/local/bin/locklog</code>, and the launcher runs the image by its signed digest.</p>
+    <h3 id="read-first">Read the script first</h3>
+    <p>To read it before you run it, download it from <code>locklog.dev</code> or from the repository:</p>
+  </div>
+  <pre tabindex="0" class="term"><code>curl -fsSLO https://locklog.dev/install.sh   <span class="cmt"># or raw.githubusercontent.com/DavidGodefroid/locklog/main/scripts/install.sh</span>
+less install.sh &amp;&amp; sh install.sh</code></pre>
+  <p class="prose"><code>locklog update</code> moves to another release; <code>locklog version</code> shows the launcher’s and the image’s versions.</p>
+</section>
+
+<section aria-labelledby="trial">
+  <h2 id="trial">Trial, on a non-production profile</h2>
+  <p class="prose">About five minutes. Run it on a <strong>non-production</strong> profile: your agent runs on your own account, where it could still read the logs directly.</p>
+  <pre tabindex="0" class="term"><code><span class="cmt"># Describe your logs: setup detects files, journald and containers,
+# asks whether the profile is production (answer "no" for the trial),
+# and wires the detected agents (Claude Code, Codex, Gemini CLI)</span>
+locklog setup --agent host
+
+<span class="cmt"># The console, in a terminal you keep in view (setup prints the line;</span>
+<span class="cmt"># containers get a profile of their own, &lt;profile&gt;-docker)</span>
+locklog console --profile &lt;profile&gt;</code></pre>
+  <p class="prose">Then, in another terminal, ask your agent: <em>“when did the 502s start?”</em>. It calls <code>locklog_count</code>, <code>locklog_patterns</code> and <code>locklog_trace</code>; the console audits every call and asks you only when the agent wants more than the free budgets or a value in clear. In this trial the MCP server runs as the image’s <code>agent</code> account, launched from your account, and the launcher’s <code>mcp</code> refuses production profiles.</p>
+</section>
+
+<section aria-labelledby="production">
+  <h2 id="production">For production</h2>
+  <p class="prose">On production the agent must not be able to read the logs, the Docker socket or the backends itself (precondition <a href="../security/#p1">P1</a>). Run it:</p>
+  <ul class="cards">
+    <li><h3>In lea</h3><p>Planned: no <a href="https://github.com/DavidGodefroid/lea">lea</a> release supports locklog yet (<code>locklog setup --agent lea</code> says so). Use your own container meanwhile.</p></li>
+    <li><h3>In its own container</h3><p><code>locklog setup --agent container</code> prints a tested Dockerfile snippet for your agent image and the <code>docker run</code> line. The agent user must not have sudo.</p></li>
+  </ul>
+  <p class="prose">Your agent CLI’s own login (Anthropic, OpenAI, Google) is yours to set up. Then run <code>locklog doctor</code> where the agent runs: it checks the common ways P1 fails, and on a production profile its findings are errors.</p>
+</section>
+    </div>
+  </main>
+  <footer class="site-footer">
+    <div class="wrap">
+      <ul>
+        <li><a href="https://github.com/DavidGodefroid/locklog">Source on GitHub</a></li>
+        <li><a href="https://github.com/DavidGodefroid/locklog/blob/main/README.md">README</a></li>
+        <li><a href="https://github.com/DavidGodefroid/locklog/blob/main/docs/security-model.md">Security model</a></li>
+        <li><a href="https://github.com/DavidGodefroid/locklog/blob/main/CHANGELOG.md">Changelog</a></li>
+        <li><a href="https://lockfamily.dev/">The Lock family</a></li>
+      </ul>
+      <p>Pre-release, in development: no release is published yet. locklog is licensed under the <a href="https://github.com/DavidGodefroid/locklog/blob/main/LICENSE">Apache License 2.0</a>.</p>
+    </div>
+  </footer>
+</body>
+</html>

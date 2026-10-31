@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Security model — locklog</title>
+  <meta name="description" content="locklog's security model: what it protects and enforces, the preconditions P1 to P3 it relies on, what it does not mask, and its residuals by design.">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0b1120" media="(prefers-color-scheme: dark)">
+  <link rel="canonical" href="https://locklog.dev/security/">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="locklog">
+  <meta property="og:title" content="Security model — locklog">
+  <meta property="og:description" content="locklog's security model: what it protects and enforces, the preconditions P1 to P3 it relies on, what it does not mask, and its residuals by design.">
+  <meta property="og:url" content="https://locklog.dev/security/">
+  <meta property="og:locale" content="en_US">
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="Security model — locklog">
+  <meta name="twitter:description" content="locklog's security model: what it protects and enforces, the preconditions P1 to P3 it relies on, what it does not mask, and its residuals by design.">
+  <link rel="icon" href="../assets/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="../assets/style.css">
+  <script src="../assets/anchors.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header">
+    <div class="wrap">
+      <a class="brand" href="../"><img src="../assets/logo.svg" alt="" width="32" height="32"><span class="wordmark">lock<span>log</span></span></a>
+      <nav class="site-nav" aria-label="Main">
+        <ul>
+          <li><a href="../">Home</a></li>
+          <li><a href="../install/">Install</a></li>
+          <li><a href="../how-it-works/">How it works</a></li>
+          <li><a href="../security/" aria-current="page">Security</a></li>
+          <li><a href="../faq/">FAQ</a></li>
+          <li><a href="https://github.com/DavidGodefroid/locklog">GitHub</a></li>
+        </ul>
+      </nav>
+    </div>
+  </header>
+  <main id="main" tabindex="-1">
+    <div class="wrap">
+<h1>Security model</h1>
+<div class="prose">
+  <p class="lead">What locklog protects, how, what it relies on, and what it does not do.</p>
+</div>
+
+<div class="notice" role="note"><p><strong>Pre-release, in development.</strong> No release of locklog is published yet. It is built on <a href="https://github.com/DavidGodefroid/lockkit">lockkit</a>, and its design is public in <a href="https://github.com/DavidGodefroid/locklog/blob/main/docs/security-model.md">docs/security-model.md</a>.</p></div>
+
+<section aria-labelledby="protects">
+  <h2 id="protects">What locklog protects</h2>
+  <ul class="cards">
+    <li><span class="icon" aria-hidden="true">🕶️</span><h3>Clear values</h3><p>Nothing unmasked leaves the console, except an unmask a human approves at the console (the exact spans, once). Secrets are never unmasked or pseudonymised.</p></li>
+    <li><span class="icon" aria-hidden="true">🧪</span><h3>Clear-text oracles</h3><p>The agent cannot learn whether a clear value it chooses occurs in the logs, except through the documented <a href="#residuals">residuals</a>.</p></li>
+    <li><span class="icon" aria-hidden="true">🗄️</span><h3>The log backends</h3><p>locklog reads, never writes. Backend credentials stay in the console.</p></li>
+    <li><span class="icon" aria-hidden="true">📜</span><h3>The record of what happened</h3><p>Every call is audited in a hash chain, without clear values.</p></li>
+  </ul>
+</section>
+
+<section aria-labelledby="boundaries">
+  <h2 id="boundaries">Trust boundaries</h2>
+  <pre tabindex="0" class="diagram" role="img" aria-label="On the host, the root-owned locklog launcher starts the console as uid 10051 with no capability, a read-only root, CPU, memory and process limits, no log driver and an allowed-uids list, with read-only non-recursive binds of the approved roots; the home volume (keys, index, audit, PII rules) is mounted by the console only, the run volume holds the socket directory; its network is none, the backend's network or, from v0.2.0, the hub's. A map loop names the approved containers. The agent is not locklog's: the user's own agent container (a lea container is planned), or the host agent for the trial."><code> host (the human)
+   locklog launcher (root-owned /usr/local/bin/locklog)
+     ├─ console  locklog-console-&lt;n&gt;  uid 10051, no capability, read-only root,
+     │    --cpus min(2,nproc) --memory 1g --pids-limit 256 --log-driver none,
+     │    --allowed-uids … (not passed by the launcher yet: #102); read-only
+     │    non-recursive binds of the approved roots
+     │    volume locklog-home  keys, index, audit, PII rules          (console only)
+     │    volume locklog-run   socket dir 2750 locklog:locklog-clients (10051:10050), socket 0660
+     │    network: none (local sources) | the backend's network | the hub's network (v0.2.0)
+     └─ map loop  docker events → names and ids of the approved container globs
+
+ agent (not locklog's): the user's own agent container (a lea container: planned)
+   (gid 10050, its uid in --allowed-uids when needed), or, for the trial,
+   the host agent through `locklog mcp`</code></pre>
+  <p class="prose">The console is the only component that reads logs, holds credentials, keeps the pseudonym keys and decides what leaves.</p>
+</section>
+
+<section aria-labelledby="preconditions">
+  <h2 id="preconditions">Preconditions (not enforced by locklog)</h2>
+  <p class="prose">Like every Lock, locklog protects the logs only from an agent that cannot reach them by another path.</p>
+  <ul class="cards">
+    <li><h3 id="p1">P1 · The agent is placed apart</h3><p>The agent cannot read the logs, the Docker socket, the backends’ unauthenticated ports or the cloud metadata service directly; cannot become the console’s account; and cannot write the human’s launcher state: <code>$XDG_RUNTIME_DIR/locklog</code>, or <code>~/.local/state/locklog</code> where there is no runtime directory, and the environment the human starts the launcher with.</p></li>
+    <li><h3 id="p2">P2 · One uid, one trust domain</h3><p>Agents of one uid are one trust domain. In the own-container recipe, the agent user must not have sudo. Otherwise every agent that mounts one <code>locklog-run</code> is one domain.</p></li>
+    <li><h3 id="p3">P3 · Credentials stay with the console</h3><p>Backend read credentials are held only by the console. Log shippers use write-only tokens.</p></li>
+  </ul>
+  <div class="prose">
+    <p>A standalone <code>.locklog/</code> outside lea is reviewed by the console. Placing the agent is lea’s job, or the job of your own agent container. Whether agents may join <code>LOCKLOG_NETWORK</code> also falls under P1: they must not.</p>
+    <h3 id="doctor"><code>locklog doctor</code></h3>
+    <p>Run where the agent runs, it checks the usual ways P1 fails and never prints a response body. It looks at:</p>
+    <ul>
+      <li>whether the Docker socket or <code>DOCKER_HOST</code> is reachable;</li>
+      <li>membership of the groups <code>docker</code>, <code>adm</code> and <code>systemd-journal</code>;</li>
+      <li><code>sudo -n</code> and euid 0;</li>
+      <li>whether <code>/var/log/journal</code> and <code>/var/lib/docker</code> are readable;</li>
+      <li>cloud credential files in the agent’s account;</li>
+      <li>unauthenticated reads of the configured backends;</li>
+      <li>the cloud metadata credential paths.</li>
+    </ul>
+    <p>Each finding prints a remedy. On a production profile its findings are errors and it exits 1. It also lists residuals: whether Landlock confines the console, containers with <code>IpcMode</code> shareable, and swarm mode.</p>
+    <h3 id="trial">The host-agent trial</h3>
+    <p><code>locklog setup --agent host</code> runs the MCP server as the image’s <code>agent</code> account, launched from your own account. Your agent there can still read whatever your account can, so the trial is for non-production data. The launcher’s <code>mcp</code> refuses production profiles.</p>
+  </div>
+</section>
+
+<section aria-labelledby="enforces">
+  <h2 id="enforces">What locklog enforces</h2>
+  <div class="table-wrap" role="region" aria-label="Invariants and their mechanisms" tabindex="0">
+  <table>
+  <thead><tr><th scope="col">#</th><th scope="col">Invariant</th><th scope="col">Mechanism</th></tr></thead>
+  <tbody>
+  <tr><th scope="row">1</th><td>No locklog container has an engine socket</td><td>launcher; goldens</td></tr>
+  <tr><th scope="row">2</th><td>The console shares only <code>locklog-run</code> with agents; the home volume, the map directory and the hub network never</td><td>launcher; with the hub (v0.2.0) <code>lock up</code>; with lea (planned) its label check</td></tr>
+  <tr><th scope="row">3</th><td>Nothing unmasked leaves the console except an approved unmask; secrets never</td><td>masking pipeline, typed masked responses; canary harness</td></tr>
+  <tr><th scope="row">4</th><td>Agent predicates see only the masked view; every record is masked before any predicate; no text is sent to a backend; plans, charges and stopping points depend on the plan, never on matches; agent rules only tighten</td><td>engine, oracle and equivalence suites</td></tr>
+  <tr><th scope="row">5</th><td>Approved operations run only on a decision bound to the plan hash (exact spans for an unmask, the whole plan for a scan) and the policy fingerprint, once; never auto-approved for <code>read-pii</code>. With the hub (v0.2.0), <code>read-pii</code> only from <code>tty</code>, <code>deck</code> or <code>mobile</code></td><td>lockkit plans and tickets; the facade check lands with the hub</td></tr>
+  <tr><th scope="row">6</th><td>No approve or reveal method on the agent socket</td><td>lockkit</td></tr>
+  <tr><th scope="row">7</th><td>With the hub (v0.2.0): hub unreachable ⇒ approvals wait; free reads continue with the local audit</td><td>hub client</td></tr>
+  <tr><th scope="row">8</th><td>With the hub (v0.2.0): no hub auto-discovery</td><td>lockkit</td></tr>
+  <tr><th scope="row">9</th><td>Only approved sources are opened; the policy is the approved copy; <code>.locklog/</code> is read-only for lea agents (lea placement planned)</td><td>approved store, mount plan, dev/inode checks</td></tr>
+  <tr><th scope="row">10</th><td>Log content is untrusted text everywhere</td><td>JSON-escaped under an “untrusted” header, controls replaced; injection corpus</td></tr>
+  <tr><th scope="row">11</th><td>Resources are bounded</td><td>plans, rolling budgets, a queue, container limits, decompression, response and journal DATA caps, a 64 MiB result cache</td></tr>
+  <tr><th scope="row">12</th><td>Every call is audited, chained, without clear values</td><td>lockkit audit</td></tr>
+  <tr><th scope="row">13</th><td>No egress except the configured backends; production backends authenticated over TLS</td><td>network none or a dedicated network; a dialer pinned to host:port; no proxy environment, no redirects off-host; an unauthenticated-read check</td></tr>
+  <tr><th scope="row">14</th><td>Read-only by construction</td><td>read-only binds and root; <code>O_RDONLY</code> beneath-root opens; HTTP method and path allowlists</td></tr>
+  <tr><th scope="row">15</th><td>Pseudonym keys never leave the home volume; old epoch keys are deleted</td><td>files 0600, rotation</td></tr>
+  <tr><th scope="row">16</th><td>Only the clients group, the image’s <code>agent</code>, the console’s own uid and <code>--allowed-uids</code> reach the socket (never root or 65534); the launcher does not pass <code>--allowed-uids</code> yet (<a href="https://github.com/DavidGodefroid/locklog/issues/102">#102</a>)</td><td>kernel peer credentials, lockkit peer check</td></tr>
+  </tbody>
+  </table>
+  </div>
+</section>
+
+<section class="limits" aria-labelledby="not-masked">
+  <h2 id="not-masked">What is not masked</h2>
+  <div class="prose">
+    <p>locklog masks the values it <strong>detects</strong>. It does not detect:</p>
+    <ul>
+      <li>person names, unless the opt-in <code>person_name</code> detector is on (and names outside its heuristics when it is);</li>
+      <li>usernames and logins in free text;</li>
+      <li>postal addresses;</li>
+      <li>private and loopback IPs (infrastructure, never detected);</li>
+      <li>user agents and other quasi-identifiers;</li>
+      <li>business ids (order and customer ids, kept so <code>trace</code> works);</li>
+      <li>base64 or hex-encoded content;</li>
+      <li>secrets without a known shape (short or low-entropy tokens, passwords in prose, session ids in URL paths, connection strings without userinfo).</li>
+    </ul>
+    <h3 id="residuals">Residuals by design</h3>
+    <ul>
+      <li>pseudonyms link a person’s records within an epoch (7 days by default);</li>
+      <li><code>lookup</code> (a clear value → its pseudonym, rate-limited and audited, or approval-gated with <code>lookup = "approved"</code>) and an approved unmask link a known value to its records. This is membership probing by equality;</li>
+      <li>how far a call got before its deadline reflects the content’s detector density, rounded to plan granules. Aggregate byte volume and record length are visible at granule level;</li>
+      <li>with the opt-in <code>prefilter = true</code> (refused on production), latency reveals how many records contain a clear substring.</li>
+    </ul>
+    <p>Pseudonymised data is personal data (GDPR recital 26). The model provider receives pseudonyms, timestamps, the fields locklog does not mask and the residuals above. Tighten with <code>redact-unknown</code> (the production default for structured logs), your own rules, and <code>lookup = "approved"</code>.</p>
+  </div>
+</section>
+
+<section aria-labelledby="mounts">
+  <h2 id="mounts">Containers’ logs and later mounts</h2>
+  <div class="prose">
+    <p>Docker forces <code>rslave</code> propagation for a bind source inside its data root. A mount created after the console started (the <code>/dev/shm</code> of an <code>--ipc=shareable</code> container, swarm secrets) therefore appears inside the console’s read-only bind, and it appears <strong>read-write</strong>.</p>
+    <p>The console opens only <code>&lt;id&gt;/&lt;id&gt;-json.log[.N[.gz]]</code> for mapped ids, without crossing a mount point. Where the kernel has Landlock, it denies itself writes beneath its roots. Even so, a compromised console could read such propagated files. <code>doctor</code> names shareable-IPC containers and swarm mode as a residual.</p>
+  </div>
+</section>
+
+<section aria-labelledby="injection">
+  <h2 id="injection">Prompt injection</h2>
+  <p class="prose">Log content is data. Results are JSON-escaped under an “untrusted log lines” header, with control, bidi and zero-width characters replaced. Content cannot make locklog do anything beyond the agent’s call, and nothing the agent does through locklog writes or unmasks without the human.</p>
+</section>
+
+<section aria-labelledby="retention">
+  <h2 id="retention">Retention</h2>
+  <div class="table-wrap" role="region" aria-label="What is kept, where, for how long" tabindex="0">
+  <table>
+  <thead><tr><th scope="col">Data</th><th scope="col">Where</th><th scope="col">Kept</th></tr></thead>
+  <tbody>
+  <tr><th scope="row">Audit (one chained line per call)</th><td>home volume</td><td>until you delete it. It holds the method, the source names, the time range, the decision, the peer and the pseudonyms an unmask or lookup named; not the predicates. The <strong>reason the agent typed</strong> for an approval is kept, masked by the detectors: a personal value in a form the detectors miss stays there</td></tr>
+  <tr><th scope="row">Plans and approved scans</th><td>console memory</td><td>until used or expired (an approved scan: 30 minutes); gone when the session ends</td></tr>
+  <tr><th scope="row">Result cache</th><td>console memory</td><td>≤ 64 MiB, gone when the session ends (a policy change, the console’s exit)</td></tr>
+  <tr><th scope="row">Local index</th><td>home volume</td><td>per file identity, rebuilt when a file changes; trusted field values masked at answer time</td></tr>
+  <tr><th scope="row">Pseudonym keys</th><td>home volume</td><td>the current epoch’s key; a replaced key until it has been replaced for <code>pseudonym_max_age</code> (30 days by default), deleted when the console opens the profile</td></tr>
+  </tbody>
+  </table>
+  </div>
+</section>
+
+<section aria-labelledby="report">
+  <h2 id="report">Report a vulnerability</h2>
+  <p class="prose">Please do not open a public issue. Report it privately through a <a href="https://github.com/DavidGodefroid/locklog/security/advisories/new">GitHub security advisory</a>, as described in <a href="https://github.com/DavidGodefroid/locklog/blob/main/SECURITY.md">SECURITY.md</a>. Never include real credentials, real personal data or unmasked log lines: use synthetic values.</p>
+</section>
+    </div>
+  </main>
+  <footer class="site-footer">
+    <div class="wrap">
+      <ul>
+        <li><a href="https://github.com/DavidGodefroid/locklog">Source on GitHub</a></li>
+        <li><a href="https://github.com/DavidGodefroid/locklog/blob/main/README.md">README</a></li>
+        <li><a href="https://github.com/DavidGodefroid/locklog/blob/main/docs/security-model.md">Security model</a></li>
+        <li><a href="https://github.com/DavidGodefroid/locklog/blob/main/CHANGELOG.md">Changelog</a></li>
+        <li><a href="https://lockfamily.dev/">The Lock family</a></li>
+      </ul>
+      <p>Pre-release, in development: no release is published yet. locklog is licensed under the <a href="https://github.com/DavidGodefroid/locklog/blob/main/LICENSE">Apache License 2.0</a>.</p>
+    </div>
+  </footer>
+</body>
+</html>

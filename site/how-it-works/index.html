@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>How it works — locklog</title>
+  <meta name="description" content="How locklog works: a console held by a human reads the logs, masks every record before the agent's predicates run, and answers the agent over MCP with bounded, typed, masked results.">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0b1120" media="(prefers-color-scheme: dark)">
+  <link rel="canonical" href="https://locklog.dev/how-it-works/">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="locklog">
+  <meta property="og:title" content="How it works — locklog">
+  <meta property="og:description" content="How locklog works: a console held by a human reads the logs, masks every record before the agent's predicates run, and answers the agent over MCP with bounded, typed, masked results.">
+  <meta property="og:url" content="https://locklog.dev/how-it-works/">
+  <meta property="og:locale" content="en_US">
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="How it works — locklog">
+  <meta name="twitter:description" content="How locklog works: a console held by a human reads the logs, masks every record before the agent's predicates run, and answers the agent over MCP with bounded, typed, masked results.">
+  <link rel="icon" href="../assets/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="../assets/style.css">
+  <script src="../assets/anchors.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header">
+    <div class="wrap">
+      <a class="brand" href="../"><img src="../assets/logo.svg" alt="" width="32" height="32"><span class="wordmark">lock<span>log</span></span></a>
+      <nav class="site-nav" aria-label="Main">
+        <ul>
+          <li><a href="../">Home</a></li>
+          <li><a href="../install/">Install</a></li>
+          <li><a href="../how-it-works/" aria-current="page">How it works</a></li>
+          <li><a href="../security/">Security</a></li>
+          <li><a href="../faq/">FAQ</a></li>
+          <li><a href="https://github.com/DavidGodefroid/locklog">GitHub</a></li>
+        </ul>
+      </nav>
+    </div>
+  </header>
+  <main id="main" tabindex="-1">
+    <div class="wrap">
+<h1>How locklog works</h1>
+<div class="prose">
+  <p class="lead">A console held by a human reads the logs. The agent asks over MCP and gets masked, bounded, typed answers.</p>
+  <p>The console is the only component that reads logs, holds credentials, keeps the pseudonym keys and decides what leaves. The agent reaches it only through its Unix socket, with the MCP server <code>locklog mcp</code>, and nothing unmasked leaves the console except an unmask you approve.</p>
+</div>
+
+<div class="notice" role="note"><p><strong>Pre-release, in development.</strong> No release of locklog is published yet. It is built on <a href="https://github.com/DavidGodefroid/lockkit">lockkit</a>, and its design is public in <a href="https://github.com/DavidGodefroid/locklog/blob/main/docs/security-model.md">docs/security-model.md</a>.</p></div>
+
+<section aria-labelledby="layout">
+  <h2 id="layout">Where each piece runs</h2>
+  <pre tabindex="0" class="diagram" role="img" aria-label="On the host, the locklog launcher starts the console container, locklog-console-n, as uid 10051 with no capability, a read-only root, CPU and memory limits and no log driver; it has read-only, non-recursive binds of the approved log directories, a home volume only it mounts, and a run volume holding the socket. A map loop follows docker events to name the approved containers. The agent, in its own container or on the host for the trial (lea placement planned), runs the MCP server locklog mcp, which connects to the socket; the kernel checks the peer uid."><code> host (you)
+   locklog launcher
+     ├─ console container  locklog-console-&lt;n&gt;   uid 10051 "locklog", no capability,
+     │    read-only root, --cpus min(2,nproc), --memory 1g, --log-driver none
+     │    read-only, non-recursive binds of the approved log directories
+     │    volume locklog-home: pseudonym keys, local index, audit, rules (console only)
+     │    volume locklog-run:  /run/locklog (2750 locklog:locklog-clients), one socket
+     │                         per project and profile, &lt;project-hash&gt;-&lt;profile&gt;.sock (0660)
+     │    network: none, or the backend's network for Loki
+     └─ map loop: docker events → container names and ids of the approved globs
+
+ agent (yours: your own container, or the host for the trial; lea planned)
+   MCP server `locklog mcp` → its project's socket in /run/locklog (peer uid checked by the kernel)</code></pre>
+</section>
+
+<section aria-labelledby="call">
+  <h2 id="call">The life of a call</h2>
+  <ol class="steps prose">
+    <li><strong>Approved sources only.</strong> The console reads the approved sources, and only those. The sources are reviewed at the console’s first start and on every loosening.</li>
+    <li><strong>A byte plan first.</strong> For each call it builds a byte plan from the time range and the trusted selectors only (local index, Loki label stats, ES <code>_count</code>). Admission, cursors and stopping points depend on the plan, never on what matched.</li>
+    <li><strong>Masked first.</strong> Every record of a planned chunk is masked first: secrets (<code>⟦secret⟧</code>, final), then your rules, personal field names, value detectors (email, phone, IBAN, card, BE/FR/NL/US national ids, public IP; person names and loose phone numbers opt-in) and the structured or text mode. Then the agent’s predicates run on the masked view.</li>
+    <li><strong>Bounded, untrusted output.</strong> The answer leaves through <code>render</code> caps as JSON under an “untrusted content” header, with the pseudonym <code>epoch</code> and a sealed cursor to continue for free.</li>
+  </ol>
+</section>
+
+<section aria-labelledby="decides">
+  <h2 id="decides">Who decides what</h2>
+  <div class="table-wrap" role="region" aria-label="Operations and who decides them" tabindex="0">
+  <table>
+  <thead><tr><th scope="col">Operation</th><th scope="col">Who decides</th></tr></thead>
+  <tbody>
+  <tr><th scope="row"><code>status</code>, <code>sources</code>, <code>search</code>, <code>count</code>, <code>patterns</code>, <code>context</code>, <code>trace</code>, <code>tail</code> within budgets</th><td>free, audited</td></tr>
+  <tr><th scope="row"><code>lookup</code> (clear value → pseudonym, detector kinds only)</th><td>free, rate-limited, audited; or approved each time with <code>lookup = "approved"</code></td></tr>
+  <tr><th scope="row"><code>pii_list</code> / <code>pii_add</code> (agent masking rules, tighten only)</th><td>free, capped, audited (served once the console’s PII backend lands, <a href="https://github.com/DavidGodefroid/locklog/issues/64">#64</a>)</td></tr>
+  <tr><th scope="row"><code>locklog_scan</code> (beyond a budget, approved once for its whole plan; its cursor continues free for 30 minutes)</th><td>you, at the console</td></tr>
+  <tr><th scope="row"><code>locklog_unmask</code> (the clear value of exact spans of one record, once)</th><td>you, at the console, never auto-approved; <strong>off by default on production</strong></td></tr>
+  <tr><th scope="row"><code>locklog_request_change</code> (any loosening)</th><td>you, at the console’s <code>:review</code></td></tr>
+  <tr><th scope="row">write, delete, admin</th><td>does not exist</td></tr>
+  </tbody>
+  </table>
+  </div>
+  <p class="prose">The unmask screen shows the record <strong>masked</strong>, with the asked spans marked <code>» «</code>, the agent’s reason and what a yes lets the agent link. Secrets are never unmasked. On a non-production profile, auto mode (Shift+Tab) can approve scans for you; unmasks and approved lookups always wait for you, and production stays in manual mode.</p>
+</section>
+
+<section aria-labelledby="masking">
+  <h2 id="masking">The masking pipeline</h2>
+  <p class="prose">Order, fixed, per record and per field:</p>
+  <ol class="steps prose">
+    <li><strong>Secret detectors</strong> and secret-looking names → <code>⟦secret⟧</code>. This step is final: later steps run on its output, so a rule that pseudonymises a whole field never hashes a secret.</li>
+    <li><strong>Rules</strong>: field and label names in <code>.locklog/pii.toml</code>, and value lists and regexes in the console-held rule directory.</li>
+    <li><strong>Personal field names</strong> → pseudonym.</li>
+    <li><strong>Value detectors</strong> on a detection view (folded, NFKC, without zero-width characters, with percent, JSON <code>\u</code> and HTML entities decoded): email, phone, IBAN, card, Belgian/French/Dutch/US national ids, public IP; person names and loose phone numbers are opt-in (<code>detectors</code>) for their false positives.</li>
+    <li><strong>Structured mode</strong> (<code>redact-unknown</code>, the production default, or <code>detect</code>). The <code>text = "template"</code> setting is accepted but not applied yet.</li>
+  </ol>
+  <div class="prose">
+    <p>A pseudonym is <code>⟦kind:ID⟧</code>: 12 Crockford base32 characters (60 bits) of an HMAC-SHA256 under a random per-epoch key. The key rotates every 7 days by default (<code>pseudonym_rotation</code>); a replaced key is deleted once it has been replaced for <code>pseudonym_max_age</code> (30 days by default), when the console opens the profile. There is no pseudonym-to-value store: an unmask re-reads the record by its sealed reference.</p>
+    <p>Agent rules (<code>locklog_pii_add</code>) only tighten: they add masking and never remove it or change its kind. They will be stored in the console’s home volume, never in the project’s <code>.locklog/</code>, once the console serves them (<a href="https://github.com/DavidGodefroid/locklog/issues/64">#64</a>); until then the tools answer that there are no rules.</p>
+  </div>
+</section>
+
+<section aria-labelledby="sources">
+  <h2 id="sources">Sources</h2>
+  <div class="table-wrap" role="region" aria-label="Log sources" tabindex="0">
+  <table>
+  <thead><tr><th scope="col">Source</th><th scope="col">Since</th><th scope="col">Notes</th></tr></thead>
+  <tbody>
+  <tr><th scope="row">Files</th><td>v0.1.0</td><td>globs under approved roots, rotation, <code>.gz</code>, <code>.zst</code>; formats <code>auto</code>, <code>json</code>, <code>logfmt</code>, <code>syslog</code>, <code>cri</code>, <code>docker-json</code>, <code>combined</code>, <code>plain</code>; multi-line events</td></tr>
+  <tr><th scope="row">journald</th><td>v0.1.0</td><td>pure-Go reader, field allowlist; core dumps, command lines and audit fields are never served</td></tr>
+  <tr><th scope="row">Docker containers</th><td>v0.1.0</td><td><code>json-file</code> logs by container name glob; the <code>journald</code> driver through journald. Podman through journald</td></tr>
+  <tr><th scope="row">Loki</th><td>v0.1.0</td><td>trusted labels and structured metadata, server-side metric counts; text never sent to Loki</td></tr>
+  <tr><th scope="row">Elasticsearch, OpenSearch</th><td>v0.3.0</td><td>trusted keyword fields, <code>search_after</code>, a read-only privilege check</td></tr>
+  </tbody>
+  </table>
+  </div>
+  <p class="prose">The console opens Loki, Elasticsearch and OpenSearch sources from the profile once <a href="https://github.com/DavidGodefroid/locklog/pull/97">#97</a> is merged; until then the console refuses a profile that holds one, before it opens anything.</p>
+  <p class="prose"><code>docker compose up</code> deletes a recreated container’s <code>json-file</code> logs: use the journald driver or Loki for history across deploys.</p>
+</section>
+
+<section aria-labelledby="benchmark">
+  <h2 id="benchmark">Masking benchmark</h2>
+  <p class="prose">The leak harness plants canaries of every detected kind, in every format and position and in encoded forms (percent, JSON <code>\u</code>, HTML entities, look-alikes, zero-width characters), and checks every byte that leaves the console: <strong>0 leaks</strong>, checked on every pull request (CI job <code>suites</code>, with the oracle and equivalence suites).</p>
+</section>
+
+<section aria-labelledby="roadmap">
+  <h2 id="roadmap">Status and roadmap</h2>
+  <p class="prose">Pre-release, in active development. v0.1.0 is planned to ship files, journald, Docker and Loki (with <a href="https://github.com/DavidGodefroid/locklog/pull/97">#97</a>) with the standalone console. v0.2.0 adds the hub (<code>lock up</code>, <code>lock approve</code>), and v0.3.0 adds Elasticsearch, OpenSearch and the masked export.</p>
+  <p><a href="../security/">What locklog relies on, and what it does not mask</a></p>
+</section>
+    </div>
+  </main>
+  <footer class="site-footer">
+    <div class="wrap">
+      <ul>
+        <li><a href="https://github.com/DavidGodefroid/locklog">Source on GitHub</a></li>
+        <li><a href="https://github.com/DavidGodefroid/locklog/blob/main/README.md">README</a></li>
+        <li><a href="https://github.com/DavidGodefroid/locklog/blob/main/docs/security-model.md">Security model</a></li>
+        <li><a href="https://github.com/DavidGodefroid/locklog/blob/main/CHANGELOG.md">Changelog</a></li>
+        <li><a href="https://lockfamily.dev/">The Lock family</a></li>
+      </ul>
+      <p>Pre-release, in development: no release is published yet. locklog is licensed under the <a href="https://github.com/DavidGodefroid/locklog/blob/main/LICENSE">Apache License 2.0</a>.</p>
+    </div>
+  </footer>
+</body>
+</html>
