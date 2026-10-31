@@ -8,6 +8,7 @@
 package parse
 
 import (
+	"slices"
 	"time"
 )
 
@@ -101,7 +102,8 @@ type Event struct {
 	Inherited bool
 
 	// Fields is the structured part (top-level members), without the keys
-	// that became Time and Message. Nil for free text.
+	// that became Time and Message. For free text, only parser-known
+	// fields (a plain line's level), else nil.
 	Fields []Member
 	// TimeKey and MessageKey name the keys Time and Message came from.
 	TimeKey    string
@@ -132,9 +134,26 @@ type Event struct {
 	Unterminated bool
 
 	// Attrs are the container frame's fields (stream, ...) for framed
-	// formats; nil otherwise.
+	// formats, after the source's static attributes; nil otherwise.
 	Attrs []Member
+	// Framed is set when the event came out of a container frame (its
+	// FrameKeys are in Attrs).
+	Framed bool
 
 	timeMember *Member // the member Time was lifted from
 	timePos    int     // its index in Fields had it not been lifted
+}
+
+// SetTime gives the event an authoritative time from outside its text (a
+// container runtime's frame, a remote backend's entry timestamp). A
+// timestamp the payload carried stays in the payload: a lifted time field
+// goes back to its place in Fields, and a plain line keeps it in Message.
+func (ev *Event) SetTime(t time.Time) {
+	if ev.timeMember != nil {
+		ev.Fields = slices.Insert(slices.Clone(ev.Fields), min(ev.timePos, len(ev.Fields)), *ev.timeMember)
+	}
+	if ev.Format == "plain" && ev.HasTime {
+		ev.Message = ev.Raw
+	}
+	ev.Time, ev.HasTime, ev.Inherited, ev.TimeKey, ev.timeMember = t, true, false, "", nil
 }

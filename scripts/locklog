@@ -4,12 +4,20 @@
 # image, each with the account, the mounts and the network it needs:
 #
 #   console    as the console account (locklog, uid 10051), in a container
-#              of its own per project (locklog-console-<n>): no capability,
-#              read-only root, bounded CPU, memory and processes, no log
-#              driver, no network unless LOCKLOG_NETWORK names one; the log
-#              directories of the profile's mount plan bound read-only and
-#              non-recursive; the socket and home volumes
-#   mcp        as the image's agent account (uid 10052): the MCP server of
+#              of its own per project (locklog-console-<n>, labelled
+#              locklog.console=1): no capability, read-only root, bounded
+#              CPU, memory and processes, no log driver, no network unless
+#              LOCKLOG_NETWORK names one; the log directories of the
+#              profile's mount plan bound read-only and non-recursive; the
+#              socket and home volumes. With a docker source: the Docker
+#              containers root bound read-only and non-recursive with gid 0,
+#              and the containers map (below) kept current by a `docker
+#              events` loop for the console's lifetime. gid 0 applies to the
+#              whole console, not to one mount: a docker source therefore
+#              runs in a console of its own, with no file or journald
+#              source beside it (remote sources are fine)
+#   refresh    rewrite the containers map of this project's console once
+#   mcp       as the image's agent account (uid 10052): the MCP server of
 #              a host agent (the non-production trial; the server refuses
 #              production profiles), with the socket volume and the
 #              project (read-only)
@@ -19,6 +27,19 @@
 #
 # The project (the nearest directory up from here that holds .locklog/, or
 # this directory) is mounted read-only at its own path.
+#
+# The containers map: the name -> id map of the containers the approved
+# globs of the profile's docker sources name, written here (the console has
+# no engine socket to ask). One file per version, map.v<N> (0644, in a 0755
+# directory), in $XDG_RUNTIME_DIR/locklog/map/<console>/, else in
+# ~/.local/state/locklog/map/<console>/, bound read-only at /run/locklog-map:
+#
+#   locklog-map 1
+#   c <64-hex id> <name> <max-file 1..100> <compress 0|1>   a json-file container
+#   x <64-hex id>                                           a console container: never served
+#
+# Names and ids only, never log content. The console checks the globs again
+# when it reads, and skips console containers whatever the map says.
 #
 # Environment:
 #   LOCKLOG_IMAGE        image to run (default: the release image of this
@@ -30,6 +51,8 @@
 #   LOCKLOG_EXTRA_ROOTS  log directories beyond the built-in allowlist
 #                        (/var/log, /run/log/journal), separated by spaces
 #   VAULT_ADDR, VAULT_NAMESPACE  passed to the console
+#   XDG_RUNTIME_DIR      where the containers map is written, when it is a
+#                        directory of yours
 set -eu
 
 # scripts/install.sh and locklog update write the release version here,
@@ -325,6 +348,7 @@ plan_line() {
 	case "${1:-}" in
 	file)
 		[ $# -eq 3 ] || die "mount plan: malformed line: file $*"
+		local_lines=1
 		dir=$2
 		glob=$3
 		safe "$dir" && safe "$glob" || die "mount plan: $dir holds a character a mount cannot carry"
@@ -348,8 +372,13 @@ plan_line() {
 			;;
 		esac
 		;;
+	docker)
+		[ $# -eq 2 ] || die "mount plan: malformed line: $*"
+		add_docker_glob "$2"
+		;;
 	journald)
 		[ $# -eq 1 ] || die "mount plan: malformed line: $*"
+		local_lines=1
 		found=
 		for j in /var/log/journal /run/log/journal; do
 			physical "$j" || continue
@@ -363,6 +392,422 @@ plan_line() {
 		die "mount plan: unknown line: $*"
 		;;
 	esac
+}
+
+# The approved container globs of the docker sources (one per line, from the
+# plan's docker lines), the containers root once bound, and whether the plan
+# binds other log directories (file, journald lines).
+docker_globs=
+docker_root=
+local_lines=
+
+# add_docker_glob GLOB: a container name glob ([A-Za-z0-9_.*?-], as the
+# config allows), once.
+add_docker_glob() {
+	case "$1" in
+	'' | -* | *[!A-Za-z0-9_.*?-]*) die "mount plan: invalid container glob $1" ;;
+	esac
+	case "
+$docker_globs" in
+	*"
+$1
+"*) ;;
+	*) docker_globs="$docker_globs$1
+" ;;
+	esac
+}
+
+# docker_root_bind: bind the Docker containers root (docker info
+# .DockerRootDir + /containers) read-only and non-recursive at its own path,
+# and add gid 0 (its directories are 0710 root:root, the json logs 0640,
+# and rotated files appear later: no narrower grant works). A supplementary
+# gid applies to the whole console process, not to one mount: with gid 0 the
+# console could read any file readable by group root in any of its mounts.
+# So gid 0 is added only when nothing else is bound: no file or journald
+# line (refused beside a docker line, here and by `locklog mounts`), only
+# the project's .locklog/ (read-only, yours), the locklog volumes and the
+# map directory (0644 files you wrote). The daemon is trusted for this path.
+# You usually cannot reach it (/var/lib/docker is 0710 root), so its
+# dev:inode is passed to the console only when you can stat it.
+docker_root_bind() {
+	[ -z "$local_lines" ] && [ -z "$mount_args" ] && [ -z "$seen_dirs" ] && [ -z "$gids" ] ||
+		die "a docker source cannot share a console with file or journald sources: the containers root is read with group 0, which would apply to every bound log directory; put the container logs in a profile of their own and run a separate console for them"
+	dr=$(docker info --format '{{.DockerRootDir}}' 2>/dev/null) || die "could not read the Docker root directory (docker info)"
+	r="${dr%/}/containers"
+	case "$r" in /?*) ;; *) die "the Docker root directory $dr is not an absolute path" ;; esac
+	case "$r/" in *//* | */./* | */../*) die "the Docker root directory $dr is not a clean path" ;; esac
+	case "$r" in *[*?[\ ]*) die "the Docker root directory $dr holds a space or a glob character" ;; esac
+	safe "$r" || die "the Docker root directory $dr holds a character a mount cannot carry"
+	docker_root=$r
+	mount_args="$mount_args --mount type=bind,src=$r,dst=$r,readonly,$nonrecursive"
+	add_gid 0
+	if di=$(devino "$r" 2>/dev/null) && [ -n "$di" ]; then
+		expect="$expect$di $r;"
+		plan_text="$plan_text  bind $r (read-only, non-recursive; the Docker containers root, group 0 for it only)
+"
+	else
+		plan_text="$plan_text  bind $r (read-only, non-recursive; the Docker containers root, group 0 for it only; owned by root: not checked from the host)
+"
+	fi
+}
+
+valid_id() {
+	[ ${#1} -eq 64 ] || return 1
+	case "$1" in *[!0-9a-f]*) return 1 ;; esac
+	return 0
+}
+
+valid_name() {
+	[ ${#1} -le 128 ] || return 1
+	case "$1" in '' | [!A-Za-z0-9]* | *[!A-Za-z0-9_.-]*) return 1 ;; esac
+	return 0
+}
+
+is_console() {
+	case "$1" in locklog-console*) return 0 ;; esac
+	return 1
+}
+
+# glob_match NAME: NAME matches one of docker_globs (as sh patterns: the
+# globs hold no special character but '*' and '?').
+glob_match() {
+	while IFS= read -r g; do
+		[ -n "$g" ] || continue
+		# shellcheck disable=SC2254 # the glob is a pattern on purpose
+		case "$1" in $g) return 0 ;; esac
+	done <<EOF
+$docker_globs
+EOF
+	return 1
+}
+
+# map_base: the directory of the containers maps.
+map_base() {
+	x=${XDG_RUNTIME_DIR:-}
+	if [ -n "$x" ] && [ -d "$x" ] && [ ! -L "$x" ] && [ "$(fowner "$x")" = "$(id -u)" ]; then
+		printf '%s/locklog/map\n' "$x"
+		return 0
+	fi
+	[ -n "${HOME:-}" ] || die "neither XDG_RUNTIME_DIR nor HOME is set: no place for the containers map"
+	printf '%s/.local/state/locklog/map\n' "$HOME"
+}
+
+# ensure_map_dir NAME: set map_dir, the containers map directory of the
+# console NAME: yours, 0755, no symbolic link, created (its parents 0700)
+# when missing.
+ensure_map_dir() {
+	base=$(map_base)
+	(umask 077 && mkdir -p "$base") || die "could not create $base"
+	d="$base/$1"
+	[ ! -L "$d" ] || die "$d is a symbolic link"
+	mkdir -p "$d" || die "could not create $d"
+	chmod 0755 "$d"
+	map_dir=$(cd "$d" && pwd -P) || die "could not enter $d"
+	case "$map_dir" in *" "*) die "$map_dir holds a space: a mount cannot carry it" ;; esac
+	safe "$map_dir" || die "$map_dir holds a character a mount cannot carry"
+	trusted "$map_dir" || die "$map_dir is a link, has an ACL, or is owned or writable by someone else than you"
+}
+
+# write_map: write the next version of the containers map into map_dir,
+# atomically (a temporary file in the same directory, then mv), under the
+# directory's writer lock, and keep the last two versions. Sets map_version, map_c (containers mapped), map_x
+# (console containers excluded) and map_skip (matching containers skipped:
+# not json-file, or a record that does not parse).
+#
+# Nothing the engine prints is split on a separator a name, a label or a log
+# option could hold: the ids come from `docker ps -q` (validated, each once;
+# an id listed twice is excluded), and each container is inspected alone,
+# the label as a fixed token from a template conditional, the free-text
+# fields validated token by token, the name last; a record of another line
+# or field count, or another id, is excluded too (fail closed: an x line).
+lock_held=
+
+# map_lock: take the map directory's writer lock (mkdir is atomic), so that
+# refresh and the loop never race on N or on each other's temporary file.
+# A lock older than a minute is a killed writer's: broken. Waits up to 15 s.
+map_lock() {
+	i=0
+	while ! mkdir "$map_dir/.lock" 2>/dev/null; do
+		if [ -n "$(find "$map_dir/.lock" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
+			rmdir "$map_dir/.lock" 2>/dev/null || :
+			continue
+		fi
+		i=$((i + 1))
+		[ "$i" -le 15 ] || return 1
+		sleep 1
+	done
+	lock_held=1
+}
+
+map_unlock() {
+	rmdir "$map_dir/.lock" 2>/dev/null || :
+	lock_held=
+}
+
+# lock_traps: release the writer lock when this shell exits or is
+# signalled while holding it.
+lock_traps() {
+	trap '[ -z "$lock_held" ] || rmdir "$map_dir/.lock" 2>/dev/null || :' EXIT
+	trap 'exit 129' HUP
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
+}
+
+write_map() {
+	if [ ! -d "$map_dir" ]; then
+		{ mkdir -p "$map_dir" && chmod 0755 "$map_dir"; } || return 1
+	fi
+	map_lock || return 1
+	wm_rc=0
+	write_map_locked || wm_rc=$?
+	map_unlock
+	return "$wm_rc"
+}
+
+write_map_locked() {
+	set +f
+	# Temporary files a killed writer left behind (older than a minute).
+	find "$map_dir" -maxdepth 1 -name '.map.tmp.*' -type f -mmin +1 -exec rm -f {} + 2>/dev/null || :
+	ids=$(docker ps -a -q --no-trunc) || return 1
+	cs=
+	xs=
+	map_c=0
+	map_x=0
+	map_skip=0
+	seen=
+	dups=
+	while IFS= read -r cid; do
+		valid_id "$cid" || continue
+		case " $seen " in
+		*" $cid "*) dups="$dups $cid" ;;
+		*) seen="$seen $cid" ;;
+		esac
+	done <<EOF
+$ids
+EOF
+	set -f
+	for cid in $seen; do
+		case " $dups " in
+		*" $cid "*)
+			xs="${xs}x $cid
+"
+			map_x=$((map_x + 1))
+			continue
+			;;
+		esac
+		rec=$(docker inspect --type container --format '{{.Id}} {{if index .Config.Labels "locklog.console"}}1{{else}}0{{end}} {{.HostConfig.LogConfig.Type}} {{with index .HostConfig.LogConfig.Config "max-file"}}{{.}}{{else}}-{{end}} {{with index .HostConfig.LogConfig.Config "compress"}}{{.}}{{else}}-{{end}} {{.Name}}' "$cid" 2>/dev/null) || continue # gone since the listing
+		bad=
+		case "$rec" in *"
+"*) bad=1 ;; esac
+		if [ -z "$bad" ]; then
+			# shellcheck disable=SC2086 # split on purpose (set -f)
+			set -- $rec
+			[ $# -eq 6 ] && [ "$1" = "$cid" ] || bad=1
+		fi
+		if [ -z "$bad" ]; then
+			label=$2
+			ctype=$3
+			mf=$4
+			cmp=$5
+			cname=${6#/}
+			case "$label" in 0 | 1) ;; *) bad=1 ;; esac
+			valid_name "$cname" || bad=1
+		fi
+		if [ -n "$bad" ] || [ "$label" = 1 ] || is_console "$cname"; then
+			xs="${xs}x $cid
+"
+			map_x=$((map_x + 1))
+			[ -z "$bad" ] || map_skip=$((map_skip + 1))
+			continue
+		fi
+		glob_match "$cname" || continue
+		case "$ctype" in
+		json-file) ;;
+		*)
+			map_skip=$((map_skip + 1))
+			continue
+			;;
+		esac
+		case "$mf" in
+		-) mf=1 ;;
+		'' | *[!0-9]*)
+			map_skip=$((map_skip + 1))
+			continue
+			;;
+		esac
+		while :; do
+			case "$mf" in 0?*) mf=${mf#0} ;; *) break ;; esac
+		done
+		if [ ${#mf} -gt 3 ] || [ "$mf" -gt 100 ]; then mf=100; fi
+		[ "$mf" -ge 1 ] || mf=1
+		case "$cmp" in
+		true) cmp=1 ;;
+		false | -) cmp=0 ;;
+		*)
+			map_skip=$((map_skip + 1))
+			continue
+			;;
+		esac
+		cs="${cs}c $cid $cname $mf $cmp
+"
+		map_c=$((map_c + 1))
+	done
+	set +f
+	# A name given to two ids in one snapshot (the engine forbids it):
+	# both ids are excluded, neither is mapped.
+	dupnames=$(printf '%s' "$cs" | awk '{ n[$3]++ } END { for (k in n) if (n[k] > 1) print k }')
+	if [ -n "$dupnames" ]; then
+		kept=
+		while IFS=' ' read -r _ cid cname mf cmp; do
+			[ -n "${cid:-}" ] || continue
+			if printf '%s\n' "$dupnames" | grep -Fqx -- "$cname"; then
+				xs="${xs}x $cid
+"
+				map_x=$((map_x + 1))
+				map_c=$((map_c - 1))
+			else
+				kept="${kept}c $cid $cname $mf $cmp
+"
+			fi
+		done <<EOF
+$cs
+EOF
+		cs=$kept
+	fi
+	n=0
+	for f in "$map_dir"/map.v*; do
+		v=${f##*/map.v}
+		case "$v" in '' | 0* | *[!0-9]*) continue ;; esac
+		[ ${#v} -le 15 ] || continue
+		[ "$v" -le "$n" ] || n=$v
+	done
+	n=$((n + 1))
+	tmp=$(mktemp "$map_dir/.map.tmp.XXXXXX") || return 1
+	if ! { printf 'locklog-map 1\n%s%s' "$cs" "$xs" >"$tmp" && chmod 0644 "$tmp" && mv -f "$tmp" "$map_dir/map.v$n"; }; then
+		rm -f "$tmp"
+		return 1
+	fi
+	for f in "$map_dir"/map.v*; do
+		v=${f##*/map.v}
+		case "$v" in '' | 0* | *[!0-9]*) continue ;; esac
+		[ ${#v} -le 15 ] || continue
+		[ "$v" -ge $((n - 1)) ] || rm -f "$f"
+	done
+	map_version=$n
+}
+
+# map_loop SINCE PID NAME: keep the map current while the console lives:
+# its docker run (PID, which replaced the launcher) or, once that pid is
+# gone (the CLI killed), its container NAME while it still runs (checked
+# every 5 s). Every container create, rename and destroy from SINCE
+# (seconds since the epoch) on marks the map dirty, and one rewrite a
+# second at most drains the mark (a burst of events costs one rewrite).
+# When docker events exits it is restarted, from the time it exited, after
+# a backoff doubling up to 30 s, and the map rewritten then. Once the
+# console is gone, docker events and the reader are killed and the fifo
+# removed. Failures are reported on stderr, once per streak.
+map_loop() {
+	since=$1
+	ppid=$2
+	cname=$3
+	ev_pid=
+	rd_pid=
+	cl_checked=
+	cl_alive=1
+	warned_events=
+	warned_map=
+	backoff=1
+	fifo_dir=$(mktemp -d) || {
+		say "warning: mktemp failed: the containers map will not follow container changes (locklog refresh rewrites it)"
+		exit 1
+	}
+	fifo="$fifo_dir/events"
+	dirty="$fifo_dir/dirty"
+	if ! mkfifo -m 0600 "$fifo"; then
+		say "warning: mkfifo failed: the containers map will not follow container changes (locklog refresh rewrites it)"
+		rm -rf "$fifo_dir"
+		exit 1
+	fi
+	trap loop_end TERM HUP INT
+	while console_alive; do
+		# The reader and docker events are started from subshells that
+		# exit at once: they are not this shell's children, so kill -0
+		# tells when they are gone (no zombie). The reader opens the fifo
+		# first, with its output already away from the substitution.
+		rd_pid=$({
+			while IFS= read -r _; do : >"$dirty"; done
+		} >/dev/null <"$fifo" &
+			echo $!)
+		started=$(date +%s)
+		ev_pid=$(docker events --since "$since" --filter type=container --filter event=create \
+			--filter event=rename --filter event=destroy --format '{{.Action}}' 2>/dev/null >"$fifo" &
+			echo $!)
+		while kill -0 "$ev_pid" 2>/dev/null; do
+			console_alive || loop_end
+			flush_map
+			sleep 1
+		done
+		# Gone: their pids may be reused from here on. The reader ends on
+		# the fifo's end of file.
+		ev_pid=
+		rd_pid=
+		console_alive || loop_end
+		now=$(date +%s)
+		since=$now
+		if [ $((now - started)) -ge 30 ]; then
+			# It ran a while: a new streak.
+			backoff=1
+			warned_events=
+		fi
+		if [ -z "$warned_events" ]; then
+			say "warning: docker events stopped; restarting it (backoff up to 30 s) and rewriting the containers map"
+			warned_events=1
+		fi
+		sleep "$backoff"
+		backoff=$((backoff * 2))
+		[ "$backoff" -le 30 ] || backoff=30
+		rm -f "$dirty"
+		checked_write
+	done
+	loop_end
+}
+
+# console_alive: the console's docker run lives, or else its container
+# still runs (asked at most every 5 s).
+console_alive() {
+	kill -0 "$ppid" 2>/dev/null && return 0
+	now=$(date +%s)
+	if [ -n "$cl_checked" ] && [ $((now - cl_checked)) -lt 5 ]; then
+		return "$cl_alive"
+	fi
+	cl_checked=$now
+	cl_alive=1
+	[ "$(docker inspect -f '{{.State.Running}}' "$cname" 2>/dev/null)" = true ] && cl_alive=0
+	return "$cl_alive"
+}
+
+# flush_map: rewrite the map once when events marked it dirty.
+flush_map() {
+	[ -e "$dirty" ] || return 0
+	rm -f "$dirty"
+	checked_write
+}
+
+# checked_write: write_map, warning once per streak of failures.
+checked_write() {
+	if write_map; then
+		warned_map=
+	elif [ -z "$warned_map" ]; then
+		say "warning: could not rewrite the containers map (docker ps, docker inspect); retrying on the next change"
+		warned_map=1
+	fi
+}
+
+loop_end() {
+	[ -z "$ev_pid$rd_pid" ] || kill $ev_pid $rd_pid 2>/dev/null || :
+	[ -z "$lock_held" ] || rmdir "$map_dir/.lock" 2>/dev/null || :
+	rm -rf "$fifo_dir"
+	exit 0
 }
 
 # ensure_volume NAME DIR OWNER: the named volume NAME exists, created from
@@ -507,7 +952,21 @@ project_mount() {
 # The confinement every locklog container runs with.
 confined="--cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /tmp:rw,nosuid,nodev,noexec,size=64m"
 
-console() {
+# docker_version KIND VERSION: sets major and minor of a Docker version
+# (KIND names it in messages), refusing one before 19.03.
+docker_version() {
+	major=${2%%.*}
+	rest=${2#*.}
+	minor=${rest%%.*}
+	case "$major$minor" in *[!0-9]* | '') die "unknown Docker $1 version $2" ;; esac
+	if [ "$major" -lt 19 ] || { [ "$major" -eq 19 ] && [ "$minor" -lt 3 ]; }; then
+		die "Docker $1 $2 is too old: locklog needs Docker 19.03 or later"
+	fi
+}
+
+# check_project: the trusted project and its .locklog/ (ll_dir), checked
+# again right before reading them.
+check_project() {
 	need_docker
 	project_mount
 	[ -n "$project_trusted" ] ||
@@ -517,17 +976,34 @@ console() {
 	trusted_config "$project" || die "$project/.locklog changed: it is no longer trusted"
 	ll_dir="$project/.locklog"
 	physical "$ll_dir" || die "$ll_dir is not a directory with no symbolic link on its path"
+	name="locklog-console-$(printf '%s' "$project" | cksum | awk '{ print $1 }')"
+}
+
+# read_plan ARGS: the profile's mount plan, derived in the image from
+# .locklog/ (as the agent account, no network) and checked here, on the
+# host: its header and its lines.
+read_plan() {
+	planned=$(docker run --rm --network none --user agent --log-driver none $confined --pids-limit 64 --memory 256m \
+		-v "$ll_dir:$ll_dir:ro" -w "$project" "$image" mounts "$@") ||
+		die "could not read the mount plan of the profile (locklog mounts)"
+	header=$(printf '%s\n' "$planned" | sed -n 1p)
+	printf '%s\n' "$header" | grep -Eqx 'profile [A-Za-z0-9][A-Za-z0-9_.-]{0,63} (true|false)' ||
+		die "mount plan: malformed header"
+	lines=$(printf '%s\n' "$planned" | sed -n '2,$p')
+}
+
+console() {
+	check_project
 
 	# Docker >= 19.03, rootful: rootless engines keep logs the console
-	# cannot reach.
+	# cannot reach. The non-recursive bind option is parsed by the CLI, so
+	# the CLI's version chooses it: CLI 29 refuses bind-nonrecursive, a CLI
+	# before 25 does not know bind-recursive. Both set the same API field
+	# (Engine >= 19.03).
 	sv=$(docker version --format '{{.Server.Version}}' 2>/dev/null) || die "the Docker engine does not answer"
-	major=${sv%%.*}
-	rest=${sv#*.}
-	minor=${rest%%.*}
-	case "$major$minor" in *[!0-9]* | '') die "unknown Docker engine version $sv" ;; esac
-	if [ "$major" -lt 19 ] || { [ "$major" -eq 19 ] && [ "$minor" -lt 3 ]; }; then
-		die "Docker $sv is too old: locklog needs Docker 19.03 or later"
-	fi
+	docker_version engine "$sv"
+	cv=$(docker version --format '{{.Client.Version}}' 2>/dev/null) || die "the Docker CLI does not report its version"
+	docker_version CLI "$cv"
 	if [ "$major" -ge 25 ]; then
 		nonrecursive=bind-recursive=disabled
 	else
@@ -537,24 +1013,32 @@ console() {
 	*rootless*) die "rootless Docker is not supported: its containers' logs and the host's journal are out of the console's reach" ;;
 	esac
 
-	# The profile's mount plan, derived in the image from .locklog/ (as the
-	# agent account, no network) and checked here, on the host.
-	planned=$(docker run --rm --network none --user agent --log-driver none $confined --pids-limit 64 --memory 256m \
-		-v "$ll_dir:$ll_dir:ro" -w "$project" "$image" mounts "$@") ||
-		die "could not read the mount plan of the profile (locklog mounts)"
-	header=$(printf '%s\n' "$planned" | sed -n 1p)
-	printf '%s\n' "$header" | grep -Eqx 'profile [A-Za-z0-9][A-Za-z0-9_.-]{0,63} (true|false)' ||
-		die "mount plan: malformed header"
-	if [ "$(uname -s)" = Darwin ] && [ "$(printf '%s\n' "$planned" | sed -n '2,$p' | grep -c .)" -gt 0 ]; then
+	read_plan "$@"
+	if [ "$(uname -s)" = Darwin ] && [ "$(printf '%s\n' "$lines" | grep -c .)" -gt 0 ]; then
 		die "local log sources are not supported with Docker Desktop on macOS (the containers' logs live in its VM); use a remote source"
 	fi
-	lines=$(printf '%s\n' "$planned" | sed -n '2,$p')
 	# Read in this shell (no pipe), so that plan_line fills the plan.
 	while IFS= read -r l; do
 		[ -z "$l" ] || plan_line "$l"
 	done <<EOF
 $lines
 EOF
+	docker_args=
+	if [ -n "$docker_globs" ]; then
+		[ -z "$local_lines" ] ||
+			die "a docker source cannot share a console with file or journald sources: the containers root is read with group 0, which would apply to every bound log directory; put the container logs in a profile of their own and run a separate console for them"
+		docker_root_bind
+		ensure_map_dir "$name"
+		# The time before the snapshot: the events loop replays from it, so
+		# that nothing between the snapshot and its subscription is lost.
+		t0=$(date +%s)
+		lock_traps
+		write_map || die "could not write the containers map (docker ps, docker inspect)"
+		mount_args="$mount_args --mount type=bind,src=$map_dir,dst=/run/locklog-map,readonly"
+		docker_args="-e LOCKLOG_DOCKER_ROOT=$docker_root"
+		plan_text="$plan_text  containers map $map_dir at /run/locklog-map (read-only): $map_c mapped, $map_x console containers excluded, $map_skip skipped; kept current while the console runs
+"
+	fi
 
 	net=none
 	if [ -n "${LOCKLOG_NETWORK:-}" ]; then
@@ -571,7 +1055,6 @@ EOF
 	ensure_volume locklog-run /run/locklog 10051:10050:2750
 	ensure_volume locklog-home /home/locklog 10051:10051:700
 
-	name="locklog-console-$(printf '%s' "$project" | cksum | awk '{ print $1 }')"
 	if [ "$(docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null)" = false ]; then
 		docker rm "$name" >/dev/null
 	fi
@@ -587,13 +1070,42 @@ EOF
 
 	set -f
 	# shellcheck disable=SC2086 # the plan's arguments are split on purpose
-	exec docker run --rm "$tty" --name "$name" --user locklog --log-driver none $confined \
+	set -- run --rm "$tty" --name "$name" --label locklog.console=1 --user locklog --log-driver none $confined \
 		--pids-limit 256 --memory 1g --cpus "$cpus" --network "$net" \
 		-e VAULT_ADDR -e VAULT_NAMESPACE \
 		-e "LOCKLOG_NETWORK=${LOCKLOG_NETWORK:-}" -e "LOCKLOG_EXTRA_ROOTS=${LOCKLOG_EXTRA_ROOTS:-}" \
-		-e "LOCKLOG_EXPECT_DIR=$(devino "$ll_dir")" -e "LOCKLOG_EXPECT_ROOTS=$expect" \
+		-e "LOCKLOG_EXPECT_DIR=$(devino "$ll_dir")" -e "LOCKLOG_EXPECT_ROOTS=$expect" $docker_args \
 		-v locklog-run:/run/locklog -v locklog-home:/home/locklog -v "$ll_dir:$ll_dir:ro" \
 		$group_args $mount_args -w "$project" "$image" console "$@"
+	set +f
+	[ -n "$docker_globs" ] || exec docker "$@"
+
+	# With a docker source, the map loop runs beside the console, watching
+	# this pid: docker run replaces the launcher as on the plain path, so
+	# signals, the terminal and the exit status are the console's, and the
+	# loop ends with it (also when this process is killed).
+	map_loop "$t0" "$$" "$name" &
+	exec docker "$@"
+}
+
+# refresh ARGS: rewrite the containers map of this project's console once,
+# from the approved globs of the profile's docker sources.
+refresh() {
+	check_project
+	read_plan "$@"
+	while IFS= read -r l; do
+		case "$l" in
+		docker\ *) add_docker_glob "${l#docker }" ;;
+		esac
+	done <<EOF
+$lines
+EOF
+	[ -n "$docker_globs" ] || die "the profile has no docker source: there is no containers map to write"
+	ensure_map_dir "$name"
+	lock_traps
+	write_map || die "could not write the containers map (docker ps, docker inspect)"
+	printf 'locklog: containers map v%s of %s (%s): %s mapped, %s console containers excluded, %s skipped (not json-file, or not a valid name)\n' \
+		"$map_version" "$name" "$map_dir" "$map_c" "$map_x" "$map_skip"
 }
 
 cmd="${1:-}"
@@ -610,6 +1122,10 @@ version | --version)
 console)
 	shift
 	console "$@"
+	;;
+refresh)
+	shift
+	refresh "$@"
 	;;
 mcp)
 	# The agent speaks MCP on stdin and stdout: no terminal. The server

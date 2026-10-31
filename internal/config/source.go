@@ -145,6 +145,13 @@ var (
 	orgIDRe      = regexp.MustCompile(`^[A-Za-z0-9_.!*'()-]{1,150}$`)
 )
 
+// ValidContainerName reports whether n is a container name (not a glob) the
+// docker source may serve: the characters of a container glob, without '*'
+// and '?'.
+func ValidContainerName(n string) bool {
+	return containerRe.MatchString(n) && !strings.ContainsAny(n, "*?")
+}
+
 // ConsolePrefix starts the name of every locklog console container. A
 // container glob that can match any name with this prefix is refused; the
 // docker source also skips console containers by label and id when it
@@ -457,6 +464,13 @@ func buildRemote(r rawSource, production bool, errf func(string, ...any) error) 
 		}
 		if pii.LooksPersonal(l) || pii.LooksQuasi(l) {
 			return nil, errf("trusted_labels / trusted_metadata: %q looks like personal data and cannot be trusted", l)
+		}
+	}
+	// Loki's | name="v" filter matches stream labels as well as
+	// structured metadata: a name that is both would select on either.
+	for _, m := range rem.TrustedMetadata {
+		if _, sel := rem.Selector[m]; sel || slices.Contains(rem.TrustedLabels, m) {
+			return nil, errf("trusted_metadata: %s cannot be both a stream label and structured metadata (it is in the selector or trusted_labels)", m)
 		}
 	}
 	if rem.OrgID != "" && !orgIDRe.MatchString(rem.OrgID) {

@@ -2,7 +2,7 @@ package parse
 
 import (
 	"io"
-	"slices"
+	"reflect"
 	"strings"
 	"time"
 )
@@ -14,10 +14,14 @@ import (
 // order, never overlap, and the bytes between two events (blank lines) are
 // only those the Reader skipped. Offset reports the stream position.
 type Reader struct {
-	p  *Parser
-	lr *LineReader
+	p   *Parser
+	lr  *LineReader
+	end int64 // lines starting at or after end are left in lr; -1: none
 
-	peeks   []logical // lines read ahead, in order
+	peeks []logical // lines read ahead, in order
+	// held is a frame line read ahead that ended another stream's partial
+	// run: it is unwrapped (and may start its own run) on the next call.
+	held    *Line
 	pending *assembly
 	err     error
 
@@ -63,7 +67,16 @@ type assembly struct {
 // NewReader reads events from r; base is the stream offset of r's first
 // byte. A scan that starts inside a file must start at a line boundary.
 func (p *Parser) NewReader(r io.Reader, base int64) *Reader {
-	return &Reader{p: p, lr: NewLineReader(r, base), hold: -1}
+	return &Reader{p: p, lr: NewLineReader(r, base), end: -1, hold: -1}
+}
+
+// NewSectionReader reads the events of the lines of lr that start before
+// end. The first line starting at or after end is left in lr, so the next
+// section reads on from it. Events never cross a section boundary: a section
+// read alone yields the same events as when it is read after the previous
+// one, which makes fixed byte sections independent plan granules.
+func (p *Parser) NewSectionReader(lr *LineReader, end int64) *Reader {
+	return &Reader{p: p, lr: lr, end: end, hold: -1}
 }
 
 // Offset returns the stream offset up to which events have been returned or
@@ -81,6 +94,8 @@ func (r *Reader) Offset() int64 {
 		return r.pending.offset
 	case len(r.peeks) > 0:
 		return r.peeks[0].Offset
+	case r.held != nil:
+		return r.held.Offset
 	}
 	return r.lr.Offset()
 }
@@ -148,13 +163,23 @@ func (r *Reader) nextLogical() (logical, error) {
 		r.peeks = r.peeks[1:]
 		return ln, nil
 	}
-	if r.err != nil {
-		return logical{}, r.err
+	var l Line
+	if r.held != nil {
+		l, r.held = *r.held, nil
+	} else {
+		if r.err != nil {
+			return logical{}, r.err
+		}
+		var err error
+		if l, err = r.lr.Next(); err != nil {
+			r.err = err
+			return logical{}, err
+		}
 	}
-	l, err := r.lr.Next()
-	if err != nil {
-		r.err = err
-		return logical{}, err
+	if r.end >= 0 && l.Offset >= r.end {
+		r.lr.Unread(l)
+		r.err = io.EOF
+		return logical{}, io.EOF
 	}
 	if r.p.framer == nil {
 		return logical{Line: l}, nil
@@ -179,13 +204,25 @@ func (r *Reader) nextLogical() (logical, error) {
 			open = true
 			break
 		}
+		if r.end >= 0 && l2.Offset >= r.end {
+			// A partial run is cut at a section boundary, so that
+			// sections stay independent.
+			r.lr.Unread(l2)
+			break
+		}
 		next, ok := r.p.framer.Unwrap(l2.Text, &r.p.opts)
 		if !ok {
 			// A non-frame line ends the partial run; it is read
 			// again as the next logical line. An unterminated one
 			// may be a frame still being written: hold the run.
-			r.peeks = append(r.peeks, logical{Line: l2})
+			r.lr.Unread(l2)
 			open = open || l2.Unterminated
+			break
+		}
+		if frameStream(next) != frameStream(fr) {
+			// Runtimes interleave stdout and stderr in one file: a
+			// frame of the other stream ends this run, never joins it.
+			r.held = &l2
 			break
 		}
 		next.Text = validText([]byte(next.Text))
@@ -224,13 +261,21 @@ func (r *Reader) continues(ln logical) bool {
 	if r.pending.format != nil {
 		return false
 	}
+	if f := r.pending.frame; f != nil && ln.frame != nil && !reflect.DeepEqual(f.Attrs, ln.frame.Attrs) {
+		return false // another stream (or container attrs): never one event
+	}
 	switch r.p.opts.Multiline {
 	case MultilineNone:
 		return false
 	case MultilinePattern:
 		return !r.p.start.MatchString(ln.Text)
 	}
-	t := ln.Text
+	return indentContinuation(ln.Text)
+}
+
+// indentContinuation reports a line that continues a free-text event in
+// indent mode.
+func indentContinuation(t string) bool {
 	if t == "" {
 		return false
 	}
@@ -262,7 +307,7 @@ func (r *Reader) start(ln logical, split bool) {
 	var continuation bool
 	switch r.p.opts.Multiline {
 	case MultilineIndent:
-		continuation = ln.Text != "" && (ln.Text[0] == ' ' || ln.Text[0] == '\t')
+		continuation = indentContinuation(ln.Text)
 	case MultilinePattern:
 		continuation = !r.p.start.MatchString(ln.Text)
 	}
@@ -300,20 +345,12 @@ func (r *Reader) emit() Event {
 	if a.unterminated && r.hold < 0 {
 		r.hold = a.offset
 	}
+	ev.Attrs = r.p.attrs(nil)
 	if a.frame != nil {
-		ev.Attrs = a.frame.Attrs
+		ev.Framed = true
+		ev.Attrs = r.p.attrs(a.frame.Attrs)
 		if a.frame.HasTime {
-			// The runtime's timestamp is authoritative for ordering;
-			// a payload timestamp stays in the payload text/fields.
-			if ev.timeMember != nil {
-				ev.Fields = slices.Insert(slices.Clone(ev.Fields), min(ev.timePos, len(ev.Fields)), *ev.timeMember)
-			}
-			if ev.Format == "plain" && ev.HasTime {
-				// Keep the payload's leading timestamp in the
-				// message.
-				ev.Message = text
-			}
-			ev.Time, ev.HasTime, ev.TimeKey, ev.timeMember = a.frame.Time, true, "", nil
+			ev.SetTime(a.frame.Time)
 		}
 	}
 	if ev.HasTime {
@@ -322,4 +359,10 @@ func (r *Reader) emit() Event {
 		ev.Time, ev.Inherited = r.lastTime, true
 	}
 	return ev
+}
+
+// frameStream is a frame's "stream" attribute ("" when it has none).
+func frameStream(fr Frame) string {
+	v, _ := Get(fr.Attrs, "stream")
+	return v.Str
 }
