@@ -3,7 +3,7 @@ package config
 import (
 	"time"
 
-	"github.com/DavidGodefroid/lockkit/pii"
+	"github.com/DavidGodefroid/locklog/internal/mask"
 )
 
 // Structured modes: how the leaves of structured records (JSON, logfmt,
@@ -11,9 +11,9 @@ import (
 const (
 	// StructuredRedactUnknown redacts every leaf that is neither trusted
 	// nor named by an allow rule (the production default).
-	StructuredRedactUnknown = "redact-unknown"
+	StructuredRedactUnknown = mask.StructuredRedactUnknown
 	// StructuredDetect masks what rules, names and detectors find.
-	StructuredDetect = "detect"
+	StructuredDetect = mask.StructuredDetect
 )
 
 // Text modes: how free text is masked.
@@ -104,9 +104,13 @@ type Limits struct {
 // DefaultLimits returns the limits of a profile that sets none.
 func DefaultLimits(production bool) Limits {
 	l := Limits{
-		Local: Budgets{Range: 7 * Day, CountRange: 30 * Day, MaxBytes: 4 * GiB, BytesPerHour: 40 * GiB},
-		Remote: Budgets{Range: 24 * time.Hour, CountRange: 30 * Day, MaxBytes: 2 * GiB, BytesPerHour: 20 * GiB,
-			MetricQueriesPerHour: 120, RequestsPerMinute: 240},
+		// Per-call admission: 512 MiB (docs/performance.md, spikes S3/S4).
+		// Masking runs at about 1 MB/s/core, so the 30 s deadline stops a
+		// call long before and it continues free with its cursor. Remote
+		// bytes are decompressed response bytes.
+		Local: Budgets{Range: 7 * Day, CountRange: 30 * Day, MaxBytes: 512 * MiB, BytesPerHour: 40 * GiB},
+		Remote: Budgets{Range: 24 * time.Hour, CountRange: 30 * Day, MaxBytes: 512 * MiB, BytesPerHour: 20 * GiB,
+			MetricQueriesPerHour: 120, RequestsPerMinute: 600},
 		MaxRecords:           200,
 		MaxOutputBytes:       64 * KiB,
 		LookupsPerHour:       50,
@@ -117,23 +121,24 @@ func DefaultLimits(production bool) Limits {
 	if production {
 		l.Remote.BytesPerHour = 10 * GiB
 		l.Remote.MetricQueriesPerHour = 60
-		l.Remote.RequestsPerMinute = 60
+		// 240/min still fetches about 2.7 MB/s of log lines, above masking
+		// speed; 60/min would throttle below it.
+		l.Remote.RequestsPerMinute = 240
 		l.LookupsPerHour = 10
 	}
 	return l
 }
 
-// DefaultDetectors is the detector set of a profile that sets none: every
-// lockkit value detector but the opt-in ones. Secret detection is not a
-// detector setting: it is always on.
-func DefaultDetectors() []string {
-	ds := pii.AllDetectors()
-	out := make([]string, len(ds))
-	for i, d := range ds {
-		out[i] = d.Name()
-	}
-	return out
-}
+// DefaultDetectors is the detector set of a profile that sets none
+// (mask.DefaultValueDetectors: lockkit's defaults and ip). person_name and
+// phone_loose are opt-in for their false positives (OptInDetectors).
+// Secret detection is not a detector setting: it is always on, and a
+// profile naming "secret" is refused.
+func DefaultDetectors() []string { return mask.DefaultValueDetectors() }
+
+// OptInDetectors are the value detectors a profile may add to the
+// default set by naming them in `detectors`.
+func OptInDetectors() []string { return []string{"person_name", "phone_loose"} }
 
 // DefaultStructured is redact-unknown on production, detect elsewhere.
 func DefaultStructured(production bool) string {

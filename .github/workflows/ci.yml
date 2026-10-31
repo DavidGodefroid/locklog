@@ -23,6 +23,8 @@ jobs:
     timeout-minutes: 15
     env:
       CGO_ENABLED: "0"
+      # The Landlock tests must run, not skip, on the Linux runner.
+      LOCKLOG_REQUIRE_LANDLOCK_ABI: ${{ matrix.os == 'ubuntu-latest' && '5' || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -76,6 +78,56 @@ jobs:
             grep -E -- '--- FAIL|_test\.go:[0-9]+:|^FAIL|panic:' test.log | head -40 | sed 's/^/::error::/'
             exit 1
           }
+
+  # Every fuzz target for a short time; run scripts/fuzz.sh with a longer
+  # FUZZTIME locally for deeper runs.
+  fuzz:
+    name: fuzz
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.x"
+          check-latest: true
+      - name: fuzz
+        run: GOMAXPROCS=2 FUZZTIME=20s sh scripts/fuzz.sh
+      - name: keep the failing inputs
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fuzz-crashers
+          path: "**/testdata/fuzz/**"
+          if-no-files-found: ignore
+
+  # Sources against the runner's own services: journald (the source reads
+  # /var/log/journal as root, like a console with the journal group would).
+  integration:
+    name: integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.x"
+          check-latest: true
+      - name: journald
+        shell: bash
+        run: |
+          set -o pipefail
+          go test -c -o journald.test ./internal/source/journald/
+          sudo LOCKLOG_JOURNALD_IT=1 ./journald.test -test.run '^TestLiveJournal$' -test.v | tee it.log
+          grep -q -- '--- PASS: TestLiveJournal' it.log
 
   # One required check name ("lint") for every static check; later pull
   # requests add steps here (goreleaser check, install.sh rules, ...).
@@ -190,6 +242,106 @@ jobs:
           grep -x 'profile staging false' plan.txt
           grep -x 'file /var/log /var/log/syslog\*' plan.txt
           grep -x journald plan.txt
+
+  # The docker source against a real engine: containers with rotated,
+  # compressed json-file logs, the map written by `locklog refresh`, and the
+  # source's test binary run in a container confined like the console.
+  docker-source:
+    name: docker source (integration)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CGO_ENABLED: "0"
+      IMG: alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.x"
+          check-latest: true
+      - name: docker build
+        run: docker build -t locklog .
+      - name: containers with rotated, compressed logs
+        run: |
+          set -eux
+          r="ll11-it-$(od -An -N4 -tx4 /dev/urandom | tr -d ' ')"
+          echo "R=$r" >> "$GITHUB_ENV"
+          docker pull -q "$IMG"
+          gen='i=0; while [ $i -lt 3000 ]; do echo "$0 line $i with some padding text"; i=$((i+1)); done; echo "$0 to stderr" >&2'
+          opts="--log-driver json-file --log-opt max-size=20k --log-opt max-file=3 --log-opt compress=true"
+          for n in "$r-a" "$r-b" "other-$r"; do docker run -d --name "$n" $opts "$IMG" sh -c "$gen" "$n"; done
+          docker run -d --name "locklog-console-it-$r" --label locklog.console=1 $opts "$IMG" sh -c "$gen" console
+          docker run -d --name "$r-local" --log-driver local "$IMG" sh -c "$gen" local
+          docker wait "$r-a" "$r-b" "other-$r" "locklog-console-it-$r" "$r-local"
+          sleep 3 # rotated files are compressed in the background
+          mkdir -p "$RUNNER_TEMP/it/expect"
+          for n in "$r-a" "$r-b"; do docker logs "$n" > "$RUNNER_TEMP/it/expect/$n" 2>&1; done
+          wc -l "$RUNNER_TEMP"/it/expect/*
+      - name: locklog refresh writes the map
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p "$RUNNER_TEMP/proj/.locklog" && cd "$RUNNER_TEMP/proj"
+          printf '%s\n' 'version = 1' '[profiles.it.sources.web]' 'kind = "docker"' "containers = [\"$R-*\"]" > .locklog/config.toml
+          mkdir -m 0700 "$RUNNER_TEMP/xdg"
+          XDG_RUNTIME_DIR="$RUNNER_TEMP/xdg" sh "$GITHUB_WORKSPACE/scripts/locklog" refresh | tee refresh.txt
+          grep -q ': 2 mapped, 1 console containers excluded, 1 skipped' refresh.txt
+          cat "$RUNNER_TEMP"/xdg/locklog/map/locklog-console-*/map.v1
+      - name: read in a container confined like the console
+        shell: bash
+        run: |
+          set -euxo pipefail
+          go test -c -tags integration -o "$RUNNER_TEMP/it/docker.test" ./internal/source/docker
+          root="$(docker info --format '{{.DockerRootDir}}')/containers"
+          mapdir=$(echo "$RUNNER_TEMP"/xdg/locklog/map/locklog-console-*)
+          console_id=$(docker inspect --format '{{.Id}}' "locklog-console-it-$R")
+          docker run --rm --user 10051:10051 --group-add 0 --cap-drop ALL --security-opt no-new-privileges \
+            --read-only --network none --tmpfs /tmp:rw,nosuid,nodev,noexec,size=64m \
+            --mount "type=bind,src=$root,dst=$root,readonly,bind-recursive=disabled" \
+            --mount "type=bind,src=$mapdir,dst=/run/locklog-map,readonly" \
+            --mount "type=bind,src=$RUNNER_TEMP/it,dst=/it,readonly" \
+            -e "LOCKLOG_DOCKER_ROOT=$root" -e "LL11_GLOB=$R-*" -e LL11_EXPECT=/it/expect \
+            -e "LL11_CONSOLE_ID=$console_id" -e "LL11_CONSOLE_NAME=locklog-console-it-$R" \
+            "$IMG" /it/docker.test -test.v -test.run Integration | tee it.log
+          for t in ReadsApprovedContainers NeverServesConsoles CannotListOrWrite; do
+            grep -q -- "--- PASS: TestIntegration$t" it.log
+          done
+      - name: Landlock, and a mount propagated after the reader started
+        shell: bash
+        run: |
+          set -euxo pipefail
+          root="$(docker info --format '{{.DockerRootDir}}')/containers"
+          mapdir=$(echo "$RUNNER_TEMP"/xdg/locklog/map/locklog-console-*)
+          sync="$RUNNER_TEMP/sync"
+          mkdir -m 0777 "$sync"
+          # The reader restricts itself, says it is ready, then waits for
+          # the shareable container's id.
+          docker run -d --name "$R-reader" --user 10051:10051 --group-add 0 --cap-drop ALL --security-opt no-new-privileges \
+            --read-only --network none --tmpfs /tmp:rw,nosuid,nodev,noexec,size=64m \
+            --mount "type=bind,src=$root,dst=$root,readonly,bind-recursive=disabled" \
+            --mount "type=bind,src=$mapdir,dst=/run/locklog-map,readonly" \
+            --mount "type=bind,src=$RUNNER_TEMP/it,dst=/it,readonly" \
+            --mount "type=bind,src=$sync,dst=/sync" \
+            -e "LOCKLOG_DOCKER_ROOT=$root" -e "LL11_GLOB=$R-*" -e LL11_SYNC=/sync \
+            "$IMG" /it/docker.test -test.v -test.run '^TestIntegrationLandlockShm$'
+          for _ in $(seq 60); do [ -e "$sync/ready" ] && break; sleep 1; done
+          test -e "$sync/ready" || { docker logs "$R-reader"; exit 1; }
+          # A probe anyone may write (0666 in the 1777 tmpfs): only Landlock
+          # can refuse the reader's writes.
+          docker run -d --name "$R-shm" --ipc=shareable "$IMG" sh -c 'echo probe > /dev/shm/.ll11-tmp && chmod 0666 /dev/shm/.ll11-tmp && mv /dev/shm/.ll11-tmp /dev/shm/ll11-probe && sleep 300'
+          timeout 30 sh -c "until docker exec '$R-shm' test -e /dev/shm/ll11-probe; do sleep 0.2; done"
+          docker inspect --format '{{.Id}}' "$R-shm" > "$sync/shm-id"
+          rc=$(docker wait "$R-reader")
+          docker logs "$R-reader" 2>&1 | tee landlock.log
+          test "$rc" = 0
+          grep -q -- '--- PASS: TestIntegrationLandlockShm' landlock.log
+      - name: remove the test containers
+        if: always()
+        run: |
+          [ -n "${R:-}" ] || exit 0
+          docker rm -f "$R-a" "$R-b" "other-$R" "locklog-console-it-$R" "$R-local" "$R-reader" "$R-shm" >/dev/null 2>&1 || true
 
   # install.sh of this commit against the latest published release: the
   # signatures (checksums.txt and the images), the checksum, the launcher

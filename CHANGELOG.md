@@ -31,3 +31,33 @@ uses [Semantic Versioning](https://semver.org/).
   no network for a local-only profile), an audit record per call written
   before the answer leaves (fail closed; never a predicate or a value), and
   `--allowed-uids`.
+- The Docker source: containers' `json-file` logs (rotated `.N[.gz]` files
+  included) read by name from the containers root through a name → id map,
+  approved globs checked again at read time, console containers never served,
+  no read across a mount point; the `docker-json` format with an `attrs`
+  allowlist. The launcher binds the containers root with gid 0, keeps the map
+  current with a `docker events` loop, labels console containers, and gains
+  `locklog refresh`. gid 0 applies to the whole console, so a docker source
+  runs in a console of its own: the mount plan and the launcher refuse it
+  beside a file or journald source.
+- `internal/landlock`: a Landlock ruleset the console applies to itself
+  (read-only beneath the log and containers roots, writes only to its
+  volumes and /tmp, rights chosen by ABI), and the rule that a docker source
+  on a production profile needs Landlock or openat2 with `RESOLVE_NO_XDEV`.
+- Parsing: the `syslog` (RFC 5424 with structured data, RFC 3164 with or
+  without PRI, rsyslog's RFC 3339 variant) and `combined` (NCSA
+  common/combined access logs) formats, detected by `auto` after JSON and
+  logfmt, and the `cri` and `docker-json` container frames (runtime time,
+  stream, split lines joined, payload decoded with `auto`).
+- Masking on lockkit v0.8.0: its secret detector (credentials, token
+  shapes, private keys, URL userinfo) and `LooksSecret` names are step 1,
+  always on and never a profile setting (`detectors = ["secret"]` is
+  refused); public IP addresses (`ip`) join the default detectors;
+  `person_name` and `phone_loose` are opt-in by naming them in a profile's
+  `detectors`.
+
+### Fixed
+
+- The launcher chooses the non-recursive bind option from the Docker CLI
+  version, which parses it (`bind-recursive=disabled` from CLI 25), not from
+  the engine's.
