@@ -86,6 +86,10 @@ func ABI() (int, string) {
 // but the ruleset could not be applied (nothing was restricted then,
 // except no_new_privs).
 func Restrict(r Rules) (Status, error) {
+	r, err := r.resolve()
+	if err != nil {
+		return Status{State: Unsupported, Detail: "invalid rules"}, err
+	}
 	abi, why := ABI()
 	if abi == 0 {
 		return Status{State: Unsupported, Detail: why}, nil
@@ -130,7 +134,7 @@ func Restrict(r Rules) (Status, error) {
 // addRule grants access beneath path (a file gets only file rights). A
 // missing path is skipped.
 func addRule(ruleset int, path string, access uint64) error {
-	pfd, err := unix.Open(path, unix.O_PATH|unix.O_CLOEXEC, 0)
+	pfd, err := unix.Open(path, unix.O_PATH|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if errors.Is(err, unix.ENOENT) {
 		return nil
 	}
@@ -142,7 +146,11 @@ func addRule(ruleset int, path string, access uint64) error {
 	if err := unix.Fstat(pfd, &st); err != nil {
 		return fmt.Errorf("landlock: stat %s: %w", path, err)
 	}
-	if st.Mode&unix.S_IFMT != unix.S_IFDIR {
+	switch st.Mode & unix.S_IFMT {
+	case unix.S_IFDIR:
+	case unix.S_IFLNK:
+		return fmt.Errorf("landlock: %s is a symbolic link", path)
+	default:
 		access &= fileRights
 	}
 	attr := pathBeneathAttr{allowedAccess: access, parentFd: int32(pfd)}

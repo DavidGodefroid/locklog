@@ -567,8 +567,15 @@ func TestFileSourcesNeverCrossMounts(t *testing.T) {
 		if !fo.NoXDev || len(fo.Roots) != 1 || fo.Roots[0] != e.root || fo.Recursive || fo.Tag != c.Name {
 			t.Errorf("%s: %+v", c.Name, fo)
 		}
-		for _, p := range append(slices.Clone(fo.Paths), fo.Alternates[fo.Paths[min(1, len(fo.Paths)-1)]]) {
-			if p != "" && !strings.HasPrefix(p, e.root+"/"+c.ID+"/"+c.ID+"-json.log") {
+		paths := slices.Clone(fo.Paths)
+		for _, a := range fo.Alternates {
+			paths = append(paths, a)
+		}
+		if c.Compress && len(fo.Alternates) != 1 {
+			t.Errorf("%s: alternates %v", c.Name, fo.Alternates)
+		}
+		for _, p := range paths {
+			if !strings.HasPrefix(p, e.root+"/"+c.ID+"/"+c.ID+"-json.log") {
 				t.Errorf("%s: path %s", c.Name, p)
 			}
 		}

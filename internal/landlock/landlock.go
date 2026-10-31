@@ -22,14 +22,23 @@
 //	})
 //
 // Every path the console reads after Restrict must be listed (CA bundles,
-// zone info, /proc/self files): anything else is refused.
+// zone info, /proc/self files, and device files such as /dev/null or
+// /dev/tty): anything else is refused. IOCTL_DEV is never granted, not even
+// beneath the read-write roots. Only filesystem access is confined: network
+// and scoping (abstract sockets, signals) are not handled.
 package landlock
 
-import "strings"
+import (
+	"errors"
+	"fmt"
+	"io/fs"
+	"path/filepath"
+	"strings"
+)
 
 // State of the confinement.
 const (
-	// Enforced: every right of ABI 3 or later is handled (writes,
+	// Enforced: every filesystem right of ABI 3 or later is handled (writes,
 	// creation, removal, renames and truncation are refused outside the
 	// read-write roots).
 	Enforced = "enforced"
@@ -38,7 +47,8 @@ const (
 	// truncated).
 	Partial = "partial"
 	// Unsupported: no Landlock (kernel < 5.13, the LSM disabled, the
-	// syscalls blocked by seccomp, or not Linux): nothing is confined.
+	// syscalls blocked by seccomp, or not Linux): no filesystem access is
+	// confined.
 	Unsupported = "unsupported"
 )
 
@@ -73,11 +83,55 @@ func (s Status) String() string {
 }
 
 // Rules are the paths granted: anything else is refused once restricted.
-// A missing path is skipped.
+// A missing path is skipped. Rules on nested paths add up, so a ReadOnly or
+// Exec path at or beneath a ReadWrite one is refused (it would be
+// writable).
 type Rules struct {
 	ReadOnly  []string
 	ReadWrite []string
 	Exec      []string
+}
+
+// resolve cleans the paths and resolves their symbolic links (a missing
+// path is dropped), and refuses a read-only or exec path at or beneath a
+// read-write one.
+func (r Rules) resolve() (Rules, error) {
+	res := func(ps []string) ([]string, error) {
+		var out []string
+		for _, p := range ps {
+			if !filepath.IsAbs(p) {
+				return nil, fmt.Errorf("landlock: %q is not an absolute path", p)
+			}
+			q, err := filepath.EvalSymlinks(filepath.Clean(p))
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			if err != nil {
+				return nil, fmt.Errorf("landlock: %s: %w", p, err)
+			}
+			out = append(out, q)
+		}
+		return out, nil
+	}
+	var out Rules
+	var err error
+	if out.ReadOnly, err = res(r.ReadOnly); err != nil {
+		return Rules{}, err
+	}
+	if out.ReadWrite, err = res(r.ReadWrite); err != nil {
+		return Rules{}, err
+	}
+	if out.Exec, err = res(r.Exec); err != nil {
+		return Rules{}, err
+	}
+	for _, w := range out.ReadWrite {
+		for _, p := range append(append([]string{}, out.ReadOnly...), out.Exec...) {
+			if p == w || strings.HasPrefix(p, strings.TrimSuffix(w, "/")+"/") {
+				return Rules{}, fmt.Errorf("landlock: %s is beneath the read-write %s: it would be writable", p, w)
+			}
+		}
+	}
+	return out, nil
 }
 
 func itoa(n int) string {

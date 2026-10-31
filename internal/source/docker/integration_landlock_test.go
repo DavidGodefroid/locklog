@@ -15,6 +15,8 @@ import (
 	"github.com/DavidGodefroid/locklog/internal/parse"
 	"github.com/DavidGodefroid/locklog/internal/source"
 	"github.com/DavidGodefroid/locklog/internal/source/file"
+
+	"golang.org/x/sys/unix"
 )
 
 // TestIntegrationLandlockShm runs alone (Landlock cannot be undone): the
@@ -58,6 +60,35 @@ func TestIntegrationLandlockShm(t *testing.T) {
 	if err := syscall.Stat(probe, &stt); err != nil {
 		t.Fatalf("the propagated /dev/shm is not visible: %v", err)
 	}
+	// The mount is writable as far as the kernel's mount flags and the
+	// file's mode go (0666 in a 1777 tmpfs): only Landlock refuses below.
+	var sfs unix.Statfs_t
+	if err := unix.Statfs(shm, &sfs); err != nil || sfs.Flags&unix.ST_RDONLY != 0 {
+		t.Fatalf("the propagated /dev/shm is read-only or unknown (flags %#x, %v): the checks below would prove nothing", sfs.Flags, err)
+	}
+	if stt.Mode&0o777 != 0o666 {
+		t.Fatalf("probe mode %o, want 0666", stt.Mode&0o777)
+	}
+	// The kernel refuses the crossing: openat2 RESOLVE_NO_XDEV gives
+	// EXDEV; without it (a positive control) the file opens for reading.
+	rfd, err := unix.Open(root, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(rfd)
+	rel := shmID + "/mounts/shm/ll11-probe"
+	if fd, err := unix.Openat2(rfd, rel, &unix.OpenHow{Flags: unix.O_RDONLY | unix.O_CLOEXEC,
+		Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_XDEV}); !errors.Is(err, unix.EXDEV) {
+		if err == nil {
+			unix.Close(fd)
+		}
+		t.Errorf("openat2 RESOLVE_NO_XDEV across the propagated mount: %v, want EXDEV", err)
+	}
+	if fd, err := unix.Openat2(rfd, rel, &unix.OpenHow{Flags: unix.O_RDONLY | unix.O_CLOEXEC, Resolve: unix.RESOLVE_BENEATH}); err != nil {
+		t.Errorf("control: openat2 without RESOLVE_NO_XDEV: %v", err)
+	} else {
+		unix.Close(fd)
+	}
 	// The docker source's discipline: no open across the mount.
 	p, _ := parse.New(parse.Options{Format: "docker-json"})
 	fs, err := file.New(file.Options{Name: "it", Paths: []string{probe}, Roots: []string{root}, Parser: p, NoXDev: true})
@@ -67,16 +98,28 @@ func TestIntegrationLandlockShm(t *testing.T) {
 	if plan, err := fs.Plan(ctx, itRange, source.Selector{}); err != nil || len(plan.Chunks) != 0 {
 		t.Errorf("opened a file of a propagated mount: %+v %v", plan, err)
 	}
-	// Raw writes there: refused by Landlock.
-	for _, w := range []func() error{
-		func() error { return os.WriteFile(probe, []byte("x"), 0o644) },
-		func() error { return os.WriteFile(filepath.Join(shm, "ll11-created"), []byte("x"), 0o644) },
-		func() error { return os.Remove(probe) },
-		func() error { return os.Truncate(probe, 0) },
-		func() error { return os.Mkdir(filepath.Join(shm, "ll11-dir"), 0o755) },
+	// Writes there: refused by Landlock, exactly EACCES.
+	for what, w := range map[string]func() error{
+		"append write": func() error {
+			f, err := os.OpenFile(probe, os.O_WRONLY|os.O_APPEND, 0)
+			if err == nil {
+				f.Close()
+			}
+			return err
+		},
+		"truncate": func() error { return os.Truncate(probe, 0) },
+		"create": func() error {
+			f, err := os.OpenFile(filepath.Join(shm, "ll11-created"), os.O_RDONLY|os.O_CREATE|os.O_EXCL, 0o644)
+			if err == nil {
+				f.Close()
+			}
+			return err
+		},
+		"remove": func() error { return os.Remove(probe) },
+		"mkdir":  func() error { return os.Mkdir(filepath.Join(shm, "ll11-dir"), 0o755) },
 	} {
-		if err := w(); !errors.Is(err, syscall.EACCES) && !errors.Is(err, syscall.EROFS) {
-			t.Errorf("a write under the propagated /dev/shm: %v", err)
+		if err := w(); !errors.Is(err, syscall.EACCES) {
+			t.Errorf("%s under the propagated /dev/shm: %v, want EACCES", what, err)
 		}
 	}
 	// The approved logs are still read.
