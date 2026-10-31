@@ -103,6 +103,19 @@ jobs:
           path: "**/testdata/fuzz/**"
           if-no-files-found: ignore
 
+  # The README/site demo is scripts/brand/demo.py's output and names only
+  # tools and pseudonym kinds the code has.
+  demo:
+    name: demo
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: demo golden test
+        run: python3 scripts/brand/check_demo.py
+
   # One required check name ("lint") for every static check; later pull
   # requests add steps here (goreleaser check, install.sh rules, ...).
   lint:
