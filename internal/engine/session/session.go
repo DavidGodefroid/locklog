@@ -76,8 +76,8 @@ type Options struct {
 	// profile with pseudonym_rotation = "session" starts a new epoch then
 	// (not when the console reconnects).
 	FirstOpen bool
-	// EpochsOpened, when set, is called once the epoch store is open (and
-	// rotated, on a first open): an open that fails after it has used up
+	// EpochsOpened, when set, is called synchronously, before Open
+	// returns, once the epoch store is open (and rotated, on a first open): an open that fails after it has used up
 	// the first open's rotation, so the caller stops passing FirstOpen.
 	EpochsOpened func()
 	// Workers mask in parallel (default min(2, NumCPU): the launcher runs
@@ -161,11 +161,8 @@ func Open(ctx context.Context, o Options) (_ *Session, err error) {
 	if err != nil {
 		return nil, err
 	}
-	if s.epochs, err = openEpochs(filepath.Join(dir, "epochs"), fresh, pr, o.FirstOpen, o.Now()); err != nil {
+	if s.epochs, err = openEpochs(filepath.Join(dir, "epochs"), fresh, pr, o.FirstOpen, o.Now(), o.EpochsOpened); err != nil {
 		return nil, err
-	}
-	if o.EpochsOpened != nil {
-		o.EpochsOpened()
 	}
 	rules, notes, err := loadRules(o.Project, filepath.Join(dir, "pii"))
 	if err != nil {
@@ -301,7 +298,7 @@ func writePrivate(p string, data []byte) error {
 // openEpochs opens the pseudonym epochs (created only in a new state
 // directory), rotates them as the profile says and prunes the keys older
 // than pseudonym_max_age.
-func openEpochs(dir string, create bool, pr config.Profile, first bool, now time.Time) (*pii.EpochStore, error) {
+func openEpochs(dir string, create bool, pr config.Profile, first bool, now time.Time, opened func()) (*pii.EpochStore, error) {
 	st, err := pii.OpenEpochStore(dir, create, now)
 	if errors.Is(err, pii.ErrNoEpoch) {
 		return nil, fmt.Errorf("the pseudonym epoch keys of profile %q are missing: refused (locklog keys rotate starts a new epoch)", pr.Name)
@@ -321,6 +318,11 @@ func openEpochs(dir string, create bool, pr config.Profile, first bool, now time
 			st.Close()
 			return nil, err
 		}
+	}
+	// From here the first open's rotation is used up, even if pruning
+	// or a later step fails.
+	if opened != nil {
+		opened()
 	}
 	if pr.PseudonymMaxAge > 0 {
 		if _, err := st.Prune(now, pr.PseudonymMaxAge); err != nil {

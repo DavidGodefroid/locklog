@@ -179,6 +179,14 @@ func TestOpenerConfinedWithoutVaultRefusesVault(t *testing.T) {
 	if _, err := op.confine(src(kconfig.CredentialsVault)); err == nil || !strings.Contains(err.Error(), "restart the console") {
 		t.Errorf("vault after a ruleset without it: %v", err)
 	}
+	// Confined with the vault rule: a later Vault policy is accepted.
+	op = &opener{inContainer: true, lookPath: op.lookPath, restrict: op.restrict}
+	if _, err := op.confine(src(kconfig.CredentialsVault)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := op.confine(src(kconfig.CredentialsVault)); err != nil {
+		t.Errorf("vault after a ruleset with it: %v", err)
+	}
 }
 
 // A reviewed policy that adds a docker source to a console confined
