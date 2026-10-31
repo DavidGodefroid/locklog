@@ -196,7 +196,7 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 	var found []match
 	heldAll := map[streamKey]*held{} // each local stream's held record
 	res := TailResult{Epoch: e.o.Masker.Epoch(), Records: []json.RawMessage{}, Masking: Masking{Kinds: []string{}}}
-	callBytes := e.callBytes(q.Sources)
+	callBytes := e.callBytes(ctx, q.Sources)
 	covered, early, untimed, partial := true, false, false, false
 	ended := false // the duration ended (not max, not a failure)
 	stale := 0     // polls replanned after a stream changed

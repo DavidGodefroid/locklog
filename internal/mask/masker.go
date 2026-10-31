@@ -1,6 +1,7 @@
 package mask
 
 import (
+	"errors"
 	"fmt"
 	"math/big"
 	"regexp"
@@ -189,12 +190,29 @@ func (m *Masker) Epoch() string { return m.o.Pseudonyms.Epoch() }
 // Mask masks one event of source. A panic in masking withholds the whole
 // record (Failed), never part of it.
 func (m *Masker) Mask(source string, ev parse.Event) (rec Record) {
+	return m.mask(source, ev, nil)
+}
+
+// MaskClear masks ev as Mask does and also returns, for every pseudonym
+// of a value the record shows (⟦kind:ID⟧, field names excepted), the
+// clear value it stands for: what an approved unmask reveals. Never
+// return the map to anyone but the approved unmask's own spans.
+func (m *Masker) MaskClear(source string, ev parse.Event) (Record, map[string]string) {
+	clear := map[string]string{}
+	rec := m.mask(source, ev, clear)
+	if rec.failed {
+		return rec, map[string]string{}
+	}
+	return rec, clear
+}
+
+func (m *Masker) mask(source string, ev parse.Event, clear map[string]string) (rec Record) {
 	defer func() {
 		if recover() != nil {
 			rec = Record{ok: true, failed: true, ts: ev.Time, hasTime: ev.HasTime || ev.Inherited, offset: ev.Offset, length: ev.Length}
 		}
 	}()
-	w := &walk{m: m, source: source, kinds: map[string]bool{}}
+	w := &walk{m: m, source: source, kinds: map[string]bool{}, clear: clear}
 	rec = Record{ok: true, ts: ev.Time, hasTime: ev.HasTime || ev.Inherited, format: ev.Format, offset: ev.Offset, length: ev.Length}
 	rec.fields = w.members(ev.Fields, "", "", false, inherited{})
 	// Attrs come from the source's own frame (journald, docker), never
@@ -308,6 +326,9 @@ type walk struct {
 	kinds       map[string]bool
 	secretPaths []string
 	lateSecret  bool // pseudonymise found a secret (see value)
+	// clear, when set (MaskClear), records each value pseudonym's clear
+	// value.
+	clear map[string]string
 }
 
 // inherited is what a container's name and rules impose on everything
@@ -582,7 +603,11 @@ func (w *walk) token(kind, s string) string {
 		return Redacted
 	}
 	w.kinds[kind] = true
-	return Token(kind, id)
+	t := Token(kind, id)
+	if w.clear != nil {
+		w.clear[t] = s
+	}
+	return t
 }
 
 // text masks free text: secrets, then the values detectors find.
@@ -911,4 +936,51 @@ func sortedKeys(m map[string]bool) []string {
 	}
 	slices.Sort(out)
 	return out
+}
+
+// Lookup errors.
+var (
+	// ErrLookupKind: the kind is not one of the masker's value detectors.
+	ErrLookupKind = errors.New("mask: not a detector kind")
+	// ErrLookupSecret: the value reads as a secret (never looked up).
+	ErrLookupSecret = errors.New("mask: the value reads as a secret")
+	// ErrLookupValue: the value is not, whole, a value of that kind.
+	ErrLookupValue = errors.New("mask: not a value of that kind")
+)
+
+// DetectorKinds are the kinds the masker's value detectors find (sorted):
+// the only kinds Lookup resolves.
+func (m *Masker) DetectorKinds() []string {
+	ds, ok := m.o.Values.(Detectors)
+	if !ok {
+		return nil
+	}
+	var out []string
+	for _, d := range ds {
+		if n := d.Name(); n != SecretDetectorName && pii.ValidKind(n) && !slices.Contains(out, n) {
+			out = append(out, n)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// Lookup returns the pseudonym a clear value of a detector kind has in
+// the logs (equality only): the token masking the value as free text
+// gives, when that is one whole token of that kind. A value a secret
+// detector flags, a kind no value detector finds (field names, template
+// tokens, rule kinds) and a value that is not wholly of the kind are
+// refused.
+func (m *Masker) Lookup(kind, value string) (string, error) {
+	if !slices.Contains(m.DetectorKinds(), kind) {
+		return "", ErrLookupKind
+	}
+	out := m.Text(value)
+	if strings.Contains(out, Secret) || strings.Contains(out, Redacted) {
+		return "", ErrLookupSecret
+	}
+	if !strings.HasPrefix(out, Open+kind+":") || !strings.HasSuffix(out, Close) || strings.Count(out, Open) != 1 {
+		return "", ErrLookupValue
+	}
+	return out, nil
 }

@@ -274,16 +274,17 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 			}
 		}
 	}
-	maxRange := e.o.Limits.CountRange
+	lim := e.limits(ctx)
+	maxRange := lim.CountRange
 	if !trustedOnly {
-		maxRange = e.o.Limits.LocalRange
+		maxRange = lim.LocalRange
 	}
 	for _, s := range q.Sources {
 		// A remote source without its own counts is scanned: its range,
 		// trusted-only or not.
 		if src, ok := e.o.Sources[s]; ok && e.remote(s) {
 			if _, counts := src.(source.Counter); !trustedOnly || !counts {
-				maxRange = min(maxRange, e.o.Limits.RemoteRange)
+				maxRange = min(maxRange, lim.RemoteRange)
 			}
 		}
 	}
@@ -326,6 +327,12 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 		q.bucket = d
 	}
 	digest := e.queryDigest("count", q)
+	if cursor != "" {
+		var err *Error
+		if digest, err = e.scanDigest(ctx, "count", digest); err != nil {
+			return CountResult{}, err
+		}
+	}
 	res := CountResult{Epoch: e.o.Masker.Epoch(), Groups: []Group{}}
 
 	var f *frozen
@@ -348,7 +355,9 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 		}()
 	} else {
 		var plan source.Byteplan
-		if trustedOnly && q.bucket%time.Minute == 0 && e.indexable(q.Sources) {
+		// An approved scan scans its whole plan, frozen at the approval
+		// (never part from the index).
+		if trustedOnly && q.bucket%time.Minute == 0 && e.indexable(q.Sources) && scanFrom(ctx) == nil {
 			p, err := e.indexCounts(ctx, &q, a)
 			if err == nil {
 				plan = p
@@ -363,9 +372,9 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 			// source's range applies (its bytes are unknown before
 			// the fetch, so admission cannot bound a longer range).
 			for _, s := range q.Sources {
-				if _, ok := e.o.Sources[s]; ok && e.remote(s) && q.To.Sub(q.From) > e.o.Limits.RemoteRange {
+				if _, ok := e.o.Sources[s]; ok && e.remote(s) && q.To.Sub(q.From) > lim.RemoteRange {
 					return CountResult{}, &Error{Code: EOverBudget, Span: "to",
-						Message:  fmt.Sprintf("this count is scanned, and a remote source's range is at most %s: narrow the range, or count by trusted labels only on whole-minute buckets", e.o.Limits.RemoteRange),
+						Message:  fmt.Sprintf("this count is scanned, and a remote source's range is at most %s: narrow the range, or count by trusted labels only on whole-minute buckets", lim.RemoteRange),
 						Estimate: &Estimate{Range: q.To.Sub(q.From)}}
 				}
 			}
@@ -373,16 +382,19 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 			// stream order (the cheapest).
 			pq := q.Query
 			pq.Order = "asc"
-			p, err := e.planQuery(ctx, &pq, e.o.Limits.RemoteBytes, e.o.Limits.LocalBytes)
+			p, err := e.planQuery(ctx, &pq, lim.RemoteBytes, lim.LocalBytes)
 			if err != nil {
 				return CountResult{}, err
 			}
 			plan = p
-		} else if plan.Bytes() > e.o.Limits.LocalBytes {
+		} else if plan.Bytes() > lim.LocalBytes {
 			return CountResult{}, &Error{Code: EOverBudget, Message: "the part of the range the local index does not hold exceeds this call's byte budget; retry once more is indexed, or ask for locklog_scan",
 				Estimate: &Estimate{Bytes: plan.Bytes(), Granules: plan.Granules(), Range: q.To.Sub(q.From)}}
 		}
-		f = e.freeze(digest, plan, false)
+		var aerr error
+		if f, digest, aerr = e.admitPlan(ctx, "count", digest, plan, false, func() []string { return scopeLines(q.Query) }); aerr != nil {
+			return CountResult{}, aerr
+		}
 	}
 
 	sc, failures := Scanned{}, 0
@@ -391,7 +403,7 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 	if q.ByPattern {
 		factor++ // templating reads every matching message
 	}
-	chunk, gran, sc, failures, err = e.run(ctx, &f, chunk, gran, nil, e.callBytes(q.Sources), factor, func(raw source.RawRecord, rec mask.Record, b *budget) {
+	chunk, gran, sc, failures, err = e.run(ctx, &f, chunk, gran, nil, e.callBytes(ctx, q.Sources), factor, func(raw source.RawRecord, rec mask.Record, b *budget) {
 		if rec.Failed() && trustedOnly {
 			// The index counts every record by its trusted values;
 			// a scan of a trusted-only count does the same for a
@@ -466,7 +478,7 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 	res.Complete = chunk >= len(f.plan.Chunks)
 	if !res.Complete {
 		st := cursorState{Plan: f.id, Query: digest, Chunk: chunk, Granule: gran, Epoch: e.o.Masker.Epoch(), PolicyFP: e.o.PolicyFP(), Cache: e.aggs.put(a),
-			From: q.From, To: q.To, Last: last}
+			From: q.From, To: q.To, Last: last, Scan: scanID(ctx)}
 		res.Cursor = e.seal("Lc1", st)
 		if cu, ok := coveredUntil(f.plan, chunk, gran, q.Query); ok {
 			res.CoveredUntil = &cu
@@ -585,7 +597,17 @@ func (e *Engine) indexCounts(ctx context.Context, q *CountQuery, a *agg) (source
 	var plan source.Byteplan
 	for _, name := range q.Sources {
 		ic := e.o.Sources[name].(source.Counter)
-		r, err := ic.IndexCounts(ctx, source.CountQuery{Range: source.Range{From: q.From, To: q.To},
+		cctx := ctx
+		if e.remote(name) {
+			// Server-side metric queries: each request draws on the
+			// hourly metric budget and the per-minute request budget,
+			// and none is sent once the metric budget is used up.
+			if e.ledger.metricLeft(name) == 0 {
+				return source.Byteplan{}, errMetricBudget
+			}
+			cctx = source.WithLimiter(ctx, requestLimiter{l: e.ledger, src: name, metric: true})
+		}
+		r, err := ic.IndexCounts(cctx, source.CountQuery{Range: source.Range{From: q.From, To: q.To},
 			Selector: q.selector(name, e.o.Trusted), By: q.By, ByLabels: q.ByLabels, Bucket: q.bucket})
 		if err != nil {
 			return source.Byteplan{}, err
