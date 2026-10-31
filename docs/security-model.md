@@ -118,7 +118,8 @@ Order, fixed, per record and per field:
    public IP; person names and loose phone numbers are opt-in (`detectors`)
    for their false positives.
 5. **Structured mode** (`redact-unknown`, the production default, or
-   `detect`) or **text mode** (`detect`, or `template`).
+   `detect`). The `text = "template"` setting is accepted but not applied
+   yet.
 
 A pseudonym is `⟦kind:ID⟧`: 12 Crockford base32 characters (60 bits) of an
 HMAC-SHA256 under a random per-epoch key. The key rotates every 7 days by
@@ -128,8 +129,10 @@ opens the profile. There is no pseudonym-to-value store. An unmask re-reads
 the record by its sealed reference.
 
 Agent rules (`locklog_pii_add`) only tighten: they add masking and never
-remove it or change its kind. They are stored in the console's home volume,
-never in the project's `.locklog/`.
+remove it or change its kind. They will be stored in the console's home
+volume, never in the project's `.locklog/`, once the console serves them
+([#64](https://github.com/DavidGodefroid/locklog/issues/64)); until then the
+tools answer that there are no rules.
 
 ## What is not masked
 
@@ -185,7 +188,7 @@ agent does through locklog writes or unmasks without the human.
 
 | Data | Where | Kept |
 |---|---|---|
-| Audit (one chained line per call) | home volume | until you delete it. It holds pseudonyms, tool arguments and **the predicates the agent typed**: a personal value the agent typed in a form the detectors miss stays there |
+| Audit (one chained line per call) | home volume | until you delete it. It holds the method, the source names, the time range, the decision, the peer and the pseudonyms an unmask or lookup named; not the predicates. The **reason the agent typed** for an approval is kept, masked by the detectors: a personal value in a form the detectors miss stays there |
 | Plans and approved scans | console memory | until used or expired (an approved scan: 30 minutes); gone when the session ends |
 | Result cache | console memory | ≤ 64 MiB, gone when the session ends (a policy change, the console's exit) |
 | Local index | home volume | per file identity, rebuilt when a file changes; trusted field values masked at answer time |
