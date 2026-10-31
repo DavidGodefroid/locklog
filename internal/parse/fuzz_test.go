@@ -16,6 +16,7 @@ var fuzzSeeds = []string{
 	`{"a":` + strings.Repeat("[", 70) + "\n",
 	"2026-10-30T14:00:00Z P part\n2026-10-30T14:00:00Z F end\n",
 	"[2026-10-30 14:02:11] [error] x\n  y\nCaused by: z\n",
+	"\f{}\n\v{\"a\":1}\n",
 }
 
 // checkEvents asserts the reader's invariants on any input: events ordered,

@@ -93,7 +93,9 @@ func init() {
 const (
 	// MultilineIndent (default) joins a line that starts with a space or a
 	// tab, or with "Caused by:" / "Suppressed:", to the free-text event
-	// before it (stack traces). Structured events are never joined.
+	// before it (stack traces). Structured events are never joined, and a
+	// line that starts with a space or a tab is always free text (so that
+	// a reader resumed on it agrees with one that read through).
 	MultilineIndent = "indent"
 	// MultilineNone makes every line an event.
 	MultilineNone = "none"
@@ -183,7 +185,12 @@ func (p *Parser) structured(line string) Format {
 		if _, isPlain := p.format.(plainFormat); isPlain {
 			return nil
 		}
+		// An explicit format decodes any line it accepts (a one-pair
+		// logfmt line too), not only those "auto" would detect.
 		if p.format.Detect(line) {
+			return p.format
+		}
+		if _, ok := p.format.Decode(line, &p.opts); ok {
 			return p.format
 		}
 		return nil

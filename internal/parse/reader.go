@@ -36,7 +36,7 @@ type Reader struct {
 // holdBlank holds Offset on a skipped blank line that is unterminated: the
 // writer may complete it into a line that matters.
 func (r *Reader) holdBlank(ln logical) {
-	if ln.Unterminated {
+	if ln.Unterminated && r.hold < 0 {
 		r.hold = ln.Offset
 	}
 }
@@ -82,13 +82,15 @@ func (p *Parser) NewSectionReader(lr *LineReader, end int64) *Reader {
 // Split. When the last event returned ends with an unterminated line (the
 // stream may still be written), Offset is that event's offset.
 func (r *Reader) Offset() int64 {
+	// A hold is earlier than anything still pending: once an event was
+	// held, the stream is incomplete from there on.
 	switch {
+	case r.hold >= 0:
+		return r.hold
 	case r.pending != nil:
 		return r.pending.offset
 	case len(r.peeks) > 0:
 		return r.peeks[0].Offset
-	case r.hold >= 0:
-		return r.hold
 	}
 	return r.lr.Offset()
 }
@@ -103,7 +105,7 @@ func (r *Reader) Next() (Event, error) {
 			}
 			return Event{}, err
 		}
-		if strings.TrimSpace(ln.Text) == "" {
+		if strings.Trim(ln.Text, " \t\r") == "" {
 			if r.pending != nil && r.p.opts.Multiline == MultilinePattern && r.pending.format == nil {
 				// In pattern mode a blank line continues the event.
 				if r.fits(ln) {
@@ -201,8 +203,10 @@ func (r *Reader) nextLogical() (logical, error) {
 		next, ok := r.p.framer.Unwrap(l2.Text, &r.p.opts)
 		if !ok {
 			// A non-frame line ends the partial run; it is read
-			// again as the next logical line.
+			// again as the next logical line. An unterminated one
+			// may be a frame still being written: hold the run.
 			r.lr.Unread(l2)
+			open = open || l2.Unterminated
 			break
 		}
 		next.Text = validText([]byte(next.Text))
@@ -247,7 +251,12 @@ func (r *Reader) continues(ln logical) bool {
 	case MultilinePattern:
 		return !r.p.start.MatchString(ln.Text)
 	}
-	t := ln.Text
+	return indentContinuation(ln.Text)
+}
+
+// indentContinuation reports a line that continues a free-text event in
+// indent mode.
+func indentContinuation(t string) bool {
 	if t == "" {
 		return false
 	}
@@ -279,7 +288,7 @@ func (r *Reader) start(ln logical, split bool) {
 	var continuation bool
 	switch r.p.opts.Multiline {
 	case MultilineIndent:
-		continuation = ln.Text != "" && (ln.Text[0] == ' ' || ln.Text[0] == '\t')
+		continuation = indentContinuation(ln.Text)
 	case MultilinePattern:
 		continuation = !r.p.start.MatchString(ln.Text)
 	}
@@ -314,8 +323,7 @@ func (r *Reader) emit() Event {
 	ev.Truncated = a.truncated
 	ev.Split = a.split
 	ev.Unterminated = a.unterminated
-	r.hold = -1
-	if a.unterminated {
+	if a.unterminated && r.hold < 0 {
 		r.hold = a.offset
 	}
 	if a.frame != nil {

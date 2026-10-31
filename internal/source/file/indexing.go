@@ -167,39 +167,14 @@ func (s *Source) indexCompressed(ctx context.Context, fi fileInfo) (int64, error
 
 func (s *Source) fields() []string { return s.opts.Trusted }
 
-// ErrNotIndexable is returned by IndexCounts when a selector or group field
-// is not in the index of every stream.
-var ErrNotIndexable = errors.New("file source: the count needs fields the index does not hold")
+// ErrNotIndexable, CountQuery, CountRow and CountResult: see package source.
+var ErrNotIndexable = source.ErrNotIndexable
 
-// CountQuery is a count of records by trusted fields per time bucket.
-type CountQuery struct {
-	Range    source.Range
-	Selector source.Selector
-	By       []string
-	// Bucket is a whole number of minutes (0: one bucket for the range).
-	Bucket time.Duration
-}
-
-// CountRow is the count of one bucket and one tuple of By values (raw:
-// index.Absent, index.Redacted and index.Other stand for themselves).
-type CountRow struct {
-	Bucket time.Time
-	Vals   []string
-	N      int64
-}
-
-// CountResult is what the index answers, and the plan of what it cannot.
-type CountResult struct {
-	Rows []CountRow
-	// Untimed counts indexed records without a time in matching
-	// granules (not in any bucket).
-	Untimed int64
-	// Residual is the plan of the granules the index does not hold: the
-	// caller scans them and adds their counts.
-	Residual source.Byteplan
-	// IndexedFrom: see source.Schema.
-	IndexedFrom time.Time
-}
+type (
+	CountQuery  = source.CountQuery
+	CountRow    = source.CountRow
+	CountResult = source.CountResult
+)
 
 // IndexCounts answers a trusted-field count from the local index, at minute
 // resolution: a minute counts when its start is in the range. Granules the
