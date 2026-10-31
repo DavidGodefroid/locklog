@@ -211,6 +211,8 @@ org_id = "tenant-1"`))["staging"]
 		{lokiOK + `org_id = "a b"`, "invalid tenant id"},
 		{lokiOK + `org_id = "a|b"`, "no '|' federation"},
 		{lokiOK + `trusted_metadata = ["msg"]`, "is message text"},
+		{lokiOK + "trusted_labels = [\"level\"]\ntrusted_metadata = [\"level\"]", "both a stream label and structured metadata"},
+		{lokiOK + `trusted_metadata = ["app"]`, "both a stream label and structured metadata"},
 		{strings.Replace(lokiOK, `auth = "bearer"`, `auth = "basic"`, 1) + `user = "admin:hunter2"`, "user: a login name without"},
 		{strings.Replace(lokiOK, `selector = { app = "api" }`, `selector = { app = "a\"b" }`, 1), "without quotes, backslashes"},
 		{strings.Replace(lokiOK, `selector = { app = "api" }`, `selector = { app = "a\\b" }`, 1), "without quotes, backslashes"},

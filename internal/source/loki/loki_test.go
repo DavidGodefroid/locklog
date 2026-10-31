@@ -775,3 +775,16 @@ func TestEmptyValuesNotPushedDown(t *testing.T) {
 		}
 	}
 }
+
+func TestMetadataNameThatIsALabelRefused(t *testing.T) {
+	// A | name="v" filter also matches stream labels: a name both a label
+	// and metadata would select on either.
+	p, _ := parse.New(parse.Options{})
+	for _, md := range []string{"level", "env"} {
+		_, err := New(Options{Name: "l", Client: &egress.Client{}, Parser: p, Selector: map[string]string{"env": "prod"},
+			TrustedLabels: []string{"app", "level"}, TrustedMetadata: []string{"trace_id", md}})
+		if err == nil {
+			t.Fatalf("trusted metadata %q accepted", md)
+		}
+	}
+}

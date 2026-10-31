@@ -89,6 +89,13 @@ func New(o Options) (*Source, error) {
 			return nil, fmt.Errorf("loki source: invalid selector label %q", k)
 		}
 	}
+	// A | name="v" filter matches stream labels too: a trusted metadata
+	// name that is also a stream label would select on either.
+	for _, m := range o.TrustedMetadata {
+		if _, sel := o.Selector[m]; sel || slices.Contains(o.TrustedLabels, m) {
+			return nil, fmt.Errorf("loki source: %q is both a stream label and trusted structured metadata", m)
+		}
+	}
 	if o.InFlight <= 0 {
 		o.InFlight = InFlight
 	}
