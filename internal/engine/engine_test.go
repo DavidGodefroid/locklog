@@ -26,7 +26,6 @@ import (
 
 	"github.com/DavidGodefroid/locklog/internal/index"
 	"github.com/DavidGodefroid/locklog/internal/mask"
-	"github.com/DavidGodefroid/locklog/internal/mask/masktest"
 	"github.com/DavidGodefroid/locklog/internal/parse"
 	"github.com/DavidGodefroid/locklog/internal/source"
 	"github.com/DavidGodefroid/locklog/internal/source/file"
@@ -87,13 +86,13 @@ func newFixture(t *testing.T, content string, opt func(*Options)) *fixture {
 
 // boomFinder is a secret finder that panics on a text holding BOOM: the
 // masker withholds such a record whole (Failed).
-type boomFinder struct{ masktest.SecretFinder }
+type boomFinder struct{}
 
-func (b boomFinder) Find(s string) []pii.Match {
+func (boomFinder) Find(s string) []pii.Match {
 	if strings.Contains(s, "BOOM") {
 		panic("boom")
 	}
-	return b.SecretFinder.Find(s)
+	return nil
 }
 
 func withBoom(o *mask.Options) { o.Secrets = boomFinder{} }
@@ -114,7 +113,7 @@ func newFixtureMask(t *testing.T, content string, mopt func(*mask.Options), opt 
 	if err != nil {
 		t.Fatal(err)
 	}
-	mo := mask.Options{Pseudonyms: ep, Values: mask.Detectors(pii.AllDetectors()), Secrets: masktest.SecretFinder{},
+	mo := mask.Options{Pseudonyms: ep, Values: mask.Detectors(pii.AllDetectors()),
 		Trusted: []string{"level", "status"}, Structured: mask.StructuredDetect}
 	if mopt != nil {
 		mopt(&mo)
