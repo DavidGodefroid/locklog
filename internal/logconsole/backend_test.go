@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -122,9 +123,14 @@ func devInoOf(t *testing.T, p string) string {
 	return d
 }
 
+// filesCfg is a profile reading app.log under dir.
+func filesCfg(dir string) string {
+	return "version = 1\n[profiles.staging.sources.app]\nkind = \"file\"\npaths = [\"" + dir + "/app.log\"]\n"
+}
+
 func TestConnectChecksMounts(t *testing.T) {
-	root := project(t, localCfg)
 	logs := t.TempDir()
+	root := project(t, filesCfg(logs))
 	eng := &fakeEngine{}
 	var opened OpenOptions
 	open := func(_ context.Context, o OpenOptions) (Engine, error) { opened = o; return eng, nil }
@@ -149,6 +155,10 @@ func TestConnectChecksMounts(t *testing.T) {
 	}
 	if opened.Policy.Profile.Name != "staging" || opened.Credentials.Secret != "pw" || opened.Credentials.User != "u" {
 		t.Errorf("opened with %+v", opened)
+	}
+	// The engine gets the checked roots of the plan, and the project.
+	if !slices.Equal(opened.Roots.Dirs, []string{logs}) || opened.Project != root {
+		t.Errorf("opened with roots %+v, project %q", opened.Roots, opened.Project)
 	}
 	if err := s.Close(); err != nil || !eng.closed {
 		t.Error("Close did not close the engine")

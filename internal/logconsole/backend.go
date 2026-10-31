@@ -18,6 +18,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/DavidGodefroid/lockkit/audit"
@@ -76,7 +77,20 @@ type OpenOptions struct {
 	Credentials egress.Credentials
 	// StateDir is the console's state directory (home volume).
 	StateDir string
+	// Roots are the mount roots of the policy's local sources, checked
+	// against the launcher's (PlanRoots): the only directories the
+	// sources may be given.
+	Roots Roots
+	// Project is the project root ("" for none): its .locklog holds the
+	// human's PII rules.
+	Project string
 }
+
+// ErrConnLost is returned (wrapped) by an engine whose logs can no longer
+// be trusted to be the ones approved (a mount swapped, the engine closed):
+// the console drops the session (console.Env.Lost) and the agent gets
+// ipc.CodeConnLost; the next call reconnects, checking everything again.
+var ErrConnLost = errors.New("the log session is lost")
 
 // Opener opens the engine of a policy.
 type Opener func(ctx context.Context, o OpenOptions) (Engine, error)
@@ -97,6 +111,9 @@ type Options struct {
 	// mount root, as the launcher checked them on the host.
 	ExpectDir   string
 	ExpectRoots string
+	// DockerRoot is LOCKLOG_DOCKER_ROOT: the containers root the launcher
+	// bound for a docker source.
+	DockerRoot string
 	// InContainer is true in locklog's image (InImage): LOCKLOG_EXPECT_DIR
 	// is then required, and Root must be the directory the launcher
 	// started the console in.
@@ -229,9 +246,56 @@ func (b *Backend) LoadPolicy() (console.Policy, error) {
 type session struct {
 	engine Engine
 	policy Policy
+
+	// done is closed when the session closes: the calls in flight are
+	// cancelled (callContext).
+	once sync.Once
+	done chan struct{}
 }
 
-func (s *session) Close() error { return s.engine.Close() }
+func newSession(e Engine, p Policy) *session {
+	return &session{engine: e, policy: p, done: make(chan struct{})}
+}
+
+// Close cancels the calls in flight, then closes the engine.
+func (s *session) Close() error {
+	var err error
+	s.once.Do(func() {
+		if s.done != nil {
+			close(s.done)
+		}
+		err = s.engine.Close()
+	})
+	return err
+}
+
+// closed reports whether the session was closed.
+func (s *session) closed() bool {
+	if s.done == nil {
+		return false
+	}
+	select {
+	case <-s.done:
+		return true
+	default:
+		return false
+	}
+}
+
+// callContext is ctx, also cancelled when the session closes.
+func (s *session) callContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(ctx)
+	if s.done != nil {
+		go func() {
+			select {
+			case <-s.done:
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
+	}
+	return ctx, cancel
+}
 
 // Connect implements console.Backend: the launcher's checks first, then
 // the engine of the policy in force.
@@ -246,15 +310,19 @@ func (b *Backend) Connect(ctx context.Context, c console.Credentials) (console.S
 	if b.o.Open == nil {
 		return nil, errors.New("this build has no log engine")
 	}
+	roots, err := PlanRoots(b.o, pol.Policy.Profile)
+	if err != nil {
+		return nil, err
+	}
 	var creds egress.Credentials
 	if c.Secret != nil {
 		creds = egress.Credentials{User: c.User, Secret: string(c.Secret)}
 	}
-	e, err := b.o.Open(ctx, OpenOptions{Policy: pol.Policy, Credentials: creds, StateDir: b.o.StateDir})
+	e, err := b.o.Open(ctx, OpenOptions{Policy: pol.Policy, Credentials: creds, StateDir: b.o.StateDir, Roots: roots, Project: b.o.Root})
 	if err != nil {
 		return nil, err
 	}
-	return &session{engine: e, policy: pol}, nil
+	return newSession(e, pol), nil
 }
 
 // Checks implements console.Backend: a console with no remote source and
@@ -319,10 +387,33 @@ func (b *Backend) handler(method string) console.Handler {
 		if len(params) == 0 {
 			params = json.RawMessage("{}")
 		}
-		result, refused, err := ls.engine.Handle(ctx, method, params, c)
 		rec := newRecord(ctx, env, method, params)
+		// The mounts are checked again on every call (a root swapped
+		// after the start): a session whose logs are not the checked ones
+		// is dropped, and the next call reconnects, checking them all.
+		if err := CheckMounts(b.o); err != nil {
+			env.Println("the log mounts changed since the console checked them: the session is closed (" + env.Safe(env.Sanitizer().Error(err)) + ")")
+			return lost(req.ID, env, rec)
+		}
+		cctx, cancel := ls.callContext(ctx)
+		result, refused, err := ls.engine.Handle(cctx, method, params, c)
+		cancel()
 		var resp ipc.Response
 		switch {
+		case errors.Is(err, ErrConnLost) || ls.closed():
+			// The session ended under the call (Lost, the console
+			// closing it): the call ends cleanly, and the session is
+			// dropped so that the next call reconnects.
+			if err != nil {
+				env.Println("log session lost (" + method + "): " + env.Safe(env.Sanitizer().Error(err)))
+			}
+			return lost(req.ID, env, rec)
+		case ctx.Err() != nil:
+			// The agent's connection closed (or the console is
+			// stopping): whatever the engine answered, the call is
+			// cancelled; nobody reads the answer, but it is audited.
+			rec.Decision, rec.Error = "failed", errCancelledText
+			resp = console.ErrResp(req.ID, ipc.CodeInternal, errCancelledText)
 		case err != nil:
 			// The engine's error may quote the call or a log line: the
 			// detail is shown on the console only, the agent and the
@@ -348,6 +439,23 @@ func (b *Backend) handler(method string) console.Handler {
 
 // errEngineText is what the agent and the audit get of an engine failure.
 const errEngineText = "the log engine failed; the request did not complete"
+
+// errCancelledText records a call whose client went away.
+const errCancelledText = "cancelled: the client's connection closed"
+
+// errLostText is what the agent and the audit get of a lost session.
+const errLostText = "the log session was lost; the console reconnects at the next call"
+
+// lost ends a call whose session is lost: the session is dropped
+// (env.Lost), the call is audited and answered with ipc.CodeConnLost.
+func lost(id int64, env console.Env, rec Record) ipc.Response {
+	env.Lost()
+	rec.Decision, rec.Error = "failed", errLostText
+	if err := writeAudit(env, rec); err != nil {
+		return console.ErrResp(id, ipc.CodeInternal, "the call could not be audited: refused")
+	}
+	return console.ErrResp(id, ipc.CodeConnLost, errLostText)
+}
 
 func refusalResp(id int64, r *Refusal, env console.Env) ipc.Response {
 	info := r.Info
@@ -429,6 +537,7 @@ func FromEnv(o Options, getenv func(string) string) Options {
 	}
 	o.ExpectDir = getenv("LOCKLOG_EXPECT_DIR")
 	o.ExpectRoots = getenv("LOCKLOG_EXPECT_ROOTS")
+	o.DockerRoot = getenv("LOCKLOG_DOCKER_ROOT")
 	return o
 }
 
