@@ -461,8 +461,7 @@ func TestPatternsGrowingFileCountedOnce(t *testing.T) {
 	w := t0.Add(time.Hour)
 	content := patternLog(w, 100, "alpha %d")
 	calls := 0
-	var f *fixture
-	f = newFixture(t, content, func(o *Options) {
+	f := newFixture(t, content, func(o *Options) {
 		cs := o.Sources["app"].(countingSource)
 		o.Sources["app"] = growingSource{cs, "", &calls, ""}
 	})
