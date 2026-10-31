@@ -5,6 +5,7 @@ package file
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"strings"
@@ -82,6 +83,12 @@ func (d *dir) list() ([]entry, error) {
 		return nil, err
 	}
 	unix.CloseOnExec(fd)
+	// A dup shares the directory's read position: start from the top
+	// (the directory may have been listed before).
+	if _, err := unix.Seek(fd, 0, io.SeekStart); err != nil {
+		unix.Close(fd)
+		return nil, err
+	}
 	f := os.NewFile(uintptr(fd), d.path)
 	defer f.Close()
 	des, err := f.ReadDir(-1)
@@ -102,7 +109,7 @@ func (d *dir) open(name string) (*os.File, error) {
 	if err := validName(name); err != nil {
 		return nil, err
 	}
-	fd, err := unix.Openat(d.fd, name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	fd, err := unix.Openat(d.fd, name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_NOCTTY, 0)
 	if err != nil {
 		return nil, &fs.PathError{Op: "openat", Path: d.path + "/" + name, Err: err}
 	}

@@ -5,6 +5,8 @@ package file
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -64,6 +66,7 @@ type Source struct {
 
 	mu      sync.Mutex
 	gens    map[[2]uint64]gen // streams seen, by (dev, inode)
+	failed  map[string]bool   // compressed streams whose indexing failed
 	catalog []fileInfo
 	catTime time.Time
 }
@@ -72,6 +75,7 @@ type gen struct {
 	id         string
 	prefixLen  int
 	prefixHash string
+	fileSize   int64 // a compressed file's size: one that changes is another stream
 }
 
 // fileInfo is one matched file.
@@ -104,7 +108,7 @@ func New(opts Options) (*Source, error) {
 	}
 	opts.Trusted = slices.Clone(opts.Trusted)
 	sort.Strings(opts.Trusted)
-	return &Source{opts: opts, gens: map[[2]uint64]gen{}}, nil
+	return &Source{opts: opts, gens: map[[2]uint64]gen{}, failed: map[string]bool{}}, nil
 }
 
 // Name returns the source name.
@@ -151,7 +155,27 @@ func (s *Source) files(ctx context.Context) ([]fileInfo, error) {
 		}
 		return out[i].m.rel > out[j].m.rel
 	})
+	// One stream once: a hard link, or a file renamed during the listing,
+	// is the same stream under two paths.
+	seenStream := map[string]bool{}
+	uniq := out[:0]
+	for _, fi := range out {
+		if !seenStream[fi.stream] {
+			seenStream[fi.stream] = true
+			uniq = append(uniq, fi)
+		}
+	}
+	out = uniq
 	s.mu.Lock()
+	live := map[[2]uint64]bool{}
+	for _, fi := range out {
+		live[[2]uint64{fi.id.dev, fi.id.ino}] = true
+	}
+	for k := range s.gens {
+		if !live[k] {
+			delete(s.gens, k) // forgotten: a file seen again is a new stream
+		}
+	}
 	s.catalog, s.catTime = out, s.opts.Now()
 	s.mu.Unlock()
 	return out, nil
@@ -166,7 +190,13 @@ func (s *Source) identifyOpen(f *os.File, m match) (fileInfo, error) {
 	if err != nil {
 		return fileInfo{}, err
 	}
-	same := func(plen int, phash string) bool {
+	// A compressed file is a stream as a whole: appended members change its
+	// decompressed content and size, so any change of its size is a new
+	// stream (re-measured, re-indexed).
+	same := func(plen int, phash string, fileSize int64) bool {
+		if id.compression != compNone && fileSize != id.size {
+			return false
+		}
 		if plen > id.prefixLen {
 			return false
 		}
@@ -180,21 +210,36 @@ func (s *Source) identifyOpen(f *os.File, m match) (fileInfo, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	g, ok := s.gens[k]
-	if ok && !same(g.prefixLen, g.prefixHash) {
+	if ok && !same(g.prefixLen, g.prefixHash, g.fileSize) {
 		ok = false
 	}
 	if !ok && s.opts.Index != nil {
+		stale := false
 		s.opts.Index.With(s.opts.Name, id.dev, id.ino, func(st *index.Stream) *index.Stream {
-			if st != nil && same(st.PrefixLen, st.PrefixHash) {
-				g, ok = gen{id: st.Gen, prefixLen: st.PrefixLen, prefixHash: st.PrefixHash}, true
+			switch {
+			case st == nil:
+			case same(st.PrefixLen, st.PrefixHash, st.FileSize):
+				g, ok = gen{id: st.Gen, prefixLen: st.PrefixLen, prefixHash: st.PrefixHash, fileSize: st.FileSize}, true
+			default:
+				stale = true // the inode holds another stream now
 			}
 			return nil
 		})
+		if stale {
+			s.opts.Index.Delete(s.opts.Name, id.dev, id.ino)
+		}
 	}
 	if !ok {
-		g = gen{id: id.prefixHash[:12]}
+		// A new stream: a random generation, so that a stream that
+		// replaced another on the same inode (copytruncate, an inode
+		// reused) never takes its id, its refs or its index.
+		var b [6]byte
+		if _, err := rand.Read(b[:]); err != nil {
+			return fileInfo{}, err
+		}
+		g = gen{id: hex.EncodeToString(b[:])}
 	}
-	g.prefixLen, g.prefixHash = id.prefixLen, id.prefixHash
+	g.prefixLen, g.prefixHash, g.fileSize = id.prefixLen, id.prefixHash, id.size
 	s.gens[k] = g
 	stream := strconv.FormatUint(id.dev, 16) + "-" + strconv.FormatUint(id.ino, 16) + "-" + g.id
 	return fileInfo{m: m, id: id, stream: stream, gen: g.id}, nil
@@ -216,6 +261,15 @@ func (s *Source) openStreamFile(ctx context.Context, stream string) (*os.File, f
 		return nil, fileInfo{}, err
 	}
 	return s.open(fi)
+}
+
+// stale maps a stream that is no longer found (rewritten, rotated away) to
+// source.ErrStale: refs and plans of this source name streams it served.
+func stale(err error) error {
+	if errors.Is(err, source.ErrNotFound) {
+		return source.ErrStale
+	}
+	return err
 }
 
 // lookup finds the file of a stream, from the cached listing when fresh.
@@ -373,9 +427,12 @@ func granuleMayMatch(g *index.Granule, fields []string, r source.Range, sel sour
 	if !selectorIndexed(sel, fields) {
 		return true
 	}
+	names := termFields(sel)
 	match := func(cs []index.Count) bool {
 		for _, c := range cs {
-			if sel.Match(tupleMap(fields, c.Vals)) {
+			// A redacted or overflowing value is unknown: it may
+			// match.
+			if unknown(fields, c.Vals, names) || sel.Match(tupleMap(fields, c.Vals)) {
 				return true
 			}
 		}
@@ -398,8 +455,29 @@ func selectorIndexed(sel source.Selector, fields []string) bool {
 	return true
 }
 
-// tupleMap maps fields to a tuple's values, leaving absent fields out; an
-// Other value matches no term.
+// termFields returns the fields a selector's terms name.
+func termFields(sel source.Selector) []string {
+	var out []string
+	for _, t := range sel.Terms {
+		out = append(out, t.Field)
+	}
+	return out
+}
+
+// unknown reports whether a tuple holds, for one of names, a value the index
+// does not know (index.Redacted: a detector flagged it; index.Other: the
+// minute had too many tuples). Such a tuple may match any term on that
+// field, and cannot be counted by it.
+func unknown(fields, vals, names []string) bool {
+	for i, f := range fields {
+		if (vals[i] == index.Redacted || vals[i] == index.Other) && slices.Contains(names, f) {
+			return true
+		}
+	}
+	return false
+}
+
+// tupleMap maps fields to a tuple's values, leaving absent fields out.
 func tupleMap(fields, vals []string) map[string]string {
 	m := make(map[string]string, len(fields))
 	for i, f := range fields {
@@ -417,11 +495,14 @@ func (s *Source) Scan(ctx context.Context, c source.Chunk) (source.Iterator, err
 	}
 	f, fi, err := s.openStreamFile(ctx, c.Stream)
 	if err != nil {
-		return nil, err
+		return nil, stale(err)
 	}
-	if fi.id.compression == compNone && fi.id.size < c.End() && c.End() != math.MaxInt64 {
+	// A plain file may only have grown since the plan; a compressed one
+	// must be the file planned.
+	if fi.id.compression == compNone && fi.id.size < c.End() && c.End() != math.MaxInt64 ||
+		fi.id.compression != compNone && c.Version != "" && c.Version != strconv.FormatInt(fi.id.size, 10) {
 		f.Close()
-		return nil, source.ErrStale // truncated since the plan
+		return nil, source.ErrStale
 	}
 	it, err := s.newIter(ctx, f, fi, c.Start(), c.End())
 	if err != nil {
@@ -563,11 +644,16 @@ func (it *iter) Close() error {
 	return it.f.Close()
 }
 
-// Reread returns the record at ref.
+// Reread returns the record at ref. A record without a time of its own
+// comes back untimed (the time a scan inherited for it from its granule is
+// not recomputed).
 func (s *Source) Reread(ctx context.Context, ref source.RawRef) (source.RawRecord, error) {
+	if ref.Source != s.opts.Name || ref.Offset < 0 || ref.Length <= 0 {
+		return source.RawRecord{}, source.ErrStale
+	}
 	f, fi, err := s.openStreamFile(ctx, ref.Stream)
 	if err != nil {
-		return source.RawRecord{}, err
+		return source.RawRecord{}, stale(err)
 	}
 	defer f.Close()
 	st, err := openStream(f, fi.id.compression, ref.Offset)
@@ -606,7 +692,7 @@ func (s *Source) Around(ctx context.Context, ref source.RawRef, before, after in
 func (s *Source) around(ctx context.Context, ref source.RawRef, fromGranule int64, before, after int) ([]source.RawRecord, bool, error) {
 	f, fi, err := s.openStreamFile(ctx, ref.Stream)
 	if err != nil {
-		return nil, false, err
+		return nil, false, stale(err)
 	}
 	it, err := s.newIter(ctx, f, fi, fromGranule*source.GranuleBytes, math.MaxInt64)
 	if err != nil {
@@ -668,7 +754,7 @@ func (s *Source) Describe(ctx context.Context) (source.Schema, error) {
 	values := map[string]map[string]bool{}
 	dropped := map[string]bool{}
 	cov := s.coverage(files)
-	sch.IndexedFrom, sch.FullyIndexed = cov.indexedFrom, cov.full
+	sch.IndexedFrom, sch.IndexedUntil, sch.FullyIndexed = cov.indexedFrom, cov.indexedUntil, cov.full
 	for _, fi := range files {
 		fields, isize, gs := s.streamIndex(fi)
 		if size := streamSize(fi, isize); size >= 0 {
@@ -688,7 +774,7 @@ func (s *Source) Describe(ctx context.Context) (source.Schema, error) {
 			for _, m := range g.Minutes {
 				for _, c := range m.Counts {
 					for i, f := range fields {
-						if v := c.Vals[i]; v != index.Absent && v != index.Other {
+						if v := c.Vals[i]; v != index.Absent && v != index.Other && v != index.Redacted {
 							if values[f] == nil {
 								values[f] = map[string]bool{}
 							}
@@ -717,37 +803,124 @@ func (s *Source) Describe(ctx context.Context) (source.Schema, error) {
 	return sch, nil
 }
 
+// ClaimMargin is the timestamp disorder the coverage claim allows for. The
+// claim also assumes no record is stamped later than its file's mtime plus
+// five minutes (zone-less local times read as UTC on a host ahead of UTC,
+// or a clock running ahead, break that assumption: accepted limitation).
+//
+// indexed_from is that much after (and indexed_until that much before) the
+// nearest record the index may lack, rounded to whole minutes.
+const ClaimMargin = time.Minute
+
 type coverage struct {
-	indexedFrom time.Time
-	full        bool
+	indexedFrom, indexedUntil time.Time
+	full                      bool
 }
 
-// coverage walks the granules newest first (files by mtime, granules from
-// the last) and returns the start of the indexed run that reaches the
-// newest record.
+// coverage walks the granules newest first (files by mtime, a file's
+// granules from the last) and returns the indexed run that reaches the
+// newest record: [indexedFrom, indexedUntil] holds no record the index
+// lacks.
+//
+//   - A granule never indexed ends the run. The older part of its file
+//     holds records up to about the start of the file's indexed run, and
+//     every other file not wholly indexed may hold records up to its
+//     mtime: indexedFrom is clamped to the latest such bound
+//     (with two files written at the same time, nothing is claimed until
+//     both are indexed).
+//   - A grown tail (indexed before it grew) does not end the run, but the
+//     records after its indexed span are not in the index: indexedUntil
+//     stops there (zero: up to the newest record).
 func (s *Source) coverage(files []fileInfo) coverage {
-	var c coverage
-	c.full = true
-	for _, fi := range files {
-		_, isize, gs := s.streamIndex(fi)
-		size := streamSize(fi, isize)
-		if size < 0 {
+	c := coverage{full: true}
+	var bound time.Time // newest possible record not in the index
+	stopped := false
+	for fi := range files {
+		f := files[fi]
+		_, isize, gs := s.streamIndex(f)
+		size := streamSize(f, isize)
+		whole := size >= 0
+		if stopped || !whole {
 			c.full = false
-			return c
+			stopped = true
+			if !whole || !complete(gs, size) {
+				if b := f.id.mtime.Add(mtimeSlack); b.After(bound) {
+					bound = b
+				}
+			}
+			continue
 		}
 		n := (size + source.GranuleBytes - 1) / source.GranuleBytes
+		var fileFrom time.Time // earliest record of this file's indexed run
 		for i := n - 1; i >= 0; i-- {
 			g := gs[i]
+			if g == nil {
+				// The older, unindexed part of this file holds
+				// records up to about its indexed run's start.
+				c.full, stopped = false, true
+				b := fileFrom
+				if b.IsZero() {
+					b = f.id.mtime.Add(mtimeSlack)
+				}
+				if b.After(bound) {
+					bound = b
+				}
+				break
+			}
+			if from, _, ok := g.Span(); ok && (fileFrom.IsZero() || from.Before(fileFrom)) {
+				fileFrom = from
+			}
 			if !usable(g, size) {
+				// A grown granule: what was appended is not indexed.
+				// The claim stops before the newest indexed time of
+				// this file (the granule's own, else its older
+				// granules'); with none, the run ends here.
 				c.full = false
-				return c
+				_, to, ok := g.Span()
+				if !ok {
+					to, ok = newestBefore(gs, i, size)
+				}
+				if !ok {
+					stopped = true
+					if b := f.id.mtime.Add(mtimeSlack); b.After(bound) {
+						bound = b
+					}
+					break
+				}
+				// Exclusive, minus the disorder margin.
+				if u := to.Add(-ClaimMargin).Truncate(time.Minute); c.indexedUntil.IsZero() || u.Before(c.indexedUntil) {
+					c.indexedUntil = u
+				}
 			}
 			if from, _, ok := g.Span(); ok && (c.indexedFrom.IsZero() || from.Before(c.indexedFrom)) {
 				c.indexedFrom = from
 			}
 		}
 	}
+	if !bound.IsZero() && !c.indexedFrom.IsZero() && !bound.Before(c.indexedFrom) {
+		// After the bound, plus the disorder margin: records at the
+		// bound's time, or written slightly out of order, may still be
+		// unindexed.
+		c.indexedFrom = bound.Add(ClaimMargin).Truncate(time.Minute).Add(time.Minute)
+		if !c.indexedUntil.IsZero() && c.indexedFrom.After(c.indexedUntil) || c.indexedFrom.After(s.opts.Now()) {
+			c.indexedFrom, c.indexedUntil = time.Time{}, time.Time{}
+		}
+	}
 	return c
+}
+
+// newestBefore returns the latest record time of the usable granules
+// before granule i.
+func newestBefore(gs map[int64]*index.Granule, i, size int64) (time.Time, bool) {
+	var best time.Time
+	for j := i - 1; j >= 0; j-- {
+		if g := gs[j]; usable(g, size) {
+			if _, to, ok := g.Span(); ok && to.After(best) {
+				best = to
+			}
+		}
+	}
+	return best, !best.IsZero()
 }
 
 // stringsKey joins values for map keys (length-prefixed).
