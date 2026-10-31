@@ -57,6 +57,21 @@ uses [Semantic Versioning](https://semver.org/).
   patterns capped apart from the window's, `truncated` past the cap; with a
   remote source both windows fit its range budget), plan-based admission
   and free continuations; `count` gains `by_pattern`.
+- The Elasticsearch 8 / OpenSearch 2 source (`kind = "elastic"` or
+  `"opensearch"`): allowlisted read routes on the source's own indices
+  (`_search`, `_count`, `_field_caps`, `_mapping`, `/`,
+  `_security/user/_privileges`, `_resolve/index`, OpenSearch's `authinfo`),
+  typed query bodies (time range, `term`/`terms` on trusted keyword fields,
+  sort with an optional tiebreaker, `search_after`, size and timeout caps,
+  `date_histogram` and `terms` counts) with text matched locally, untrusted
+  fields dropped, multi-valued fields and `!=` evaluated alike by the server
+  and the engine (empty values kept local), the Loki paging and byte model
+  (lazy slices, bytes counted per page against the call's limit, bounded
+  Around, `MaxSlices`), `auth = "api_key"` (Elasticsearch `ApiKey`), and a
+  production privilege check that fails closed: any grant beyond a
+  read-only allowlist, on any pattern, alias or data stream, and any
+  OpenSearch role not known read-only (or vouched for in `read_only_roles`)
+  is refused.
 
 ### Fixed
 

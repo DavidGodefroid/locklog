@@ -227,11 +227,11 @@ func covers(names, readable []string) bool {
 }
 
 // esWrite lists every grant of a _privileges answer beyond the read-only
-// allowlist that reaches what the source reads: any cluster privilege off
-// the allowlist, global, application and run_as grants, any remote grant
-// off the allowlist, and an index privilege off the allowlist on a pattern
-// covering one of readable (the source's names and patterns and what they
-// resolve to).
+// allowlist, on any pattern (fail closed): any cluster privilege off the
+// allowlist, global, application and run_as grants, any remote grant off
+// the allowlist, and any index privilege off the allowlist, whatever index
+// pattern, alias or data stream it names. Grants covering one of readable
+// (the source's names and patterns and what they resolve to) are marked.
 func esWrite(body []byte, readable []string) ([]string, error) {
 	var raw map[string]json.RawMessage
 	if json.Unmarshal(body, &raw) != nil || raw["cluster"] == nil || raw["indices"] == nil {
@@ -268,13 +268,18 @@ func esWrite(body []byte, readable []string) ([]string, error) {
 			}
 		}
 	}
+	// Fail closed: a grant off the allowlist is refused on any pattern,
+	// whether or not it covers what the source reads (a pattern, alias or
+	// data stream can come to resolve to the source's indices later). A
+	// grant that covers them now is marked so.
 	for _, g := range u.Indices {
-		if !covers(g.Names, readable) {
-			continue
+		mark := ""
+		if covers(g.Names, readable) {
+			mark = " (reaches the source's indices)"
 		}
 		for _, p := range g.Privileges {
 			if !slices.Contains(readIndex, p) {
-				write = append(write, strings.Join(g.Names, ",")+":"+p)
+				write = append(write, strings.Join(g.Names, ",")+":"+p+mark)
 			}
 		}
 	}
@@ -292,9 +297,9 @@ func esWrite(body []byte, readable []string) ([]string, error) {
 }
 
 // esPrivileges resolves what the source's names and patterns cover
-// (_resolve/index), then lists the key's grants beyond the read-only
-// allowlist on any of it (_privileges): a write grant on a concrete index
-// a read-only pattern matches, or on a pattern covering one, is listed.
+// (_resolve/index: the key must be able to), then lists the key's grants
+// beyond the read-only allowlist on any pattern (_privileges), marking
+// those that reach the source's indices.
 func (s *Source) esPrivileges(ctx context.Context) ([]string, error) {
 	readable, err := s.readable(ctx)
 	if err != nil {
