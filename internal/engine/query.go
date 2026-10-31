@@ -210,6 +210,8 @@ type validator struct {
 	trusted func(src, name string, label bool) bool
 	// detect reports a value a detector flags (personal data, secret).
 	detect func(string) bool
+	// trustedValue masks a value as a trusted leaf (Masker.TrustedValue).
+	trustedValue func(src, path, v string) string
 	// nameMasked reports a clear path whose name the masker shows masked.
 	nameMasked func(src, path string) bool
 	maxRange   time.Duration
@@ -383,6 +385,17 @@ func (v *validator) pred(q *Query, p *Pred, span string) *Error {
 		}
 		if !isToken(s) && v.detect != nil && v.detect(s) {
 			return refuse(EPIIInQuery, fmt.Sprintf("%s.value[%d]", span, i), "the value looks like personal data or a secret: use locklog_lookup to get its pseudonym")
+		}
+		// A value compared with a trusted field is pushed down to the
+		// clear index and source selectors: one the masker would mask
+		// there (a card number in exponent form, a rule) is refused,
+		// as it would be an oracle on the clear values.
+		if !isToken(s) && v.trustedValue != nil {
+			for _, src := range q.Sources {
+				if v.trusted(src, p.name(), p.label()) && v.trustedValue(src, p.name(), s) != s {
+					return refuse(EPIIInQuery, fmt.Sprintf("%s.value[%d]", span, i), "the value looks like personal data or a secret: use locklog_lookup to get its pseudonym")
+				}
+			}
 		}
 		p.vals = append(p.vals, s)
 		p.nums = append(p.nums, num)

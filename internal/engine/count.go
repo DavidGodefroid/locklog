@@ -26,9 +26,19 @@ const (
 	// MaxGroups bounds distinct (bucket, by) groups; beyond, records
 	// count under an "⟦other⟧" key. Distinct counts are exact up to it.
 	MaxGroups = 100000
+	// MaxGroupBytes bounds the memory of one count's groups (keys are
+	// masked values of any length): beyond, records count under
+	// "⟦other⟧" as beyond MaxGroups.
+	MaxGroupBytes = 8 << 20
+	// groupOverhead is the memory of a group besides its key bytes.
+	groupOverhead = 160
+	// maxAggBytes bounds the partial counts kept between continuations,
+	// in total.
+	maxAggBytes = 64 << 20
 )
 
-// Other is the key of groups beyond MaxGroups or of index overflow.
+// Other is the key of groups beyond MaxGroups or MaxGroupBytes, or of
+// index overflow.
 const Other = mask.Open + "other" + mask.Close
 
 // CountQuery is a count (locklog_count).
@@ -82,6 +92,7 @@ type agg struct {
 	from    time.Time
 	until   time.Time
 	noFrom  bool
+	bytes   int64 // memory of the groups (keys twice, plus overhead)
 }
 
 func newAgg() *agg { return &agg{groups: map[string]*Group{}} }
@@ -103,7 +114,8 @@ func (a *agg) add(b time.Time, key []*string, n int64, t time.Time, timed bool) 
 	k := groupKey(b, key)
 	g := a.groups[k]
 	if g == nil {
-		if len(a.groups) >= MaxGroups {
+		size := groupOverhead + 2*int64(len(k))
+		if len(a.groups) >= MaxGroups || a.bytes+size > MaxGroupBytes {
 			o := Other
 			key = make([]*string, len(key))
 			for i := range key {
@@ -115,6 +127,7 @@ func (a *agg) add(b time.Time, key []*string, n int64, t time.Time, timed bool) 
 		if g == nil {
 			g = &Group{Bucket: b, Key: key}
 			a.groups[k] = g
+			a.bytes += groupOverhead + 2*int64(len(k))
 		}
 	}
 	g.N += n
@@ -130,11 +143,13 @@ func (a *agg) add(b time.Time, key []*string, n int64, t time.Time, timed bool) 
 	}
 }
 
-// aggCache keeps partial counts between continuations.
+// aggCache keeps partial counts between continuations, at most maxAggs
+// and maxAggBytes in total (the oldest are evicted first).
 type aggCache struct {
-	mu sync.Mutex
-	m  map[string]*agg
-	o  []string
+	mu    sync.Mutex
+	m     map[string]*agg
+	o     []string
+	bytes int64
 }
 
 const maxAggs = 64
@@ -145,10 +160,12 @@ func (c *aggCache) put(a *agg) string {
 	if c.m == nil {
 		c.m = map[string]*agg{}
 	}
-	for len(c.o) >= maxAggs {
+	for len(c.o) > 0 && (len(c.o) >= maxAggs || c.bytes+a.bytes > maxAggBytes) {
+		c.bytes -= c.m[c.o[0]].bytes
 		delete(c.m, c.o[0])
 		c.o = c.o[1:]
 	}
+	c.bytes += a.bytes
 	var b [12]byte
 	rand.Read(b[:])
 	id := hex.EncodeToString(b[:])
@@ -174,9 +191,11 @@ func (c *aggCache) get(id string) (*agg, bool) {
 func (c *aggCache) drop(id string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if _, ok := c.m[id]; !ok {
+	a, ok := c.m[id]
+	if !ok {
 		return
 	}
+	c.bytes -= a.bytes
 	delete(c.m, id)
 	c.o = slices.DeleteFunc(c.o, func(o string) bool { return o == id })
 }
@@ -430,13 +449,13 @@ func (q *Query) rangeContains(t time.Time, minuteResolution bool) bool {
 // counted and is left out, which the index path does too (such a granule
 // goes to the residual scan).
 func (e *Engine) countFailed(q *CountQuery, raw source.RawRecord, rec mask.Record, a *agg) {
-	known := func(v string) (ok bool) {
+	known := func(name, v string) (ok bool) {
 		defer func() {
 			if recover() != nil {
 				ok = false
 			}
 		}()
-		return e.o.Masker.Text(v) == v
+		return e.o.Masker.TrustedValue(raw.Ref.Source, name, v) == v
 	}
 	sel := q.selector(raw.Ref.Source, e.o.Trusted)
 	fields, labels := map[string]string{}, map[string]string{}
@@ -449,7 +468,7 @@ func (e *Engine) countFailed(q *CountQuery, raw source.RawRecord, rec mask.Recor
 		switch {
 		case v == index.Absent:
 			return "", false, true
-		case v == index.Redacted || !known(v):
+		case v == index.Redacted || !known(name, v):
 			return "", false, false // unknown, as in the index
 		}
 		m[name] = v
@@ -516,10 +535,11 @@ func (e *Engine) indexCounts(ctx context.Context, q *CountQuery, a *agg) (source
 		if err != nil {
 			return source.Byteplan{}, err
 		}
+		by := q.groupBy()
 		for _, row := range r.Rows {
 			key := make([]*string, len(row.Vals))
 			for i, v := range row.Vals {
-				key[i] = e.indexValue(v)
+				key[i] = e.indexValue(name, by[i].name(), v)
 			}
 			a.add(row.Bucket, key, row.N, time.Time{}, false)
 		}
@@ -540,9 +560,11 @@ func (e *Engine) indexCounts(ctx context.Context, q *CountQuery, a *agg) (source
 	return plan, nil
 }
 
-// indexValue masks an indexed raw value for the agent: trusted values pass
-// the masker's text path; markers become placeholders.
-func (e *Engine) indexValue(v string) *string {
+// indexValue masks an indexed raw value of a trusted field or label for the
+// agent; markers become placeholders. A value the masker would change as a
+// trusted leaf (an index built before a rule, or by another Sensitive) is
+// withheld, never shown clear: the scan shows it masked.
+func (e *Engine) indexValue(src, name, v string) *string {
 	var s string
 	switch v {
 	case index.Absent:
@@ -552,7 +574,10 @@ func (e *Engine) indexValue(v string) *string {
 	case index.Other:
 		s = Other
 	default:
-		s = e.o.Masker.Text(v)
+		s = v
+		if e.o.Masker.TrustedValue(src, name, v) != v {
+			s = mask.Redacted
+		}
 	}
 	return &s
 }

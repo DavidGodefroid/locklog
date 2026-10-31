@@ -3,6 +3,8 @@
 package engine
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -123,7 +125,7 @@ func newFixtureMask(t *testing.T, content string, mopt func(*mask.Options), opt 
 		t.Fatal(err)
 	}
 	src, err := file.New(file.Options{Name: "app", Paths: []string{root + "/logs/app.log"}, Roots: []string{root}, Parser: p,
-		Trusted: []string{"level", "status"}, Index: st, Sensitive: func(_, v string) bool { return m.Text(v) != v }})
+		Trusted: []string{"level", "status"}, Index: st, Sensitive: func(f, v string) bool { return m.TrustedValue("app", f, v) != v }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -440,7 +442,11 @@ func allPages(t *testing.T, e *Engine, qq Query) []string {
 // a log with records masking fails on, only masked_failures differs (0 with
 // the filter, see prefilter.go).
 func TestPrefilterEquivalence(t *testing.T) {
-	content := genLog(t0, 20000, "canary@example.org") + "time=2026-10-30T13:00:00Z level=info msg=\"caf\\u00e9 ok\"\n"
+	content := genLog(t0, 20000, "canary@example.org") + "time=2026-10-30T13:00:00Z level=info msg=\"caf\\u00e9 ok\"\n" +
+		// Invisible runes and invalid bytes the masker drops join text.
+		"time=2026-10-30T13:00:01Z level=info msg=\"ab\\u200bcd joined\"\n" +
+		"{\"time\":\"2026-10-30T13:00:02Z\",\"msg\":\"x\",\"note\":\"ef\u00adgh\"}\n" +
+		"time=2026-10-30T13:00:03Z level=info msg=\"ij\xffkl\"\n"
 	t.Run("plain", func(t *testing.T) { prefilterEquivalence(t, newFixture(t, content, oneGranulePerCall), false) })
 	t.Run("failing granule", func(t *testing.T) {
 		prefilterEquivalence(t, newFixtureMask(t, boomLog(10000), withBoom, oneGranulePerCall), true)
@@ -469,6 +475,9 @@ func prefilterEquivalence(t *testing.T, f *fixture, failing bool) {
 		q(func(q *Query) { q.Text = "kaboom"; q.Limit = 200 }),
 		q(func(q *Query) { q.Text = "order 12"; q.Limit = 200 }),
 		q(func(q *Query) { q.Text = "café"; q.Limit = 200 }),
+		q(func(q *Query) { q.Text = "abcd"; q.Limit = 200 }),
+		q(func(q *Query) { q.Text = "efgh"; q.Limit = 200 }),
+		q(func(q *Query) { q.Text = "ijkl"; q.Limit = 200 }),
 		q(func(q *Query) {
 			q.Where = []Pred{{Field: "msg", Op: "contains", Value: raw("timed out (order 4")}}
 			q.Limit = 200
@@ -1627,5 +1636,169 @@ func TestCallerPredicatesUntouched(t *testing.T) {
 		if p.re != nil || p.in != nil || p.vals != nil || p.nums != nil {
 			t.Fatalf("predicate written into: %+v", p)
 		}
+	}
+}
+
+// processedSource records the bytes its iterators processed.
+type processedSource struct {
+	source.Source
+	n *int64
+}
+
+type processedIter struct {
+	source.Iterator
+	n *int64
+}
+
+func (s processedSource) Scan(ctx context.Context, c source.Chunk) (source.Iterator, error) {
+	it, err := s.Source.Scan(ctx, c)
+	if err != nil {
+		return nil, err
+	}
+	return processedIter{it, s.n}, nil
+}
+
+func (it processedIter) Close() error {
+	*it.n += it.Processed()
+	return it.Iterator.Close()
+}
+
+// TestUnmeasuredCompressedBudget: a compressed file never measured, planned
+// by estimate, that expands beyond the call's byte budget is refused once
+// the budget is processed, never buffered whole.
+func TestUnmeasuredCompressedBudget(t *testing.T) {
+	// About 30:1: repeated blocks, each with a random id.
+	var pb strings.Builder
+	block := genLog(t0, 50, "c@example.org")
+	for i := 0; i < 2500; i++ {
+		id := make([]byte, 96)
+		rand.Read(id)
+		fmt.Fprintf(&pb, "time=2026-10-30T12:30:00Z level=info msg=\"batch %x\"\n%s", id, block)
+	}
+	plain := pb.String()
+	var gz bytes.Buffer
+	w := gzip.NewWriter(&gz)
+	w.Write([]byte(plain))
+	w.Close()
+	budget := int64(gz.Len())*10 + 1<<20
+	if int64(len(plain)) < 3*budget {
+		t.Fatalf("fixture: %d plain bytes (%d compressed) for a %d budget", len(plain), gz.Len(), budget)
+	}
+	var processed int64
+	f := newFixture(t, gz.String(), func(o *Options) {
+		o.Limits.LocalBytes = budget
+		o.Sources["app"] = processedSource{o.Sources["app"], &processed}
+	})
+	if _, err := f.eng.Search(ctx, q(func(q *Query) { q.Text = "upstream" })); code(err) != EOverBudget {
+		t.Fatalf("search: %v", err)
+	}
+	if _, err := f.eng.Count(ctx, CountQuery{Query: q(func(q *Query) { q.Text = "upstream" })}); code(err) != EOverBudget {
+		t.Fatalf("count: %v", err)
+	}
+	// Each call stopped about its budget (a read buffer past it).
+	if processed > 2*(budget+1<<20) {
+		t.Fatalf("processed %d bytes for two calls of %d", processed, budget)
+	}
+	// Within the budget, the same file is searched whole.
+	f.eng.o.Limits.LocalBytes = 4 * int64(len(plain))
+	if _, err := f.eng.Search(ctx, q(func(q *Query) { q.Text = "upstream" })); err != nil {
+		t.Fatalf("within the budget: %v", err)
+	}
+}
+
+// TestTrustedValueMaskedInIndex: a trusted value the masker masks as a
+// field (a card number in exponent form) is never shown nor matched clear
+// through the index, nor accepted as a predicate value.
+func TestTrustedValueMaskedInIndex(t *testing.T) {
+	const card = "4.111111111111111E15"
+	var b strings.Builder
+	for i := 0; i < 200; i++ {
+		st := "200"
+		if i%10 == 0 {
+			st = card
+		}
+		fmt.Fprintf(&b, "time=2026-10-30T12:%02d:%02dZ level=info status=%s msg=\"req %d\"\n", i/60, i%60, st, i)
+	}
+	f := newFixture(t, b.String(), nil)
+	res, err := f.eng.Search(ctx, q(func(q *Query) { q.Fields = []string{"status"}; q.Limit = 200 }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, _ := json.Marshal(res)
+	if strings.Contains(string(out), card) || strings.Contains(string(out), "4111111111111111") || !strings.Contains(string(out), "⟦card:") {
+		t.Fatalf("search does not mask the card: %.300s", out)
+	}
+	count := func() string {
+		c, err := f.eng.Count(ctx, CountQuery{Query: q(nil), By: []string{"status"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		js, _ := json.Marshal(c)
+		return string(js)
+	}
+	cold := count()
+	for i := 0; ; i++ {
+		_, done, err := f.src.IndexStep(ctx, 64<<20, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if done || i > 20 {
+			break
+		}
+	}
+	indexed := count()
+	if !strings.Contains(indexed, `"from_index":true`) {
+		t.Fatalf("not answered from the index: %s", indexed)
+	}
+	for name, js := range map[string]string{"cold": cold, "indexed": indexed} {
+		if strings.Contains(js, card) || strings.Contains(js, "4111111111111111") {
+			t.Fatalf("%s count shows the card clear: %s", name, js)
+		}
+	}
+	for _, v := range []json.RawMessage{raw(card), raw("4111111111111111")} {
+		_, err := f.eng.Count(ctx, CountQuery{Query: q(func(q *Query) { q.Where = []Pred{{Field: "status", Op: OpEq, Value: v}} })})
+		if code(err) != EPIIInQuery {
+			t.Errorf("status = %s: %v", v, err)
+		}
+	}
+	// An index holding the value raw (built with a Sensitive that missed
+	// it) still never shows it.
+	if v := f.eng.indexValue("app", "status", card); *v != mask.Redacted {
+		t.Fatalf("index value shown as %q", *v)
+	}
+	if v := f.eng.indexValue("app", "status", "200"); *v != "200" {
+		t.Fatalf("plain index value shown as %q", *v)
+	}
+}
+
+// TestCountMemoryBound: a count's groups are bounded in bytes (long keys
+// fold into ⟦other⟧ past MaxGroupBytes), and the partial counts kept
+// between continuations in total.
+func TestCountMemoryBound(t *testing.T) {
+	long := strings.Repeat("x", 64<<10)
+	a := newAgg()
+	for i := 0; i < 1000; i++ {
+		k := fmt.Sprintf("%d%s", i, long)
+		a.add(t0, []*string{&k}, 1, t0, true)
+	}
+	if a.bytes > MaxGroupBytes || len(a.groups) >= 1000 {
+		t.Fatalf("%d groups, %d bytes", len(a.groups), a.bytes)
+	}
+	o := Other
+	if g := a.groups[groupKey(t0, []*string{&o})]; g == nil || g.N == 0 {
+		t.Fatal("no ⟦other⟧ group")
+	}
+	var c aggCache
+	for i := 0; i < maxAggs; i++ {
+		c.put(a.clone())
+	}
+	if c.bytes > maxAggBytes || len(c.o) > maxAggBytes/int(a.bytes)+1 {
+		t.Fatalf("cache: %d partial counts, %d bytes", len(c.o), c.bytes)
+	}
+	for len(c.o) > 0 {
+		c.drop(c.o[0])
+	}
+	if c.bytes != 0 {
+		t.Fatalf("cache bytes after dropping all: %d", c.bytes)
 	}
 }

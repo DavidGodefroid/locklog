@@ -34,6 +34,10 @@ import (
 type Masker interface {
 	Mask(source string, ev parse.Event) mask.Record
 	Text(s string) string
+	// TrustedValue masks a trusted value read outside a record (index
+	// values, values compared with trusted fields) as Mask masks a
+	// trusted leaf at that path.
+	TrustedValue(source, path, v string) string
 	Epoch() string
 }
 
@@ -143,7 +147,7 @@ func (e *Engine) remote(src string) bool {
 // range to the count budget.
 func (e *Engine) validator(maxRange time.Duration) *validator {
 	return &validator{now: e.o.Now(), sources: e.names, trusted: e.o.Trusted, detect: e.o.Detect,
-		nameMasked: e.o.NameMasked, maxRange: maxRange, limitMax: e.o.Limits.MaxRecords}
+		trustedValue: e.o.Masker.TrustedValue, nameMasked: e.o.NameMasked, maxRange: maxRange, limitMax: e.o.Limits.MaxRecords}
 }
 
 // queryDigest is the keyed digest of a validated query (cursor excluded).
@@ -409,7 +413,22 @@ func (e *Engine) run(ctx context.Context, plan source.Byteplan, chunk, gran int,
 			return chunk, gran, sc, failures, nil
 		}
 		groupCtx, cancel := context.WithDeadline(ctx, deadline.Add(e.o.Limits.Deadline/2))
-		raws, total, fetched, err := e.fetch(groupCtx, sub, needles)
+		// The group may process its planned bytes or what is left of
+		// the call's budget, whichever is more: a group whose bytes
+		// are under-estimated (a compressed stream not yet measured, a
+		// remote slice) stops there instead of buffering all of it.
+		limit := planned
+		if callBytes > 0 {
+			limit = max(limit, callBytes-sc.Bytes)
+		}
+		raws, total, fetched, err := e.fetch(groupCtx, sub, needles, limit)
+		if errors.Is(err, errFetchCap) {
+			cancel()
+			if sc.Granules > 0 {
+				return chunk, gran, sc, failures, nil // the next call has a whole budget
+			}
+			return chunk, gran, sc, failures, &Error{Code: EOverBudget, Message: "a log stream holds more data than this call's byte budget (a compressed file expands more than estimated): narrow the range or the sources, or ask for locklog_scan"}
+		}
 		if err == nil && sc.Granules > 0 && e.o.Cost.Time(fetched) > time.Until(deadline) {
 			// Fetched more than the time left can mask: drop the group
 			// unmasked; the next call fetches it again.
@@ -477,10 +496,15 @@ func (e *Engine) run(ctx context.Context, plan source.Byteplan, chunk, gran int,
 		// Reported work is granule-rounded: the planned bytes of the
 		// granules (a remote slice, unknown before the fetch, by the
 		// bytes fetched, which depend on time and selector only).
-		if planned > 0 {
-			sc.Bytes += planned
-		} else {
+		// A group planned by estimate (an unmeasured compressed
+		// stream) reports what it processed when that is more.
+		switch {
+		case planned == 0:
 			sc.Bytes += fetched
+		case estimated(sub.Granules):
+			sc.Bytes += max(planned, fetched)
+		default:
+			sc.Bytes += planned
 		}
 		sc.Records += int64(total) // before the pre-filter
 		sc.Granules += len(sub.Granules)
@@ -500,12 +524,23 @@ func overEval(ctx context.Context) *Error {
 	return &Error{Code: EOverBudget, Message: "evaluating the predicates on this data did not finish in time: use fewer or simpler predicates, or narrow the range"}
 }
 
+// estimated reports a group holding a granule whose bytes are an estimate.
+func estimated(gs []source.Granule) bool {
+	return slices.ContainsFunc(gs, func(g source.Granule) bool { return g.Bytes == 0 })
+}
+
+// errFetchCap stops a fetch past its byte limit.
+var errFetchCap = errors.New("engine: group past its byte limit")
+
 // fetch reads the records of a group of granules: those to mask, how many
 // the group holds (before any filtering: scanned.records never depends on
 // the clear text) and the bytes it cost. With the opt-in pre-filter, a
 // record whose clear text cannot contain every needle is dropped before
 // masking (non-production only).
-func (e *Engine) fetch(ctx context.Context, c source.Chunk, needles []string) ([]source.RawRecord, int, int64, error) {
+//
+// A positive limit bounds the bytes the group may process: past it, fetch
+// stops with errFetchCap.
+func (e *Engine) fetch(ctx context.Context, c source.Chunk, needles []string, limit int64) ([]source.RawRecord, int, int64, error) {
 	it, err := e.o.Sources[c.Source].Scan(ctx, c)
 	if err != nil {
 		return nil, 0, 0, err
@@ -520,6 +555,9 @@ func (e *Engine) fetch(ctx context.Context, c source.Chunk, needles []string) ([
 		}
 		if err != nil {
 			return nil, total, it.Processed(), err
+		}
+		if limit > 0 && it.Processed() > limit {
+			return nil, total, it.Processed(), errFetchCap
 		}
 		total++
 		if e.o.Prefilter && len(needles) > 0 && !prefilterPass(raw.Event, needles) {

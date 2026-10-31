@@ -56,8 +56,9 @@ type Options struct {
 	Trusted []string
 	// Index is the local index store (nil: no index).
 	Index *index.Store
-	// Sensitive reports a trusted value a detector flags: it is indexed
-	// as index.Redacted.
+	// Sensitive reports a trusted value the masker would change as a
+	// trusted leaf (mask.Masker.TrustedValue): it is indexed as
+	// index.Redacted, never held clear.
 	Sensitive func(field, value string) bool
 	// Now is the clock (tests).
 	Now func() time.Time
