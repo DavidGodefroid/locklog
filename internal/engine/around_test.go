@@ -1504,3 +1504,74 @@ func TestTailTwoCopies(t *testing.T) {
 		t.Fatalf("complete with %d records", len(res.Records))
 	}
 }
+
+// TestTailMaxSlowPoll: max reached by a poll planned before the end, which
+// completes after it, leaves the end uncovered: not complete.
+func TestTailMaxSlowPoll(t *testing.T) {
+	root := t.TempDir()
+	const mid = "0123456789abcdef0123456789abcdef"
+	os.Mkdir(filepath.Join(root, mid), 0o755)
+	jpath := filepath.Join(root, mid, "system.journal")
+	var es []journaltest.Entry
+	old := uint64(time.Now().Add(-time.Hour).UnixMicro())
+	for i := 0; i < 10; i++ {
+		es = append(es, journaltest.Entry{Realtime: old + uint64(i)*1000, Fields: []string{"MESSAGE=old", "PRIORITY=6"}})
+	}
+	write := func(es []journaltest.Entry) {
+		tmp := jpath + ".tmp"
+		os.WriteFile(tmp, journaltest.Build(journaltest.Options{Compact: true, PerArray: 100}, es), 0o644)
+		os.Rename(tmp, jpath)
+	}
+	write(es)
+	p, _ := parse.New(parse.Options{Format: "plain"})
+	js, err := journald.New(journald.Options{Name: "journal", Roots: []string{root}, Parser: p})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ss := &stallSource{Source: js}
+	f := newFixture(t, "", func(o *Options) { o.Sources["journal"] = ss; o.TailPoll = 50 * time.Millisecond })
+	live := func(m string) journaltest.Entry {
+		return journaltest.Entry{Realtime: uint64(time.Now().UnixMicro()), Fields: []string{"MESSAGE=" + m, "PRIORITY=6"}}
+	}
+	go func() {
+		time.Sleep(600 * time.Millisecond)
+		es = append(es, live("live A"), live("live B"))
+		ss.stall.Store(int64(700 * time.Millisecond))
+		write(es)
+		time.Sleep(250 * time.Millisecond) // planned, stalled
+		es = append(es, live("live C"))
+		write(es)
+	}()
+	res, err := f.eng.Tail(ctx, TailQuery{Sources: []string{"journal"}, Duration: "1s", Max: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Complete {
+		t.Fatalf("complete:true with max reached while live C (written before the end) was never scanned")
+	}
+}
+
+// TestTailSameSecondBaseline: a record dated in the start's second that was
+// written just before the call is returned, whether the stream grows or not.
+func TestTailSameSecondBaseline(t *testing.T) {
+	for _, grow := range []bool{false, true} {
+		f := newFixture(t, genLog(time.Now().Add(-time.Hour), 5, "c@example.org"), func(o *Options) { o.TailPoll = 50 * time.Millisecond })
+		path := filepath.Join(f.root, "logs", "app.log")
+		nextSecond()
+		appendLines(t, path, liveLine(1, "x"))
+		if grow {
+			go func() {
+				time.Sleep(300 * time.Millisecond)
+				appendLines(t, path, liveLine(2, "x"))
+			}()
+		}
+		res, err := f.eng.Tail(ctx, TailQuery{Duration: "1s"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		has1 := len(res.Records) > 0 && strings.Contains(string(res.Records[0]), "live 1 ")
+		if !has1 || !res.Complete {
+			t.Fatalf("grow %v: %d records, live 1 returned %v, complete %v", grow, len(res.Records), has1, res.Complete)
+		}
+	}
+}
