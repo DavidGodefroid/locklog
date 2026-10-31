@@ -36,14 +36,18 @@ import (
 // The agent's methods. Each is free (no approval) within the budgets the
 // engine enforces, and audited.
 const (
-	MethodStatus  = "log.status"
-	MethodSources = "log.sources"
-	MethodSearch  = "log.search"
-	MethodCount   = "log.count"
+	MethodStatus   = "log.status"
+	MethodSources  = "log.sources"
+	MethodSearch   = "log.search"
+	MethodCount    = "log.count"
+	MethodPatterns = "log.patterns"
+	MethodContext  = "log.context"
+	MethodTrace    = "log.trace"
+	MethodTail     = "log.tail"
 )
 
 // Methods lists the methods served, in a fixed order.
-var Methods = []string{MethodStatus, MethodSources, MethodSearch, MethodCount}
+var Methods = []string{MethodStatus, MethodSources, MethodSearch, MethodCount, MethodPatterns, MethodContext, MethodTrace, MethodTail}
 
 // Caller is the kernel-verified peer of a call.
 type Caller struct{ UID, PID int }
