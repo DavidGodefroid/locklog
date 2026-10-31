@@ -163,6 +163,9 @@ type cursorState struct {
 	// last is continued over that window, not over a new one.
 	From time.Time `json:"a"`
 	To   time.Time `json:"b"`
+	// Last is the query's last as the agent gave it: a continuation must
+	// give the same one (or none, with the same from/to).
+	Last string `json:"l,omitempty"`
 }
 
 // refState is sealed into a record ref.
@@ -323,11 +326,16 @@ func (e *Engine) openCursor(cursor string) (cursorState, *Error) {
 }
 
 // restoreWindow resolves the last of a continued query to the window of its
-// first call; the query digest, over the resolved range, then matches.
-func restoreWindow(q *Query, st cursorState) {
+// first call; the query digest, over the resolved range, then matches. A
+// continuation whose last differs from the first call's is refused.
+func restoreWindow(q *Query, st cursorState) *Error {
+	if q.Last != st.Last {
+		return &Error{Code: EStale, Span: "cursor", Message: "the cursor belongs to another query"}
+	}
 	if q.Last != "" && q.From.IsZero() && q.To.IsZero() && !st.From.IsZero() {
 		q.From, q.To, q.Last = st.From, st.To, ""
 	}
+	return nil
 }
 
 // resume returns the frozen plan of an opened cursor of a query.
@@ -604,13 +612,16 @@ func (e *Engine) Search(ctx context.Context, q Query) (_ SearchResult, retErr er
 			}
 		}
 	}
+	last := q.Last
 	var st cursorState
 	if cursor != "" {
 		var err *Error
 		if st, err = e.openCursor(cursor); err != nil {
 			return SearchResult{}, err
 		}
-		restoreWindow(&q, st)
+		if err = restoreWindow(&q, st); err != nil {
+			return SearchResult{}, err
+		}
 	}
 	if err := e.validator(maxRange).validate(&q); err != nil {
 		return SearchResult{}, err
@@ -712,7 +723,7 @@ func (e *Engine) Search(ctx context.Context, q Query) (_ SearchResult, retErr er
 	res.Complete = done && len(rest) == 0
 	if !res.Complete {
 		st := cursorState{Plan: f.id, Query: digest, Chunk: chunk, Granule: gran, Epoch: e.o.Masker.Epoch(), PolicyFP: e.o.PolicyFP(),
-			From: q.From, To: q.To}
+			From: q.From, To: q.To, Last: last}
 		if len(rest) > 0 {
 			st.Cache = e.cache.put(rest)
 		}

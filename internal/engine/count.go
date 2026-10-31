@@ -224,13 +224,16 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 			}
 		}
 	}
+	last := q.Last
 	var st cursorState
 	if cursor != "" {
 		var err *Error
 		if st, err = e.openCursor(cursor); err != nil {
 			return CountResult{}, err
 		}
-		restoreWindow(&q.Query, st)
+		if err = restoreWindow(&q.Query, st); err != nil {
+			return CountResult{}, err
+		}
 	}
 	v := e.validator(maxRange)
 	if err := v.validate(&q.Query); err != nil {
@@ -363,7 +366,7 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 	res.Complete = chunk >= len(f.plan.Chunks)
 	if !res.Complete {
 		st := cursorState{Plan: f.id, Query: digest, Chunk: chunk, Granule: gran, Epoch: e.o.Masker.Epoch(), PolicyFP: e.o.PolicyFP(), Cache: e.aggs.put(a),
-			From: q.From, To: q.To}
+			From: q.From, To: q.To, Last: last}
 		res.Cursor = e.seal("Lc1", st)
 		if cu, ok := coveredUntil(f.plan, chunk, gran, q.Query); ok {
 			res.CoveredUntil = &cu

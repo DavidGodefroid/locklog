@@ -407,7 +407,7 @@ func normalize(t *testing.T, e *Engine, res any) string {
 		if err := e.o.Sealer.Open("Lc1", c, &st); err != nil {
 			t.Fatal(err)
 		}
-		m["cursor"] = fmt.Sprintf("chunk %d granule %d cached %v from %v to %v", st.Chunk, st.Granule, st.Cache != "", st.From, st.To)
+		m["cursor"] = fmt.Sprintf("chunk %d granule %d cached %v from %v to %v last %q", st.Chunk, st.Granule, st.Cache != "", st.From, st.To, st.Last)
 	}
 	if rs, ok := m["records"].([]any); ok {
 		for _, r := range rs {
@@ -1055,5 +1055,35 @@ func TestMaskFailuresWithheldPerRecord(t *testing.T) {
 	}
 	if n != 30000 || failed != 3 {
 		t.Fatalf("count %d with %d failures", n, failed)
+	}
+}
+
+// TestLastCursorMismatch: a cursor of a query by last continues only the
+// same last; another last, or the resolved from/to, is another query.
+func TestLastCursorMismatch(t *testing.T) {
+	f := newFixture(t, genLog(t0, 30000, "c@example.org"), oneGranulePerCall)
+	f.eng.o.Now = func() time.Time { return t0.Add(3 * time.Hour) }
+	res, err := f.eng.Search(ctx, Query{Last: "2h", Limit: 200})
+	if err != nil || res.Complete {
+		t.Fatal(err)
+	}
+	for name, qq := range map[string]Query{
+		"other last": {Last: "3h", Limit: 200},
+		"from/to":    {From: t0.Add(time.Hour), To: t0.Add(3 * time.Hour), Limit: 200},
+	} {
+		qq.Cursor = res.Cursor
+		if _, err := f.eng.Search(ctx, qq); code(err) != EStale {
+			t.Errorf("search, %s: %v", name, err)
+		}
+	}
+	c, err := f.eng.Count(ctx, CountQuery{Query: Query{Last: "2h", Text: "upstream"}})
+	if err != nil || c.Complete {
+		t.Fatal(err)
+	}
+	if _, err := f.eng.Count(ctx, CountQuery{Query: Query{Last: "3h", Text: "upstream", Cursor: c.Cursor}}); code(err) != EStale {
+		t.Errorf("count, other last: %v", err)
+	}
+	if _, err := f.eng.Count(ctx, CountQuery{Query: Query{Last: "2h", Text: "upstream", Cursor: c.Cursor}}); err != nil {
+		t.Errorf("count, same last: %v", err)
 	}
 }
