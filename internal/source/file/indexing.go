@@ -92,6 +92,9 @@ func (s *Source) store(fi fileInfo, size int64, gs []index.Granule) {
 			st.Compression = fi.id.compression
 		}
 		st.PrefixLen, st.PrefixHash = fi.id.prefixLen, fi.id.prefixHash
+		if fi.id.compression != compNone {
+			st.FileSize = fi.id.size
+		}
 		if size >= 0 {
 			st.Size = size
 		}

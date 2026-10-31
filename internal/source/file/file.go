@@ -75,6 +75,7 @@ type gen struct {
 	id         string
 	prefixLen  int
 	prefixHash string
+	fileSize   int64 // a compressed file's size: one that changes is another stream
 }
 
 // fileInfo is one matched file.
@@ -189,7 +190,13 @@ func (s *Source) identifyOpen(f *os.File, m match) (fileInfo, error) {
 	if err != nil {
 		return fileInfo{}, err
 	}
-	same := func(plen int, phash string) bool {
+	// A compressed file is a stream as a whole: appended members change its
+	// decompressed content and size, so any change of its size is a new
+	// stream (re-measured, re-indexed).
+	same := func(plen int, phash string, fileSize int64) bool {
+		if id.compression != compNone && fileSize != id.size {
+			return false
+		}
 		if plen > id.prefixLen {
 			return false
 		}
@@ -203,7 +210,7 @@ func (s *Source) identifyOpen(f *os.File, m match) (fileInfo, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	g, ok := s.gens[k]
-	if ok && !same(g.prefixLen, g.prefixHash) {
+	if ok && !same(g.prefixLen, g.prefixHash, g.fileSize) {
 		ok = false
 	}
 	if !ok && s.opts.Index != nil {
@@ -211,8 +218,8 @@ func (s *Source) identifyOpen(f *os.File, m match) (fileInfo, error) {
 		s.opts.Index.With(s.opts.Name, id.dev, id.ino, func(st *index.Stream) *index.Stream {
 			switch {
 			case st == nil:
-			case same(st.PrefixLen, st.PrefixHash):
-				g, ok = gen{id: st.Gen, prefixLen: st.PrefixLen, prefixHash: st.PrefixHash}, true
+			case same(st.PrefixLen, st.PrefixHash, st.FileSize):
+				g, ok = gen{id: st.Gen, prefixLen: st.PrefixLen, prefixHash: st.PrefixHash, fileSize: st.FileSize}, true
 			default:
 				stale = true // the inode holds another stream now
 			}
@@ -232,7 +239,7 @@ func (s *Source) identifyOpen(f *os.File, m match) (fileInfo, error) {
 		}
 		g = gen{id: hex.EncodeToString(b[:])}
 	}
-	g.prefixLen, g.prefixHash = id.prefixLen, id.prefixHash
+	g.prefixLen, g.prefixHash, g.fileSize = id.prefixLen, id.prefixHash, id.size
 	s.gens[k] = g
 	stream := strconv.FormatUint(id.dev, 16) + "-" + strconv.FormatUint(id.ino, 16) + "-" + g.id
 	return fileInfo{m: m, id: id, stream: stream, gen: g.id}, nil
@@ -860,10 +867,25 @@ func (s *Source) coverage(files []fileInfo) coverage {
 				fileFrom = from
 			}
 			if !usable(g, size) {
+				// A grown granule: what was appended is not indexed.
+				// The claim stops before the newest indexed time of
+				// this file (the granule's own, else its older
+				// granules'); with none, the run ends here.
 				c.full = false
-				if _, to, ok := g.Span(); ok && (c.indexedUntil.IsZero() || to.Before(c.indexedUntil)) {
-					// Exclusive, minus the disorder margin.
-					c.indexedUntil = to.Add(-ClaimMargin).Truncate(time.Minute)
+				_, to, ok := g.Span()
+				if !ok {
+					to, ok = newestBefore(gs, i, size)
+				}
+				if !ok {
+					stopped = true
+					if b := f.id.mtime.Add(mtimeSlack); b.After(bound) {
+						bound = b
+					}
+					break
+				}
+				// Exclusive, minus the disorder margin.
+				if u := to.Add(-ClaimMargin).Truncate(time.Minute); c.indexedUntil.IsZero() || u.Before(c.indexedUntil) {
+					c.indexedUntil = u
 				}
 			}
 			if from, _, ok := g.Span(); ok && (c.indexedFrom.IsZero() || from.Before(c.indexedFrom)) {
@@ -881,6 +903,20 @@ func (s *Source) coverage(files []fileInfo) coverage {
 		}
 	}
 	return c
+}
+
+// newestBefore returns the latest record time of the usable granules
+// before granule i.
+func newestBefore(gs map[int64]*index.Granule, i, size int64) (time.Time, bool) {
+	var best time.Time
+	for j := i - 1; j >= 0; j-- {
+		if g := gs[j]; usable(g, size) {
+			if _, to, ok := g.Span(); ok && to.After(best) {
+				best = to
+			}
+		}
+	}
+	return best, !best.IsZero()
 }
 
 // stringsKey joins values for map keys (length-prefixed).

@@ -191,7 +191,8 @@ type Schema struct {
 	// every record from IndexedFrom on (before IndexedUntil when set: a
 	// growing file's newest lines are being indexed) is in the local
 	// index, allowing a minute of timestamp disorder. Zero when nothing can
-	// be claimed.
+	// be claimed. It describes what the index holds: counts may still scan
+	// part of that range (a grown granule goes to the residual whole).
 	IndexedFrom, IndexedUntil time.Time
 	// FullyIndexed is set when every granule is indexed.
 	FullyIndexed bool

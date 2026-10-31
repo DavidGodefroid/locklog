@@ -35,6 +35,8 @@ type Stream struct {
 	// of the decompressed stream once a full pass measured it, else -1.
 	Compression string `json:"compression,omitempty"`
 	Size        int64  `json:"size"`
+	// FileSize is a compressed file's own size when it was measured.
+	FileSize int64 `json:"file_size,omitempty"`
 	// Fields are the indexed fields, in tuple order; Dropped those
 	// dropped for cardinality.
 	Fields  []string `json:"fields"`

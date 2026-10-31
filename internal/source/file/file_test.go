@@ -1018,3 +1018,58 @@ func TestBlankTailAcrossBoundaryNotSealed(t *testing.T) {
 		t.Fatalf("granule 0 indexed with %d records, holds %d", g.Records, len(recs))
 	}
 }
+
+func TestGrownUntimedTailNotClaimed(t *testing.T) {
+	e := newEnv(t)
+	var b strings.Builder
+	for i := 0; b.Len() < source.GranuleBytes-200; i++ {
+		fmt.Fprintf(&b, "time=%s level=info msg=%d\n", t0.Add(time.Duration(i)*time.Second).Format(time.RFC3339), i)
+	}
+	b.WriteString("starting up, no time here, padding the line past the boundary " + strings.Repeat("x", 300) + "\n")
+	p := e.write("logs/app.log", b.String(), time.Time{})
+	s := e.source([]string{e.root + "/logs/app.log"})
+	s.IndexStep(ctx, 1<<40, true)
+	f, _ := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0)
+	for i := 0; i < 100; i++ {
+		fmt.Fprintf(f, "time=%s level=error msg=late%d\n", t0.Add(10*time.Hour+time.Duration(i)*time.Second).Format(time.RFC3339), i)
+	}
+	f.Close()
+	s.IndexStep(ctx, 1<<40, false) // busy: no upkeep
+	sch, _ := s.Describe(ctx)
+	res, _ := s.IndexCounts(ctx, CountQuery{Range: source.Range{From: t0, To: t0.Add(12 * time.Hour)}, By: []string{"level"}})
+	for _, r := range scanPlan(t, s, res.Residual) {
+		in := !sch.IndexedFrom.IsZero() && !r.Event.Time.Before(sch.IndexedFrom) &&
+			(sch.IndexedUntil.IsZero() || r.Event.Time.Before(sch.IndexedUntil))
+		if in {
+			t.Fatalf("record at %v unindexed inside the claim [%v, %v)", r.Event.Time, sch.IndexedFrom, sch.IndexedUntil)
+		}
+	}
+}
+
+func TestGrownCompressedFileIsANewStream(t *testing.T) {
+	e := newEnv(t)
+	member := func(start time.Time) []byte {
+		var buf bytes.Buffer
+		zw := gzip.NewWriter(&buf)
+		zw.Write([]byte(genLines(start, 3000)))
+		zw.Close()
+		return buf.Bytes()
+	}
+	p := e.write("logs/app.log.gz", string(member(t0)), time.Time{})
+	s := e.source([]string{e.root + "/logs/app.log.gz"})
+	s.IndexStep(ctx, 1<<40, true)
+	f, _ := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0)
+	f.Write(member(t0.Add(time.Hour)))
+	f.Close()
+	plan, _ := s.Plan(ctx, everything, source.Selector{})
+	if n := len(scanPlan(t, s, plan)); n != 6000+6000/7+1 && n < 6000 {
+		t.Fatalf("%d records after an appended member", n)
+	}
+	recs := scanPlan(t, s, plan)
+	if !recs[len(recs)-1].Event.Time.After(t0.Add(time.Hour)) {
+		t.Fatal("the appended member is not planned")
+	}
+	if sch, _ := s.Describe(ctx); sch.FullyIndexed {
+		t.Fatal("grown compressed file claimed as indexed")
+	}
+}
