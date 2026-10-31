@@ -464,7 +464,8 @@ func TestNoDigestOnTheSocket(t *testing.T) {
 
 func TestCountFromIndexEqualsScan(t *testing.T) {
 	content := genLog(t0, 30000, "c@example.org")
-	cq := CountQuery{Query: q(func(q *Query) { q.Where = []Pred{{Field: "status", Op: "!=", Value: raw(200)}} }), Bucket: "1h", By: []string{"level"}}
+	// A string value: numeric terms are never served from the index.
+	cq := CountQuery{Query: q(func(q *Query) { q.Where = []Pred{{Field: "status", Op: "!=", Value: raw("200")}} }), Bucket: "1h", By: []string{"level"}}
 	scan := newFixture(t, content, nil)
 	want, err := scan.eng.Count(ctx, cq)
 	if err != nil || !want.Complete || want.FromIndex == false && want.Scanned.Granules == 0 {
@@ -587,5 +588,60 @@ func TestCalibrationInBackground(t *testing.T) {
 	}
 	if n := calls.Load(); n != 1 {
 		t.Fatalf("%d calibrations ran", n)
+	}
+}
+
+// TestNumericTermsColdEqualsIndexed: numbers compare by exact value in the
+// evaluator; the index holds raw literals, so numeric terms are never pushed
+// down nor served from it, and cold and indexed answers agree.
+func TestNumericTermsColdEqualsIndexed(t *testing.T) {
+	content := genLog(t0, 10000, "c@example.org") // 3 granules
+	type tc struct {
+		name string
+		pred Pred
+		want int
+	}
+	var cases []tc
+	for _, lit := range []string{"200", "200.0", "2e2"} {
+		cases = append(cases,
+			tc{"= " + lit, Pred{Field: "status", Op: "=", Value: json.RawMessage(lit)}, 2500},
+			tc{"in " + lit, Pred{Field: "status", Op: "in", Value: json.RawMessage("[" + lit + ", 3e2]")}, 5000},
+			tc{"!= " + lit, Pred{Field: "status", Op: "!=", Value: json.RawMessage(lit)}, 7500})
+	}
+	f := newFixture(t, content, nil)
+	answers := func() map[string][2]int {
+		out := map[string][2]int{}
+		for _, c := range cases {
+			recs, _ := allRecords(t, f.eng, q(func(q *Query) { q.Where = []Pred{c.pred}; q.Limit = 200; q.Fields = []string{"status"} }))
+			res, err := f.eng.Count(ctx, CountQuery{Query: q(func(q *Query) { q.Where = []Pred{c.pred} })})
+			for err == nil && !res.Complete {
+				t.Fatalf("%s: count incomplete", c.name)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			n := 0
+			for _, g := range res.Groups {
+				n += int(g.N)
+			}
+			out[c.name] = [2]int{len(recs), n}
+		}
+		return out
+	}
+	cold := answers()
+	for i := 0; ; i++ {
+		_, done, err := f.src.IndexStep(ctx, 64<<20, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if done || i > 20 {
+			break
+		}
+	}
+	indexed := answers()
+	for _, c := range cases {
+		if cold[c.name] != [2]int{c.want, c.want} || indexed[c.name] != cold[c.name] {
+			t.Errorf("%s: cold %v, indexed %v, want %d", c.name, cold[c.name], indexed[c.name], c.want)
+		}
 	}
 }
