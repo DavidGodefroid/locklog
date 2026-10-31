@@ -5,6 +5,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"slices"
@@ -280,6 +281,14 @@ func TestLokiDenseSliceSplit(t *testing.T) {
 			if !replayed {
 				t.Fatal("no cursor replayed after a split")
 			}
+			// A query's split plans take one slot: other queries'
+			// cursors are never evicted by a dense one.
+			f.eng.mu.Lock()
+			plans := len(f.eng.plans)
+			f.eng.mu.Unlock()
+			if plans != 1 {
+				t.Fatalf("%d frozen plans after one query", plans)
+			}
 			ts := recordTimes(t, recs)
 			checkOrder(t, ts, 9*12+600, order == "desc")
 			seen := map[time.Time]bool{}
@@ -311,8 +320,12 @@ func TestLokiSliceOverAtNarrowest(t *testing.T) {
 			if code(err) != EOverBudget {
 				t.Fatalf("call %d: %v", calls, err)
 			}
-			if msg := err.Error(); strings.Contains(msg, "compressed") || strings.Contains(msg, "file") {
-				t.Fatalf("remote refusal speaks of files: %s", msg)
+			var e *Error
+			if !errors.As(err, &e) || e.Message != errSliceOver().Message {
+				t.Fatalf("call %d: %v, want the narrowest-slice refusal", calls, err)
+			}
+			if strings.Contains(e.Message, "compressed") || strings.Contains(e.Message, "file") {
+				t.Fatalf("remote refusal speaks of files: %s", e.Message)
 			}
 			return
 		}

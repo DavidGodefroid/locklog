@@ -462,9 +462,12 @@ func (e *Engine) resume(st cursorState, query string) (*frozen, *Error) {
 
 // splitSlice returns a frozen plan like f's, with granule gran of chunk
 // replaced by parts (descending: newest first, the chunk's granules then in
-// reverse time order). f itself is never changed: cursors on it still
-// resume where they point. The number of chunks is kept (patterns sort
-// records into window and baseline by chunk index).
+// reverse time order). f itself is never changed (a call reading it
+// concurrently is unaffected) but it is dropped from the frozen plans: a
+// query's split plans take one slot, never evicting other queries' plans,
+// and a cursor on f (a replay from before the split) is then stale. The
+// number of chunks is kept (patterns sort records into window and baseline
+// by chunk index).
 func (e *Engine) splitSlice(f *frozen, chunk, gran int, parts []source.Granule) *frozen {
 	parts = slices.Clone(parts)
 	if f.desc {
@@ -474,7 +477,11 @@ func (e *Engine) splitSlice(f *frozen, chunk, gran int, parts []source.Granule) 
 	c := plan.Chunks[chunk]
 	c.Granules = slices.Concat(c.Granules[:gran], parts, c.Granules[gran+1:])
 	plan.Chunks[chunk] = c
-	return e.freeze(f.query, plan, f.desc)
+	n := e.freeze(f.query, plan, f.desc)
+	e.mu.Lock()
+	delete(e.plans, f.id)
+	e.mu.Unlock()
+	return n
 }
 
 // errSliceOver refuses a remote slice holding more than one call's budget
@@ -504,7 +511,10 @@ func errSliceOver() *Error {
 // call's budget when it is the call's first group is split by its source
 // (source.Splitter) into narrower slices: *fp is then a new frozen plan
 // holding them and the call stops before the first of them (the next call
-// has a whole budget for it). One the source cannot split is refused.
+// has a whole budget for it). One the source cannot split is refused. The
+// split points are a function of the slice only; whether a slice is split
+// depends on the bytes the selector's records take (the byte cap) or, when
+// that cap is the time left to mask, on the cost model.
 func (e *Engine) run(ctx context.Context, fp **frozen, chunk, gran int, needles []string, callBytes, factor int64,
 	visit func(raw source.RawRecord, rec mask.Record, b *budget)) (int, int, Scanned, int, *Error) {
 	plan := (*fp).plan
@@ -582,7 +592,7 @@ func (e *Engine) run(ctx context.Context, fp **frozen, chunk, gran int, needles 
 			if sc.Granules > 0 {
 				return chunk, gran, sc, failures, nil // the next call has a whole budget
 			}
-			if planned == 0 && len(sub.Granules) == 1 {
+			if planned == 0 && len(sub.Granules) == 1 && e.remote(c.Source) {
 				// A remote slice: split it, or refuse it at its
 				// narrowest.
 				var parts []source.Granule

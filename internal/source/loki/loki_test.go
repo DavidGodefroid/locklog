@@ -1367,7 +1367,7 @@ func TestSplit(t *testing.T) {
 	}
 	for _, tc := range []struct {
 		w, sub time.Duration
-	}{{24 * time.Hour, 6 * time.Hour}, {time.Hour, 15 * time.Minute}, {5 * time.Minute, time.Minute}, {time.Minute, 10 * time.Second}, {10 * time.Second, time.Second}} {
+	}{{24 * time.Hour, 6 * time.Hour}, {6 * time.Hour, time.Hour}, {time.Hour, 15 * time.Minute}, {15 * time.Minute, 5 * time.Minute}, {5 * time.Minute, time.Minute}, {time.Minute, 10 * time.Second}, {10 * time.Second, time.Second}} {
 		parent := g(base, tc.w)
 		parts := s.Split(parent)
 		if len(parts) != int(tc.w/tc.sub) {
