@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -63,7 +64,8 @@ func OpenAgentRules(dir string) (*AgentRules, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("agent rules: %w", err)
 	}
-	if fi, err := os.Lstat(dir); err != nil || !fi.IsDir() || fi.Mode().Perm()&0o077 != 0 {
+	// Windows has no Unix modes (the console runs on Linux).
+	if fi, err := os.Lstat(dir); err != nil || !fi.IsDir() || runtime.GOOS != "windows" && fi.Mode().Perm()&0o077 != 0 {
 		return nil, fmt.Errorf("agent rules: %s must be a private directory (0700)", dir)
 	}
 	a := &AgentRules{dir: dir}

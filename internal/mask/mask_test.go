@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -350,7 +351,7 @@ func TestAgentRulesTightenOnlyAndLeakNoName(t *testing.T) {
 				t.Errorf("%s holds %q", p, name)
 			}
 		}
-		if fi.Mode().Perm() != 0o600 {
+		if runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
 			t.Errorf("%s mode %04o", p, fi.Mode().Perm())
 		}
 		return nil

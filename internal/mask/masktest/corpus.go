@@ -215,7 +215,6 @@ func percentAll(v string, times int) string {
 	return b.String()
 }
 
-
 // Lines generates n lines: every kind, in every position (JSON value,
 // nested value, key, number, array item, logfmt value, free text) and
 // every encoding, in turn.
