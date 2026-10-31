@@ -136,4 +136,5 @@ type Event struct {
 	Attrs []Member
 
 	timeMember *Member // the member Time was lifted from
+	timePos    int     // its index in Fields had it not been lifted
 }

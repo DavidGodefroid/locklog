@@ -11,6 +11,6 @@ for pkg in $(go list ./...); do
 	targets=$(grep -h -o '^func Fuzz[A-Za-z0-9_]*' "$dir"/*_test.go 2>/dev/null | sed 's/^func //' || true)
 	for t in $targets; do
 		echo "fuzz: $pkg $t ($fuzztime)"
-		go test "$pkg" -run '^$' -fuzz "^$t\$" -fuzztime "$fuzztime" -parallel "${GOMAXPROCS:-2}"
+		go test "$pkg" -run '^$' -fuzz "^$t\$" -fuzztime "$fuzztime" -fuzzminimizetime 100x -parallel "${GOMAXPROCS:-2}"
 	done
 done

@@ -164,6 +164,9 @@ func liftTimeAndMessage(ev *Event, members []Member, o *Options) []Member {
 	}
 	out := make([]Member, 0, len(members))
 	for i, m := range members {
+		if i == timeIdx {
+			ev.timePos = len(out)
+		}
 		if i != timeIdx && i != msgIdx {
 			out = append(out, m)
 		}
