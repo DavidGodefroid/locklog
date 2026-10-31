@@ -34,8 +34,8 @@ uses [Semantic Versioning](https://semver.org/).
 - The Docker source: containers' `json-file` logs (rotated `.N[.gz]` files
   included) read by name from the containers root through a name → id map,
   approved globs checked again at read time, console containers never served,
-  no read across a mount point; the `docker-json` format with an `attrs`
-  allowlist. The launcher binds the containers root with gid 0, keeps the map
+  no read across a mount point; the `docker-json` format, and an `attrs`
+  allowlist on the `docker-json` frames. The launcher binds the containers root with gid 0, keeps the map
   current with a `docker events` loop, labels console containers, and gains
   `locklog refresh`. gid 0 applies to the whole console, so a docker source
   runs in a console of its own: the mount plan and the launcher refuse it
