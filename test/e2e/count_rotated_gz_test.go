@@ -139,15 +139,28 @@ func mkdir(t *testing.T, dir string) {
 
 // out is the structured output of a locklog tool.
 type out struct {
-	Data struct {
-		Groups []struct {
-			N json.Number `json:"n"`
-		} `json:"groups"`
-		Records  []json.RawMessage `json:"records"`
-		Complete bool              `json:"complete"`
-		Cursor   string            `json:"cursor"`
-	} `json:"data"`
+	Data    json.RawMessage `json:"data"`
 	Refusal json.RawMessage `json:"refusal"`
+}
+
+// result is the data of a locklog_count or a locklog_search.
+type result struct {
+	Groups []struct {
+		N json.Number `json:"n"`
+	} `json:"groups"`
+	Records  []json.RawMessage `json:"records"`
+	Complete bool              `json:"complete"`
+	Cursor   string            `json:"cursor"`
+}
+
+// decode decodes the data of a locklog_count or a locklog_search.
+func decode(t *testing.T, tool string, o out) result {
+	t.Helper()
+	var r result
+	if err := json.Unmarshal(o.Data, &r); err != nil {
+		t.Fatalf("%s: data: %v: %s", tool, err, o.Data)
+	}
+	return r
 }
 
 // text is the text content of a tool result.
@@ -193,9 +206,10 @@ func call(t *testing.T, ctx context.Context, cs *mcp.ClientSession, tool string,
 func count(t *testing.T, ctx context.Context, cs *mcp.ClientSession, args map[string]any) (total int64, groups, calls int) {
 	t.Helper()
 	for {
-		o, txt := call(t, ctx, cs, "locklog_count", args)
+		raw, txt := call(t, ctx, cs, "locklog_count", args)
+		o := decode(t, "locklog_count", raw)
 		calls++
-		for _, g := range o.Data.Groups {
+		for _, g := range o.Groups {
 			n, err := g.N.Int64()
 			if err != nil {
 				t.Fatalf("locklog_count: group count %q: %v", g.N, err)
@@ -203,17 +217,17 @@ func count(t *testing.T, ctx context.Context, cs *mcp.ClientSession, args map[st
 			total += n
 			groups++
 		}
-		if o.Data.Complete {
+		if o.Complete {
 			return total, groups, calls
 		}
-		if o.Data.Cursor == "" || calls >= 50 {
+		if o.Cursor == "" || calls >= 50 {
 			t.Fatalf("locklog_count: incomplete with no cursor to continue (after %d calls): %s", calls, txt)
 		}
 		next := map[string]any{}
 		for k, v := range args {
 			next[k] = v
 		}
-		next["cursor"] = o.Data.Cursor
+		next["cursor"] = o.Cursor
 		args = next
 	}
 }
@@ -353,15 +367,16 @@ func TestCountRotatedGz(t *testing.T) {
 		t.Errorf("locklog_count bucket 5m sums to %d, want %d", bucketed, want)
 	}
 
-	so, stext := call(t, ctx, cs, "locklog_search", map[string]any{"from": from, "to": to, "limit": 50})
-	t.Logf("locklog_search: %d records", len(so.Data.Records))
-	if len(so.Data.Records) == 0 {
+	sraw, stext := call(t, ctx, cs, "locklog_search", map[string]any{"from": from, "to": to, "limit": 50})
+	so := decode(t, "locklog_search", sraw)
+	t.Logf("locklog_search: %d records", len(so.Records))
+	if len(so.Records) == 0 {
 		t.Errorf("locklog_search: no records:\n%s", stext)
 	}
 	if !strings.Contains(stext, "⟦email:") {
 		t.Errorf("locklog_search: no ⟦email: pseudonym in the result:\n%s", stext)
 	}
-	j, _ := json.Marshal(so)
+	j, _ := json.Marshal(sraw)
 	for _, clear := range append(append([]string{}, emails...), names...) {
 		for _, where := range []string{stext, string(j)} {
 			if strings.Contains(strings.ToLower(where), strings.ToLower(clear)) {
