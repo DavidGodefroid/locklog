@@ -53,7 +53,7 @@ credentials = "ask"          # typed at the console, never written to disk
 | `prefilter` | `false` | Opt-in speed-up for non-production; reveals through latency how many records hold a clear substring |
 | `user_journals` | `false` | Also serve `user-*.journal` files |
 | `pseudonym_rotation` | `7d` | Epoch length (`session` or a duration; `never` is refused on production) |
-| `pseudonym_max_age` | `30d` | Past this, rotation at the next idle moment |
+| `pseudonym_max_age` | `30d` | How long a replaced epoch key is kept; older ones are deleted when the console opens the profile |
 | `limits` | see Budgets | Per-call and rolling budgets |
 
 Sources take `kind`, `format`, `multiline` (`none` or `indent`) and
@@ -66,6 +66,11 @@ countable), plus per kind:
 | `journald` | `units` (globs on `_SYSTEMD_UNIT`), `allow` (extra fields, reviewed; core dumps, command lines, executables, audit and `OBJECT_` fields can never be allowed) |
 | `docker` | `containers` (name globs; a glob matching a locklog console is refused), `attrs` (json-file log-opt attributes to keep) |
 | `loki` | `url`, `selector`, `trusted_labels`, `trusted_metadata`, `auth` (`none` refused on production, `basic`, `bearer`, `mtls`), `org_id`, `credentials` (`ask` or `vault`), `tls`, `tls_ca` |
+
+The console opens `loki`, `elastic` and `opensearch` sources from the
+profile once [#97](https://github.com/DavidGodefroid/locklog/pull/97) is
+merged; until then the console cannot open them
+(`unsupported source kind`).
 
 ## Wiring an agent
 
@@ -102,10 +107,10 @@ it back and says so.
 | `locklog_trace` | one id or pseudonym across sources, merged timeline | free within budgets |
 | `locklog_tail` | new records for ≤ 50 s | free (rolling budgets) |
 | `locklog_lookup` | a clear value → its pseudonym (detector kinds only) | free, rate-limited |
-| `locklog_pii_list`, `locklog_pii_add` | the masking rules; add masking (never remove it) | free, capped |
+| `locklog_pii_list`, `locklog_pii_add` | the masking rules; add masking (never remove it). Until the console serves PII rules ([#64](https://github.com/DavidGodefroid/locklog/issues/64)) they answer that there are none | free, capped |
 | `locklog_request_change` | ask for a loosening | you decide at `:review` |
 | `locklog_scan` | one call over a budget, approved for its whole plan | you approve |
-| `locklog_unmask` | the clear value of exact pseudonym spans of one record, once | you approve on a terminal facade; off on production |
+| `locklog_unmask` | the clear value of up to 8 exact pseudonyms of one record, once, with a reason | you approve at the console, never automatically; off on production |
 
 Every result carries the pseudonym `epoch`. A result with
 `complete: false` has a `cursor`: passing it back continues the same plan
@@ -155,11 +160,19 @@ cursor. The numbers behind these defaults are in
 ## The console
 
 `locklog console` shows each call as a one-line note. It opens an
-approval screen for scans, unmasks and change requests.
+approval screen for scans, unmasks, approved lookups and change requests,
+and answers `y` or `n` (an unanswered screen times out and the agent is told
+not to retry unless asked).
 
 | Command | What it does |
 |---|---|
-| `:status` | consoles, sources, budgets, epoch age, lookups used |
-| `:review` | the policy diff waiting for you |
-| `:reveal <ref>` | a record in clear, on this terminal only (secrets redacted) |
-| Ctrl-O on an approval | the record in clear, on this terminal only |
+| `:status` | the profile, mode, session, pending changes, sources and budgets |
+| `:review` | the policy change and change requests waiting for you |
+| `:mode` (Shift+Tab) | manual or auto mode; auto approves scans on a non-production profile, never an unmask or a lookup; production stays manual |
+| `:quit` | end the console |
+
+The unmask screen shows the record masked, the asked spans marked `» «`,
+the agent's reason, and two warnings: the agent receives these clear values
+once, and can link them to every record with the same pseudonym in the
+epoch. After a yes the record is read again, and the unmask is refused
+(`E_STALE`) if the record, the epoch or the policy changed.

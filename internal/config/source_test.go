@@ -249,3 +249,101 @@ func TestValidContainerName(t *testing.T) {
 		}
 	}
 }
+
+const elasticOK = `kind = "elastic"
+url = "https://es.example.com:9200"
+indices = ["logs-app-*", "audit"]
+auth = "api_key"
+`
+
+func TestElasticSource(t *testing.T) {
+	p := mustParse(t, src(elasticOK+`trusted_fields = ["service.name", "log.level", "log.level"]
+selector = { "service.environment" = "prod" }
+tiebreaker = "event.id"`))["staging"]
+	s := p.Sources[0]
+	r := s.Remote
+	if r == nil || s.Kind != KindElastic || r.Auth != AuthAPIKey || r.Credentials != kconfig.CredentialsAsk || r.TLS != kconfig.TLSVerifyFull ||
+		!slices.Equal(r.Indices, []string{"audit", "logs-app-*"}) || !slices.Equal(r.TrustedFields, []string{"log.level", "service.name"}) ||
+		r.TimeField != "@timestamp" || r.MessageField != "message" || r.TieBreaker != "event.id" || r.Selector["service.environment"] != "prod" {
+		t.Fatalf("remote = %+v", r)
+	}
+	// The selector is optional: the indices scope the source.
+	mustParse(t, src(elasticOK))
+	mustParse(t, src(strings.Replace(elasticOK, `auth = "api_key"`, "auth = \"basic\"\nuser = \"reader\"", 1)))
+	mustParse(t, src(strings.Replace(elasticOK, `auth = "api_key"`, `auth = "bearer"`, 1)+`credentials = "vault"`+"\n"+`vault_path = "secret/data/es"`))
+	mustParse(t, src(elasticOK+"time_field = \"event.created\"\nmessage_field = \"log.original\""))
+	for _, tt := range []struct{ body, part string }{
+		{strings.Replace(elasticOK, `indices = ["logs-app-*", "audit"]`, "", 1), "at least one index"},
+		{strings.Replace(elasticOK, `"audit"`, `"_all"`, 1), "invalid index name"},
+		{strings.Replace(elasticOK, `"audit"`, `".security"`, 1), "invalid index name"},
+		{strings.Replace(elasticOK, `"audit"`, `"*"`, 1), "invalid index name"},
+		{strings.Replace(elasticOK, `"audit"`, `"logs-*-x"`, 1), "invalid index name"},
+		{strings.Replace(elasticOK, `"audit"`, `"remote:logs"`, 1), "invalid index name"},
+		{strings.Replace(elasticOK, `"audit"`, `"Logs"`, 1), "invalid index name"},
+		{strings.Replace(elasticOK, `"audit"`, `"a,b"`, 1), "invalid index name"},
+		{elasticOK + `trusted_fields = ["message"]`, "is message text"},
+		{elasticOK + "message_field = \"body.text\"\ntrusted_fields = [\"body.text\"]", "is message text"},
+		{elasticOK + `trusted_fields = ["@timestamp"]`, "is the time field"},
+		{elasticOK + `trusted_fields = ["user.email"]`, "looks like personal data"},
+		{elasticOK + `trusted_fields = ["a*"]`, "invalid field name"},
+		{elasticOK + `trusted_fields = ["a..b"]`, "invalid field name"},
+		{elasticOK + `time_field = "a b"`, "invalid field name"},
+		{elasticOK + `tiebreaker = "x\""`, "invalid field name"},
+		{elasticOK + `selector = { "a*" = "x" }`, "invalid field name"},
+		{elasticOK + `selector = { env = "" }`, "needs a non-empty value"},
+		{elasticOK + `selector = { message = "x" }`, "message or time field"},
+		{elasticOK + `trusted_labels = ["app"]`, `applies only to kind = "loki"`},
+		{elasticOK + `org_id = "t"`, `applies only to kind = "loki"`},
+		{elasticOK + `read_only_roles = ["r"]`, `applies only to kind = "opensearch"`},
+		{elasticOK + `user = "x"`, `"api_key" takes no user`},
+		{strings.Replace(elasticOK, `auth = "api_key"`, `auth = "token"`, 1), "want none, basic, bearer, api_key or mtls"},
+		{strings.Replace(elasticOK, `auth = "api_key"`, "", 1), "auth is required"},
+		{strings.Replace(elasticOK, "https://es.example.com:9200", "http://es.example.com:9200", 1), "plain http://"},
+		{lokiOK + `indices = ["a"]`, `applies only to kind = "elastic" or "opensearch"`},
+		{strings.Replace(lokiOK, `auth = "bearer"`, `auth = "api_key"`, 1), `applies only to kind = "elastic"`},
+		{`kind = "file"` + "\n" + `paths = ["/var/log/a"]` + "\n" + `trusted_fields = ["a"]`, `applies only to kind = "elastic" or "opensearch"`},
+	} {
+		wantErr(t, src(tt.body), tt.part)
+	}
+}
+
+const openSearchOK = `kind = "opensearch"
+url = "https://os.example.com:9200"
+indices = ["logs-*"]
+auth = "basic"
+user = "reader"
+`
+
+func TestOpenSearchSource(t *testing.T) {
+	p := mustParse(t, src(openSearchOK+`read_only_roles = ["logs_reader", "logs_reader"]
+trusted_fields = ["level"]`))["staging"]
+	r := p.Sources[0].Remote
+	if p.Sources[0].Kind != KindOpenSearch || !slices.Equal(r.ReadOnlyRoles, []string{"logs_reader"}) || !slices.Equal(r.TrustedFields, []string{"level"}) {
+		t.Fatalf("remote = %+v", r)
+	}
+	wantErr(t, src(strings.Replace(openSearchOK, "auth = \"basic\"\nuser = \"reader\"", `auth = "api_key"`, 1)), `applies only to kind = "elastic"`)
+	wantErr(t, src(openSearchOK+`read_only_roles = ["a b"]`), "invalid role name")
+	wantErr(t, src(strings.Replace(openSearchOK, `auth = "basic"`, `auth = "token"`, 1)), "want none, basic, bearer or mtls")
+}
+
+func TestElasticProduction(t *testing.T) {
+	for _, ok := range []string{elasticOK, openSearchOK} {
+		none := strings.Replace(strings.Replace(ok, `auth = "api_key"`, `auth = "none"`, 1), "auth = \"basic\"\nuser = \"reader\"", `auth = "none"`, 1)
+		wantErr(t, prodSrc(none), `auth = "none" is refused on a production profile`)
+		wantErr(t, prodSrc(strings.Replace(strings.Replace(ok, "https://es.example.com:9200", "http://127.0.0.1:9200", 1), "https://os.example.com:9200", "http://127.0.0.1:9200", 1)), "needs an https:// URL")
+		wantErr(t, prodSrc(ok+`tls = "verify-ca"`), `needs tls = "verify-full"`)
+		mustParse(t, prodSrc(ok+`credentials = "vault"`+"\n"+`vault_path = "secret/data/es"`))
+	}
+	// An OpenSearch admin certificate cannot be told from a reader's.
+	mtls := strings.Replace(openSearchOK, "auth = \"basic\"\nuser = \"reader\"", "auth = \"mtls\"\ntls_cert = \"/c.pem\"\ntls_key = \"/k.pem\"", 1)
+	wantErr(t, prodSrc(mtls), `a client certificate (auth = "mtls", tls_cert, tls_key) is refused for kind = "opensearch"`)
+	// Whatever the auth mode: a client certificate rides along.
+	wantErr(t, prodSrc(openSearchOK+"tls_cert = \"/c.pem\"\ntls_key = \"/k.pem\""), `is refused for kind = "opensearch" on a production profile`)
+	mustParse(t, src(openSearchOK+"tls_cert = \"/c.pem\"\ntls_key = \"/k.pem\""))
+	mustParse(t, prodSrc(strings.Replace(elasticOK, `auth = "api_key"`, `auth = "bearer"`, 1)+"tls_cert = \"/c.pem\"\ntls_key = \"/k.pem\""))
+	mustParse(t, src(mtls))
+	mustParse(t, prodSrc(strings.Replace(mtls, `kind = "opensearch"`, `kind = "elastic"`, 1)))
+	// Off production, plain http on loopback and no auth are fine.
+	mustParse(t, src(strings.Replace(elasticOK, "https://es.example.com:9200", "http://127.0.0.1:9200", 1)))
+	mustParse(t, src(strings.Replace(strings.Replace(elasticOK, "https://es.example.com:9200", "http://es:9200", 1), `auth = "api_key"`, `auth = "none"`, 1)))
+}

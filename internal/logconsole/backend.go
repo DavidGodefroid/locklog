@@ -43,10 +43,52 @@ const (
 	// MethodPatterns is the top message templates of a range, optionally
 	// against a baseline window (locklog_patterns).
 	MethodPatterns = "log.patterns"
+	// MethodContext, MethodTrace and MethodTail read around a ref, follow
+	// an id across sources and follow new records (locklog_context,
+	// locklog_trace, locklog_tail).
+	MethodContext = "log.context"
+	MethodTrace   = "log.trace"
+	MethodTail    = "log.tail"
+	// MethodScan is a call over the free budgets, approved once (class
+	// read) for its whole plan (locklog_scan); MethodUnmask reveals exact
+	// pseudonyms of one record on a read-pii approval (locklog_unmask);
+	// MethodLookup gives the pseudonyms of clear values, rate-limited
+	// (locklog_lookup). Policy changes go through the console's own
+	// change.request (locklog_request_change).
+	MethodScan   = "log.scan"
+	MethodUnmask = "log.unmask"
+	MethodLookup = "log.lookup"
 )
 
 // Methods lists the methods served, in a fixed order.
-var Methods = []string{MethodStatus, MethodSources, MethodSearch, MethodCount, MethodPatterns}
+var Methods = []string{MethodStatus, MethodSources, MethodSearch, MethodCount, MethodPatterns, MethodContext, MethodTrace, MethodTail,
+	MethodScan, MethodUnmask, MethodLookup}
+
+// Approve asks the human to approve a call's operation on the console's
+// approval screen (console.Env.Approve for the call's request).
+type Approve func(ctx context.Context, s console.Screen) console.Approval
+
+type approveKey struct{}
+
+// WithApprove attaches the call's approver to ctx.
+func WithApprove(ctx context.Context, a Approve) context.Context {
+	return context.WithValue(ctx, approveKey{}, a)
+}
+
+// ApproveFrom returns the call's approver, or nil.
+func ApproveFrom(ctx context.Context) Approve {
+	a, _ := ctx.Value(approveKey{}).(Approve)
+	return a
+}
+
+// Declined is an engine's error for a call the human did not approve: Resp
+// is the console's answer (a denial, a timeout, a pending ticket), sent to
+// the agent as is.
+type Declined struct {
+	Resp ipc.Response
+}
+
+func (d *Declined) Error() string { return "the operation was not approved" }
 
 // Caller is the kernel-verified peer of a call.
 type Caller struct{ UID, PID int }
@@ -413,9 +455,11 @@ func (b *Backend) handler(method string) console.Handler {
 			return lost(req.ID, env, rec)
 		}
 		cctx, cancel := ls.callContext(ctx)
+		cctx = WithApprove(cctx, func(ctx context.Context, s console.Screen) console.Approval { return env.Approve(ctx, req.ID, s) })
 		result, refused, err := ls.engine.Handle(cctx, method, params, c)
 		cancel()
 		var resp ipc.Response
+		var declined *Declined
 		switch {
 		case errors.Is(err, ErrConnLost) || ls.closed():
 			// The session ended under the call (Lost, the console
@@ -425,6 +469,15 @@ func (b *Backend) handler(method string) console.Handler {
 				env.Println("log session lost (" + method + "): " + env.Safe(env.Sanitizer().Error(err)))
 			}
 			return lost(req.ID, env, rec)
+		case errors.As(err, &declined):
+			// Not approved: the console recorded the decision; the agent
+			// gets its answer (a refusal, or a pending ticket).
+			rec.Decision = "denied"
+			if declined.Resp.Error == nil {
+				rec.Decision = "pending"
+			}
+			resp = declined.Resp
+			resp.ID = req.ID
 		case ctx.Err() != nil:
 			// The agent's connection closed (or the console is
 			// stopping): whatever the engine answered, the call is
@@ -443,6 +496,10 @@ func (b *Backend) handler(method string) console.Handler {
 			resp = refusalResp(req.ID, refused, env)
 		default:
 			rec.Decision = "ok"
+			// A value tool is audited by pseudonym, never by value.
+			if ap, ok := result.(interface{ AuditPseudonyms() []string }); ok {
+				rec.Pseudonyms = ap.AuditPseudonyms()
+			}
 			resp = console.OKResp(req.ID, result)
 		}
 		// Every call is audited before its answer leaves; one that cannot

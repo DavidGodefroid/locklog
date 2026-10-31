@@ -268,3 +268,70 @@ func TestCanonicalJSONStable(t *testing.T) {
 		t.Errorf("extra roots not canonical: %s", b)
 	}
 }
+
+const esPolicy = `
+[profiles.pp.sources.es]
+kind = "elastic"
+url = "https://es.example.com"
+indices = ["logs-app-*"]
+auth = "api_key"
+trusted_fields = ["log.level"]
+[profiles.pp.sources.os]
+kind = "opensearch"
+url = "https://os.example.com"
+indices = ["logs-*"]
+auth = "basic"
+user = "reader"
+read_only_roles = ["logs_reader"]
+`
+
+func TestDiffElasticSources(t *testing.T) {
+	pol := func(body string) Policy { return mustPolicy(t, mustParse(t, body)["pp"], "", nil) }
+	base := pol(esPolicy)
+	if d := pol(esPolicy).Diff(base); len(d) != 0 {
+		t.Fatalf("Diff of equal policies = %+v", d)
+	}
+	for _, tt := range []struct {
+		name, old, new, field string
+		loosens               bool
+	}{
+		{"index added", `indices = ["logs-app-*"]`, `indices = ["logs-app-*", "audit"]`, "sources.es.indices", true},
+		{"index widened", `indices = ["logs-app-*"]`, `indices = ["logs-*"]`, "sources.es.indices", true},
+		{"index replaced", `indices = ["logs-*"]`, `indices = ["logs-a"]`, "sources.os.indices", true},
+		{"trusted field added", `trusted_fields = ["log.level"]`, `trusted_fields = ["log.level", "service.name"]`, "sources.es.trusted_fields", true},
+		{"trusted field removed", `trusted_fields = ["log.level"]`, `trusted_fields = []`, "sources.es.trusted_fields", false},
+		{"read-only role vouched", `read_only_roles = ["logs_reader"]`, `read_only_roles = ["logs_reader", "ops"]`, "sources.os.read_only_roles", true},
+		{"read-only role dropped", `read_only_roles = ["logs_reader"]`, `read_only_roles = []`, "sources.os.read_only_roles", false},
+		{"time field", `trusted_fields = ["log.level"]`, "trusted_fields = [\"log.level\"]\ntime_field = \"event.created\"", "sources.es.time_field", true},
+		{"message field", `trusted_fields = ["log.level"]`, "trusted_fields = [\"log.level\"]\nmessage_field = \"log.original\"", "sources.es.message_field", true},
+		{"tiebreaker", `trusted_fields = ["log.level"]`, "trusted_fields = [\"log.level\"]\ntiebreaker = \"event.id\"", "sources.es.tiebreaker", true},
+		{"selector added", `trusted_fields = ["log.level"]`, "trusted_fields = [\"log.level\"]\nselector = { env = \"prod\" }", "sources.es.selector", true},
+		{"auth to bearer", `auth = "api_key"`, `auth = "bearer"`, "sources.es.auth", true},
+		{"kind changed", `kind = "opensearch"`, `kind = "elastic"`, "sources.os.kind", true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if !strings.Contains(esPolicy, tt.old) {
+				t.Fatalf("base has no %q", tt.old)
+			}
+			body := strings.Replace(esPolicy, tt.old, tt.new, 1)
+			if tt.name == "kind changed" {
+				body = strings.Replace(body, `read_only_roles = ["logs_reader"]`, "", 1)
+			}
+			assertChange(t, pol(body).Diff(base), tt.field, tt.loosens)
+		})
+	}
+	lines := strings.Join(base.Describe(), "\n")
+	for _, part := range []string{"source es (elastic", "indices: logs-app-*", "auth: api_key · tls: verify-full · credentials: ask",
+		"time field: @timestamp · message field: message", "trusted fields: log.level", "source os (opensearch", "read-only roles: logs_reader"} {
+		if !strings.Contains(lines, part) {
+			t.Errorf("Describe lacks %q:\n%s", part, lines)
+		}
+	}
+	// The canonical form, and so the fingerprint, does not depend on the
+	// order of the lists.
+	re := pol(strings.Replace(esPolicy, `indices = ["logs-app-*"]`, `indices = ["logs-app-*", "audit"]`, 1))
+	re2 := pol(strings.Replace(esPolicy, `indices = ["logs-app-*"]`, `indices = ["audit", "logs-app-*", "audit"]`, 1))
+	if re.Fingerprint() != re2.Fingerprint() {
+		t.Error("index order changed the fingerprint")
+	}
+}

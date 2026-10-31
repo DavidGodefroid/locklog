@@ -4,10 +4,10 @@
 Claude Code (left) investigates PDF errors on a staging profile. locklog_count shows the step at
 14:02, locklog_patterns the new pattern (the email and the IP already pseudonymised), and
 locklog_trace the order behind it: all free, all masked. The agent then asks locklog_unmask for
-the email. The locklog console (right, its own account and container) shows the approval screen
-with the exact span highlighted. The human presses Ctrl-O to see the record in clear on their own
-screen, and answers "n". The agent gets "denied" and carries on without the address. The console's
-audit (bottom) keeps every call, with no clear value. Pure SVG + CSS keyframes, so it plays on
+the email. The locklog console (right, its own account and container) shows the read-pii approval
+screen: the masked record with the exact span marked » «, the agent's reason and what revealing it
+lets the agent do. The human answers "n". The agent gets "denied by the human" and carries on
+without the address. The console's audit (bottom) keeps every call, with no clear value. Pure SVG + CSS keyframes, so it plays on
 GitHub, on the site and in any browser; every animation shares one clock of LOOP seconds, and
 prefers-reduced-motion shows the final frame.
 
@@ -29,8 +29,6 @@ SANS = "Inter,-apple-system,'Segoe UI',system-ui,Helvetica,Arial,'DejaVu Sans',s
 # The values the demo shows. A pseudonym is ⟦kind:ID⟧ with a 12-character Crockford base32 ID.
 EMAIL = "⟦email:7F3KQ2M9ZD4X⟧"
 IP = "⟦ip:K2M9ZDQ81RTA⟧"
-CLEAR_EMAIL = "jane.doe@example.com"
-CLEAR_IP = "203.0.113.7"
 
 css, body = [], []
 n = 0
@@ -132,8 +130,8 @@ row = len(agent)
 body.append(spans(ax, ay + row * LH, [("  └ ", D), ("Waiting for approval in the locklog console…", Y)],
                   cls=show(6.1, 11.4)))
 reply = [
-    (11.6, [("  └ ", D), ("locklog: the human denied this unmask (denied).", T)]),
-    (11.6, [("    ", D), ("Do not retry; ask the user.", T)]),
+    (11.6, [("  └ ", D), ("Error: denied by the human; do not retry", T)]),
+    (11.6, [("    ", D), ("unless asked", T)]),
     (12.4, [("● ", T), ("The PDF renderer's upstream has timed out since", T)]),
     (12.4, [("  ", T), ("14:02:11 (1,204 requests, order 4812 among them).", T)]),
     (12.4, [("  ", T), ("I can't see the customer's address: support can", T)]),
@@ -162,9 +160,10 @@ for i, (t, tool, what) in enumerate(notes):
     body.append(spans(cx, cy + (3 + i) * LH, [("· ", D), (tool, S), (" " + what, D)], cls=show(t, 6.2), size=CS))
 screen = [
     [("╭─ ", V), ("STAGING", Y), (" · unmask · read-pii ", T), ("──────────────────────────────", V)],
-    [("│ ", V), ("asked by uid 1000 (host agent) · reason ", D), ('"contact the customer"', T)],
-    [("│ ", V), ("record api · 2026-10-30T14:02:11.204Z", T)],
-    [("│", V)],
+    [("│ ", V), ("uid 1000 · reason ", D), ('"contact the customer"', T)],
+    [("│ ", V), ("source: api · record: 2026-10-30T14:02:11.204Z", T)],
+    [("│ ", V), ("reveal: ", T), (EMAIL, Y)],
+    [("│ ", V), ("spans: 1 in this record (marked » «)", T)],
 ]
 srow = 3
 g = [f'<g class="{show(6.4)}">']
@@ -172,24 +171,20 @@ for i, parts in enumerate(screen):
     g.append(spans(cx, cy + (srow + i) * LH, parts, size=CS))
 g.append("</g>")
 body.append("".join(g))
-# The record, masked, with the asked span highlighted; Ctrl-O shows it in clear here only.
+# The record stays masked on the approval screen, with the asked span marked.
 ry = cy + (srow + len(screen)) * LH
-pre = "│   render pdf for "
-masked_rec = [("│   ", V), ("render pdf for ", T), (EMAIL, Y), (" from ", T), (IP, TL)]
-clear_rec = [("│   ", V), ("render pdf for ", T), (CLEAR_EMAIL, Y), (" from ", T), (CLEAR_IP, T)]
+pre = "│   render pdf for »"
+marked_rec = [("│   ", V), ("render pdf for ", T), ("»", C["amber"]), (EMAIL, Y), ("«", C["amber"]),
+              (" from ", T), (IP, TL)]
 body.append(f'<rect x="{cx + CHW * len(pre) - 2:.1f}" y="{ry - 12}" width="{CHW * len(EMAIL) + 4:.1f}" '
-            f'height="16" rx="3" fill="{C["amber"]}" fill-opacity=".18" class="{show(6.4, 8.6)}"/>')
-body.append(f'<rect x="{cx + CHW * len(pre) - 2:.1f}" y="{ry - 12}" width="{CHW * len(CLEAR_EMAIL) + 4:.1f}" '
-            f'height="16" rx="3" fill="{C["amber"]}" fill-opacity=".18" class="{show(8.6, 10.0)}"/>')
-body.append(spans(cx, ry, masked_rec, cls=show(6.4, 8.6), size=CS))
-body.append(spans(cx, ry, clear_rec, cls=show(8.6, 10.0), size=CS))
-body.append(spans(cx, ry, masked_rec, cls=show(10.0), size=CS))
+            f'height="16" rx="3" fill="{C["amber"]}" fill-opacity=".18" class="{show(6.4)}"/>')
+body.append(spans(cx, ry, marked_rec, cls=show(6.4), size=CS))
 body.append(spans(cx, ry + LH, [("│   ", V), ("failed: upstream timed out", T)], cls=show(6.4), size=CS))
 tail = [
     [("│", V)],
-    [("│ ", V), ("27 records with this pseudonym went to agents this epoch;", D)],
-    [("│ ", V), ("the agent can link this value to every one of them.", D)],
-    [("│ ", V), ("Ctrl-O shows the record in clear, on this screen only.", D)],
+    [("│ ", V), ("! the agent receives these clear values, once", Y)],
+    [("│ ", V), ("! the agent can link this value to every record", Y)],
+    [("│ ", V), ("  with this pseudonym (in this epoch)", Y)],
 ]
 g = [f'<g class="{show(6.6)}">']
 for i, parts in enumerate(tail):
@@ -197,15 +192,15 @@ for i, parts in enumerate(tail):
 g.append("</g>")
 body.append("".join(g))
 py = ry + (2 + len(tail)) * LH
-body.append(spans(cx, py, [("╰─ ", V), ("Unmask for the agent? [y/N] ", T)], cls=show(6.8), size=CS))
-body.append(spans(cx + CHW * 31, py, [("Ctrl-O", C["amber"])], cls=show(8.3, 8.9, fade=0.05), size=CS))
-body.append(text(cx + CHW * 31, py, "n", cls=show(10.6, fade=0.03), size=CS, col=R, weight=700))
+ask = "╰─ Approve? [y/N] "
+body.append(spans(cx, py, [("╰─ ", V), ("Approve? [y/N] ", T)], cls=show(6.8), size=CS))
+body.append(text(cx + CHW * len(ask), py, "n", cls=show(10.6, fade=0.03), size=CS, col=R, weight=700))
 blink = anim([(0, "opacity:0"), (6.9, "opacity:0"), (6.91, "opacity:1"), (7.4, "opacity:1"),
               (7.41, "opacity:0"), (7.8, "opacity:0"), (7.81, "opacity:1"), (8.29, "opacity:1"),
-              (8.3, "opacity:0"), (9.0, "opacity:0"), (9.01, "opacity:1"), (9.5, "opacity:1"),
+              (8.3, "opacity:0"), (8.7, "opacity:0"), (8.71, "opacity:1"), (9.5, "opacity:1"),
               (9.51, "opacity:0"), (9.9, "opacity:0"), (9.91, "opacity:1"), (10.59, "opacity:1"),
               (10.6, "opacity:0"), (LOOP, "opacity:0")])
-body.append(f'<rect x="{cx + CHW * 31:.1f}" y="{py - 11}" width="{CHW:.1f}" height="14" '
+body.append(f'<rect x="{cx + CHW * len(ask):.1f}" y="{py - 11}" width="{CHW:.1f}" height="14" '
             f'fill="{T}" class="{blink}"/>')
 body.append(spans(cx, py + LH, [("✗ ", R), ("denied · the agent gets no clear value", T)], cls=show(11.0), size=CS))
 body.append(f'<g class="{show(7.0, 10.6, fade=0.1)}"><rect x="{CX + CW - 196}" y="{py + 4}" '
@@ -260,17 +255,17 @@ def jline(pairs):
     return out
 
 
-free = jline([("tool", '"locklog_patterns"', T), ("decision", '"free"', G), ("profile", '"staging"', T),
-              "…", ("scanned", "12582912", S), ("kinds", '["email","ip"]', TL), "…", ("peer_uid", "1000", T)])
-denied = jline([("tool", '"locklog_unmask"', T), ("decision", '"denied"', R), ("profile", '"staging"', T),
-                "…", ("spans", f'["{EMAIL}"]', TL), ("facade", '"tty"', T), "…", ("peer_uid", "1000", T)])
+free = jline([("event", '"call"', T), ("profile", '"staging"', T), ("decision", '"ok"', G),
+              "…", ("peer_uid", "1000", T), "…", ("method", '"log.patterns"', T), ("sources", '["api"]', S)])
+denied = jline([("event", '"call"', T), ("profile", '"staging"', T), ("decision", '"denied"', R),
+                "…", ("peer_uid", "1000", T), "…", ("method", '"log.unmask"', T), ("sources", '["api"]', S)])
 body.append(spans(BX + 16, BY + 48, free, cls=show(3.6), size=10))
 body.append(spans(BX + 16, BY + 68, denied, cls=show(11.4), size=10))
 
 # Captions.
 caps = [(0.0, 5.7, "Counts, patterns and traces are free, and masked before the model sees them."),
         (5.7, 11.2, "Unmasking a value waits for you, in a console the agent can't reach."),
-        (11.2, END, "You saw it in clear. The agent didn't, and the audit kept the call.")]
+        (11.2, END, "You said no. The agent never saw the address, and the audit kept the call.")]
 for t0, t1, s in caps:
     body.append(text(W / 2, 580, s, cls=show(t0 + 0.05, t1 - 0.2), size=23, weight=650,
                      family=SANS, anchor="middle"))
@@ -279,8 +274,8 @@ label = ("locklog: Claude Code asks when the PDF errors started on a staging pro
          "shows the step at 14:02, locklog_patterns finds the new pattern with the email and the IP "
          "already pseudonymised, and locklog_trace follows order 4812: all free and masked. The agent "
          "then asks locklog_unmask for the email. The locklog console, in its own account and "
-         "container, shows the approval screen with the span highlighted; the human presses Ctrl-O to "
-         "see the record in clear on their screen only, and answers n. The agent gets denied and "
+         "container, shows the read-pii approval screen with the masked record and the span marked; "
+         "the human answers n. The agent gets denied and "
          "carries on without the address; the audit records every call with pseudonyms only.")
 print(f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W}" height="{H}" '
       f'role="img" aria-label="{esc(label)}">')

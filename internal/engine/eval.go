@@ -183,6 +183,9 @@ func (q *Query) match(rec mask.Record, b *budget) bool {
 	if q.textRe != nil && !anyText(rec, b, regexWeight(q.textReCost), q.textRe.MatchString) {
 		return false
 	}
+	if q.trace != nil && !q.trace.match(rec, b) {
+		return false
+	}
 	return !b.exceeded()
 }
 
@@ -196,6 +199,9 @@ func (q *Query) textPreds() int64 {
 		}
 	}
 	if q.Text != "" {
+		n++
+	}
+	if q.trace != nil {
 		n++
 	}
 	if q.textRe != nil {

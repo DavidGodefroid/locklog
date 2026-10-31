@@ -709,31 +709,42 @@ const MaxAround = 50
 // Around returns up to before records before ref, ref's record and up to
 // after records after it, reading back at most 16 granules.
 func (s *Source) Around(ctx context.Context, ref source.RawRef, before, after int) ([]source.RawRecord, error) {
-	before, after = max(0, min(before, MaxAround)), max(0, min(after, MaxAround))
-	n := ref.Offset / source.GranuleBytes
-	for _, back := range []int64{1, 4, 16} {
-		recs, enough, err := s.around(ctx, ref, max(0, n-back), before, after)
-		if err != nil {
-			return nil, err
-		}
-		if enough || n-back <= 0 || back == 16 {
-			return recs, nil
-		}
-	}
-	return nil, nil // unreachable
+	recs, _, err := s.AroundMeasured(ctx, ref, before, after)
+	return recs, err
 }
 
-func (s *Source) around(ctx context.Context, ref source.RawRef, fromGranule int64, before, after int) ([]source.RawRecord, bool, error) {
+// AroundMeasured is Around, also returning the bytes it processed (read,
+// decompressed and discarded, over every read-back attempt): see
+// source.AroundMeter.
+func (s *Source) AroundMeasured(ctx context.Context, ref source.RawRef, before, after int) ([]source.RawRecord, int64, error) {
+	before, after = max(0, min(before, MaxAround)), max(0, min(after, MaxAround))
+	n := ref.Offset / source.GranuleBytes
+	var processed int64
+	for _, back := range []int64{1, 4, 16} {
+		recs, enough, p, err := s.around(ctx, ref, max(0, n-back), before, after)
+		processed += p
+		if err != nil {
+			return nil, processed, err
+		}
+		if enough || n-back <= 0 || back == 16 {
+			return recs, processed, nil
+		}
+	}
+	return nil, processed, nil // unreachable
+}
+
+func (s *Source) around(ctx context.Context, ref source.RawRef, fromGranule int64, before, after int) (_ []source.RawRecord, _ bool, processed int64, _ error) {
 	f, fi, err := s.openStreamFile(ctx, ref.Stream)
 	if err != nil {
-		return nil, false, stale(err)
+		return nil, false, 0, stale(err)
 	}
 	it, err := s.newIter(ctx, f, fi, fromGranule*source.GranuleBytes, math.MaxInt64)
 	if err != nil {
 		f.Close()
-		return nil, false, err
+		return nil, false, 0, err
 	}
 	defer it.Close()
+	defer func() { processed = it.Processed() }()
 	var prev []source.RawRecord
 	var out []source.RawRecord
 	found := false
@@ -743,12 +754,12 @@ func (s *Source) around(ctx context.Context, ref source.RawRef, fromGranule int6
 			break
 		}
 		if err != nil {
-			return nil, false, err
+			return nil, false, 0, err
 		}
 		if !found {
 			if rec.Ref.Offset == ref.Offset {
 				if rec.Ref.Length != ref.Length {
-					return nil, false, source.ErrStale
+					return nil, false, 0, source.ErrStale
 				}
 				found = true
 				out = append(prev, rec)
@@ -758,7 +769,7 @@ func (s *Source) around(ctx context.Context, ref source.RawRef, fromGranule int6
 				continue
 			}
 			if rec.Ref.Offset > ref.Offset {
-				return nil, false, source.ErrStale
+				return nil, false, 0, source.ErrStale
 			}
 			prev = append(prev, rec)
 			if len(prev) > before {
@@ -772,9 +783,9 @@ func (s *Source) around(ctx context.Context, ref source.RawRef, fromGranule int6
 		}
 	}
 	if !found {
-		return nil, false, source.ErrStale
+		return nil, false, 0, source.ErrStale
 	}
-	return out, len(prev) >= before || fromGranule == 0, nil
+	return out, len(prev) >= before || fromGranule == 0, 0, nil
 }
 
 // Describe returns the source's schema: streams, sizes, the index coverage

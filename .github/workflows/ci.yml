@@ -46,11 +46,21 @@ jobs:
           }
 
   # The engine and the sources under the race detector (cgo, -short: the
-  # heaviest equivalence cases run in full in the test job above).
+  # heaviest equivalence cases run in full in the test job above). The
+  # engine's read-around tests (tail, context, trace) run in a shard of
+  # their own: under -race they take as long as the rest.
   race:
-    name: race (engine, sources)
+    name: race (${{ matrix.shard }})
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: engine read-around
+            args: -run '^(TestTail|TestContext|TestTrace)' ./internal/engine/
+          - shard: engine, sources
+            args: -skip '^(TestTail|TestContext|TestTrace)' ./internal/engine/ ./internal/source/...
     env:
       CGO_ENABLED: "1"
     steps:
@@ -65,7 +75,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          go test -race -short -timeout 15m ./internal/engine/ ./internal/source/... 2>&1 | tee test.log || {
+          go test -race -short -timeout 30m ${{ matrix.args }} 2>&1 | tee test.log || {
             grep -E -- '--- FAIL|_test\.go:[0-9]+:|^FAIL|panic:|WARNING: DATA RACE' test.log | head -40 | sed 's/^/::error::/'
             exit 1
           }
@@ -131,10 +141,60 @@ jobs:
       - name: integration tests
         env:
           LOCKLOG_LOKI_URL: http://127.0.0.1:3100
-        run: go test -tags integration -count=1 ./test/...
+        run: go test -tags integration -count=1 ./test/loki/...
       - name: backend logs on failure
         if: failure()
         run: docker logs loki 2>&1 | tail -100
+
+  # The Elasticsearch source against Elasticsearch 8 and OpenSearch 2, both
+  # with security on (OpenSearch: the security plugin's demo configuration,
+  # TLS on the transport layer only), from pulled images. The tests create
+  # read-only and write-capable users and check the production refusal.
+  integration-elastic:
+    name: integration (elasticsearch, opensearch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      CGO_ENABLED: "0"
+      OS_ADMIN_PW: "Zq8#Vt3rLp!kW7xN-ci"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.x"
+          check-latest: true
+      - name: start Elasticsearch and OpenSearch
+        run: |
+          docker run -d --name es -p 127.0.0.1:9200:9200 -e discovery.type=single-node \
+            -e xpack.security.enabled=true -e xpack.security.http.ssl.enabled=false \
+            -e ELASTIC_PASSWORD=ci-elastic-pw -e "ES_JAVA_OPTS=-Xms512m -Xmx512m" \
+            docker.elastic.co/elasticsearch/elasticsearch:8.15.3
+          docker run -d --name os -p 127.0.0.1:9201:9200 -e discovery.type=single-node \
+            -e "OPENSEARCH_INITIAL_ADMIN_PASSWORD=$OS_ADMIN_PW" -e plugins.security.ssl.http.enabled=false \
+            -e "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m" opensearchproject/opensearch:2.17.1
+          for i in $(seq 1 120); do
+            if curl -fsS -u elastic:ci-elastic-pw http://127.0.0.1:9200/_cluster/health >/dev/null 2>&1 &&
+              curl -fsS -u "admin:$OS_ADMIN_PW" http://127.0.0.1:9201/_plugins/_security/authinfo >/dev/null 2>&1; then exit 0; fi
+            sleep 2
+          done
+          docker logs es | tail -50
+          docker logs os | tail -50
+          exit 1
+      - name: OpenSearch refuses an anonymous read
+        run: test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:9201/_cat/indices)" = 401
+      - name: integration tests
+        env:
+          LOCKLOG_ES_URL: http://127.0.0.1:9200
+          LOCKLOG_ES_ADMIN: elastic:ci-elastic-pw
+          LOCKLOG_OPENSEARCH_URL: http://127.0.0.1:9201
+        run: LOCKLOG_OPENSEARCH_ADMIN="admin:$OS_ADMIN_PW" go test -tags integration -count=1 -v ./test/elastic/...
+      - name: backend logs on failure
+        if: failure()
+        run: |
+          docker logs es 2>&1 | tail -100
+          docker logs os 2>&1 | tail -100
 
   # Every fuzz target for a short time; run scripts/fuzz.sh with a longer
   # FUZZTIME locally for deeper runs.
@@ -198,6 +258,69 @@ jobs:
           go test -c -o journald.test ./internal/source/journald/
           sudo LOCKLOG_JOURNALD_IT=1 ./journald.test -test.run '^TestLiveJournal$' -test.v | tee it.log
           grep -q -- '--- PASS: TestLiveJournal' it.log
+
+  # The heavy LL-16 suites, on every pull request: the leak suite with every
+  # canary kind in every encoding written into every query position, the
+  # oracle, the equivalence suites, and the latency cases of the oracle
+  # (repeated, interleaved runs on production and non-production defaults,
+  # idle and under a CPU hog, compared statistically). The test job runs
+  # the quick suites (injection, the agent-rule leak case, incident (a)).
+  suites:
+    name: suites (leak, oracle, equivalence, latency)
+    runs-on: ubuntu-latest
+    timeout-minutes: 65
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.x"
+          check-latest: true
+      - name: suites
+        shell: bash
+        run: |
+          set -o pipefail
+          GOMAXPROCS=2 LOCKLOG_SUITES=1 LOCKLOG_SUITE_FULL=1 LOCKLOG_SUITE_TIMING=1 go test -count=1 -timeout 60m -v \
+            -run '^(TestSuite|TestLeakScanner)' ./internal/engine/ 2>&1 |
+            grep -v -E '^=== (RUN|PAUSE|CONT)|: [0-9]+ pages in |: scanned in ' | tee suites.log
+
+  # Local incident (b) at realistic volume (R6-P1): 7 days x 1 GiB/day of
+  # nginx and journald (a quarter of that: the journal history imported by
+  # systemd-journal-remote in export format with past timestamps); job 1
+  # warm and cold, idle and with the host slowed 3x; no prompt (<= 3); warm
+  # within 5 min, cold within 5 min plus the backfill (1.5x the warm build).
+  incidents:
+    name: incidents (local, realistic volume)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.x"
+          check-latest: true
+      - name: systemd-journal-remote
+        run: sudo apt-get update -q && sudo apt-get install -y -q systemd-journal-remote
+      - name: incidents
+        shell: bash
+        run: |
+          set -o pipefail
+          # About 12 GiB of data: the runner's larger temporary disk when
+          # there is one.
+          dir="${RUNNER_TEMP}"
+          if [ -d /mnt ] && sudo mkdir -p /mnt/incidents && sudo chown "$(id -u):$(id -g)" /mnt/incidents; then dir=/mnt/incidents; fi
+          df -h "$dir"
+          TMPDIR="$dir" GOMAXPROCS=2 LOCKLOG_INCIDENT_VOLUME=1GiB \
+            LOCKLOG_JOURNAL_REMOTE=/usr/lib/systemd/systemd-journal-remote \
+            go test -count=1 -timeout 85m -v -run '^(TestIncidentOrder4812|TestIncidentVolume)$' ./internal/engine/ 2>&1 |
+            grep -v -E '^=== (RUN|PAUSE|CONT)' | tee incidents.log
 
   # One required check name ("lint") for every static check; later pull
   # requests add steps here (goreleaser check, install.sh rules, ...).
@@ -455,6 +578,117 @@ jobs:
           LOCKLOG_E2E_DIR="$d" go test -tags e2e -count=1 -v -timeout 15m -run '^TestCountRotatedGz$' ./test/e2e 2>&1 | tee e2e.log
           grep -q -- '--- PASS: TestCountRotatedGz' e2e.log
       - name: remove the console and the volumes
+        if: always()
+        run: |
+          ids=$(docker ps -aq --filter label=locklog.console=1)
+          [ -z "$ids" ] || docker rm -f $ids >/dev/null
+          docker volume rm locklog-run locklog-home >/dev/null 2>&1 || true
+
+  # The five-minute path, timed from setup to the first answer (the image is
+  # built before the clock starts): the launcher installed on PATH, `setup
+  # --yes --no-production --agent host`, the console, and an MCP client
+  # spawning the server the written .mcp.json names (test/e2e).
+  five-minutes:
+    name: five-minutes
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.x"
+          check-latest: true
+      - name: docker build
+        run: docker build -t locklog .
+      - name: build the e2e test
+        run: go test -c -tags e2e -o "$RUNNER_TEMP/e2e.test" ./test/e2e
+      - name: TestFiveMinutes
+        shell: bash
+        run: |
+          set -euxo pipefail
+          d="$RUNNER_TEMP/e2e-$(od -An -N4 -tx4 /dev/urandom | tr -d ' ')"
+          mkdir -m 0755 "$d"
+          cd test/e2e
+          LOCKLOG_E2E_DIR="$d" "$RUNNER_TEMP/e2e.test" -test.count=1 -test.v -test.timeout 15m -test.run '^TestFiveMinutes$' 2>&1 | tee "$RUNNER_TEMP/e2e.log"
+          grep -q -- '--- PASS: TestFiveMinutes' "$RUNNER_TEMP/e2e.log"
+      - name: remove the consoles and the volumes
+        if: always()
+        run: |
+          ids=$(docker ps -aq --filter label=locklog.console=1)
+          [ -z "$ids" ] || docker rm -f $ids >/dev/null
+          docker volume rm locklog-run locklog-home >/dev/null 2>&1 || true
+
+  # The own-container recipe: an agent image built on the runner from the
+  # snippet setup prints, run as its non-root agent user, calls the console.
+  e2e-own-container:
+    name: own-container recipe (e2e)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CGO_ENABLED: "0"
+      LOCKLOG_E2E_AGENT_BASE: alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.x"
+          check-latest: true
+      - name: docker build
+        run: docker build -t locklog .
+      - name: build the e2e test
+        run: go test -c -tags e2e -o "$RUNNER_TEMP/e2e.test" ./test/e2e
+      - name: TestOwnContainer
+        shell: bash
+        run: |
+          set -euxo pipefail
+          d="$RUNNER_TEMP/e2e-$(od -An -N4 -tx4 /dev/urandom | tr -d ' ')"
+          mkdir -m 0755 "$d"
+          cd test/e2e
+          LOCKLOG_E2E_DIR="$d" "$RUNNER_TEMP/e2e.test" -test.count=1 -test.v -test.timeout 15m -test.run '^TestOwnContainer$' 2>&1 | tee "$RUNNER_TEMP/e2e.log"
+          grep -q -- '--- PASS: TestOwnContainer' "$RUNNER_TEMP/e2e.log"
+      - name: remove the consoles and the volumes
+        if: always()
+        run: |
+          ids=$(docker ps -aq --filter label=locklog.console=1)
+          [ -z "$ids" ] || docker rm -f $ids >/dev/null
+          docker volume rm locklog-run locklog-home >/dev/null 2>&1 || true
+
+  # The host-agent guard end to end: the launcher's mcp on a production
+  # profile served by a real console is refused (E_PRODUCTION_HOST_AGENT).
+  e2e-production-guard:
+    name: production guard (e2e)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.x"
+          check-latest: true
+      - name: docker build
+        run: docker build -t locklog .
+      - name: build the e2e test
+        run: go test -c -tags e2e -o "$RUNNER_TEMP/e2e.test" ./test/e2e
+      - name: TestProductionGuard
+        shell: bash
+        run: |
+          set -euxo pipefail
+          d="$RUNNER_TEMP/e2e-$(od -An -N4 -tx4 /dev/urandom | tr -d ' ')"
+          mkdir -m 0755 "$d"
+          cd test/e2e
+          LOCKLOG_E2E_DIR="$d" "$RUNNER_TEMP/e2e.test" -test.count=1 -test.v -test.timeout 15m -test.run '^TestProductionGuard$' 2>&1 | tee "$RUNNER_TEMP/e2e.log"
+          grep -q -- '--- PASS: TestProductionGuard' "$RUNNER_TEMP/e2e.log"
+      - name: remove the consoles and the volumes
         if: always()
         run: |
           ids=$(docker ps -aq --filter label=locklog.console=1)

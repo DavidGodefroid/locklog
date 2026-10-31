@@ -66,6 +66,9 @@ func Canonical(p Policy) Policy {
 			r := *s.Remote
 			r.TrustedLabels = kconfig.SortedSet(r.TrustedLabels)
 			r.TrustedMetadata = kconfig.SortedSet(r.TrustedMetadata)
+			r.Indices = sortedOrNil(r.Indices)
+			r.TrustedFields = sortedOrNil(r.TrustedFields)
+			r.ReadOnlyRoles = sortedOrNil(r.ReadOnlyRoles)
 			r.Selector = maps.Clone(r.Selector)
 			if r.Selector == nil {
 				r.Selector = map[string]string{}
@@ -249,6 +252,15 @@ func diffSource(a, c Source) []kconfig.Change {
 		same("org_id", ar.OrgID, cr.OrgID)
 		out = append(out, kconfig.SetDiff(pre+"trusted_labels", ar.TrustedLabels, cr.TrustedLabels, false)...)
 		out = append(out, kconfig.SetDiff(pre+"trusted_metadata", ar.TrustedMetadata, cr.TrustedMetadata, false)...)
+		// Elasticsearch / OpenSearch: another index, trusted field or
+		// vouched-for role reads or shows more; another time, message or
+		// tiebreaker field reads the same documents another way.
+		out = append(out, kconfig.SetDiff(pre+"indices", kconfig.SortedSet(ar.Indices), kconfig.SortedSet(cr.Indices), false)...)
+		out = append(out, kconfig.SetDiff(pre+"trusted_fields", kconfig.SortedSet(ar.TrustedFields), kconfig.SortedSet(cr.TrustedFields), false)...)
+		out = append(out, kconfig.SetDiff(pre+"read_only_roles", kconfig.SortedSet(ar.ReadOnlyRoles), kconfig.SortedSet(cr.ReadOnlyRoles), false)...)
+		same("time_field", ar.TimeField, cr.TimeField)
+		same("message_field", ar.MessageField, cr.MessageField)
+		same("tiebreaker", ar.TieBreaker, cr.TieBreaker)
 		for _, ch := range kconfig.DiffBase(ar.Base, cr.Base) {
 			ch.Field = pre + ch.Field
 			out = append(out, ch)
@@ -270,7 +282,11 @@ func remoteString(r *Remote) string {
 	if r == nil {
 		return "(none)"
 	}
-	return r.URL + " " + selectorString(r.Selector)
+	out := r.URL + " " + selectorString(r.Selector)
+	if len(r.Indices) > 0 {
+		out += " indices [" + strings.Join(r.Indices, ", ") + "]"
+	}
+	return out
 }
 
 // Describe is the policy as lines for the console's status and review
@@ -343,6 +359,19 @@ func describeSource(s Source) []string {
 		}
 		item("trusted labels", r.TrustedLabels)
 		item("trusted metadata", r.TrustedMetadata)
+	case KindElastic, KindOpenSearch:
+		r := s.Remote
+		lines = append(lines, "  url: "+r.URL, "  indices: "+strings.Join(r.Indices, ", "),
+			fmt.Sprintf("  auth: %s · tls: %s · credentials: %s", r.Auth, r.TLS, r.Credentials),
+			fmt.Sprintf("  time field: %s · message field: %s", r.TimeField, r.MessageField))
+		if len(r.Selector) > 0 {
+			lines = append(lines, "  selector: "+selectorString(r.Selector))
+		}
+		if r.TieBreaker != "" {
+			lines = append(lines, "  tiebreaker: "+r.TieBreaker)
+		}
+		item("trusted fields", r.TrustedFields)
+		item("read-only roles", r.ReadOnlyRoles)
 	}
 	item("trusted", s.TrustedFields())
 	return lines
