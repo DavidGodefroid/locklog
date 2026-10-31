@@ -323,7 +323,7 @@ func TestResponsesKeepTrustedFieldsOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	hs, _, err := s.fetchSlice(ctx, Filter{}, 0, 1<<62)
+	hs, _, err := s.fetchSlice(ctx, Filter{}, 0, 1<<62, nil)
 	if err != nil || len(hs) != 1 {
 		t.Fatalf("%v %d", err, len(hs))
 	}
@@ -338,7 +338,7 @@ func TestPartialAnswersFail(t *testing.T) {
 		f := newFake(dataset(10))
 		mod(f)
 		s := newSource(t, f, nil)
-		if _, _, err := s.fetchSlice(ctx, Filter{}, t0.UnixNano(), t0.Add(time.Hour).UnixNano()); err == nil {
+		if _, _, err := s.fetchSlice(ctx, Filter{}, t0.UnixNano(), t0.Add(time.Hour).UnixNano(), nil); err == nil {
 			t.Fatal("a partial answer was served")
 		}
 		if _, err := s.IndexCounts(ctx, source.CountQuery{Range: source.Range{From: t0, To: t0.Add(time.Hour)}, Bucket: time.Minute}); err == nil || errors.Is(err, source.ErrNotIndexable) {
@@ -572,10 +572,21 @@ func TestCheckPrivileges(t *testing.T) {
 		{"global privileges", grants(`"global":[{"application":{"manage":{"applications":["*"]}}}]`), true, false},
 		{"an unknown member", grants(`"future_grants":["x"]`), true, false},
 		{"write on a concrete index a read-only pattern matches", grants(`"indices":[{"names":["logs-*"],"privileges":["read"]},{"names":["logs-app"],"privileges":["index"]}]`), true, false},
-		{"write on another index", grants(`"indices":[{"names":["logs-*"],"privileges":["read"]},{"names":["*"],"privileges":["create_doc"]}]`), true, false},
+		{"write on every index", grants(`"indices":[{"names":["logs-*"],"privileges":["read"]},{"names":["*"],"privileges":["create_doc"]}]`), true, false},
+		{"write on a pattern covering a resolved index", grants(`"indices":[{"names":["logs-*"],"privileges":["read"]},{"names":["lo?s-b*"],"privileges":["write"]}]`), true, false},
+		{"write on a data stream's backing index", grants(`"indices":[{"names":["logs-*"],"privileges":["read"]},{"names":[".ds-logs-*"],"privileges":["index"]}]`), true, false},
+		{"write on the data stream", grants(`"indices":[{"names":["logs-*"],"privileges":["read"]},{"names":["logs-app"],"privileges":["delete"]}]`), true, false},
+		{"manage on an alias", grants(`"indices":[{"names":["logs-*"],"privileges":["read"]},{"names":["logs-current"],"privileges":["manage"]}]`), true, false},
+		{"write on a future index of the pattern", grants(`"indices":[{"names":["logs-*"],"privileges":["read"]},{"names":["logs-z"],"privileges":["write"]}]`), true, false},
+		{"write on a regex pattern", grants(`"indices":[{"names":["logs-*"],"privileges":["read"]},{"names":["/metrics-.*/"],"privileges":["write"]}]`), true, false},
+		{"all on the indices", grants(`"indices":[{"names":["logs-*"],"privileges":["all"]}]`), true, false},
+		{"unknown index privilege", grants(`"indices":[{"names":["logs-*"],"privileges":["read","future_priv"]}]`), true, false},
+		{"write on an unrelated index", grants(`"indices":[{"names":["logs-*"],"privileges":["read"]},{"names":["metrics-*"],"privileges":["write"]}]`), true, true},
+		{"resolve refused", func(f *fakeES) { f.resolved = "not json" }, true, false},
+		{"resolve without indices", func(f *fakeES) { f.resolved = `{}` }, true, false},
 		{"monitor_* and read_* cluster privileges", grants(`"cluster":["monitor","monitor_ml","read_ilm"]`), true, true},
 		{"write key off production", grants(`"indices":[{"names":["logs-*"],"privileges":["read","write"]}]`), false, true},
-		{"no read", func(f *fakeES) { f.privs["read"] = false }, false, false},
+		{"opensearch backend for an elastic source", func(f *fakeES) { f.flavour, f.roles = "opensearch", []string{"readall"} }, false, false},
 		{"security disabled on production", func(f *fakeES) { f.security = false }, true, false},
 		{"security disabled off production", func(f *fakeES) { f.security = false }, false, true},
 		{"opensearch readall on production", func(f *fakeES) { f.flavour, f.roles = "opensearch", []string{"readall"} }, true, true},
@@ -589,7 +600,11 @@ func TestCheckPrivileges(t *testing.T) {
 		if tt.mod != nil {
 			tt.mod(f)
 		}
-		s := newSource(t, f, nil)
+		s := newSource(t, f, func(o *Options) {
+			if f.flavour == "opensearch" && !strings.HasSuffix(tt.name, "for an elastic source") {
+				o.Kind = KindOpenSearch
+			}
+		})
 		info, err := s.Check(ctx, tt.production)
 		if (err == nil) != tt.ok {
 			t.Errorf("%s: %+v %v", tt.name, info, err)
@@ -598,9 +613,14 @@ func TestCheckPrivileges(t *testing.T) {
 	// A vouched-for custom role passes.
 	f := newFake(nil)
 	f.flavour, f.roles = "opensearch", []string{"logs_reader"}
-	s := newSource(t, f, func(o *Options) { o.ReadOnlyRoles = []string{"logs_reader"} })
+	s := newSource(t, f, func(o *Options) { o.Kind, o.ReadOnlyRoles = KindOpenSearch, []string{"logs_reader"} })
 	if info, err := s.Check(ctx, true); err != nil || info.Flavour != FlavourOpenSearch || !info.Verified {
 		t.Fatalf("%+v %v", info, err)
+	}
+	// An Elasticsearch backend for an opensearch source is refused.
+	s = newSource(t, newFake(nil), func(o *Options) { o.Kind = KindOpenSearch })
+	if _, err := s.Check(ctx, false); err == nil {
+		t.Fatal("an Elasticsearch backend passed for kind opensearch")
 	}
 }
 

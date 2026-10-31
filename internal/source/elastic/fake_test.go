@@ -19,6 +19,10 @@ import (
 // from Elasticsearch 8.15).
 const readOnlyGrants = `{"cluster":["monitor"],"global":[],"indices":[{"names":["logs-*"],"privileges":["read","view_index_metadata"],"allow_restricted_indices":false}],"applications":[],"run_as":[]}`
 
+// resolvedLogs is the _resolve/index answer of logs-* (shape recorded from
+// Elasticsearch 8.15): two indices, an alias, a data stream.
+const resolvedLogs = `{"indices":[{"name":"logs-a","aliases":["logs-current"],"attributes":["open"]},{"name":"logs-b","attributes":["open"]},{"name":".ds-logs-app-2026.10.30-000001","attributes":["open"],"data_stream":"logs-app"}],"aliases":[{"name":"logs-current","indices":["logs-a"]}],"data_streams":[{"name":"logs-app","backing_indices":[".ds-logs-app-2026.10.30-000001"],"timestamp_field":"@timestamp"}]}`
+
 var t0 = time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
 
 // fakeDoc is one document: its time (milliseconds, as a date field) and
@@ -42,8 +46,8 @@ type fakeES struct {
 	seg       string
 	docs      []fakeDoc
 	flavour   string // "" (Elasticsearch) or "opensearch"
-	privs     map[string]bool
 	grants    string // the _privileges answer
+	resolved  string // the _resolve/index answer
 	roles     []string
 	security  bool // privilege endpoints answer
 	requests  []string
@@ -57,7 +61,7 @@ type fakeES struct {
 }
 
 func newFake(docs []fakeDoc) *fakeES {
-	return &fakeES{seg: "logs-*", docs: docs, security: true, privs: map[string]bool{"read": true}, grants: readOnlyGrants,
+	return &fakeES{seg: "logs-*", docs: docs, security: true, grants: readOnlyGrants, resolved: resolvedLogs,
 		types: map[string]string{"@timestamp": "date", "app": "keyword", "level": "keyword", "pod": "keyword", "event.id": "keyword", "message": "text", "user_email": "keyword"}}
 }
 
@@ -96,30 +100,12 @@ func (f *fakeES) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		_, _ = w.Write([]byte(`{"name":"n","version":{"number":"8.15.3","build_flavor":"default"},"tagline":"You Know, for Search"}`))
-	case r.Method == "GET" && r.URL.Path == "/_security/user/_has_privileges":
-		if !f.security || f.flavour == "opensearch" {
-			f.fail(w, 400, "security is not enabled")
+	case r.Method == "GET" && r.URL.Path == "/_resolve/index"+pre:
+		if r.URL.Query().Get("expand_wildcards") != "open" {
+			f.fail(w, 400, "expand_wildcards")
 			return
 		}
-		var pb PrivilegesBody
-		if err := strictDecode(body, &pb); err != nil {
-			f.fail(w, 400, err.Error())
-			return
-		}
-		cl := map[string]bool{}
-		for _, p := range pb.Cluster {
-			cl[p] = f.privs["cluster:"+p]
-		}
-		idx := map[string]map[string]bool{}
-		for _, ip := range pb.Index {
-			for _, n := range ip.Names {
-				idx[n] = map[string]bool{}
-				for _, p := range ip.Privileges {
-					idx[n][p] = f.privs[p]
-				}
-			}
-		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"username": "reader", "has_all_requested": false, "cluster": cl, "index": idx, "application": map[string]any{}})
+		_, _ = w.Write([]byte(f.resolved))
 	case r.Method == "GET" && r.URL.Path == "/_security/user/_privileges":
 		if !f.security || f.flavour == "opensearch" {
 			f.fail(w, 400, "security is not enabled")

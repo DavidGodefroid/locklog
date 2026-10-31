@@ -44,7 +44,9 @@ func IndexSegment(indices []string) (string, error) {
 // sends: searches, counts, field capabilities and mappings of the
 // source's own indices (the segment is literal: no other index is
 // reachable), the root (flavour and version), and the read-only privilege
-// checks of each flavour.
+// checks of each flavour: Elasticsearch's grants of the user and what the
+// source's indices resolve to, the OpenSearch security plugin's roles of
+// the user (authinfo: any authenticated user may read it).
 func ElasticRoutes(indices []string) (*Allowlist, error) {
 	seg, err := IndexSegment(indices)
 	if err != nil {
@@ -56,17 +58,15 @@ func ElasticRoutes(indices []string) (*Allowlist, error) {
 		Route{http.MethodGet, "/" + seg + "/_field_caps"},
 		Route{http.MethodGet, "/" + seg + "/_mapping"},
 		Route{http.MethodGet, "/"},
-		Route{http.MethodGet, ElasticPrivilegesPath},
 		Route{http.MethodGet, ElasticUserPrivilegesPath},
+		Route{http.MethodGet, "/_resolve/index/" + seg},
 		Route{http.MethodGet, OpenSearchAuthInfoPath},
 	), nil
 }
 
-// The privilege checks: Elasticsearch's has_privileges (a GET with a
-// body) and the user's own grants, the OpenSearch security plugin's
-// authinfo.
+// The privilege checks: Elasticsearch's grants of the user, the
+// OpenSearch security plugin's authinfo.
 const (
-	ElasticPrivilegesPath     = "/_security/user/_has_privileges"
 	ElasticUserPrivilegesPath = "/_security/user/_privileges"
 	OpenSearchAuthInfoPath    = "/_plugins/_security/authinfo"
 )

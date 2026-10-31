@@ -27,9 +27,16 @@ func TestElasticRoutes(t *testing.T) {
 		{"GET", "/logs-a*,logs-b/_field_caps", true},
 		{"GET", "/logs-a*,logs-b/_mapping", true},
 		{"GET", "/", true},
-		{"GET", "/_security/user/_has_privileges", true},
+		{"GET", "/_security/user/_has_privileges", false},
 		{"GET", "/_security/user/_privileges", true},
+		{"GET", "/_resolve/index/logs-a*,logs-b", true},
 		{"GET", "/_resolve/index/logs-a*", false},
+		{"GET", "/_resolve/index/*", false},
+		{"GET", "/_resolve/index/logs-a*,logs-b/x", false},
+		{"POST", "/_resolve/index/logs-a*,logs-b", false},
+		{"GET", "/_plugins/_security/api/account", false},
+		{"PUT", "/logs-a*,logs-b/_mapping", false},
+		{"POST", "/logs-a*,logs-b/_field_caps", false},
 		{"GET", "/_plugins/_security/authinfo", true},
 		{"GET", "/logs-a*,logs-b/_search", false},
 		{"POST", "/logs-b/_search", false},
@@ -79,9 +86,9 @@ func TestSendPostsJSONWithCredentials(t *testing.T) {
 		(s.path != "/es/logs-*/_count" && s.path != "/es/logs-%2A/_count") || s.query != "expand_wildcards=open" {
 		t.Fatalf("%s %s %s %q %s %s", method, ctype, body, s.auth, s.path, s.query)
 	}
-	// GET with a body (has_privileges).
-	if _, err := c.Send(context.Background(), "GET", ElasticPrivilegesPath, nil, []byte(`{"cluster":[]}`)); err != nil || method != "GET" || string(body) != `{"cluster":[]}` {
-		t.Fatalf("%v %s %s", err, method, body)
+	// A GET without a body (the indices resolved).
+	if _, err := c.Send(context.Background(), "GET", "/_resolve/index/logs-*", nil, nil); err != nil || method != "GET" || len(body) != 0 || ctype != "" {
+		t.Fatalf("%v %s %s %s", err, method, body, ctype)
 	}
 	n := s.n.Load()
 	if _, err := c.Send(context.Background(), "POST", "/logs-*/_delete_by_query", nil, []byte(`{}`)); !errors.Is(err, ErrNotAllowed) || s.n.Load() != n {

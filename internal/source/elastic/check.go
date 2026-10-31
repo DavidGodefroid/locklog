@@ -65,9 +65,9 @@ func (s *Source) detect(ctx context.Context) (string, string, error) {
 	return "", "", errors.New("elasticsearch source: unknown backend distribution")
 }
 
-// The privileges a read-only key may hold: everything else, on any
-// pattern, makes it more than a reader (an allowlist: a privilege
-// Elasticsearch adds later is refused until listed here).
+// The privileges a read-only key may hold: everything else makes it more
+// than a reader (an allowlist: a privilege Elasticsearch adds later is
+// refused until listed here).
 var (
 	readCluster = []string{"monitor", "read_ilm", "read_slm", "read_pipeline", "read_ccr"}
 	readIndex   = []string{"read", "view_index_metadata", "monitor", "read_cross_cluster"}
@@ -76,32 +76,28 @@ var (
 	readOnlyRoles = []string{"readall", "readall_and_monitor"}
 )
 
+// readOnlyCluster reports a cluster privilege of the allowlist. The
+// monitor_* privileges (monitor_ml, monitor_watcher, ...) read only.
 func readOnlyCluster(p string) bool {
 	return slices.Contains(readCluster, p) || strings.HasPrefix(p, "monitor_")
 }
 
-var errCannotRead = errors.New("elasticsearch source: the key cannot read")
-
-type hasPrivilegesResponse struct {
-	Index map[string]map[string]bool `json:"index"`
+// indexGrant is one index grant of a _privileges answer.
+type indexGrant struct {
+	Names      []string `json:"names"`
+	Privileges []string `json:"privileges"`
 }
 
 // userPrivileges is GET /_security/user/_privileges: every grant of the
 // user, on every pattern.
 type userPrivileges struct {
-	Cluster []string `json:"cluster"`
-	Global  []json.RawMessage
-	Indices []struct {
-		Names      []string `json:"names"`
-		Privileges []string `json:"privileges"`
-	} `json:"indices"`
+	Cluster      []string          `json:"cluster"`
+	Global       []json.RawMessage `json:"global"`
+	Indices      []indexGrant      `json:"indices"`
 	Applications []json.RawMessage `json:"applications"`
 	RunAs        []string          `json:"run_as"`
-	// Remote grants (cross-cluster): judged as local ones.
-	RemoteIndices []struct {
-		Names      []string `json:"names"`
-		Privileges []string `json:"privileges"`
-	} `json:"remote_indices"`
+	// Remote grants (cross-cluster): judged as local ones, on any index.
+	RemoteIndices []indexGrant `json:"remote_indices"`
 	RemoteCluster []struct {
 		Privileges []string `json:"privileges"`
 	} `json:"remote_cluster"`
@@ -111,9 +107,132 @@ type userPrivileges struct {
 // judges; any other non-empty member is refused (fail closed).
 var knownPrivilegeKeys = []string{"cluster", "global", "indices", "applications", "run_as", "remote_indices", "remote_cluster"}
 
+// resolveResponse is GET /_resolve/index/{indices}: the indices, aliases
+// and data streams the source's names and patterns cover, as the key sees
+// them (the read privilege includes resolving).
+type resolveResponse struct {
+	Indices []struct {
+		Name       string   `json:"name"`
+		Aliases    []string `json:"aliases"`
+		DataStream string   `json:"data_stream"`
+	} `json:"indices"`
+	Aliases []struct {
+		Name    string   `json:"name"`
+		Indices []string `json:"indices"`
+	} `json:"aliases"`
+	DataStreams []struct {
+		Name           string   `json:"name"`
+		BackingIndices []string `json:"backing_indices"`
+	} `json:"data_streams"`
+}
+
+// readable returns every name the source reads through: its configured
+// names and patterns, and the indices, aliases, data streams and backing
+// indices they resolve to.
+func (s *Source) readable(ctx context.Context) ([]string, error) {
+	body, err := s.do(ctx, http.MethodGet, "/_resolve/index/"+s.seg, readParams(), nil)
+	if err != nil {
+		return nil, err
+	}
+	var r resolveResponse
+	var raw map[string]json.RawMessage
+	if json.Unmarshal(body, &r) != nil || json.Unmarshal(body, &raw) != nil || raw["indices"] == nil {
+		return nil, errResponse
+	}
+	names := strings.Split(s.seg, ",")
+	for _, i := range r.Indices {
+		names = append(names, i.Name, i.DataStream)
+		names = append(names, i.Aliases...)
+	}
+	for _, a := range r.Aliases {
+		names = append(names, a.Name)
+		names = append(names, a.Indices...)
+	}
+	for _, d := range r.DataStreams {
+		names = append(names, d.Name)
+		names = append(names, d.BackingIndices...)
+	}
+	names = slices.DeleteFunc(names, func(n string) bool { return n == "" })
+	sort.Strings(names)
+	return slices.Compact(names), nil
+}
+
+// globMatches reports whether the role index pattern g ('*' any run, '?'
+// one character) matches name n, or, for a trailing-'*' pattern n of the
+// source, whether g matches some name n covers. A pattern locklog cannot
+// read exactly (a /regex/, date math, a remote cluster) covers everything:
+// a grant through it is judged on every index.
+func globMatches(g, n string) bool {
+	if g == "" || strings.ContainsAny(g, "/<>{}:\\[") {
+		return true
+	}
+	if g[0] == '-' {
+		return true // an exclusion: judged as covering, fail closed
+	}
+	prefix, open := strings.CutSuffix(n, "*")
+	// An automaton over the name: the states are positions in g.
+	states := closure(g, map[int]bool{0: true})
+	for i := 0; i < len(prefix) && len(states) > 0; i++ {
+		next := map[int]bool{}
+		for st := range states {
+			if st >= len(g) {
+				continue
+			}
+			switch g[st] {
+			case '*':
+				next[st] = true
+			case '?':
+				next[st+1] = true
+			default:
+				if g[st] == prefix[i] {
+					next[st+1] = true
+				}
+			}
+		}
+		states = closure(g, next)
+	}
+	if open {
+		// Any suffix may follow: some name n covers is matched once a
+		// state survives the prefix.
+		return len(states) > 0
+	}
+	return states[len(g)]
+}
+
+// closure adds, for every state on a '*', the state after it.
+func closure(g string, states map[int]bool) map[int]bool {
+	for changed := true; changed; {
+		changed = false
+		for st := range states {
+			if st < len(g) && g[st] == '*' && !states[st+1] {
+				states[st+1] = true
+				changed = true
+			}
+		}
+	}
+	return states
+}
+
+// covers reports whether a grant on names reaches any name the source
+// reads.
+func covers(names, readable []string) bool {
+	for _, g := range names {
+		for _, n := range readable {
+			if globMatches(g, n) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // esWrite lists every grant of a _privileges answer beyond the read-only
-// allowlist.
-func esWrite(body []byte) ([]string, error) {
+// allowlist that reaches what the source reads: any cluster privilege off
+// the allowlist, global, application and run_as grants, any remote grant
+// off the allowlist, and an index privilege off the allowlist on a pattern
+// covering one of readable (the source's names and patterns and what they
+// resolve to).
+func esWrite(body []byte, readable []string) ([]string, error) {
 	var raw map[string]json.RawMessage
 	if json.Unmarshal(body, &raw) != nil || raw["cluster"] == nil || raw["indices"] == nil {
 		return nil, errResponse
@@ -130,9 +249,6 @@ func esWrite(body []byte) ([]string, error) {
 	if json.Unmarshal(body, &u) != nil {
 		return nil, errResponse
 	}
-	if err := json.Unmarshal(raw["global"], &u.Global); raw["global"] != nil && err != nil {
-		return nil, errResponse
-	}
 	for _, p := range u.Cluster {
 		if !readOnlyCluster(p) {
 			write = append(write, "cluster:"+p)
@@ -145,7 +261,17 @@ func esWrite(body []byte) ([]string, error) {
 			}
 		}
 	}
-	for _, g := range append(slices.Clone(u.Indices), u.RemoteIndices...) {
+	for _, g := range u.RemoteIndices {
+		for _, p := range g.Privileges {
+			if !slices.Contains(readIndex, p) {
+				write = append(write, "remote:"+strings.Join(g.Names, ",")+":"+p)
+			}
+		}
+	}
+	for _, g := range u.Indices {
+		if !covers(g.Names, readable) {
+			continue
+		}
 		for _, p := range g.Privileges {
 			if !slices.Contains(readIndex, p) {
 				write = append(write, strings.Join(g.Names, ",")+":"+p)
@@ -165,44 +291,30 @@ func esWrite(body []byte) ([]string, error) {
 	return slices.Compact(write), nil
 }
 
-// esPrivileges checks the key reads every index of the source
-// (has_privileges), then lists its grants beyond the read-only allowlist
-// on any pattern (_privileges): a write grant on a concrete index a
-// read-only pattern matches is listed too.
+// esPrivileges resolves what the source's names and patterns cover
+// (_resolve/index), then lists the key's grants beyond the read-only
+// allowlist on any of it (_privileges): a write grant on a concrete index
+// a read-only pattern matches, or on a pattern covering one, is listed.
 func (s *Source) esPrivileges(ctx context.Context) ([]string, error) {
-	names := strings.Split(s.seg, ",")
-	b, err := marshalChecked(PrivilegesBody{Cluster: []string{"monitor"}, Index: []IndexPrivileges{{Names: names, Privileges: []string{"read"}}}})
+	readable, err := s.readable(ctx)
 	if err != nil {
 		return nil, err
 	}
-	body, err := s.do(ctx, http.MethodGet, egress.ElasticPrivilegesPath, nil, b)
+	body, err := s.do(ctx, http.MethodGet, egress.ElasticUserPrivilegesPath, nil, nil)
 	if err != nil {
 		return nil, err
 	}
-	var r hasPrivilegesResponse
-	if json.Unmarshal(body, &r) != nil || r.Index == nil {
-		return nil, errResponse
-	}
-	for _, name := range names {
-		privs, ok := r.Index[name]
-		if !ok {
-			return nil, errResponse
-		}
-		if !privs["read"] {
-			return nil, fmt.Errorf("%w %s", errCannotRead, name)
-		}
-	}
-	body, err = s.do(ctx, http.MethodGet, egress.ElasticUserPrivilegesPath, nil, nil)
-	if err != nil {
-		return nil, err
-	}
-	return esWrite(body)
+	return esWrite(body, readable)
 }
 
 type authInfoResponse struct {
 	Roles []string `json:"roles"`
 }
 
+// osPrivileges lists the OpenSearch security roles of the key that are not
+// known read-only: the built-in readall roles, and the ones the human
+// vouches for (ReadOnlyRoles). A role's permissions are not readable with
+// a read-only key, so any other role is refused, whatever it grants.
 func (s *Source) osPrivileges(ctx context.Context) ([]string, error) {
 	body, err := s.do(ctx, http.MethodGet, egress.OpenSearchAuthInfoPath, nil, nil)
 	if err != nil {
@@ -257,6 +369,9 @@ func (s *Source) Check(ctx context.Context, production bool) (Info, error) {
 	if info.Flavour, info.Version, err = s.detect(ctx); err != nil {
 		return info, err
 	}
+	if want := map[string]string{KindElastic: FlavourElasticsearch, KindOpenSearch: FlavourOpenSearch}[s.o.Kind]; info.Flavour != want {
+		return info, fmt.Errorf("elasticsearch source: the backend is %s, the source is kind = %q", info.Flavour, s.o.Kind)
+	}
 	var write []string
 	if info.Flavour == FlavourOpenSearch {
 		write, err = s.osPrivileges(ctx)
@@ -266,8 +381,6 @@ func (s *Source) Check(ctx context.Context, production bool) (Info, error) {
 	switch {
 	case err == nil:
 		info.Verified, info.Write = true, write
-	case errors.Is(err, errCannotRead):
-		return info, err
 	case production:
 		return info, fmt.Errorf("elasticsearch source: the key's privileges cannot be read, which a production profile refuses: %w", err)
 	}
@@ -308,7 +421,7 @@ const MaxDescribeValues = 64
 // caller), marks the trusted ones, and lists the trusted fields' values
 // of the last 24 hours when they are few.
 func (s *Source) Describe(ctx context.Context) (source.Schema, error) {
-	sch := source.Schema{Kind: Kind, Format: s.o.Parser.Options().Format}
+	sch := source.Schema{Kind: s.o.Kind, Format: s.o.Parser.Options().Format}
 	fc, err := s.fieldCaps(ctx, []string{"*"})
 	if err != nil {
 		return sch, fmt.Errorf("elasticsearch source: %w", err)

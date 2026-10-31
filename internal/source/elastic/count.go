@@ -80,7 +80,7 @@ func (s *Source) IndexCounts(ctx context.Context, q source.CountQuery) (source.C
 		}
 	}
 	for _, t := range q.Selector.Terms {
-		if !t.Label || !s.trusted(t.Field) || (t.Op != "=" && t.Op != "in" && t.Op != "!=") || len(t.Values) == 0 {
+		if !s.pushable(t) {
 			return source.CountResult{}, source.ErrNotIndexable
 		}
 	}
