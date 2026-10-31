@@ -127,6 +127,10 @@ type Event struct {
 	// MaxEventBytes or MaxEventLines.
 	Split bool
 
+	// Unterminated is set when the event's last line had no terminator
+	// (the end of a stream that may still be written).
+	Unterminated bool
+
 	// Attrs are the container frame's fields (stream, ...) for framed
 	// formats; nil otherwise.
 	Attrs []Member
