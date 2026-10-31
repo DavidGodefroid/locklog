@@ -129,11 +129,13 @@ jobs:
           sudo LOCKLOG_JOURNALD_IT=1 ./journald.test -test.run '^TestLiveJournal$' -test.v | tee it.log
           grep -q -- '--- PASS: TestLiveJournal' it.log
 
-  # The latency cases of the oracle suite (repeated, interleaved runs on
-  # production and non-production defaults, idle and under a CPU hog,
-  # compared statistically); they never run with -short or in the test job.
+  # The full leak suite (every canary kind in every encoding written into
+  # every query position) and the latency cases of the oracle suite
+  # (repeated, interleaved runs on production and non-production defaults,
+  # idle and under a CPU hog, compared statistically); the test job runs the
+  # leak suite's subset and never the timing cases.
   suites:
-    name: suites (timing)
+    name: suites (full leak, timing)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -146,8 +148,13 @@ jobs:
         with:
           go-version: "1.26.x"
           check-latest: true
-      - name: oracle latency
-        run: GOMAXPROCS=2 LOCKLOG_SUITE_TIMING=1 go test -count=1 -timeout 25m -v -run '^TestSuiteOracleLatency$' ./internal/engine/
+      - name: full leak suite and oracle latency
+        shell: bash
+        run: |
+          set -o pipefail
+          GOMAXPROCS=2 LOCKLOG_SUITE_FULL=1 LOCKLOG_SUITE_TIMING=1 go test -count=1 -timeout 25m -v \
+            -run '^(TestSuiteLeak|TestSuiteOracleLatency)$' ./internal/engine/ 2>&1 |
+            grep -v -E '^=== (RUN|PAUSE|CONT)|: [0-9]+ pages in |: scanned in ' | tee suites.log
 
   # Local incident (b) at realistic volume (R6-P1): 7 days x 1 GiB/day of
   # nginx and journald (a quarter of that: the journal history imported by

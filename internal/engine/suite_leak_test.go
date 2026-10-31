@@ -295,16 +295,41 @@ func leakRefusals(t *testing.T, whole *suite, mode string, l *leakScanner, recs 
 	s := newSuite(t, head, suiteConfig{Structured: mode, Workers: 2})
 	var sample []masktest.Canary
 	var encoded []string
+	// Per pull request, a subset: every kind raw, and every kind and
+	// every encoding at least once; LOCKLOG_SUITE_FULL=1 (the CI suites
+	// job) writes every kind in every encoding.
+	full := os.Getenv("LOCKLOG_SUITE_FULL") == "1"
+	seen := map[string]bool{}
+	keep := func(keys ...string) bool {
+		if full {
+			return true
+		}
+		fresh := false
+		for _, k := range keys {
+			if !seen[k] {
+				seen[k], fresh = true, true
+			}
+		}
+		return fresh
+	}
 	for _, r := range recs["json"][:per] {
 		c := r.Canaries[0]
+		if !keep("raw " + c.Kind) {
+			continue
+		}
 		sample = append(sample, c)
 		encoded = append(encoded, c.Value)
 	}
 	lines := masktest.New(99).Lines(per)
 	for _, ln := range lines {
-		sample = append(sample, ln.Canaries[0])
-		encoded = append(encoded, masktest.Encode(ln.Canaries[0].Value, masktest.Encodings[ln.Encoding]))
+		c, enc := ln.Canaries[0], masktest.Encodings[ln.Encoding]
+		if !keep("kind "+c.Kind, "encoding "+enc) {
+			continue
+		}
+		sample = append(sample, c)
+		encoded = append(encoded, masktest.Encode(c.Value, enc))
 	}
+	t.Logf("%d canaries written into the calls (full %v)", len(encoded), full)
 	from, _ := json.Marshal(suiteFrom)
 	to, _ := json.Marshal(suiteTo)
 	refused := 0
