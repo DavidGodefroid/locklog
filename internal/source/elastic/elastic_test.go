@@ -170,8 +170,8 @@ func TestBodyBuildersKeepHostileValuesValues(t *testing.T) {
 
 func TestStreamRoundTripsAndRefusesForeignStreams(t *testing.T) {
 	s := newSource(t, newFake(nil), func(o *Options) { o.Selector = map[string]string{"env": "prod"} })
-	sel := source.Selector{Terms: []source.Term{{Field: "level", Op: "in", Values: []string{"warn", "error", "warn"}},
-		{Field: "app", Op: "!=", Values: []string{"x"}}, {Field: "pod", Op: "=", Values: []string{"pod-1"}}}}
+	sel := source.Selector{Terms: []source.Term{{Field: "level", Label: true, Op: "in", Values: []string{"warn", "error", "warn"}},
+		{Field: "app", Label: true, Op: "!=", Values: []string{"x"}}, {Field: "pod", Label: true, Op: "=", Values: []string{"pod-1"}}}}
 	plan, err := s.Plan(ctx, source.Range{From: t0, To: t0.Add(time.Hour)}, sel)
 	if err != nil {
 		t.Fatal(err)
@@ -290,8 +290,8 @@ func TestTrustedTermsGoServerSide(t *testing.T) {
 	f := newFake(dataset(200))
 	s := newSource(t, f, func(o *Options) { o.Selector = map[string]string{"app": "api"} })
 	sel := source.Selector{Terms: []source.Term{
-		{Field: "level", Op: "in", Values: []string{"error", "warn"}},
-		{Field: "status", Op: "=", Values: []string{"500"}}, // not trusted: local
+		{Field: "level", Label: true, Op: "in", Values: []string{"error", "warn"}},
+		{Field: "status", Label: true, Op: "=", Values: []string{"500"}}, // not trusted: local
 	}}
 	recs := scanAll(t, s, source.Range{From: t0, To: t0.Add(time.Hour)}, sel)
 	want := 0
@@ -412,7 +412,7 @@ func TestCounts(t *testing.T) {
 	f := newFake(docs)
 	s := newSource(t, f, nil)
 	r := source.Range{From: t0, To: t0.Add(20 * time.Minute)}
-	sel := source.Selector{Terms: []source.Term{{Field: "app", Op: "=", Values: []string{"api"}}}}
+	sel := source.Selector{Terms: []source.Term{{Field: "app", Label: true, Op: "=", Values: []string{"api"}}}}
 	want := map[string]int64{}
 	var total int64
 	for _, d := range docs {
@@ -424,7 +424,7 @@ func TestCounts(t *testing.T) {
 		want[b.Format(time.RFC3339)+" "+lv]++
 		total++
 	}
-	res, err := s.IndexCounts(ctx, source.CountQuery{Range: r, By: []string{"level"}, Bucket: 5 * time.Minute, Selector: sel})
+	res, err := s.IndexCounts(ctx, source.CountQuery{Range: r, ByLabels: []string{"level"}, Bucket: 5 * time.Minute, Selector: sel})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -453,7 +453,7 @@ func TestCounts(t *testing.T) {
 		t.Fatalf("selector-only count sent %s", f.requests[n])
 	}
 	// By without a bucket: terms over the range; buckets off the epoch: an offset.
-	byOnly, err := s.IndexCounts(ctx, source.CountQuery{Range: r, By: []string{"level"}, Selector: sel})
+	byOnly, err := s.IndexCounts(ctx, source.CountQuery{Range: r, ByLabels: []string{"level"}, Selector: sel})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -477,11 +477,14 @@ func TestCounts(t *testing.T) {
 	// Not served: untrusted fields, too many buckets, sub-millisecond bounds,
 	// too many fields.
 	for _, q := range []source.CountQuery{
-		{Range: r, By: []string{"pod"}, Bucket: time.Minute},
-		{Range: r, Selector: source.Selector{Terms: []source.Term{{Field: "pod", Op: "=", Values: []string{"x"}}}}},
+		{Range: r, ByLabels: []string{"pod"}, Bucket: time.Minute},
+		{Range: r, Selector: source.Selector{Terms: []source.Term{{Field: "pod", Label: true, Op: "=", Values: []string{"x"}}}}},
 		{Range: source.Range{From: t0, To: t0.Add(1001 * time.Minute)}, Bucket: time.Minute},
 		{Range: source.Range{From: t0.Add(time.Microsecond), To: t0.Add(time.Hour)}},
-		{Range: r, By: []string{"app", "level", "app"}},
+		{Range: r, ByLabels: []string{"app", "level", "app"}},
+		// A line field named like a trusted document field.
+		{Range: r, By: []string{"level"}},
+		{Range: r, Selector: source.Selector{Terms: []source.Term{{Field: "app", Op: "=", Values: []string{"api"}}}}},
 	} {
 		if _, err := s.IndexCounts(ctx, q); !errors.Is(err, source.ErrNotIndexable) {
 			t.Fatalf("%+v: %v", q, err)
@@ -512,7 +515,7 @@ func TestCountsOverflowAndMultiValues(t *testing.T) {
 	}
 	s := newSource(t, newFake(docs), nil)
 	r := source.Range{From: t0, To: t0.Add(time.Hour)}
-	res, err := s.IndexCounts(ctx, source.CountQuery{Range: r, By: []string{"app"}})
+	res, err := s.IndexCounts(ctx, source.CountQuery{Range: r, ByLabels: []string{"app"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -528,7 +531,7 @@ func TestCountsOverflowAndMultiValues(t *testing.T) {
 	}
 	docs[0].fields["app"] = []string{"p", "q"}
 	s = newSource(t, newFake(docs), nil)
-	if _, err := s.IndexCounts(ctx, source.CountQuery{Range: r, By: []string{"app"}, Bucket: time.Hour}); !errors.Is(err, source.ErrNotIndexable) {
+	if _, err := s.IndexCounts(ctx, source.CountQuery{Range: r, ByLabels: []string{"app"}, Bucket: time.Hour}); !errors.Is(err, source.ErrNotIndexable) {
 		t.Fatalf("multi-valued: %v", err)
 	}
 }

@@ -170,16 +170,16 @@ func exercise(t *testing.T, s *elastic.Source, start time.Time, n int) {
 	// Server-side selection on trusted fields: levels repeat every 4
 	// documents, apps every 2: error documents are api's... never (i%4==3
 	// is odd: worker).
-	sel := source.Selector{Terms: []source.Term{{Field: "level", Op: "=", Values: []string{"error"}}, {Field: "app", Op: "in", Values: []string{"worker"}}}}
+	sel := source.Selector{Terms: []source.Term{{Field: "level", Label: true, Op: "=", Values: []string{"error"}}, {Field: "app", Label: true, Op: "in", Values: []string{"worker"}}}}
 	if got := scan(t, s, r, sel); len(got) != n/4 {
 		t.Fatalf("selected %d records, want %d", len(got), n/4)
 	}
-	notSel := source.Selector{Terms: []source.Term{{Field: "level", Op: "!=", Values: []string{"info"}}}}
+	notSel := source.Selector{Terms: []source.Term{{Field: "level", Label: true, Op: "!=", Values: []string{"info"}}}}
 	if got := scan(t, s, r, notSel); len(got) != n/2 {
 		t.Fatalf("negated selection: %d records, want %d", len(got), n/2)
 	}
 	// Counts on the server equal the scan.
-	res, err := s.IndexCounts(ctx, source.CountQuery{Range: r, By: []string{"level"}, Bucket: 5 * time.Minute})
+	res, err := s.IndexCounts(ctx, source.CountQuery{Range: r, ByLabels: []string{"level"}, Bucket: 5 * time.Minute})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +196,7 @@ func exercise(t *testing.T, s *elastic.Source, start time.Time, n int) {
 	if err != nil || len(one.Rows) != 1 || one.Rows[0].N != int64(n) {
 		t.Fatalf("_count: %v %+v", err, one.Rows)
 	}
-	by, err := s.IndexCounts(ctx, source.CountQuery{Range: r, By: []string{"app", "level"}})
+	by, err := s.IndexCounts(ctx, source.CountQuery{Range: r, ByLabels: []string{"app", "level"}})
 	if err != nil {
 		t.Fatal(err)
 	}

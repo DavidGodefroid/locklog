@@ -181,15 +181,16 @@ func (s *Source) do(ctx context.Context, method, path string, q url.Values, body
 func readParams() url.Values { return url.Values{"expand_wildcards": {"open"}} }
 
 // filter builds the server-side filter: the profile's selector, plus the
-// terms on trusted fields. Terms on other fields are ignored here (the
-// engine evaluates them after masking).
+// label terms on trusted fields (a trusted document field is a label of the
+// record, in Attrs; a line field is the message's, never the document's).
+// Other terms are ignored here (the engine evaluates them after masking).
 func (s *Source) filter(sel source.Selector) Filter {
 	var f Filter
 	for k, v := range s.o.Selector {
 		f.In = append(f.In, FieldValues{Field: k, Values: []string{v}})
 	}
 	for _, t := range sel.Terms {
-		if !s.trusted(t.Field) || len(t.Values) == 0 {
+		if !t.Label || !s.trusted(t.Field) || len(t.Values) == 0 {
 			continue
 		}
 		switch t.Op {
@@ -469,7 +470,8 @@ func (s *Source) fetchSlice(ctx context.Context, f Filter, from, to int64) ([]hi
 }
 
 // record turns a hit into a raw record: the message parsed as the line,
-// the sort timestamp as the record time, the trusted fields as attrs.
+// the sort timestamp as the record time, the trusted fields as attrs
+// (labels).
 func (s *Source) record(stream string, h hit, ordinal int) source.RawRecord {
 	ev := s.o.Parser.Line(h.line)
 	ev.SetTime(time.Unix(0, h.ts).UTC())

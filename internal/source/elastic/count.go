@@ -69,16 +69,18 @@ func termsChain(by []string, i int) map[string]Agg {
 // MaxCountBy fields, on bounds finer than a millisecond, or with too many
 // buckets are not served (source.ErrNotIndexable).
 func (s *Source) IndexCounts(ctx context.Context, q source.CountQuery) (source.CountResult, error) {
-	if len(q.By) > MaxCountBy {
+	// Counts are by labels (trusted document fields) only: a line field
+	// (q.By) is inside the message.
+	if len(q.By) > 0 || len(q.ByLabels) > MaxCountBy {
 		return source.CountResult{}, source.ErrNotIndexable
 	}
-	for _, b := range q.By {
+	for _, b := range q.ByLabels {
 		if !s.trusted(b) {
 			return source.CountResult{}, source.ErrNotIndexable
 		}
 	}
 	for _, t := range q.Selector.Terms {
-		if !s.trusted(t.Field) || (t.Op != "=" && t.Op != "in" && t.Op != "!=") || len(t.Values) == 0 {
+		if !t.Label || !s.trusted(t.Field) || (t.Op != "=" && t.Op != "in" && t.Op != "!=") || len(t.Values) == 0 {
 			return source.CountResult{}, source.ErrNotIndexable
 		}
 	}
@@ -101,7 +103,7 @@ func (s *Source) IndexCounts(ctx context.Context, q source.CountQuery) (source.C
 	}
 	var res source.CountResult
 	res.IndexedFrom = r.From
-	if bucket == 0 && len(q.By) == 0 {
+	if bucket == 0 && len(q.ByLabels) == 0 {
 		body, err := countJSON(CountBody{Query: qry})
 		if err != nil {
 			return source.CountResult{}, err
@@ -122,7 +124,7 @@ func (s *Source) IndexCounts(ctx context.Context, q source.CountQuery) (source.C
 		}
 		return res, nil
 	}
-	by := slices.Clone(q.By)
+	by := slices.Clone(q.ByLabels)
 	aggs := termsChain(by, 0)
 	if bucket != 0 {
 		ms := bucket.Milliseconds()

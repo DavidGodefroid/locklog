@@ -367,7 +367,7 @@ func (s *Source) Describe(ctx context.Context) (source.Schema, error) {
 		}
 	}
 	for _, n := range names {
-		info := source.FieldInfo{Name: n, Trusted: s.trusted(n)}
+		info := source.FieldInfo{Name: n, Label: true, Trusted: s.trusted(n)}
 		if info.Trusted {
 			info.Values = values[n]
 		}
