@@ -1,7 +1,6 @@
 package journal
 
 import (
-	"bufio"
 	"bytes"
 	"errors"
 	"io"
@@ -15,130 +14,159 @@ import (
 // a larger dictionary is never needed (journald's own is 1 MiB).
 const MaxXZDict uint64 = MaxData + 64<<10
 
+// maxLZMA2Chunks bounds the LZMA2 chunks of a value: a real payload of at
+// most MaxData needs about one per 64 KiB of output (journald's encoder
+// writes up to 2 MiB per chunk). Each chunk can reset the decoder state,
+// which costs far more than the bytes it holds, so a stream of thousands
+// of tiny chunks is refused before decoding.
+const maxLZMA2Chunks = 2*((MaxData+65535)/65536) + 2
+
 var errXZ = errors.New("journal: unsupported or corrupt xz data")
 
-// xzReader returns a reader of the first block of an XZ stream: it parses
-// the stream and block headers itself, refuses anything but a single LZMA2
-// filter, and refuses a declared dictionary over MaxXZDict before the
-// decoder allocates it. A value whose stream holds a second block is
-// reported over the cap. With prefixOnly (reading a field name: the first
-// bytes only, whose matches reach at most that far back) the smallest
-// dictionary is used whatever the header declares, and an over-cap
-// declared size is not refused. Later blocks are never read (journald writes one); the
-// stream's checksums are not verified.
-func xzReader(src io.Reader, prefixOnly bool) (io.Reader, error) {
-	cr := &countReader{r: src}
-	br := bufio.NewReaderSize(cr, 4096)
-	var sh [12]byte
-	if _, err := io.ReadFull(br, sh[:]); err != nil {
-		return nil, errXZ
+// xzHeader is what locklog reads of an XZ stream before decoding: the
+// stream and first block headers, parsed here so that only a single LZMA2
+// filter is accepted and its dictionary is known before any allocation.
+type xzHeader struct {
+	dict      uint64
+	usize     uint64 // declared uncompressed size, 0 when absent
+	hasUsize  bool
+	dataStart int // offset of the LZMA2 data
+	check     int // size of the block check
+}
+
+func parseXZ(b []byte) (xzHeader, error) {
+	var h xzHeader
+	if len(b) < 13 || !bytes.Equal(b[:6], []byte{0xFD, '7', 'z', 'X', 'Z', 0}) || b[6] != 0 {
+		return h, errXZ
 	}
-	if !bytes.Equal(sh[:6], []byte{0xFD, '7', 'z', 'X', 'Z', 0}) || sh[6] != 0 {
-		return nil, errXZ
-	}
-	checkSize, ok := map[byte]int{0: 0, 1: 4, 4: 8, 10: 32}[sh[7]]
+	check, ok := map[byte]int{0: 0, 1: 4, 4: 8, 10: 32}[b[7]]
 	if !ok {
-		return nil, errXZ
+		return h, errXZ
 	}
-	b0, err := br.ReadByte()
-	if err != nil || b0 == 0 { // 0 is the index: a stream without blocks
-		return nil, errXZ
+	h.check = check
+	b0 := b[12]
+	if b0 == 0 { // the index: a stream without blocks
+		return h, errXZ
 	}
-	hdr := make([]byte, (int(b0)+1)*4-1) // the rest of the block header, its CRC32 last
-	if _, err := io.ReadFull(br, hdr); err != nil {
-		return nil, errXZ
+	end := 12 + (int(b0)+1)*4
+	if end > len(b) {
+		return h, errXZ
 	}
+	hdr := b[13:end]
 	flags := hdr[0]
 	if flags&0x3C != 0 || flags&0x03 != 0 { // reserved bits; exactly one filter
-		return nil, errXZ
+		return h, errXZ
 	}
-	p := hdr[1 : len(hdr)-4]
+	p := hdr[1 : len(hdr)-4] // without the header CRC32
+	var err error
 	if flags&0x40 != 0 { // compressed size
-		if p, err = skipVarint(p); err != nil {
-			return nil, err
+		if _, p, err = varint(p); err != nil {
+			return h, err
 		}
 	}
-	if flags&0x80 != 0 { // uncompressed size: refuse an over-cap one now
-		var u uint64
-		if u, p, err = varint(p); err != nil {
-			return nil, err
+	if flags&0x80 != 0 {
+		if h.usize, p, err = varint(p); err != nil {
+			return h, err
 		}
-		if u > MaxData && !prefixOnly {
-			return nil, errTooLarge
-		}
+		h.hasUsize = true
 	}
 	id, p, err := varint(p)
 	if err != nil || id != 0x21 { // LZMA2
-		return nil, errXZ
+		return h, errXZ
 	}
 	n, p, err := varint(p)
 	if err != nil || n != 1 || len(p) < 1 {
-		return nil, errXZ
+		return h, errXZ
 	}
-	dict, ok := lzma2Dict(p[0])
-	if !ok {
-		return nil, errXZ
+	if h.dict, ok = lzma2Dict(p[0]); !ok {
+		return h, errXZ
 	}
-	if dict > MaxXZDict && !prefixOnly {
-		return nil, errTooLarge
+	h.dataStart = end
+	return h, nil
+}
+
+// xzPrefix decodes at most n bytes from the start of an XZ payload b (a
+// prefix of the stored bytes): the smallest dictionary does, whatever the
+// header declares, since the first bytes only reach that far back.
+func xzPrefix(b []byte, n int) ([]byte, error) {
+	h, err := parseXZ(b)
+	if err != nil {
+		return nil, err
 	}
-	capd := int(min(dict, MaxXZDict))
-	if prefixOnly {
-		// The first bytes only reach that far back: the smallest
-		// dictionary does.
-		capd = lzma.MinDictCap
-	}
-	lr, err := lzma.Reader2Config{DictCap: max(capd, lzma.MinDictCap)}.NewReader2(br)
+	r, err := lzma.Reader2Config{DictCap: lzma.MinDictCap}.NewReader2(bytes.NewReader(b[h.dataStart:]))
 	if err != nil {
 		return nil, errXZ
 	}
-	if prefixOnly {
-		return lr, nil
+	out := make([]byte, n)
+	k, err := io.ReadFull(r, out)
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
+		return nil, errXZ
 	}
-	return &xzBlock{lr: lr, br: br, cr: cr, check: checkSize}, nil
+	return out[:k], nil
 }
 
-// countReader counts the bytes read from r.
-type countReader struct {
-	r io.Reader
-	n int64
-}
-
-func (c *countReader) Read(p []byte) (int, error) {
-	n, err := c.r.Read(p)
-	c.n += int64(n)
-	return n, err
-}
-
-// xzBlock reads the first block's data and, at its end, checks that the
-// stream's index follows: a second block (which journald never writes)
-// makes the value over the cap rather than silently cut.
-type xzBlock struct {
-	lr    io.Reader
-	br    *bufio.Reader
-	cr    *countReader
-	check int
-	done  bool
-}
-
-func (x *xzBlock) Read(p []byte) (int, error) {
-	if x.done {
-		return 0, io.EOF
+// xzValue decodes a whole XZ payload b. Before decoding it refuses a
+// declared dictionary or size over the caps, a stream of more than
+// maxLZMA2Chunks chunks, and a second block (journald writes one); the
+// stream's checksums are not verified.
+func xzValue(b []byte) ([]byte, error) {
+	h, err := parseXZ(b)
+	if err != nil {
+		return nil, err
 	}
-	n, err := x.lr.Read(p)
-	if err != io.EOF {
-		return n, err
+	if h.dict > MaxXZDict || h.hasUsize && h.usize > MaxData {
+		return nil, errTooLarge
 	}
-	x.done = true
-	consumed := x.cr.n - int64(x.br.Buffered()) // stream header, block header, data
-	pad := (4 - (consumed-12)%4) % 4
-	if _, err := x.br.Discard(int(pad) + x.check); err != nil {
-		return n, errXZ
+	// Walk the LZMA2 chunk headers: they are plain, with their sizes.
+	i, chunks := h.dataStart, 0
+	for {
+		if i >= len(b) {
+			return nil, errXZ
+		}
+		c := b[i]
+		if c == 0 {
+			i++
+			break
+		}
+		if chunks++; chunks > maxLZMA2Chunks {
+			return nil, errXZ
+		}
+		switch {
+		case c == 1 || c == 2: // stored chunk
+			if i+3 > len(b) {
+				return nil, errXZ
+			}
+			i += 3 + (int(b[i+1])<<8 | int(b[i+2])) + 1
+		case c >= 0x80: // LZMA chunk
+			if i+5 > len(b) {
+				return nil, errXZ
+			}
+			hdr := 5
+			if c >= 0xC0 {
+				hdr = 6 // with a properties byte
+			}
+			i += hdr + (int(b[i+3])<<8 | int(b[i+4])) + 1
+		default:
+			return nil, errXZ
+		}
 	}
-	if b, err := x.br.ReadByte(); err != nil || b != 0 {
-		return n, errTooLarge // more blocks follow
+	lzmaEnd := i
+	i += (4-(i-12)%4)%4 + h.check // block padding, then its check
+	if i >= len(b) || b[i] != 0 {
+		return nil, errTooLarge // a second block follows
 	}
-	return n, io.EOF
+	r, err := lzma.Reader2Config{DictCap: max(int(h.dict), lzma.MinDictCap)}.NewReader2(bytes.NewReader(b[h.dataStart:lzmaEnd]))
+	if err != nil {
+		return nil, errXZ
+	}
+	out, err := io.ReadAll(io.LimitReader(r, MaxData+1))
+	if err != nil {
+		return nil, errXZ
+	}
+	if len(out) > MaxData {
+		return nil, errTooLarge
+	}
+	return out, nil
 }
 
 // lzma2Dict decodes the LZMA2 dictionary-size property byte.
@@ -161,9 +189,4 @@ func varint(p []byte) (uint64, []byte, error) {
 		}
 	}
 	return 0, nil, errXZ
-}
-
-func skipVarint(p []byte) ([]byte, error) {
-	_, rest, err := varint(p)
-	return rest, err
 }

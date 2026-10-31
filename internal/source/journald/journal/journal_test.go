@@ -610,3 +610,42 @@ func xzObjectAny(t *testing.T, raw []byte) uint64 {
 	t.Fatal("no data object")
 	return 0
 }
+
+// rawXZ builds an XZ stream (check none) around LZMA2 stored chunks of the
+// given sizes holding payload, with the given dictionary byte.
+func rawXZ(payload []byte, chunk int, dictByte byte) []byte {
+	b := []byte{0xFD, '7', 'z', 'X', 'Z', 0, 0, 0, 0, 0, 0, 0}
+	b = append(b, 0x02, 0x00, 0x21, 0x01, dictByte, 0, 0, 0, 0, 0, 0, 0) // block header, CRC unchecked
+	first := true
+	for i := 0; i < len(payload); i += chunk {
+		c := payload[i:min(i+chunk, len(payload))]
+		ctl := byte(2)
+		if first {
+			ctl, first = 1, false
+		}
+		b = append(b, ctl, byte((len(c)-1)>>8), byte(len(c)-1))
+		b = append(b, c...)
+	}
+	b = append(b, 0) // LZMA2 end
+	for (len(b)-12)%4 != 0 {
+		b = append(b, 0)
+	}
+	return append(b, 0, 0, 0, 0, 0, 0, 0, 0) // index indicator, then (unchecked) index and footer
+}
+
+func TestXZValueChunks(t *testing.T) {
+	payload := []byte("MESSAGE=" + strings.Repeat("v", 3000))
+	if got, err := xzValue(rawXZ(payload, 1000, 0x10)); err != nil || string(got) != string(payload) {
+		t.Fatalf("a few chunks: %q %v", got[:min(len(got), 20)], err)
+	}
+	// Thousands of one-byte chunks: refused before decoding.
+	if _, err := xzValue(rawXZ(payload, 1, 0x10)); err == nil {
+		t.Fatal("a stream of tiny chunks was decoded")
+	}
+	if _, err := xzValue(rawXZ(payload, 1000, 40)); !errors.Is(err, errTooLarge) {
+		t.Fatalf("a 4 GiB dictionary: %v", err)
+	}
+	if got, err := xzPrefix(rawXZ(payload, 1, 40), 65); err != nil || string(got) != string(payload[:65]) {
+		t.Fatalf("name prefix: %q %v", got, err)
+	}
+}

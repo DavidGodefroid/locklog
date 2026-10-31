@@ -454,7 +454,16 @@ func (f *File) nameCost0(off uint64, compressed bool) (string, int, error) {
 		if err := f.read(prefix, off+start); err != nil {
 			return "", 0, err
 		}
-	case objCompressedZSTD, objCompressedXZ:
+	case objCompressedXZ:
+		cost = nameCompressedCost
+		src := make([]byte, min(stored, nameCompressedCost+2048))
+		if err := f.read(src, off+start); err != nil {
+			return "", cost, err
+		}
+		if prefix, err = xzPrefix(src, MaxNameBytes+1); err != nil {
+			return "", cost, corrupt("xz data", off)
+		}
+	case objCompressedZSTD:
 		cost = nameCompressedCost
 		r, err := f.stream(flags, off+start, stored, true)
 		if err != nil {
@@ -526,39 +535,46 @@ func (f *File) valueCost(off uint64, nameLen int) ([]byte, int, error) {
 	if f.bad[off] {
 		return nil, 0, corrupt("data object", off)
 	}
-	v, err := f.value0(off, nameLen)
+	v, in, err := f.value0(off, nameLen)
 	if errors.Is(err, errTooLarge) {
-		return nil, MaxData, err
+		return nil, MaxData + in, err
 	}
 	if err != nil {
 		// A failed decode may have run to the end of the payload: charge
 		// the cap, and remember the object.
 		f.markBad(off)
-		return nil, MaxData, err
+		return nil, MaxData + in, err
 	}
-	return v, nameLen + 1 + len(v), nil
+	// The compressed input is charged too: decoding work follows the
+	// input as well as the output.
+	return v, nameLen + 1 + len(v) + in, nil
 }
 
-func (f *File) value0(off uint64, nameLen int) ([]byte, error) {
+// value0 decodes a value; in is the compressed bytes it read (0 for an
+// uncompressed one), charged on top of the decoded bytes.
+func (f *File) value0(off uint64, nameLen int) (v []byte, in int, err error) {
 	start := f.payloadStart()
 	flags, size, err := f.objectHeader(off, typeData, start+2, 1<<62)
 	if err != nil {
-		return nil, err
+		return nil, in, err
 	}
 	stored := size - start
+	if flags&objCompressedMask != 0 {
+		in = int(min(stored, maxCompressed))
+	}
 	var p []byte
 	switch flags & objCompressedMask {
 	case 0:
 		if stored > MaxData {
-			return nil, errTooLarge
+			return nil, in, errTooLarge
 		}
 		p = make([]byte, stored)
 		if err := f.read(p, off+start); err != nil {
-			return nil, err
+			return nil, in, err
 		}
 	case objCompressedZSTD, objCompressedXZ:
 		if stored > maxCompressed {
-			return nil, errTooLarge
+			return nil, in, errTooLarge
 		}
 		if flags&objCompressedZSTD != 0 {
 			// The frame header declares the content size: check it
@@ -566,40 +582,52 @@ func (f *File) value0(off uint64, nameLen int) ([]byte, error) {
 			var hb [zstd.HeaderMaxSize]byte
 			k := min(uint64(len(hb)), stored)
 			if err := f.read(hb[:k], off+start); err != nil {
-				return nil, err
+				return nil, in, err
 			}
 			var fh zstd.Header
 			if err := fh.Decode(hb[:k]); err != nil {
-				return nil, corrupt("zstd frame header", off)
+				return nil, in, corrupt("zstd frame header", off)
 			}
 			if fh.HasFCS && fh.FrameContentSize > MaxData {
-				return nil, errTooLarge
+				return nil, in, errTooLarge
 			}
+		}
+		if flags&objCompressedXZ != 0 {
+			src := make([]byte, stored)
+			if err := f.read(src, off+start); err != nil {
+				return nil, in, err
+			}
+			if p, err = xzValue(src); errors.Is(err, errTooLarge) {
+				return nil, in, err
+			} else if err != nil {
+				return nil, in, corrupt("xz data", off)
+			}
+			break
 		}
 		r, err := f.stream(flags, off+start, stored, false)
 		if err != nil {
-			return nil, err
+			return nil, in, err
 		}
 		p, err = io.ReadAll(io.LimitReader(r, MaxData+1))
 		if errors.Is(err, errTooLarge) {
-			return nil, err
+			return nil, in, err
 		}
 		if err != nil {
-			return nil, corrupt("compressed data", off)
+			return nil, in, corrupt("compressed data", off)
 		}
 		if len(p) > MaxData {
-			return nil, errTooLarge
+			return nil, in, errTooLarge
 		}
 	case objCompressedLZ4:
 		p, err = f.lz4(off+start, stored)
 		if err != nil {
-			return nil, err
+			return nil, in, err
 		}
 	default:
-		return nil, corrupt("data compression flags", off)
+		return nil, in, corrupt("data compression flags", off)
 	}
 	if len(p) <= nameLen || p[nameLen] != '=' {
-		return nil, corrupt("data payload", off)
+		return nil, in, corrupt("data payload", off)
 	}
 	if len(p) <= cachePayload {
 		if len(f.data) >= cacheMax {
@@ -614,7 +642,7 @@ func (f *File) value0(off uint64, nameLen int) ([]byte, error) {
 		f.big[off] = p
 		f.bigN += len(p)
 	}
-	return p[nameLen+1:], nil
+	return p[nameLen+1:], in, nil
 }
 
 // stream returns a decompressing reader over a ZSTD or XZ payload.
@@ -635,14 +663,7 @@ func (f *File) stream(flags uint8, off, n uint64, prefixOnly bool) (io.Reader, e
 		}
 		return f.zd, nil
 	}
-	r, err := xzReader(src, prefixOnly)
-	if errors.Is(err, errTooLarge) {
-		return nil, err
-	}
-	if err != nil {
-		return nil, corrupt("xz data", off)
-	}
-	return r, nil
+	return nil, corrupt("data compression flags", off)
 }
 
 // lz4 decodes an LZ4 payload: a little-endian 64-bit size, then one block.
