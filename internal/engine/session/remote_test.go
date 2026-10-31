@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -383,5 +384,46 @@ count_range = "2h"
 	}
 	if _, ref := call(t, s, logconsole.MethodCount, `{"from":"2026-10-30T12:00:00Z","to":"2026-10-30T14:00:00Z","text":"failed"}`); ref == nil || ref.Info.Code != "E_OVER_BUDGET" {
 		t.Errorf("a scanned count past the remote range: %+v", ref)
+	}
+}
+
+// countingLimiter counts the tokens taken.
+type countingLimiter struct{ n atomic.Int64 }
+
+func (c *countingLimiter) Wait(context.Context) error { c.n.Add(1); return nil }
+
+// Every method that reaches the backend is paced, log.sources included,
+// and one remote request takes exactly one token.
+func TestRemoteRequestsPaced(t *testing.T) {
+	fake := &lokitest.Server{Entries: lokiEntries(), User: "reader", Password: remoteSecret}
+	srv := httptest.NewServer(fake)
+	defer srv.Close()
+	f := newFixture(t, lokiCfg(srv.URL, false, ""), "")
+	s := open(t, remoteOptions(f))
+	lim := &countingLimiter{}
+	s.requests = lim
+	for _, c := range []struct{ method, params string }{
+		{logconsole.MethodSources, `{}`},
+		{logconsole.MethodSearch, `{` + hour + `}`},
+		{logconsole.MethodCount, `{` + hour + `,"where":[{"label":"level","op":"=","value":"error"}]}`},
+	} {
+		before, tokens := len(fake.Requests()), lim.n.Load()
+		if _, ref := call(t, s, c.method, c.params); ref != nil {
+			t.Fatalf("%s refused: %+v", c.method, ref)
+		}
+		reqs, took := len(fake.Requests())-before, lim.n.Load()-tokens
+		if reqs == 0 || took != int64(reqs) {
+			t.Errorf("%s: %d requests, %d tokens", c.method, reqs, took)
+		}
+	}
+	// A spent budget refuses log.sources' requests too.
+	s.requests = newRateLimiter(1, nil)
+	call(t, s, logconsole.MethodStatus, `{}`)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	_ = s.requests.Wait(ctx) // the one token
+	res, _, _ := s.Handle(ctx, logconsole.MethodSources, json.RawMessage(`{}`), logconsole.Caller{})
+	if out, _ := json.Marshal(res); !strings.Contains(string(out), "could not be described") {
+		t.Errorf("sources past the budget: %s", out)
 	}
 }

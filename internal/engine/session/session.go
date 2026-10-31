@@ -112,7 +112,7 @@ type Session struct {
 	inflight atomic.Int64
 	// requests paces the remote sources' requests of the agent's calls
 	// (limits.remote.requests_per_minute); nil without a remote source.
-	requests *rateLimiter
+	requests source.Limiter
 
 	stop    context.CancelFunc
 	indexer sync.WaitGroup
@@ -195,7 +195,9 @@ func Open(ctx context.Context, o Options) (_ *Session, err error) {
 			return nil, fmt.Errorf("source %s: %w", src.Name, err)
 		}
 		if src.Remote != nil && s.requests == nil {
-			s.requests = newRateLimiter(pr.Limits.Remote.RequestsPerMinute, nil)
+			if l := newRateLimiter(pr.Limits.Remote.RequestsPerMinute, nil); l != nil {
+				s.requests = l
+			}
 		}
 		s.srcs[src.Name] = ss
 		s.names = append(s.names, src.Name)
@@ -571,6 +573,12 @@ func (s *Session) Close() error {
 func (s *Session) Handle(ctx context.Context, method string, params json.RawMessage, _ logconsole.Caller) (any, *logconsole.Refusal, error) {
 	s.inflight.Add(1)
 	defer s.inflight.Add(-1)
+	// Every method that reaches a remote backend is paced, log.sources
+	// (its Describe) included: one request, one token. (The one pacing
+	// point of the session: no other layer waits on this limiter.)
+	if s.requests != nil && source.LimiterFrom(ctx) == nil {
+		ctx = source.WithLimiter(ctx, s.requests)
+	}
 	switch method {
 	case logconsole.MethodStatus:
 		if r := noParams(params); r != nil {
@@ -582,9 +590,6 @@ func (s *Session) Handle(ctx context.Context, method string, params json.RawMess
 			return nil, r, nil
 		}
 		return s.describe(ctx), nil, nil
-	}
-	if s.requests != nil && source.LimiterFrom(ctx) == nil {
-		ctx = source.WithLimiter(ctx, s.requests)
 	}
 	res, ref, err := s.eng.Handle(ctx, method, params)
 	if ref != nil {
