@@ -8,11 +8,13 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 
 	kconfig "github.com/DavidGodefroid/lockkit/config"
 	"github.com/DavidGodefroid/lockkit/console"
+	"github.com/DavidGodefroid/lockkit/kit"
 	"golang.org/x/term"
 
 	"github.com/DavidGodefroid/locklog/internal/config"
@@ -20,9 +22,10 @@ import (
 	"github.com/DavidGodefroid/locklog/internal/product"
 )
 
-// openEngine opens the log engine of a policy; nil until the engine is
-// part of this build (the console then refuses to connect).
-var openEngine logconsole.Opener
+// openEngine returns the opener of the log engine of a policy: in the
+// image, its first open confines the console (Landlock) before any source
+// is opened.
+func openEngine(inContainer bool) logconsole.Opener { return newOpener(inContainer).Open }
 
 const consoleUsage = "usage: locklog console [--profile P] [--allowed-uids UID,...]"
 
@@ -52,8 +55,17 @@ func consoleCmd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "locklog console:", err)
 		return 1
 	}
-	o := logconsole.FromEnv(logconsole.Options{Open: openEngine}, os.Getenv)
+	o := logconsole.FromEnv(logconsole.Options{}, os.Getenv)
 	o.InContainer = logconsole.InImage(os.Getuid(), os.Stat)
+	o.Open = openEngine(o.InContainer)
+	// The engine's state (keys, index, PII rules) beside lockkit's own
+	// (approved policies, audit), in the home volume in the image.
+	stateBase, err := kit.StateBase()
+	if err != nil {
+		fmt.Fprintln(stderr, "locklog console:", err)
+		return 1
+	}
+	o.StateDir = filepath.Join(stateBase, product.P.Name)
 	var root string
 	if o.InContainer {
 		// The launcher starts the console in the project it checked: the
@@ -103,7 +115,7 @@ func consoleCmd(args []string, stdout, stderr io.Writer) int {
 		t.Println("allowed uids besides locklog-clients (--allowed-uids): " + joinUIDs(uids))
 	}
 	err = console.Run(ctx, kp, be, console.Options{
-		Profile: p.Name, ProjectRoot: root, IO: t, TTY: os.Stdin, Isolation: iso,
+		Profile: p.Name, ProjectRoot: root, IO: t, TTY: os.Stdin, Isolation: iso, StateDir: stateBase,
 		Sanitizer: logconsole.Sanitizer(),
 	})
 	if err != nil {
