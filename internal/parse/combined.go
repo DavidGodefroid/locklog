@@ -30,7 +30,8 @@ func (combinedFormat) Detect(line string) bool {
 }
 
 func (combinedFormat) Decode(text string, o *Options) (Event, bool) {
-	if !(combinedFormat{}).Detect(text) {
+	// Detect's checks, with the expression run once.
+	if strings.IndexByte(text[:min(len(text), 800)], '[') < 0 {
 		return Event{}, false
 	}
 	m := combinedRe.FindStringSubmatchIndex(text)
