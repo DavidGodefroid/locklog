@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"slices"
 	"sort"
 	"sync"
@@ -49,7 +50,8 @@ type Limits struct {
 	MaxOutput  int
 	// Deadline of one call.
 	Deadline time.Duration
-	// MaxMaskFailures in a call before E_MASK.
+	// MaxMaskFailures in one granule before the granule is skipped
+	// whole (see run).
 	MaxMaskFailures int
 }
 
@@ -160,6 +162,10 @@ type cursorState struct {
 	Cache    string `json:"k,omitempty"`
 	Epoch    string `json:"e"`
 	PolicyFP string `json:"f"`
+	// From and To are the range resolved at the first call: a query by
+	// last is continued over that window, not over a new one.
+	From time.Time `json:"a"`
+	To   time.Time `json:"b"`
 }
 
 // refState is sealed into a record ref.
@@ -220,7 +226,8 @@ type SearchResult struct {
 	Scanned      Scanned           `json:"scanned"`
 	Masking      Masking           `json:"masking"`
 	// MaskedFailures counts records withheld whole because masking
-	// failed.
+	// failed: the records it failed on, and every record of a granule
+	// where it failed MaxMaskFailures times or more.
 	MaskedFailures int `json:"masked_failures,omitempty"`
 }
 
@@ -233,7 +240,7 @@ func (e *Engine) planQuery(ctx context.Context, q *Query, remoteBudget, localBud
 		src := e.o.Sources[name]
 		p, err := src.Plan(ctx, r, q.selector(name, e.o.Trusted))
 		if err != nil {
-			return source.Byteplan{}, &Error{Code: ESource, Message: "source " + name + ": " + e.o.Masker.Text(err.Error())}
+			return source.Byteplan{}, sourceError(err)
 		}
 		if e.remote(name) {
 			bytesRemote += p.Bytes()
@@ -250,6 +257,25 @@ func (e *Engine) planQuery(ctx context.Context, q *Query, remoteBudget, localBud
 		slices.Reverse(plan.Chunks) // sources plan newest stream first
 	}
 	return plan, nil
+}
+
+// sourceError maps an error of a source to a fixed, content-free refusal of
+// its class. Source errors may name files, hosts or label values, so their
+// text never reaches the agent.
+func sourceError(err error) *Error {
+	switch {
+	case errors.Is(err, source.ErrStale), errors.Is(err, source.ErrNotFound), errors.Is(err, fs.ErrNotExist):
+		return &Error{Code: EStale, Message: "a log stream changed since the plan was made: run the query again"}
+	case errors.Is(err, context.Canceled):
+		return &Error{Code: ESource, Message: "cancelled"}
+	case errors.Is(err, context.DeadlineExceeded):
+		return &Error{Code: ESource, Message: "the source did not answer in time; try again"}
+	case errors.Is(err, fs.ErrPermission):
+		return &Error{Code: ESource, Message: "the console may not read a log of this source (permission denied)"}
+	case errors.Is(err, source.ErrNotIndexable):
+		return &Error{Code: ESource, Message: "the count needs fields the index does not hold"}
+	}
+	return &Error{Code: ESource, Message: "the source failed to read its logs"}
 }
 
 // callBytes is the bytes one call may process (remote sources, whose
@@ -284,29 +310,43 @@ func (e *Engine) freeze(query string, plan source.Byteplan) *frozen {
 	return f
 }
 
-// resume opens a cursor of a query and returns its frozen plan.
-func (e *Engine) resume(cursor, query string) (*frozen, cursorState, *Error) {
+// openCursor opens a cursor, before the query is validated: a query by last
+// takes the window sealed in it (restoreWindow).
+func (e *Engine) openCursor(cursor string) (cursorState, *Error) {
 	var st cursorState
 	if err := e.o.Sealer.Open("Lc1", cursor, &st); err != nil {
-		return nil, st, &Error{Code: EStale, Span: "cursor", Message: "invalid or expired cursor: run the query again without it"}
+		return st, &Error{Code: EStale, Span: "cursor", Message: "invalid or expired cursor: run the query again without it"}
 	}
 	if st.PolicyFP != e.o.PolicyFP() {
-		return nil, st, &Error{Code: EPolicyChanged, Span: "cursor", Message: "the policy changed: run the query again"}
+		return st, &Error{Code: EPolicyChanged, Span: "cursor", Message: "the policy changed: run the query again"}
 	}
 	if st.Epoch != e.o.Masker.Epoch() {
-		return nil, st, &Error{Code: EStale, Span: "cursor", Message: "the pseudonym epoch changed: run the query again"}
+		return st, &Error{Code: EStale, Span: "cursor", Message: "the pseudonym epoch changed: run the query again"}
 	}
+	return st, nil
+}
+
+// restoreWindow resolves the last of a continued query to the window of its
+// first call; the query digest, over the resolved range, then matches.
+func restoreWindow(q *Query, st cursorState) {
+	if q.Last != "" && q.From.IsZero() && q.To.IsZero() && !st.From.IsZero() {
+		q.From, q.To, q.Last = st.From, st.To, ""
+	}
+}
+
+// resume returns the frozen plan of an opened cursor of a query.
+func (e *Engine) resume(st cursorState, query string) (*frozen, *Error) {
 	if st.Query != query {
-		return nil, st, &Error{Code: EStale, Span: "cursor", Message: "the cursor belongs to another query"}
+		return nil, &Error{Code: EStale, Span: "cursor", Message: "the cursor belongs to another query"}
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	f := e.plans[st.Plan]
 	if f == nil || f.query != query {
-		return nil, st, &Error{Code: EStale, Span: "cursor", Message: "the cursor expired: run the query again"}
+		return nil, &Error{Code: EStale, Span: "cursor", Message: "the cursor expired: run the query again"}
 	}
 	f.lastUse = e.o.Now()
-	return f, st, nil
+	return f, nil
 }
 
 // run executes a frozen plan from (chunk, granule) until the plan ends, the
@@ -326,6 +366,7 @@ func (e *Engine) run(ctx context.Context, plan source.Byteplan, chunk, gran int,
 	deadline := start.Add(e.o.Limits.Deadline)
 	var sc Scanned
 	failures := 0
+	filtered := e.o.Prefilter && len(needles) > 0
 	for chunk < len(plan.Chunks) {
 		if callBytes > 0 && sc.Bytes >= callBytes {
 			return chunk, gran, sc, failures, nil
@@ -350,7 +391,7 @@ func (e *Engine) run(ctx context.Context, plan source.Byteplan, chunk, gran int,
 			return chunk, gran, sc, failures, nil
 		}
 		groupCtx, cancel := context.WithDeadline(ctx, deadline.Add(e.o.Limits.Deadline/2))
-		raws, fetched, err := e.fetch(groupCtx, sub, needles)
+		raws, total, fetched, err := e.fetch(groupCtx, sub, needles)
 		if err == nil && sc.Granules > 0 && e.o.Cost.Time(fetched) > time.Until(deadline) {
 			// Fetched more than the time left can mask: drop the group
 			// unmasked; the next call fetches it again.
@@ -368,31 +409,50 @@ func (e *Engine) run(ctx context.Context, plan source.Byteplan, chunk, gran int,
 				// The group overran far past its estimate: drop it
 				// (stopping points are group boundaries),
 				// recalibrate and stop.
-				e.o.Cost.Calibrate()
+				e.o.Cost.Recalibrate()
 				if sc.Granules == 0 {
 					return chunk, gran, sc, failures, &Error{Code: ESource, Message: "the first plan granule did not finish in time; try again"}
 				}
 				return chunk, gran, sc, failures, nil
 			}
-			if errors.Is(err, source.ErrStale) || errors.Is(err, source.ErrNotFound) {
-				return chunk, gran, sc, failures, &Error{Code: EStale, Message: "a log stream changed since the plan was made: run the query again"}
-			}
 			if ctx.Err() != nil {
 				return chunk, gran, sc, failures, &Error{Code: ESource, Message: "cancelled"}
 			}
-			return chunk, gran, sc, failures, &Error{Code: ESource, Message: e.o.Masker.Text(err.Error())}
+			return chunk, gran, sc, failures, sourceError(err)
 		}
 		if took := time.Since(maskStart); took > e.o.Cost.Time(fetched)*3/2 && took > 100*time.Millisecond {
-			e.o.Cost.Calibrate() // overrun: recalibrate at once
+			e.o.Cost.Recalibrate() // overrun: recalibrate at once
+		}
+		// With the pre-filter on, only the records whose clear text
+		// holds the needles are masked: their failures would tell
+		// which ones do, so they are not counted (failed records are
+		// still withheld whole, as they never match); see
+		// prefilter.go.
+		perGranule := map[int]int{}
+		for i := range recs {
+			if recs[i].Failed() && !filtered {
+				perGranule[raws[i].Granule]++
+			}
 		}
 		for i := range raws {
-			if recs[i].Failed() {
+			// A granule where masking failed MaxMaskFailures times
+			// or more is skipped whole: none of its records is
+			// returned or counted, and all of them count as masked
+			// failures (a masker failing that often on a granule's
+			// content is not trusted with the rest of it). This was
+			// chosen over a call-level E_MASK refusal: the call
+			// would stop there every time, so no cursor (and, on a
+			// cold plan, no narrower range) could ever get past it.
+			// Skipping depends on the plan's granules and their
+			// bytes only, never on predicates or call boundaries.
+			if n := perGranule[raws[i].Granule]; n >= e.o.Limits.MaxMaskFailures {
+				failures++
+				continue
+			}
+			if recs[i].Failed() && !filtered {
 				failures++
 			}
 			visit(raws[i], recs[i])
-		}
-		if failures >= e.o.Limits.MaxMaskFailures {
-			return chunk, gran, sc, failures, &Error{Code: EMask, Message: "masking failed on several records: the call is refused"}
 		}
 		// Reported work is granule-rounded: the planned bytes of the
 		// granules (a remote slice, unknown before the fetch, by the
@@ -402,7 +462,7 @@ func (e *Engine) run(ctx context.Context, plan source.Byteplan, chunk, gran int,
 		} else {
 			sc.Bytes += fetched
 		}
-		sc.Records += int64(len(raws))
+		sc.Records += int64(total) // before the pre-filter
 		sc.Granules += len(sub.Granules)
 		gran = g[1]
 		if gran >= len(c.Granules) {
@@ -412,24 +472,28 @@ func (e *Engine) run(ctx context.Context, plan source.Byteplan, chunk, gran int,
 	return chunk, gran, sc, failures, nil
 }
 
-// fetch reads the records of a group of granules and the bytes it cost.
-// With the opt-in pre-filter, a record whose clear text cannot contain every
-// needle is dropped before masking (non-production only).
-func (e *Engine) fetch(ctx context.Context, c source.Chunk, needles []string) ([]source.RawRecord, int64, error) {
+// fetch reads the records of a group of granules: those to mask, how many
+// the group holds (before any filtering: scanned.records never depends on
+// the clear text) and the bytes it cost. With the opt-in pre-filter, a
+// record whose clear text cannot contain every needle is dropped before
+// masking (non-production only).
+func (e *Engine) fetch(ctx context.Context, c source.Chunk, needles []string) ([]source.RawRecord, int, int64, error) {
 	it, err := e.o.Sources[c.Source].Scan(ctx, c)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 	defer it.Close()
 	var raws []source.RawRecord
+	total := 0
 	for {
 		raw, err := it.Next()
 		if errors.Is(err, io.EOF) {
-			return raws, it.Processed(), nil
+			return raws, total, it.Processed(), nil
 		}
 		if err != nil {
-			return nil, it.Processed(), err
+			return nil, total, it.Processed(), err
 		}
+		total++
 		if e.o.Prefilter && len(needles) > 0 && !prefilterPass(raw.Event, needles) {
 			continue
 		}
@@ -541,7 +605,7 @@ type match struct {
 }
 
 // Search runs a search (locklog_search).
-func (e *Engine) Search(ctx context.Context, q Query) (SearchResult, error) {
+func (e *Engine) Search(ctx context.Context, q Query) (_ SearchResult, retErr error) {
 	cursor := q.Cursor
 	q.Cursor = ""
 	maxRange := e.o.Limits.LocalRange
@@ -557,6 +621,14 @@ func (e *Engine) Search(ctx context.Context, q Query) (SearchResult, error) {
 			}
 		}
 	}
+	var st cursorState
+	if cursor != "" {
+		var err *Error
+		if st, err = e.openCursor(cursor); err != nil {
+			return SearchResult{}, err
+		}
+		restoreWindow(&q, st)
+	}
 	if err := e.validator(maxRange).validate(&q); err != nil {
 		return SearchResult{}, err
 	}
@@ -567,18 +639,24 @@ func (e *Engine) Search(ctx context.Context, q Query) (SearchResult, error) {
 	chunk, gran := 0, 0
 	var pending []match
 	if cursor != "" {
-		var st cursorState
 		var err *Error
-		if f, st, err = e.resume(cursor, digest); err != nil {
+		if f, err = e.resume(st, digest); err != nil {
 			return SearchResult{}, err
 		}
 		chunk, gran = st.Chunk, st.Granule
 		if st.Cache != "" {
-			cached, ok := e.cache.take(st.Cache)
+			cached, ok := e.cache.get(st.Cache)
 			if !ok {
 				return SearchResult{}, &Error{Code: EStale, Span: "cursor", Message: "the cursor expired: run the query again"}
 			}
-			pending = cached
+			// Dropped only once this call succeeds: a failed
+			// continuation can be retried with the same cursor.
+			pending = slices.Clip(cached)
+			defer func() {
+				if retErr == nil {
+					e.cache.drop(st.Cache)
+				}
+			}()
 		}
 	} else {
 		plan, err := e.planQuery(ctx, &q, e.o.Limits.RemoteBytes, e.o.Limits.LocalBytes)
@@ -650,7 +728,8 @@ func (e *Engine) Search(ctx context.Context, q Query) (SearchResult, error) {
 	done := chunk >= len(f.plan.Chunks)
 	res.Complete = done && len(rest) == 0
 	if !res.Complete {
-		st := cursorState{Plan: f.id, Query: digest, Chunk: chunk, Granule: gran, Epoch: e.o.Masker.Epoch(), PolicyFP: e.o.PolicyFP()}
+		st := cursorState{Plan: f.id, Query: digest, Chunk: chunk, Granule: gran, Epoch: e.o.Masker.Epoch(), PolicyFP: e.o.PolicyFP(),
+			From: q.From, To: q.To}
 		if len(rest) > 0 {
 			st.Cache = e.cache.put(rest)
 		}

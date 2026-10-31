@@ -8,12 +8,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -77,6 +81,24 @@ func (c countingSource) IndexCounts(ctx context.Context, q source.CountQuery) (s
 
 func newFixture(t *testing.T, content string, opt func(*Options)) *fixture {
 	t.Helper()
+	return newFixtureMask(t, content, nil, opt)
+}
+
+// boomFinder is a secret finder that panics on a text holding BOOM: the
+// masker withholds such a record whole (Failed).
+type boomFinder struct{ masktest.SecretFinder }
+
+func (b boomFinder) Find(s string) []pii.Match {
+	if strings.Contains(s, "BOOM") {
+		panic("boom")
+	}
+	return b.SecretFinder.Find(s)
+}
+
+func withBoom(o *mask.Options) { o.Secrets = boomFinder{} }
+
+func newFixtureMask(t *testing.T, content string, mopt func(*mask.Options), opt func(*Options)) *fixture {
+	t.Helper()
 	root, _ := filepath.EvalSymlinks(t.TempDir())
 	os.MkdirAll(filepath.Join(root, "logs"), 0o755)
 	if err := os.WriteFile(filepath.Join(root, "logs", "app.log"), []byte(content), 0o644); err != nil {
@@ -91,8 +113,12 @@ func newFixture(t *testing.T, content string, opt func(*Options)) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, err := mask.New(mask.Options{Pseudonyms: ep, Values: mask.Detectors(pii.AllDetectors()), Secrets: masktest.SecretFinder{},
-		Trusted: []string{"level", "status"}, Structured: mask.StructuredDetect})
+	mo := mask.Options{Pseudonyms: ep, Values: mask.Detectors(pii.AllDetectors()), Secrets: masktest.SecretFinder{},
+		Trusted: []string{"level", "status"}, Structured: mask.StructuredDetect}
+	if mopt != nil {
+		mopt(&mo)
+	}
+	m, err := mask.New(mo)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -369,24 +395,115 @@ func TestStoppingPointsIndependentOfPredicates(t *testing.T) {
 	_ = b
 }
 
+// normalize renders a result for comparison: refs and cursors are opened
+// (they are sealed with fresh nonces; plan and cache ids are random).
+func normalize(t *testing.T, e *Engine, res any) string {
+	t.Helper()
+	b, _ := json.Marshal(res)
+	var m map[string]any
+	json.Unmarshal(b, &m)
+	if c, ok := m["cursor"].(string); ok {
+		var st cursorState
+		if err := e.o.Sealer.Open("Lc1", c, &st); err != nil {
+			t.Fatal(err)
+		}
+		m["cursor"] = fmt.Sprintf("chunk %d granule %d cached %v from %v to %v", st.Chunk, st.Granule, st.Cache != "", st.From, st.To)
+	}
+	if rs, ok := m["records"].([]any); ok {
+		for _, r := range rs {
+			rec := r.(map[string]any)
+			var st refState
+			if err := e.o.Sealer.Open("Lr1", rec["ref"].(string), &st); err != nil {
+				t.Fatal(err)
+			}
+			rec["ref"] = st
+		}
+	}
+	out, _ := json.Marshal(m)
+	return string(out)
+}
+
+// allPages runs a search to completion and returns its normalised pages.
+func allPages(t *testing.T, e *Engine, qq Query) []string {
+	t.Helper()
+	_, pages := allRecords(t, e, qq)
+	var out []string
+	for _, p := range pages {
+		out = append(out, normalize(t, e, p))
+	}
+	return out
+}
+
+// TestPrefilterEquivalence: the opt-in pre-filter changes nothing a call
+// returns (records, scanned work, failures, completeness, cursor
+// positions), whichever needle, including needles found only inside masked
+// values.
 func TestPrefilterEquivalence(t *testing.T) {
-	content := genLog(t0, 5000, "canary@example.org") + "time=2026-10-30T13:00:00Z level=info msg=\"caf\\u00e9 ok\"\n"
-	for _, qq := range []Query{
+	content := genLog(t0, 20000, "canary@example.org") + "time=2026-10-30T13:00:00Z level=info msg=\"caf\\u00e9 ok\"\n"
+	f := newFixture(t, content, oneGranulePerCall)
+	queries := []Query{
 		q(func(q *Query) { q.Text = "order 12"; q.Limit = 200 }),
 		q(func(q *Query) { q.Text = "café"; q.Limit = 200 }),
 		q(func(q *Query) {
 			q.Where = []Pred{{Field: "msg", Op: "contains", Value: raw("timed out (order 4")}}
 			q.Limit = 200
 		}),
+		// Found only inside masked values (the e-mails).
 		q(func(q *Query) { q.Text = "example.org"; q.Limit = 200 }),
-	} {
-		off := newFixture(t, content, nil)
-		on := newFixture(t, content, func(o *Options) { o.Prefilter = true })
-		a, _ := allRecords(t, off.eng, qq)
-		b, _ := allRecords(t, on.eng, qq)
-		if len(a) != len(b) {
-			t.Fatalf("%q: %d without the pre-filter, %d with", qq.Text, len(a), len(b))
+		q(func(q *Query) { q.Text = "canary"; q.Limit = 200 }),
+		q(func(q *Query) { q.Text = "user1"; q.Limit = 200 }),
+		q(func(q *Query) { q.Text = "no such words"; q.Limit = 200 }),
+	}
+	for _, qq := range queries {
+		f.eng.o.Prefilter = false
+		off := allPages(t, f.eng, qq)
+		f.eng.o.Prefilter = true
+		on := allPages(t, f.eng, qq)
+		if !slices.Equal(off, on) {
+			t.Errorf("%q: the pre-filter changes the result:\n%v\n%v", qq.Text, off, on)
 		}
+		cq := CountQuery{Query: qq, By: []string{"level"}}
+		cq.Limit = 0
+		f.eng.o.Prefilter = false
+		a, err := f.eng.Count(ctx, cq)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.eng.o.Prefilter = true
+		b, err := f.eng.Count(ctx, cq)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if x, y := normalize(t, f.eng, a), normalize(t, f.eng, b); x != y {
+			t.Errorf("%q: the pre-filter changes the count:\n%s\n%s", qq.Text, x, y)
+		}
+	}
+	f.eng.o.Prefilter = true
+	// scanned.records counts every record of the plan.
+	res, err := f.eng.Search(ctx, q(func(q *Query) { q.Text = "canary"; q.Limit = 200 }))
+	if err != nil || res.Scanned.Records < 4000 || res.Complete {
+		t.Fatalf("scanned %+v: %v", res.Scanned, err)
+	}
+}
+
+// TestPrefilterMaskFailures: with the pre-filter, masked failures (and
+// E_MASK) do not depend on whether the failing records' clear text holds
+// the needle.
+func TestPrefilterMaskFailures(t *testing.T) {
+	content := genLog(t0, 100, "c@example.org") +
+		"time=2026-10-30T12:05:00Z level=info msg=\"kaboom BOOM 1\"\n" +
+		"time=2026-10-30T12:05:01Z level=info msg=\"kaboom BOOM 2\"\n"
+	f := newFixtureMask(t, content, withBoom, func(o *Options) { o.Prefilter = true })
+	var got []string
+	for _, text := range []string{"kaboom", "upstream", "nowhere"} {
+		res, err := f.eng.Search(ctx, q(func(q *Query) { q.Text = text }))
+		if err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, fmt.Sprintf("failures %d scanned %+v", res.MaskedFailures, res.Scanned))
+	}
+	if got[0] != got[1] || got[1] != got[2] {
+		t.Fatalf("failures depend on the needle: %v", got)
 	}
 }
 
@@ -462,7 +579,8 @@ func TestNoDigestOnTheSocket(t *testing.T) {
 
 func TestCountFromIndexEqualsScan(t *testing.T) {
 	content := genLog(t0, 30000, "c@example.org")
-	cq := CountQuery{Query: q(func(q *Query) { q.Where = []Pred{{Field: "status", Op: "!=", Value: raw(200)}} }), Bucket: "1h", By: []string{"level"}}
+	// A string value: numeric terms are never served from the index.
+	cq := CountQuery{Query: q(func(q *Query) { q.Where = []Pred{{Field: "status", Op: "!=", Value: raw("200")}} }), Bucket: "1h", By: []string{"level"}}
 	scan := newFixture(t, content, nil)
 	want, err := scan.eng.Count(ctx, cq)
 	if err != nil || !want.Complete || want.FromIndex == false && want.Scanned.Granules == 0 {
@@ -548,5 +666,353 @@ func TestHandle(t *testing.T) {
 	}
 	if _, ref, _ := f.eng.Handle(ctx, "log.write", nil); ref == nil {
 		t.Fatal("unknown method accepted")
+	}
+}
+
+// TestCalibrationInBackground: a stale model never makes a query wait for a
+// calibration, and concurrent queries start only one.
+func TestCalibrationInBackground(t *testing.T) {
+	p, _ := parse.New(parse.Options{})
+	var calls atomic.Int32
+	release := make(chan struct{})
+	c := &CostModel{nsPerByte: 7, now: time.Now, parser: p, corpus: []string{"x"}, workers: 1,
+		mask: func(parse.Event) { calls.Add(1); <-release }}
+	// at is zero: stale.
+	start := time.Now()
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if ns := c.NsPerByte(); ns != 7 {
+				t.Errorf("ns %v", ns)
+			}
+			c.Recalibrate()
+		}()
+	}
+	wg.Wait()
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("queries waited %v for a calibration", d)
+	}
+	close(release)
+	for deadline := time.Now().Add(5 * time.Second); c.running.Load(); {
+		if time.Now().After(deadline) {
+			t.Fatal("calibration never finished")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("%d calibrations ran", n)
+	}
+}
+
+// TestNumericTermsColdEqualsIndexed: numbers compare by exact value in the
+// evaluator; the index holds raw literals, so numeric terms are never pushed
+// down nor served from it, and cold and indexed answers agree.
+func TestNumericTermsColdEqualsIndexed(t *testing.T) {
+	content := genLog(t0, 10000, "c@example.org") // 3 granules
+	type tc struct {
+		name string
+		pred Pred
+		want int
+	}
+	var cases []tc
+	for _, lit := range []string{"200", "200.0", "2e2"} {
+		cases = append(cases,
+			tc{"= " + lit, Pred{Field: "status", Op: "=", Value: json.RawMessage(lit)}, 2500},
+			tc{"in " + lit, Pred{Field: "status", Op: "in", Value: json.RawMessage("[" + lit + ", 3e2]")}, 5000},
+			tc{"!= " + lit, Pred{Field: "status", Op: "!=", Value: json.RawMessage(lit)}, 7500})
+	}
+	f := newFixture(t, content, nil)
+	answers := func() map[string][2]int {
+		out := map[string][2]int{}
+		for _, c := range cases {
+			recs, _ := allRecords(t, f.eng, q(func(q *Query) { q.Where = []Pred{c.pred}; q.Limit = 200; q.Fields = []string{"status"} }))
+			res, err := f.eng.Count(ctx, CountQuery{Query: q(func(q *Query) { q.Where = []Pred{c.pred} })})
+			for err == nil && !res.Complete {
+				t.Fatalf("%s: count incomplete", c.name)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			n := 0
+			for _, g := range res.Groups {
+				n += int(g.N)
+			}
+			out[c.name] = [2]int{len(recs), n}
+		}
+		return out
+	}
+	cold := answers()
+	for i := 0; ; i++ {
+		_, done, err := f.src.IndexStep(ctx, 64<<20, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if done || i > 20 {
+			break
+		}
+	}
+	indexed := answers()
+	for _, c := range cases {
+		if cold[c.name] != [2]int{c.want, c.want} || indexed[c.name] != cold[c.name] {
+			t.Errorf("%s: cold %v, indexed %v, want %d", c.name, cold[c.name], indexed[c.name], c.want)
+		}
+	}
+}
+
+// errSource injects source errors.
+type errSource struct {
+	countingSource
+	plan, scan, count func() error
+}
+
+func (s errSource) Plan(ctx context.Context, r source.Range, sel source.Selector) (source.Byteplan, error) {
+	if s.plan != nil {
+		if err := s.plan(); err != nil {
+			return source.Byteplan{}, err
+		}
+	}
+	return s.countingSource.Plan(ctx, r, sel)
+}
+
+func (s errSource) Scan(ctx context.Context, ch source.Chunk) (source.Iterator, error) {
+	if s.scan != nil {
+		if err := s.scan(); err != nil {
+			return nil, err
+		}
+	}
+	return s.countingSource.Scan(ctx, ch)
+}
+
+func (s errSource) IndexCounts(ctx context.Context, cq source.CountQuery) (source.CountResult, error) {
+	if s.count != nil {
+		if err := s.count(); err != nil {
+			return source.CountResult{}, err
+		}
+	}
+	return s.countingSource.IndexCounts(ctx, cq)
+}
+
+// TestSourceErrorsAreContentFree: errors of sources (which may name files)
+// reach the agent as fixed messages of their class only.
+func TestSourceErrorsAreContentFree(t *testing.T) {
+	const secret = "/srv/customer-acme/billing"
+	pathErr := func() error {
+		return fmt.Errorf("file source: %w", &fs.PathError{Op: "open", Path: secret + "/app.log", Err: syscall.EIO})
+	}
+	permErr := func() error {
+		return &fs.PathError{Op: "open", Path: secret + "/app.log", Err: syscall.EACCES}
+	}
+	staleErr := func() error { return fmt.Errorf("%s: %w", secret, source.ErrStale) }
+	for name, tc := range map[string]struct {
+		es    func(*errSource)
+		count bool
+		code  string
+	}{
+		"plan":       {func(s *errSource) { s.plan = pathErr }, false, ESource},
+		"scan":       {func(s *errSource) { s.scan = pathErr }, false, ESource},
+		"permission": {func(s *errSource) { s.scan = permErr }, false, ESource},
+		"stale":      {func(s *errSource) { s.scan = staleErr }, false, EStale},
+		"index":      {func(s *errSource) { s.count = pathErr }, true, ESource},
+		"count scan": {func(s *errSource) { s.scan = pathErr }, true, ESource},
+	} {
+		f := newFixture(t, genLog(t0, 100, "c@example.org"), nil)
+		es := errSource{countingSource: f.eng.o.Sources["app"].(countingSource)}
+		tc.es(&es)
+		f.eng.o.Sources["app"] = es
+		var err error
+		if tc.count {
+			_, err = f.eng.Count(ctx, CountQuery{Query: q(nil), By: []string{"level"}})
+		} else {
+			_, err = f.eng.Search(ctx, q(nil))
+		}
+		var e *Error
+		if !errors.As(err, &e) || e.Code != tc.code {
+			t.Errorf("%s: %v, want %s", name, err, tc.code)
+			continue
+		}
+		b, _ := json.Marshal(e)
+		if strings.Contains(string(b), "customer-acme") || strings.Contains(e.Error(), "/srv") {
+			t.Errorf("%s: path in the agent's error: %s", name, b)
+		}
+	}
+}
+
+// TestLastCursorsContinue: a query by last keeps the window resolved at its
+// first call; continuations made while the clock moves continue it.
+func TestLastCursorsContinue(t *testing.T) {
+	content := genLog(t0, 30000, "c@example.org") // 8h20m, 4 granules
+	f := newFixture(t, content, oneGranulePerCall)
+	now := t0.Add(3 * time.Hour)
+	f.eng.o.Now = func() time.Time { now = now.Add(time.Minute); return now }
+	// [t0+1h, t0+3h) once resolved: 7200 records.
+	qq := Query{Last: "2h", Limit: 200, Fields: []string{"level"}}
+	n, pages := 0, 0
+	for {
+		res, err := f.eng.Search(ctx, qq)
+		if err != nil {
+			t.Fatalf("search page %d: %v", pages, err)
+		}
+		n += len(res.Records)
+		pages++
+		if res.Complete {
+			break
+		}
+		qq.Cursor = res.Cursor
+	}
+	if want := 7200; n != want || pages < 3 {
+		t.Fatalf("search: %d records in %d pages, want %d", n, pages, want)
+	}
+	cq := CountQuery{Query: Query{Last: "2h", Text: "upstream"}, By: []string{"level"}}
+	var total int64
+	for pages = 0; ; pages++ {
+		res, err := f.eng.Count(ctx, cq)
+		if err != nil {
+			t.Fatalf("count page %d: %v", pages, err)
+		}
+		if res.Complete {
+			for _, g := range res.Groups {
+				total += g.N
+			}
+			break
+		}
+		cq.Cursor = res.Cursor
+	}
+	if pages < 1 || total != 7200 {
+		t.Fatalf("count: %d in %d continuations", total, pages)
+	}
+}
+
+// TestFailedContinuationKeepsItsState: a continuation that fails leaves its
+// cached page and partial count in place; retrying the cursor completes.
+func TestFailedContinuationKeepsItsState(t *testing.T) {
+	content := genLog(t0, 30000, "c@example.org")
+	flaky := func(f *fixture) {
+		calls := 0
+		es := errSource{countingSource: f.eng.o.Sources["app"].(countingSource)}
+		es.scan = func() error {
+			calls++
+			if calls == 2 {
+				return errors.New("transient")
+			}
+			return nil
+		}
+		f.eng.o.Sources["app"] = es
+	}
+	// Search: the first page leaves matches in the cache, the
+	// continuation scans more and fails.
+	f := newFixture(t, content, oneGranulePerCall)
+	flaky(f)
+	qq := q(func(q *Query) {
+		q.Where = []Pred{{Field: "level", Op: "=", Value: raw("error")}, {Field: "status", Op: "=", Value: raw(500)}}
+		q.Limit = 200
+		q.Fields = []string{"level"}
+	})
+	n, failed := 0, 0
+	for i := 0; ; i++ {
+		res, err := f.eng.Search(ctx, qq)
+		if err != nil {
+			// Retry the same cursor: its cached page is still there.
+			if failed++; code(err) != ESource || failed > 1 || qq.Cursor == "" {
+				t.Fatal(err)
+			}
+			continue
+		}
+		n += len(res.Records)
+		if res.Complete {
+			break
+		}
+		qq.Cursor = res.Cursor
+		if i > 100 {
+			t.Fatal("never completes")
+		}
+	}
+	if failed != 1 || n != 1500 {
+		t.Fatalf("search: %d records after %d failed continuations, want 1500", n, failed)
+	}
+	// Count: the partial aggregate survives the failed continuation.
+	f = newFixture(t, content, oneGranulePerCall)
+	flaky(f)
+	cq := CountQuery{Query: q(func(q *Query) { q.Text = "upstream" }), By: []string{"level"}}
+	c, err := f.eng.Count(ctx, cq)
+	if err != nil || c.Complete {
+		t.Fatal(err)
+	}
+	cq.Cursor = c.Cursor
+	if _, err := f.eng.Count(ctx, cq); code(err) != ESource {
+		t.Fatalf("injected failure: %v", err)
+	}
+	for i := 0; !c.Complete; i++ {
+		if c, err = f.eng.Count(ctx, cq); err != nil {
+			t.Fatal(err)
+		}
+		cq.Cursor = c.Cursor
+		if i > 100 {
+			t.Fatal("never completes")
+		}
+	}
+	var total int64
+	for _, g := range c.Groups {
+		total += g.N
+	}
+	if total != 30000 {
+		t.Fatalf("count: %d after a failed continuation, want 30000", total)
+	}
+}
+
+// TestMaskFailuresSkipTheirGranule: a granule holding MaxMaskFailures
+// records the masker fails on is skipped whole and counted as masked
+// failures; the query completes past it, the same way each time and however
+// calls are sliced.
+func TestMaskFailuresSkipTheirGranule(t *testing.T) {
+	var b strings.Builder
+	b.WriteString(genLog(t0, 30000, "c@example.org"))
+	for i := 0; i < 3; i++ {
+		fmt.Fprintf(&b, "time=2026-10-30T21:00:0%dZ level=info msg=\"kaboom BOOM %d\"\n", i, i)
+	}
+	const all = 30003
+	f := newFixtureMask(t, b.String(), withBoom, oneGranulePerCall)
+	qq := q(func(q *Query) { q.Text = "upstream"; q.Limit = 200; q.Fields = []string{"level"} })
+	var runs []string
+	for run := 0; run < 2; run++ {
+		recs, pages := allRecords(t, f.eng, qq)
+		failed := 0
+		for _, p := range pages {
+			failed += p.MaskedFailures
+		}
+		if failed < 3 || failed == all || len(recs)+failed != all {
+			t.Fatalf("%d records, %d masked failures", len(recs), failed)
+		}
+		runs = append(runs, fmt.Sprint(len(recs), failed))
+	}
+	if runs[0] != runs[1] {
+		t.Fatalf("not deterministic: %v", runs)
+	}
+	// A count, in one call, skips the same granule.
+	f.eng.o.Cost = fixedCost(1)
+	cq := CountQuery{Query: qq}
+	cq.Limit = 0
+	var n int64
+	failed := 0
+	for i := 0; ; i++ {
+		res, err := f.eng.Count(ctx, cq)
+		if err != nil {
+			t.Fatal(err)
+		}
+		failed += res.MaskedFailures
+		if res.Complete {
+			for _, g := range res.Groups {
+				n += g.N
+			}
+			break
+		}
+		cq.Cursor = res.Cursor
+		if i > 100 {
+			t.Fatal("never completes")
+		}
+	}
+	if fmt.Sprint(n, failed) != runs[0] {
+		t.Fatalf("count %d with %d failures, search %s", n, failed, runs[0])
 	}
 }

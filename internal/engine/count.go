@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -150,12 +151,39 @@ func (c *aggCache) put(a *agg) string {
 	return id
 }
 
-func (c *aggCache) take(id string) (*agg, bool) {
+// get returns a copy of the partial count of id, leaving it in place: a
+// continuation drops it only once it succeeded, so a failed one (which may
+// have added part of a group to its copy) can be retried.
+func (c *aggCache) get(id string) (*agg, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	a, ok := c.m[id]
+	if !ok {
+		return nil, false
+	}
+	return a.clone(), true
+}
+
+// drop removes the partial count of id.
+func (c *aggCache) drop(id string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, ok := c.m[id]; !ok {
+		return
+	}
 	delete(c.m, id)
-	return a, ok
+	c.o = slices.DeleteFunc(c.o, func(o string) bool { return o == id })
+}
+
+// clone is a deep copy of a.
+func (a *agg) clone() *agg {
+	b := *a
+	b.groups = make(map[string]*Group, len(a.groups))
+	for k, g := range a.groups {
+		gg := *g
+		b.groups[k] = &gg // Key and the times are never mutated in place
+	}
+	return &b
 }
 
 func (q *CountQuery) bucketOf(t time.Time) time.Time {
@@ -169,7 +197,7 @@ func (q *CountQuery) bucketOf(t time.Time) time.Time {
 // index where it holds the range, and from a plan-based scan of the rest
 // (continued free); every other count scans its plan, masking every record
 // first.
-func (e *Engine) Count(ctx context.Context, q CountQuery) (CountResult, error) {
+func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr error) {
 	cursor := q.Cursor
 	q.Cursor = ""
 	trustedOnly := q.trustedOnly(func(s, f string) bool { return e.o.Trusted(s, f) })
@@ -192,6 +220,14 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (CountResult, error) {
 				maxRange = min(maxRange, e.o.Limits.RemoteRange)
 			}
 		}
+	}
+	var st cursorState
+	if cursor != "" {
+		var err *Error
+		if st, err = e.openCursor(cursor); err != nil {
+			return CountResult{}, err
+		}
+		restoreWindow(&q.Query, st)
 	}
 	v := e.validator(maxRange)
 	if err := v.validate(&q.Query); err != nil {
@@ -222,16 +258,20 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (CountResult, error) {
 	chunk, gran := 0, 0
 	a := newAgg()
 	if cursor != "" {
-		var st cursorState
 		var err *Error
-		if f, st, err = e.resume(cursor, digest); err != nil {
+		if f, err = e.resume(st, digest); err != nil {
 			return CountResult{}, err
 		}
 		chunk, gran = st.Chunk, st.Granule
 		var ok bool
-		if a, ok = e.aggs.take(st.Cache); !ok {
+		if a, ok = e.aggs.get(st.Cache); !ok {
 			return CountResult{}, &Error{Code: EStale, Span: "cursor", Message: "the cursor expired: run the query again"}
 		}
+		defer func() {
+			if retErr == nil {
+				e.aggs.drop(st.Cache)
+			}
+		}()
 	} else {
 		var plan source.Byteplan
 		if trustedOnly && q.bucket%time.Minute == 0 && e.indexable(q.Sources) {
@@ -239,7 +279,7 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (CountResult, error) {
 			if err == nil {
 				plan = p
 			} else if !errors.Is(err, source.ErrNotIndexable) {
-				return CountResult{}, &Error{Code: ESource, Message: e.o.Masker.Text(err.Error())}
+				return CountResult{}, sourceError(err)
 			} else {
 				a = newAgg()
 			}
@@ -310,7 +350,8 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (CountResult, error) {
 	})
 	res.Complete = chunk >= len(f.plan.Chunks)
 	if !res.Complete {
-		st := cursorState{Plan: f.id, Query: digest, Chunk: chunk, Granule: gran, Epoch: e.o.Masker.Epoch(), PolicyFP: e.o.PolicyFP(), Cache: e.aggs.put(a)}
+		st := cursorState{Plan: f.id, Query: digest, Chunk: chunk, Granule: gran, Epoch: e.o.Masker.Epoch(), PolicyFP: e.o.PolicyFP(), Cache: e.aggs.put(a),
+			From: q.From, To: q.To}
 		res.Cursor = e.seal("Lc1", st)
 		if cu, ok := coveredUntil(f.plan, chunk, gran, q.Query); ok {
 			res.CoveredUntil = &cu

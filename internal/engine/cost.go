@@ -5,6 +5,7 @@ import (
 	"math"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/DavidGodefroid/locklog/internal/parse"
@@ -43,6 +44,8 @@ type CostModel struct {
 	corpus    []string
 	fixed     bool // tests: never recalibrate
 	workers   int
+	// running is the single-flight guard of background calibrations.
+	running atomic.Bool
 }
 
 // DefaultNsPerByte is the worst-case cost per byte and core before the
@@ -58,7 +61,21 @@ func NewCostModel(p *parse.Parser, m MaskFunc, workers int, now func() time.Time
 	return c
 }
 
-// Calibrate measures the worst-case cost per byte on the fixed corpus.
+// Recalibrate starts a calibration in the background unless one is already
+// running, and returns at once: a query never waits for one (it may take up
+// to calibrationBudget), and concurrent queries start at most one.
+func (c *CostModel) Recalibrate() {
+	if c.fixed || !c.running.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer c.running.Store(false)
+		c.Calibrate()
+	}()
+}
+
+// Calibrate measures the worst-case cost per byte on the fixed corpus,
+// synchronously (at start; queries use Recalibrate).
 func (c *CostModel) Calibrate() {
 	if c.fixed {
 		return
@@ -81,17 +98,17 @@ func (c *CostModel) Calibrate() {
 	c.mu.Unlock()
 }
 
-// NsPerByte returns the cost per byte, recalibrating hourly.
+// NsPerByte returns the cost per byte, recalibrating hourly in the
+// background (the current value serves until the new one is measured).
 func (c *CostModel) NsPerByte() float64 {
 	c.mu.Lock()
 	stale := c.now().Sub(c.at) > calibrationEvery
+	ns := c.nsPerByte
 	c.mu.Unlock()
 	if stale {
-		c.Calibrate()
+		c.Recalibrate()
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.nsPerByte
+	return ns
 }
 
 // Budget returns how many bytes fit in d.

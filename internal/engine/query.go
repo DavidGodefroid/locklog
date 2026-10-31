@@ -17,11 +17,13 @@ import (
 
 // Refusal codes (stable, documented for agents).
 const (
-	EBadQuery      = "E_BAD_QUERY"
-	EUnknownField  = "E_UNKNOWN_FIELD"
-	EPIIInQuery    = "E_PII_IN_QUERY"
-	EOverBudget    = "E_OVER_BUDGET"
-	ESource        = "E_SOURCE"
+	EBadQuery     = "E_BAD_QUERY"
+	EUnknownField = "E_UNKNOWN_FIELD"
+	EPIIInQuery   = "E_PII_IN_QUERY"
+	EOverBudget   = "E_OVER_BUDGET"
+	ESource       = "E_SOURCE"
+	// EMask is reserved: search and count skip a granule where masking
+	// fails too often instead of refusing (see run).
 	EMask          = "E_MASK"
 	EPolicyChanged = "E_POLICY_CHANGED"
 	EStale         = "E_STALE"
@@ -128,14 +130,41 @@ type Query struct {
 	textRe *regexp.Regexp
 }
 
+// numeric reports whether a value of the predicate is a number. The
+// evaluator compares numbers by exact value (200 = 200.0 = 2e2), while the
+// index and source selectors hold raw literals compared as text, so a
+// numeric term is never pushed down to a source nor answered from the index:
+// it is evaluated on the masked records only. It reads the raw value, so it
+// holds before validation too (Count sizes its range from it).
+func (p *Pred) numeric() bool {
+	d := json.NewDecoder(strings.NewReader(string(p.Value)))
+	d.UseNumber()
+	var x any
+	if d.Decode(&x) != nil {
+		return false
+	}
+	switch t := x.(type) {
+	case json.Number:
+		return true
+	case []any:
+		for _, it := range t {
+			if _, ok := it.(json.Number); ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // trustedOnly reports whether the query uses only trusted-field selection:
-// no text, no regex, every predicate an equality on a trusted field.
+// no text, no regex, every predicate an equality on a trusted field with
+// non-numeric values (see numeric).
 func (q *Query) trustedOnly(trusted func(src, field string) bool) bool {
 	if q.Text != "" || q.Regex != "" {
 		return false
 	}
 	for _, p := range q.Where {
-		if !slices.Contains([]string{OpEq, OpNe, OpIn}, p.Op) {
+		if !slices.Contains([]string{OpEq, OpNe, OpIn}, p.Op) || p.numeric() {
 			return false
 		}
 		for _, s := range q.Sources {
@@ -147,11 +176,12 @@ func (q *Query) trustedOnly(trusted func(src, field string) bool) bool {
 	return true
 }
 
-// selector returns the trusted-field terms of the query, used for planning.
+// selector returns the trusted-field terms of the query, used for planning;
+// numeric terms are left out (see numeric).
 func (q *Query) selector(src string, trusted func(src, field string) bool) source.Selector {
 	var sel source.Selector
 	for _, p := range q.Where {
-		if !trusted(src, p.name()) {
+		if !trusted(src, p.name()) || p.numeric() {
 			continue
 		}
 		switch p.Op {

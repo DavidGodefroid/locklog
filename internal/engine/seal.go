@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"crypto/hkdf"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -12,15 +13,18 @@ import (
 	"golang.org/x/crypto/chacha20poly1305"
 )
 
-// Sealer seals refs and cursors (AEAD under K_ref) and computes the keyed
-// digests plans are bound to (HMAC under K_ref). Nothing it produces can be
+// Sealer seals refs and cursors (AEAD) and computes the keyed digests plans
+// are bound to (HMAC), each under its own subkey derived from K_ref with
+// HKDF-SHA256 (info "locklog/aead/v1" and "locklog/hmac/v1"): one key is
+// never used by two primitives. Nothing it produces can be
 // opened, forged or guessed offline without K_ref, which never leaves the
 // console's home volume: an agent holding a ref or a cursor learns nothing
 // from it, and plan hashes and record digests are never returned on the
 // agent socket at all.
 type Sealer struct {
-	key  []byte
-	aead interface {
+	aeadKey []byte
+	hmacKey []byte
+	aead    interface {
 		Seal(dst, nonce, plaintext, additionalData []byte) []byte
 		Open(dst, nonce, ciphertext, additionalData []byte) ([]byte, error)
 		NonceSize() int
@@ -32,18 +36,27 @@ func NewSealer(key []byte) (*Sealer, error) {
 	if len(key) != chacha20poly1305.KeySize {
 		return nil, errors.New("engine: K_ref must be 32 bytes")
 	}
-	a, err := chacha20poly1305.NewX(key)
+	aeadKey, err := hkdf.Key(sha256.New, key, nil, "locklog/aead/v1", chacha20poly1305.KeySize)
 	if err != nil {
 		return nil, err
 	}
-	return &Sealer{key: append([]byte(nil), key...), aead: a}, nil
+	hmacKey, err := hkdf.Key(sha256.New, key, nil, "locklog/hmac/v1", sha256.Size)
+	if err != nil {
+		return nil, err
+	}
+	a, err := chacha20poly1305.NewX(aeadKey)
+	if err != nil {
+		return nil, err
+	}
+	return &Sealer{aeadKey: aeadKey, hmacKey: hmacKey, aead: a}, nil
 }
 
-// Digest is HMAC-SHA256(K_ref, domain ‖ 0 ‖ parts joined by 0), hex. It is
+// Digest is HMAC-SHA256(K_hmac, domain ‖ (0 ‖ len ‖ part)…), base64url
+// (unpadded); K_hmac is derived from K_ref. It is
 // the only hash used for plan binding and record identity (round-6
 // amendment: never an unkeyed hash of a record).
 func (s *Sealer) Digest(domain string, parts ...[]byte) string {
-	m := hmac.New(sha256.New, s.key)
+	m := hmac.New(sha256.New, s.hmacKey)
 	m.Write([]byte(domain))
 	for _, p := range parts {
 		m.Write([]byte{0})
