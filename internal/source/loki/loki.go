@@ -349,8 +349,8 @@ func (s *Source) fetchSlice(ctx context.Context, q string, from, to int64) ([]en
 		v := url.Values{}
 		v.Set("query", q)
 		v.Set("start", strconv.FormatInt(start, 10))
-		// Loki's end is inclusive and must be after start: ask up to
-		// `to` and drop what is at `to` (the next slice's).
+		// grafana/loki:3.5.7 excludes a log query's end; what is at `to`
+		// (the next slice's) is dropped anyway, should a backend include it.
 		v.Set("end", strconv.FormatInt(to, 10))
 		v.Set("limit", strconv.Itoa(s.o.Limit))
 		v.Set("direction", "forward")
@@ -652,23 +652,29 @@ type vectorResponse struct {
 	} `json:"data"`
 }
 
-// IndexCounts answers a trusted-label count with a server-side metric query
-// (`sum by (labels) (count_over_time({selector}[bucket] offset 1ns))`): no
-// line leaves Loki.
+// IndexCounts answers a trusted-label count with server-side metric queries:
+// no line leaves the source.
 //
 // The engine's buckets are [b, b+bucket); Loki's count_over_time at t counts
-// (t-bucket, t]. The query is shifted by `offset 1ns`, so that the point at
-// t = b+bucket counts [b, b+bucket). The shift is an offset rather than a
-// start moved by 1 ns because Loki's query frontend rounds a range query's
-// start down to a multiple of the step (pkg/querier/queryrange/splitters.go,
-// alignStartEnd): a moved start would be moved back. Range queries ask the
-// points From+bucket .. To, step bucket; one bucket for the range is an
-// instant query at To. Loki writes a point's time as (t-1ns) in whole
-// milliseconds, so a point maps to bucket b when its time is in
-// [b+bucket-1ms, b+bucket); a point anywhere else (a grid that is not the
-// one asked for) makes the count not served (source.ErrNotIndexable).
+// (t-bucket, t], to the nanosecond. Loki cannot be asked for the engine's
+// windows directly: its query frontend rounds a range query's start down
+// to the step (pkg/querier/queryrange/splitters.go, alignStartEnd), and
+// grafana/loki:3.5.7 returns no point at all for an offset under 1 ms (an
+// offset of 1 ms or more would move whole milliseconds across buckets). So
+// the counts are Loki's windows, corrected at the boundaries:
 //
-// Not served either (source.ErrNotIndexable): a count by anything but a
+//   - sum by (labels) (count_over_time({selector}[bucket])) at the points
+//     From+bucket .. To, step bucket (one bucket for the range: an instant
+//     query at To): the point at t is bucket t-bucket;
+//   - the entries exactly on a boundary b (From .. To) belong to the
+//     bucket starting at b, not to the one Loki ends at b. A guard query,
+//     sum(count_over_time({selector}[1ms])) at From .. To, finds the
+//     boundaries with an entry in (b-1ms, b]; the entries of those are
+//     fetched at exactly b and moved (Loki's window misses those at From
+//     and counts those at To, which are outside the range).
+//
+// A point off the grid asked for makes the count not served
+// (source.ErrNotIndexable). Not served either: a count by anything but a
 // trusted stream label (structured metadata included); a term on anything
 // but a trusted stream label, or with no value or an empty one; an empty
 // range; a bucket under a second, not whole seconds, not dividing the
@@ -704,65 +710,91 @@ func (s *Source) IndexCounts(ctx context.Context, q source.CountQuery) (source.C
 		return source.CountResult{}, err
 	}
 	by := slices.Clone(q.By)
-	expr := fmt.Sprintf("sum by (%s) (count_over_time(%s [%ds] offset 1ns))", strings.Join(by, ", "), sel, int64(bucket/time.Second))
-	v := url.Values{}
-	v.Set("query", expr)
-	path := "/loki/api/v1/query_range"
-	if instant {
-		path = "/loki/api/v1/query"
-		v.Set("time", strconv.FormatInt(q.Range.To.UnixNano(), 10))
-	} else {
-		v.Set("start", strconv.FormatInt(q.Range.From.Add(bucket).UnixNano(), 10))
-		v.Set("end", strconv.FormatInt(q.Range.To.UnixNano(), 10))
-		v.Set("step", strconv.FormatInt(int64(bucket/time.Second), 10))
+	from, to, w := q.Range.From.UnixNano(), q.Range.To.UnixNano(), int64(bucket)
+	n := (to - from) / w
+	type key struct {
+		k    int64 // bucket index
+		vals string
 	}
-	body, err := s.do(ctx, path, v)
-	if err != nil {
-		return source.CountResult{}, fmt.Errorf("loki source: %w", err)
-	}
-	var mr matrixResponse
-	if instant {
-		var vr vectorResponse
-		if json.Unmarshal(body, &vr) != nil || vr.Status != "success" || vr.Data.ResultType != "vector" {
-			return source.CountResult{}, errResponse
-		}
-		mr.Status, mr.Data.ResultType = "success", "matrix"
-		for _, r := range vr.Data.Result {
-			mr.Data.Result = append(mr.Data.Result, struct {
-				Metric map[string]string    `json:"metric"`
-				Values [][2]json.RawMessage `json:"values"`
-			}{Metric: r.Metric, Values: [][2]json.RawMessage{r.Value}})
-		}
-	} else if json.Unmarshal(body, &mr) != nil || mr.Status != "success" || mr.Data.ResultType != "matrix" {
-		return source.CountResult{}, errResponse
-	}
-	from := q.Range.From.UnixNano()
-	n := int64(span / bucket)
-	var res source.CountResult
-	for _, series := range mr.Data.Result {
+	counts := map[key]int64{}
+	valsOf := map[string][]string{}
+	keyOf := func(labels map[string]string) string {
 		vals := make([]string, len(by))
 		for i, b := range by {
-			vals[i] = series.Metric[b] // "" (absent) when the label is missing
+			vals[i] = labels[b] // "" (absent) when the label is missing
 		}
-		for _, p := range series.Values {
-			at, ok := parseSeconds(p[0])
-			var c string
-			if !ok || json.Unmarshal(p[1], &c) != nil {
-				return source.CountResult{}, errResponse
-			}
-			f, err := strconv.ParseFloat(c, 64)
-			if err != nil || f < 0 || f != math.Trunc(f) || f > 1<<53 {
-				return source.CountResult{}, errResponse
-			}
-			cnt := int64(f)
-			// The point of bucket k ends it: From+(k+1)*bucket, written
-			// 1 ns earlier in whole milliseconds.
-			k := (at - from) / int64(bucket)
-			end := from + (k+1)*int64(bucket)
-			if at < from || k >= n || at < end-int64(time.Millisecond) || at >= end {
+		k := strings.Join(vals, "\x00")
+		valsOf[k] = vals
+		return k
+	}
+
+	// Loki's windows: (From+k*bucket, From+(k+1)*bucket].
+	expr := fmt.Sprintf("sum by (%s) (count_over_time(%s [%ds]))", strings.Join(by, ", "), sel, w/int64(time.Second))
+	series, err := s.metric(ctx, expr, instant, q.Range.From.Add(bucket), q.Range.To, bucket)
+	if err != nil {
+		return source.CountResult{}, err
+	}
+	for _, sr := range series {
+		vk := keyOf(sr.metric)
+		for _, p := range sr.points {
+			// The point at From+(k+1)*bucket ends bucket k.
+			if p.at <= from || (p.at-from)%w != 0 || (p.at-from)/w > n {
 				return source.CountResult{}, source.ErrNotIndexable
 			}
-			res.Rows = append(res.Rows, source.CountRow{Bucket: time.Unix(0, from+k*int64(bucket)).UTC(), Vals: slices.Clone(vals), N: cnt})
+			counts[key{(p.at-from)/w - 1, vk}] += p.n
+		}
+	}
+
+	// The boundaries with an entry within the millisecond before them.
+	var bounds []int64
+	if instant {
+		bounds = []int64{from, to}
+	} else {
+		guard := fmt.Sprintf("sum by () (count_over_time(%s [1ms]))", sel)
+		gs, err := s.metric(ctx, guard, false, q.Range.From, q.Range.To, bucket)
+		if err != nil {
+			return source.CountResult{}, err
+		}
+		for _, sr := range gs {
+			for _, p := range sr.points {
+				if p.at < from || p.at > to || (p.at-from)%w != 0 {
+					return source.CountResult{}, source.ErrNotIndexable
+				}
+				if p.n > 0 {
+					bounds = append(bounds, p.at)
+				}
+			}
+		}
+	}
+	// Move the entries exactly on a boundary b: out of the bucket Loki
+	// ends at b (b-bucket, if it is in the range), into the one starting
+	// at b (if it is in the range).
+	for _, b := range bounds {
+		es, _, err := s.fetchSlice(ctx, sel, b, b+1)
+		if err != nil {
+			return source.CountResult{}, fmt.Errorf("loki source: %w", err)
+		}
+		k := (b - from) / w
+		for _, e := range es {
+			vk := keyOf(e.stream)
+			if b > from {
+				counts[key{k - 1, vk}]--
+			}
+			if b < to {
+				counts[key{k, vk}]++
+			}
+		}
+	}
+
+	var res source.CountResult
+	for k, c := range counts {
+		switch {
+		case c < 0:
+			// Loki's counts and its entries disagree (ingestion between
+			// the queries): not an exact answer.
+			return source.CountResult{}, source.ErrNotIndexable
+		case c > 0:
+			res.Rows = append(res.Rows, source.CountRow{Bucket: time.Unix(0, from+k.k*w).UTC(), Vals: slices.Clone(valsOf[k.vals]), N: c})
 		}
 	}
 	sort.Slice(res.Rows, func(i, j int) bool {
@@ -773,6 +805,69 @@ func (s *Source) IndexCounts(ctx context.Context, q source.CountQuery) (source.C
 	})
 	res.IndexedFrom = q.Range.From
 	return res, nil
+}
+
+type metricPoint struct {
+	at int64 // nanoseconds
+	n  int64
+}
+
+type metricSeries struct {
+	metric map[string]string
+	points []metricPoint
+}
+
+// metric sends a metric query: an instant one at end, or a range one from
+// start to end by step.
+func (s *Source) metric(ctx context.Context, expr string, instant bool, start, end time.Time, step time.Duration) ([]metricSeries, error) {
+	v := url.Values{}
+	v.Set("query", expr)
+	path := "/loki/api/v1/query_range"
+	if instant {
+		path = "/loki/api/v1/query"
+		v.Set("time", strconv.FormatInt(end.UnixNano(), 10))
+	} else {
+		v.Set("start", strconv.FormatInt(start.UnixNano(), 10))
+		v.Set("end", strconv.FormatInt(end.UnixNano(), 10))
+		v.Set("step", strconv.FormatInt(int64(step/time.Second), 10))
+	}
+	body, err := s.do(ctx, path, v)
+	if err != nil {
+		return nil, fmt.Errorf("loki source: %w", err)
+	}
+	var mr matrixResponse
+	if instant {
+		var vr vectorResponse
+		if json.Unmarshal(body, &vr) != nil || vr.Status != "success" || vr.Data.ResultType != "vector" {
+			return nil, errResponse
+		}
+		for _, r := range vr.Data.Result {
+			mr.Data.Result = append(mr.Data.Result, struct {
+				Metric map[string]string    `json:"metric"`
+				Values [][2]json.RawMessage `json:"values"`
+			}{Metric: r.Metric, Values: [][2]json.RawMessage{r.Value}})
+		}
+	} else if json.Unmarshal(body, &mr) != nil || mr.Status != "success" || mr.Data.ResultType != "matrix" {
+		return nil, errResponse
+	}
+	var out []metricSeries
+	for _, r := range mr.Data.Result {
+		sr := metricSeries{metric: r.Metric}
+		for _, p := range r.Values {
+			at, ok := parseSeconds(p[0])
+			var c string
+			if !ok || json.Unmarshal(p[1], &c) != nil {
+				return nil, errResponse
+			}
+			f, err := strconv.ParseFloat(c, 64)
+			if err != nil || f < 0 || f != math.Trunc(f) || f > 1<<53 {
+				return nil, errResponse
+			}
+			sr.points = append(sr.points, metricPoint{at: at, n: int64(f)})
+		}
+		out = append(out, sr)
+	}
+	return out, nil
 }
 
 // parseSeconds reads a metric point's time, a JSON number of seconds with

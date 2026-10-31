@@ -204,7 +204,7 @@ func TestLokiSourceAgainstLoki(t *testing.T) {
 	want := map[string]int64{}
 	levels := []string{"info", "info", "warn", "error"}
 	bucketOf := func(at time.Time) string {
-		return r.From.Add(at.Sub(r.From) / (5 * time.Minute) * (5 * time.Minute)).Format(time.RFC3339Nano)
+		return r.From.Add(at.Sub(r.From) / (5 * time.Minute) * (5 * time.Minute)).UTC().Format(time.RFC3339Nano)
 	}
 	for i := 0; i < n; i++ {
 		want[bucketOf(start.Add(time.Duration(i)*100*time.Millisecond))+" "+levels[i%4]]++
@@ -220,7 +220,7 @@ func TestLokiSourceAgainstLoki(t *testing.T) {
 	}
 	gotN := map[string]int64{}
 	for _, row := range res.Rows {
-		gotN[row.Bucket.Format(time.RFC3339Nano)+" "+row.Vals[0]] += row.N
+		gotN[row.Bucket.UTC().Format(time.RFC3339Nano)+" "+row.Vals[0]] += row.N
 	}
 	if !maps.Equal(gotN, want) {
 		t.Fatalf("metric counts\n got %v\nwant %v", gotN, want)

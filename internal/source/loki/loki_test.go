@@ -37,7 +37,7 @@ type fakeEntry struct {
 
 // fakeLoki answers query_range (streams and the metric form locklog
 // sends), labels and label values over an in-memory set of entries, with
-// Loki's paging semantics (limit over all streams, forward, inclusive end).
+// Loki's paging semantics (limit over all streams, forward, end excluded).
 type fakeLoki struct {
 	mu       sync.Mutex
 	entries  []fakeEntry
@@ -51,9 +51,9 @@ type fakeLoki struct {
 	// ignoreFlags answers as a backend that ignores the encoding-flags
 	// header (metadata merged into the stream labels, no encodingFlags).
 	ignoreFlags bool
-	// ignoreOffset evaluates metric queries without their offset (a
-	// backend whose grid is not the one asked for).
-	ignoreOffset bool
+	// offGrid writes metric points 1 s late (a backend whose grid is
+	// not the one asked for).
+	offGrid bool
 }
 
 func matches(ms [][3]string, l map[string]string) bool {
@@ -86,7 +86,7 @@ func merged(e fakeEntry) map[string]string {
 	return m
 }
 
-var metricRe = regexp.MustCompile(`^sum by \(([^)]*)\) \(count_over_time\((.*) \[(\d+)s\]( offset ([0-9a-z]+))?\)\)$`)
+var metricRe = regexp.MustCompile(`^sum by \(([^)]*)\) \(count_over_time\((.*) \[(\d+(?:ms|s))\]\)\)$`)
 
 func (f *fakeLoki) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	n := atomic.AddInt32(&f.inflight, 1)
@@ -188,7 +188,8 @@ func (f *fakeLoki) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		limit, _ := strconv.Atoi(q.Get("limit"))
 		var hits []fakeEntry
 		for _, e := range f.entries {
-			if e.ts >= start && e.ts <= end && matches(sel.stream, e.labels) && matches(sel.meta, merged(e)) {
+			// [start, end): grafana/loki:3.5.7 excludes a log query's end.
+			if e.ts >= start && e.ts < end && matches(sel.stream, e.labels) && matches(sel.meta, merged(e)) {
 				hits = append(hits, e)
 			}
 		}
@@ -234,30 +235,24 @@ func (f *fakeLoki) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// metric evaluates a metric query as Loki 3.5 does: the query frontend
-// rounds a range query's start down and its end up to the step
+// metric evaluates a metric query as grafana/loki:3.5.7 does: the query
+// frontend rounds a range query's start down and its end up to the step
 // (pkg/querier/queryrange/splitters.go, alignStartEnd); at each step t,
-// count_over_time counts (t-offset-range, t-offset] in nanoseconds; the
-// point's time is (t-offset)/1e6 + offset/1e6 in integer milliseconds
-// (pkg/logql/range_vector.go), written as seconds with a millisecond
-// fraction (model.Time.String).
+// count_over_time counts (t-range, t] to the nanosecond; the point's time
+// is t in milliseconds, written as seconds with a millisecond fraction
+// (model.Time.String). (Offsets are not modelled: locklog sends none.)
 func (f *fakeLoki) metric(w http.ResponseWriter, m []string, start, end int64, stepS string) {
 	by := []string{}
 	if m[1] != "" {
 		by = strings.Split(m[1], ", ")
 	}
 	sel, _ := parseQuery(m[2])
-	rng, _ := strconv.ParseInt(m[3], 10, 64)
-	rng *= 1e9
-	var off int64
-	if m[5] != "" && !f.ignoreOffset {
-		d, err := time.ParseDuration(m[5])
-		if err != nil {
-			http.Error(w, "bad offset", 400)
-			return
-		}
-		off = int64(d)
+	d, err := time.ParseDuration(m[3])
+	if err != nil {
+		http.Error(w, "bad range", 400)
+		return
 	}
+	rng := int64(d)
 	step, _ := strconv.ParseInt(stepS, 10, 64)
 	step *= 1e9
 	if stepS != "" {
@@ -273,7 +268,7 @@ func (f *fakeLoki) metric(w http.ResponseWriter, m []string, start, end int64, s
 		counts := map[string]int{}
 		metrics := map[string]map[string]string{}
 		for _, e := range f.entries {
-			if e.ts > t-off-rng && e.ts <= t-off && matches(sel.stream, e.labels) && matches(sel.meta, merged(e)) {
+			if e.ts > t-rng && e.ts <= t && matches(sel.stream, e.labels) && matches(sel.meta, merged(e)) {
 				mm := map[string]string{}
 				for _, l := range by {
 					if v, ok := e.labels[l]; ok {
@@ -285,7 +280,10 @@ func (f *fakeLoki) metric(w http.ResponseWriter, m []string, start, end int64, s
 				metrics[k] = mm
 			}
 		}
-		ms := (t-off)/1e6 + off/1e6
+		ms := t / 1e6
+		if f.offGrid {
+			ms += 1000
+		}
 		for k, c := range counts {
 			if series[k] == nil {
 				series[k] = map[string]any{"metric": metrics[k], "values": [][]any{}}
@@ -673,10 +671,22 @@ func TestMetricCounts(t *testing.T) {
 	if !maps.Equal(got, want) {
 		t.Fatalf("got %v\nwant %v", got, want)
 	}
+	// The counts, the 1 ms guard, and the boundary entries (log queries
+	// that never leave the source).
+	guards, logs := 0, 0
 	for _, q := range f.queries {
-		if !strings.HasPrefix(q, "sum by (level) (count_over_time({") {
+		switch {
+		case strings.HasPrefix(q, "sum by (level) (count_over_time({") && strings.HasSuffix(q, " [300s]))"):
+		case strings.HasPrefix(q, "sum by () (count_over_time({") && strings.HasSuffix(q, " [1ms]))"):
+			guards++
+		case strings.HasPrefix(q, "{"):
+			logs++
+		default:
 			t.Fatalf("query %s", q)
 		}
+	}
+	if guards != 1 || logs == 0 {
+		t.Fatalf("%d guard queries, %d boundary fetches", guards, logs)
 	}
 	// One bucket for the range: an instant query, [From, To).
 	one, err := s.IndexCounts(ctx, source.CountQuery{Range: r, By: []string{"level"}, Selector: sel})
@@ -697,7 +707,7 @@ func TestMetricCounts(t *testing.T) {
 		}
 	}
 	// A backend whose points are not on the grid asked for: not served.
-	f.ignoreOffset = true
+	f.offGrid = true
 	for _, b := range []time.Duration{5 * time.Minute, 0} {
 		if _, err := s.IndexCounts(ctx, source.CountQuery{Range: r, By: []string{"level"}, Bucket: b, Selector: sel}); !errors.Is(err, source.ErrNotIndexable) {
 			t.Fatalf("bucket %v off the grid: %v", b, err)
