@@ -117,13 +117,6 @@ func (g *incidentGen) app(ts time.Time) string {
 	return fmt.Sprintf(`{"ts":%q,"level":"info","order":%d,"user":%q,"msg":"order %d confirmed"}`, ts.UTC().Format(time.RFC3339Nano), order, user, order)
 }
 
-// incidentData is the generated data of an incident.
-type incidentData struct {
-	nginx   []string // access.log.N … access.log
-	journal string   // a journal root (<root>/<machine-id>/)
-	recs    map[string][]suiteRecord
-}
-
 // nginxLineBytes is about the size of an access-log line.
 const nginxLineBytes = 190
 

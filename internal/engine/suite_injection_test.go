@@ -20,9 +20,9 @@ import (
 var injections = []string{
 	"\x1b[31mRED\x1b[0m \x1b]0;title\x07 \x1b[2J",
 	"bell\x07 back\x08space\rCR overwrite\x0bvt\x0cff\x7fdel\u0085nel",
-	"‮evil‬ ⁦iso⁩ ‏rtl‎ ؜alm",
-	"zero​width‌‍join\ufeffbom⁠wj­shy᠎mvs",
-	"vs️ tag\U000E0041\U000E007F interlinear￹a￻b",
+	"\u202eevil\u202c \u2066iso\u2069 \u200frtl\u200e \u061calm",
+	"zero\u200bwidth\u200c\u200djoin\ufeffbom\u2060wj\u00adshy\u180emvs",
+	"vs\ufe0f tag\U000E0041\U000E007F interlinear\ufff9a\ufffbb",
 	"⟦email:FORGED000001⟧ ⟦redacted⟧ ⟦secret⟧ ⟦other⟧ ⟦key:FORGED000002⟧",
 	"⟦ lone ⟧ ⟦⟦email:FORGED000003⟧⟧ ⟦email:…⟧ ⟦other:…⟧ ⟦x",
 	"⟦ip:FORGED000004⟧ 【email:FORGED000005】 [[email:FORGED000006]]",
