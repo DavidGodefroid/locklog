@@ -1255,3 +1255,85 @@ func TestTrustedLabelDoesNotTrustField(t *testing.T) {
 		t.Fatalf("masked failures %d, want 1 (groups %v)", res.MaskedFailures, strip(res.Groups))
 	}
 }
+
+// TestDecodeRefusalEchoesNothing: a params decode error never quotes what
+// the agent wrote, not even masked (a pseudonym of a guessed value would
+// tell whether it is in the logs).
+func TestDecodeRefusalEchoesNothing(t *testing.T) {
+	f := newFixture(t, genLog(t0, 10, "c@example.org"), nil)
+	for _, p := range []string{
+		`{"jane.doe@example.com":1}`,
+		`{"from":"jane.doe@example.com"}`,
+		`{"limit":"jane.doe@example.com"}`,
+		`{"from":`,
+	} {
+		_, ref, err := f.eng.Handle(ctx, MethodSearch, json.RawMessage(p))
+		if err != nil || ref == nil || ref.Code != EBadQuery {
+			t.Fatalf("%s: %v %v", p, ref, err)
+		}
+		if b, _ := json.Marshal(ref); strings.Contains(string(b), "⟦") || strings.Contains(string(b), "jane") {
+			t.Fatalf("%s: the refusal echoes the agent's text: %s", p, b)
+		}
+	}
+}
+
+// TestCacheNeverCutsMatches: matches the page cache cannot keep refuse the
+// call (narrow the query) instead of being lost while the search reports
+// complete.
+func TestCacheNeverCutsMatches(t *testing.T) {
+	f := newFixture(t, genLog(t0, 1000, "c@example.org"), nil)
+	f.eng.cache = newResultCache(100 << 10)
+	_, err := f.eng.Search(ctx, q(func(q *Query) { q.Limit = 30 }))
+	var e *Error
+	if !errors.As(err, &e) || e.Code != EOverBudget {
+		t.Fatalf("a call with more matches than the cache holds: %v", err)
+	}
+	// One that fits pages through every match.
+	f.eng.cache = newResultCache(1 << 20)
+	if recs, _ := allRecords(t, f.eng, q(func(q *Query) { q.Limit = 30 })); len(recs) != 1000 {
+		t.Fatalf("%d records", len(recs))
+	}
+}
+
+// TestAmbiguousTrustedValuesScanned: a repeated key or an array at a
+// trusted path is unknown to the index (never pruned nor counted by it), so
+// index and scan give the same answers.
+func TestAmbiguousTrustedValuesScanned(t *testing.T) {
+	content := genLog(t0, 50, "c@example.org") +
+		"{\"time\":\"2026-10-30T12:30:00Z\",\"level\":[\"fatal\"],\"msg\":\"array\"}\n" +
+		"time=2026-10-30T12:31:00Z level=info level=fatal msg=\"dup\"\n"
+	f := newFixture(t, content, nil)
+	sq := q(func(q *Query) { q.Where = []Pred{{Field: "level", Op: "=", Value: raw("fatal")}}; q.Limit = 200 })
+	cq := CountQuery{Query: sq, By: []string{"level"}}
+	cq.Limit = 0
+	before, _ := allRecords(t, f.eng, sq)
+	cb, err := f.eng.Count(ctx, cq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.indexAll()
+	after, _ := allRecords(t, f.eng, sq)
+	ca, err := f.eng.Count(ctx, cq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(before) != 2 || len(after) != 2 {
+		t.Fatalf("search: %d unindexed, %d indexed, want 2", len(before), len(after))
+	}
+	if x, y := strip(cb.Groups), strip(ca.Groups); !slices.Equal(x, y) {
+		t.Fatalf("count: unindexed %v, indexed %v", x, y)
+	}
+}
+
+func (f *fixture) indexAll() {
+	f.t.Helper()
+	for i := 0; ; i++ {
+		_, done, err := f.src.IndexStep(ctx, 64<<20, true)
+		if err != nil {
+			f.t.Fatal(err)
+		}
+		if done || i > 20 {
+			return
+		}
+	}
+}

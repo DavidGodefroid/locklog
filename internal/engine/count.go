@@ -209,6 +209,10 @@ func (q *CountQuery) bucketOf(t time.Time) time.Time {
 func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr error) {
 	cursor := q.Cursor
 	q.Cursor = ""
+	// The caps first: the trust loops below are sources × predicates.
+	if len(q.Sources) > MaxSources || len(q.Where) > MaxPredicates || len(q.By)+len(q.ByLabels) > MaxBy {
+		return CountResult{}, refuse(EBadQuery, "", "at most %d sources, %d predicates and %d fields and labels to count by", MaxSources, MaxPredicates, MaxBy)
+	}
 	trustedOnly := q.trustedOnly(e.o.Trusted)
 	if len(q.Sources) == 0 {
 		q.Sources = append([]string(nil), e.names...)
@@ -224,8 +228,12 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 	maxRange := e.o.Limits.CountRange
 	if !trustedOnly {
 		maxRange = e.o.Limits.LocalRange
-		for _, s := range q.Sources {
-			if _, ok := e.o.Sources[s]; ok && e.remote(s) {
+	}
+	for _, s := range q.Sources {
+		// A remote source without its own counts is scanned: its range,
+		// trusted-only or not.
+		if src, ok := e.o.Sources[s]; ok && e.remote(s) {
+			if _, counts := src.(source.Counter); !trustedOnly || !counts {
 				maxRange = min(maxRange, e.o.Limits.RemoteRange)
 			}
 		}
@@ -420,16 +428,16 @@ func (e *Engine) countFailed(q *CountQuery, raw source.RawRecord, rec mask.Recor
 	sel := q.selector(raw.Ref.Source, e.o.Trusted)
 	fields, labels := map[string]string{}, map[string]string{}
 	get := func(name string, label bool) (string, bool, bool) {
-		look, m := index.Lookup, fields
+		m := fields
 		if label {
-			look, m = index.LookupAttr, labels
+			m = labels
 		}
-		v, ok := look(raw.Event, name)
-		if !ok {
+		v := index.Value(raw.Event, index.TermKey(name, label))
+		switch {
+		case v == index.Absent:
 			return "", false, true
-		}
-		if !known(v) {
-			return "", false, false
+		case v == index.Redacted || !known(v):
+			return "", false, false // unknown, as in the index
 		}
 		m[name] = v
 		return v, true, true
