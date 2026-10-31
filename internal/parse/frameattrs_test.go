@@ -112,17 +112,63 @@ func FuzzParseDockerJSONFrameAttrs(f *testing.F) {
 		evs := fuzzRead(t, p, in)
 		checkEventsGaps(t, in, evs, false)
 		for _, e := range evs {
-			if len(e.Attrs) == 0 || e.Attrs[0].Key != "container" {
+			if len(e.Attrs) == 0 || e.Attrs[0].Key != "container" || e.Attrs[0].Value.Kind != KindString || e.Attrs[0].Value.Str != "c" {
 				t.Fatalf("static attr missing: %+v", e.Attrs)
 			}
+			// A line that is not a frame carries the static attributes
+			// only.
+			if !e.Framed && len(e.Attrs) != 1 {
+				t.Fatalf("unframed event with frame attrs: %+v", e.Attrs)
+			}
+			seen := map[string]bool{}
 			for _, m := range e.Attrs[1:] {
-				if m.Key == "attrs" && (len(m.Value.Members) != 1 || m.Value.Members[0].Key != "k") {
-					t.Fatalf("attrs not filtered: %+v", m.Value)
+				if seen[m.Key] {
+					t.Fatalf("attr %q twice: %+v", m.Key, e.Attrs)
 				}
-				if m.Key != "stream" && m.Key != "attrs" {
+				seen[m.Key] = true
+				switch m.Key {
+				case "attrs":
+					if m.Value.Kind != KindObject || len(m.Value.Members) != 1 || m.Value.Members[0].Key != "k" || m.Value.Members[0].Value.Kind != KindString {
+						t.Fatalf("attrs not filtered: %+v", m.Value)
+					}
+				case "stream":
+					if m.Value.Kind != KindString || m.Value.Str != "stdout" && m.Value.Str != "stderr" {
+						t.Fatalf("stream = %+v", m.Value)
+					}
+				default:
 					t.Fatalf("unexpected attr %q", m.Key)
 				}
 			}
 		}
 	})
+}
+
+// Every "attrs" member of a frame is filtered, not only the first (#42).
+func TestFilterFrameAttrsEveryMember(t *testing.T) {
+	p := mustParser(t, Options{Format: "docker-json", FrameAttrs: []string{"team"}})
+	obj := func(ms ...Member) Value { return Value{Kind: KindObject, Members: ms} }
+	str := func(k, v string) Member { return Member{Key: k, Value: Value{Kind: KindString, Str: v}} }
+	frame := []Member{
+		str("stream", "stdout"),
+		{Key: "attrs", Value: obj(str("team", "shop"), str("secret", "s3cr3t"))},
+		{Key: "attrs", Value: obj(str("team", "other"), str("env", "PASSWORD=hunter2"))},
+		{Key: "attrs", Value: Value{Kind: KindString, Str: "not an object"}},
+	}
+	got := p.filterFrameAttrs(frame)
+	if len(got) != 2 || got[0].Key != "stream" || got[1].Key != "attrs" {
+		t.Fatalf("frame = %+v", got)
+	}
+	if ms := got[1].Value.Members; len(ms) != 1 || ms[0].Key != "team" || ms[0].Value.Str != "shop" {
+		t.Errorf("attrs = %+v", ms)
+	}
+	// None kept: every attrs member is dropped.
+	got = mustParser(t, Options{Format: "docker-json"}).filterFrameAttrs(frame)
+	if len(got) != 1 || got[0].Key != "stream" {
+		t.Errorf("attrs kept without an allowlist: %+v", got)
+	}
+	for _, m := range got {
+		if m.Key == "attrs" {
+			t.Errorf("an attrs member survived: %+v", got)
+		}
+	}
 }

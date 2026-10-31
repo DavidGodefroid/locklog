@@ -382,7 +382,7 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 			return CountResult{}, &Error{Code: EOverBudget, Message: "the part of the range the local index does not hold exceeds this call's byte budget; retry once more is indexed, or ask for locklog_scan",
 				Estimate: &Estimate{Bytes: plan.Bytes(), Granules: plan.Granules(), Range: q.To.Sub(q.From)}}
 		}
-		f = e.freeze(digest, plan)
+		f = e.freeze(digest, plan, false)
 	}
 
 	sc, failures := Scanned{}, 0
@@ -391,7 +391,7 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 	if q.ByPattern {
 		factor++ // templating reads every matching message
 	}
-	chunk, gran, sc, failures, err = e.run(ctx, f.plan, chunk, gran, nil, e.callBytes(q.Sources), factor, func(raw source.RawRecord, rec mask.Record, b *budget) {
+	chunk, gran, sc, failures, err = e.run(ctx, &f, chunk, gran, nil, e.callBytes(q.Sources), factor, func(raw source.RawRecord, rec mask.Record, b *budget) {
 		if rec.Failed() && trustedOnly {
 			// The index counts every record by its trusted values;
 			// a scan of a trusted-only count does the same for a
