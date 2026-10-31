@@ -6,23 +6,18 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"regexp"
 	"slices"
 	"strings"
+
+	"github.com/DavidGodefroid/locklog/internal/config"
 )
 
-// indexRe is an Elasticsearch / OpenSearch index, alias or data stream
-// name locklog accepts: lower-case letters, digits, '.', '_' and '-',
-// starting with a letter or digit (no hidden or system index, no "_all",
-// no remote cluster "a:b"), with at most one '*', as its last character (a
-// pattern over the open, non-hidden indices).
-var indexRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,253}\*?$`)
-
 // ValidIndex reports whether name is an index name or trailing-'*' pattern
-// a source may name.
-func ValidIndex(name string) bool {
-	return indexRe.MatchString(name) && name != "." && name != ".." && !strings.Contains(name, "..")
-}
+// a source may name (config.ValidIndex: lower-case letters, digits, '.',
+// '_' and '-', starting with a letter or digit, so no hidden or system
+// index, no "_all", no remote cluster "a:b"; at most one '*', as its last
+// character, a pattern over the open, non-hidden indices).
+func ValidIndex(name string) bool { return config.ValidIndex(name) }
 
 // IndexSegment validates indices and returns the path segment that names
 // them (sorted, comma-separated).

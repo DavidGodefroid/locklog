@@ -21,10 +21,14 @@ const (
 	KindJournald = "journald"
 	KindDocker   = "docker"
 	KindLoki     = "loki"
+	// KindElastic is Elasticsearch 8.x, KindOpenSearch OpenSearch 2.x.
+	KindElastic    = "elastic"
+	KindOpenSearch = "opensearch"
 )
 
 // Kinds lists the source kinds in a fixed order.
-var Kinds = []string{KindFile, KindJournald, KindDocker, KindLoki}
+var Kinds = []string{KindFile, KindJournald, KindDocker, KindLoki, KindElastic, KindOpenSearch}
+
 
 // Formats of log lines. "auto" detects the format per line.
 var Formats = []string{"auto", "json", "logfmt", "syslog", "cri", "docker-json", "combined", "plain"}
@@ -39,6 +43,9 @@ const (
 	AuthBasic  = "basic"
 	AuthBearer = "bearer"
 	AuthMTLS   = "mtls"
+	// AuthAPIKey is Elasticsearch's "Authorization: ApiKey <base64>":
+	// the secret is the encoded key (kind = "elastic" only).
+	AuthAPIKey = "api_key"
 )
 
 // JournaldTrusted are the journald fields locklog trusts: shown in clear
@@ -79,21 +86,34 @@ type Source struct {
 	Containers []string `json:"containers,omitempty"`
 	Attrs      []string `json:"attrs,omitempty"`
 
-	// Loki.
+	// Loki, Elasticsearch, OpenSearch.
 	Remote *Remote `json:"remote,omitempty"`
 }
 
 // Remote is the connection and server-side scope of a remote source.
 type Remote struct {
 	URL string `json:"url"`
-	// Selector is ANDed into every query: label = value.
+	// Selector is ANDed into every query: label = value (Loki), field =
+	// value (Elasticsearch, OpenSearch).
 	Selector map[string]string `json:"selector"`
-	// TrustedLabels and TrustedMetadata are shown (after the detectors)
-	// and selectable; every other label and field is dropped.
+	// TrustedLabels and TrustedMetadata (Loki) are shown (after the
+	// detectors) and selectable; every other label and field is dropped.
 	TrustedLabels   []string `json:"trusted_labels"`
 	TrustedMetadata []string `json:"trusted_metadata"`
 	Auth            string   `json:"auth"`
 	OrgID           string   `json:"org_id,omitempty"`
+
+	// Elasticsearch and OpenSearch: the indices, aliases, data streams or
+	// trailing-'*' patterns read; the keyword fields shown (after the
+	// detectors), selectable and countable (every other field is
+	// dropped); the time, message and tiebreaker fields; the OpenSearch
+	// roles the human vouches grant no write or manage permission.
+	Indices       []string `json:"indices,omitempty"`
+	TrustedFields []string `json:"trusted_fields,omitempty"`
+	TimeField     string   `json:"time_field,omitempty"`
+	MessageField  string   `json:"message_field,omitempty"`
+	TieBreaker    string   `json:"tiebreaker,omitempty"`
+	ReadOnlyRoles []string `json:"read_only_roles,omitempty"`
 	// Base holds user, credentials, vault_path and the TLS settings.
 	kconfig.Base
 }
@@ -126,6 +146,12 @@ type rawSource struct {
 	TrustedMetadata []string          `toml:"trusted_metadata"`
 	Auth            string            `toml:"auth"`
 	OrgID           string            `toml:"org_id"`
+	Indices         []string          `toml:"indices"`
+	TrustedFields   []string          `toml:"trusted_fields"`
+	TimeField       string            `toml:"time_field"`
+	MessageField    string            `toml:"message_field"`
+	TieBreaker      string            `toml:"tiebreaker"`
+	ReadOnlyRoles   []string          `toml:"read_only_roles"`
 	User            string            `toml:"user"`
 	Credentials     string            `toml:"credentials"`
 	VaultPath       string            `toml:"vault_path"`
@@ -285,24 +311,33 @@ func buildSource(name string, r rawSource, production bool) (Source, error) {
 		key string
 		set bool
 	}
-	only := func(kind string, keys ...keyed) error {
-		if s.Kind == kind {
+	onlyOf := func(kinds []string, keys ...keyed) error {
+		if slices.Contains(kinds, s.Kind) {
 			return nil
 		}
 		for _, k := range keys {
 			if k.set {
-				return errf("%s applies only to kind = %q", k.key, kind)
+				q := make([]string, len(kinds))
+				for i, k := range kinds {
+					q[i] = fmt.Sprintf("%q", k)
+				}
+				return errf("%s applies only to kind = %s", k.key, strings.Join(q, " or "))
 			}
 		}
 		return nil
 	}
-	remoteSet := r.URL != "" || r.Selector != nil || r.TrustedLabels != nil || r.TrustedMetadata != nil || r.Auth != "" ||
-		r.OrgID != "" || r.User != "" || r.Credentials != "" || r.VaultPath != "" || r.TLS != "" || r.TLSCA != "" || r.TLSCert != "" || r.TLSKey != ""
+	only := func(kind string, keys ...keyed) error { return onlyOf([]string{kind}, keys...) }
+	remoteSet := r.URL != "" || r.Selector != nil || r.Auth != "" ||
+		r.User != "" || r.Credentials != "" || r.VaultPath != "" || r.TLS != "" || r.TLSCA != "" || r.TLSCert != "" || r.TLSKey != ""
+	esSet := r.Indices != nil || r.TrustedFields != nil || r.TimeField != "" || r.MessageField != "" || r.TieBreaker != ""
 	for _, err := range []error{
 		only(KindFile, keyed{"paths", r.Paths != nil}, keyed{"recursive", r.Recursive}),
 		only(KindJournald, keyed{"units", r.Units != nil}, keyed{"allow", r.Allow != nil}),
 		only(KindDocker, keyed{"containers", r.Containers != nil}, keyed{"attrs", r.Attrs != nil}),
-		only(KindLoki, keyed{"url, selector, auth and the connection keys", remoteSet}),
+		only(KindLoki, keyed{"trusted_labels, trusted_metadata and org_id", r.TrustedLabels != nil || r.TrustedMetadata != nil || r.OrgID != ""}),
+		onlyOf([]string{KindElastic, KindOpenSearch}, keyed{"indices, trusted_fields, time_field, message_field and tiebreaker", esSet}),
+		only(KindOpenSearch, keyed{"read_only_roles", r.ReadOnlyRoles != nil}),
+		onlyOf([]string{KindLoki, KindElastic, KindOpenSearch}, keyed{"url, selector, auth and the connection keys", remoteSet}),
 	} {
 		if err != nil {
 			return Source{}, err
@@ -358,8 +393,8 @@ func buildSource(name string, r rawSource, production bool) (Source, error) {
 		}
 		s.Containers = kconfig.SortedSet(r.Containers)
 		s.Attrs = kconfig.SortedSet(r.Attrs)
-	case KindLoki:
-		rem, err := buildRemote(r, production, errf)
+	case KindLoki, KindElastic, KindOpenSearch:
+		rem, err := buildRemote(s.Kind, r, production, errf)
 		if err != nil {
 			return Source{}, err
 		}
@@ -408,7 +443,7 @@ func checkPathGlob(p string, recursive bool) error {
 	return nil
 }
 
-func buildRemote(r rawSource, production bool, errf func(string, ...any) error) (*Remote, error) {
+func buildRemote(kind string, r rawSource, production bool, errf func(string, ...any) error) (*Remote, error) {
 	for _, f := range []struct{ key, val string }{{"url", r.URL}, {"user", r.User}, {"vault_path", r.VaultPath},
 		{"tls_ca", r.TLSCA}, {"tls_cert", r.TLSCert}, {"tls_key", r.TLSKey}, {"org_id", r.OrgID}} {
 		if err := kconfig.CheckValue(product.P, f.key, f.val); err != nil {
@@ -443,41 +478,21 @@ func buildRemote(r rawSource, production bool, errf func(string, ...any) error) 
 	if u.RawQuery != "" || u.Fragment != "" {
 		return nil, errf("url must not have a query or a fragment")
 	}
-	for k, v := range r.Selector {
-		if !labelRe.MatchString(k) {
-			return nil, errf("selector: invalid label name %q", k)
+	if kind == KindLoki {
+		if err := lokiScope(r, rem, errf); err != nil {
+			return nil, err
 		}
-		if v == "" || strings.IndexFunc(v, kconfig.UnsafeRune) >= 0 || strings.ContainsAny(v, "\"\\`") || len(v) > 1024 {
-			return nil, errf("selector: label %s needs a non-empty value without quotes, backslashes or control characters", k)
-		}
-		rem.Selector[k] = v
-	}
-	if len(rem.Selector) == 0 {
-		return nil, errf("selector: a Loki source needs at least one label matcher, such as selector = { app = \"api\" }")
-	}
-	for _, l := range append(slices.Clone(r.TrustedLabels), r.TrustedMetadata...) {
-		if !labelRe.MatchString(l) {
-			return nil, errf("trusted_labels / trusted_metadata: invalid name %q", l)
-		}
-		if messageField(l) {
-			return nil, errf("trusted_labels / trusted_metadata: %s is message text, always served masked; it cannot be trusted", l)
-		}
-		if pii.LooksPersonal(l) || pii.LooksQuasi(l) {
-			return nil, errf("trusted_labels / trusted_metadata: %q looks like personal data and cannot be trusted", l)
-		}
-	}
-	// Loki's | name="v" filter matches stream labels as well as
-	// structured metadata: a name that is both would select on either.
-	for _, m := range rem.TrustedMetadata {
-		if _, sel := rem.Selector[m]; sel || slices.Contains(rem.TrustedLabels, m) {
-			return nil, errf("trusted_metadata: %s cannot be both a stream label and structured metadata (it is in the selector or trusted_labels)", m)
-		}
+	} else if err := elasticScope(r, rem, errf); err != nil {
+		return nil, err
 	}
 	if rem.OrgID != "" && !orgIDRe.MatchString(rem.OrgID) {
 		return nil, errf("org_id: invalid tenant id (one tenant: letters, digits and _.!*'()-; no '|' federation)")
 	}
 
 	if rem.Auth == "" {
+		if kind == KindElastic {
+			return nil, errf("auth is required: none, basic, bearer, api_key or mtls")
+		}
 		return nil, errf("auth is required: none, basic, bearer or mtls")
 	}
 	switch rem.Auth {
@@ -500,14 +515,24 @@ func buildRemote(r rawSource, production bool, errf func(string, ...any) error) 
 		if rem.User != "" {
 			return nil, errf("auth = \"bearer\" takes no user")
 		}
+	case AuthAPIKey:
+		if kind != KindElastic {
+			return nil, errf("auth = \"api_key\" applies only to kind = \"elastic\" (Elasticsearch API keys)")
+		}
+		if rem.User != "" {
+			return nil, errf("auth = \"api_key\" takes no user (the secret is the encoded API key)")
+		}
 	case AuthMTLS:
 		if rem.TLSCert == "" || rem.TLSKey == "" {
 			return nil, errf("auth = \"mtls\" needs tls_cert and tls_key")
 		}
 	default:
+		if kind == KindElastic {
+			return nil, errf("unknown auth mode (want none, basic, bearer, api_key or mtls)")
+		}
 		return nil, errf("unknown auth mode (want none, basic, bearer or mtls)")
 	}
-	needsSecret := rem.Auth == AuthBasic || rem.Auth == AuthBearer
+	needsSecret := rem.Auth == AuthBasic || rem.Auth == AuthBearer || rem.Auth == AuthAPIKey
 	switch rem.Credentials {
 	case "":
 		if needsSecret {
@@ -515,11 +540,11 @@ func buildRemote(r rawSource, production bool, errf func(string, ...any) error) 
 		}
 	case kconfig.CredentialsAsk:
 		if !needsSecret {
-			return nil, errf("credentials applies only to auth = \"basic\" or \"bearer\"")
+			return nil, errf("credentials applies only to auth = \"basic\", \"bearer\" or \"api_key\"")
 		}
 	case kconfig.CredentialsVault:
 		if !needsSecret {
-			return nil, errf("credentials applies only to auth = \"basic\" or \"bearer\"")
+			return nil, errf("credentials applies only to auth = \"basic\", \"bearer\" or \"api_key\"")
 		}
 		if rem.VaultPath == "" || strings.HasPrefix(rem.VaultPath, "-") || strings.HasPrefix(rem.VaultPath, "/") || strings.ContainsAny(rem.VaultPath, " \t") {
 			return nil, errf("credentials = \"vault\" needs vault_path, such as \"secret/data/loki-reader\", without spaces and not starting with '-' or '/'")
@@ -562,3 +587,121 @@ func buildRemote(r rawSource, production bool, errf func(string, ...any) error) 
 	}
 	return rem, nil
 }
+
+// lokiScope validates a Loki source's selector and trusted labels and
+// metadata into rem.
+func lokiScope(r rawSource, rem *Remote, errf func(string, ...any) error) error {
+	for k, v := range r.Selector {
+		if !labelRe.MatchString(k) {
+			return errf("selector: invalid label name %q", k)
+		}
+		if v == "" || strings.IndexFunc(v, kconfig.UnsafeRune) >= 0 || strings.ContainsAny(v, "\"\\`") || len(v) > 1024 {
+			return errf("selector: label %s needs a non-empty value without quotes, backslashes or control characters", k)
+		}
+		rem.Selector[k] = v
+	}
+	if len(rem.Selector) == 0 {
+		return errf("selector: a Loki source needs at least one label matcher, such as selector = { app = \"api\" }")
+	}
+	for _, l := range append(slices.Clone(r.TrustedLabels), r.TrustedMetadata...) {
+		if !labelRe.MatchString(l) {
+			return errf("trusted_labels / trusted_metadata: invalid name %q", l)
+		}
+		if messageField(l) {
+			return errf("trusted_labels / trusted_metadata: %s is message text, always served masked; it cannot be trusted", l)
+		}
+		if pii.LooksPersonal(l) || pii.LooksQuasi(l) {
+			return errf("trusted_labels / trusted_metadata: %q looks like personal data and cannot be trusted", l)
+		}
+	}
+	// Loki's | name="v" filter matches stream labels as well as
+	// structured metadata: a name that is both would select on either.
+	for _, m := range rem.TrustedMetadata {
+		if _, sel := rem.Selector[m]; sel || slices.Contains(rem.TrustedLabels, m) {
+			return errf("trusted_metadata: %s cannot be both a stream label and structured metadata (it is in the selector or trusted_labels)", m)
+		}
+	}
+	return nil
+}
+
+// elasticScope validates an Elasticsearch or OpenSearch source's indices,
+// optional selector, trusted fields and time, message and tiebreaker
+// fields into rem.
+func elasticScope(r rawSource, rem *Remote, errf func(string, ...any) error) error {
+	if len(r.Indices) == 0 {
+		return errf("indices: an Elasticsearch / OpenSearch source needs at least one index, alias, data stream or trailing-'*' pattern, such as indices = [\"logs-app-*\"]")
+	}
+	for _, i := range r.Indices {
+		if !ValidIndex(i) {
+			return errf("indices: invalid index name %q (lower-case letters, digits, '.', '_' and '-', starting with a letter or digit, at most a trailing '*'; no hidden, system or remote index)", i)
+		}
+	}
+	rem.Indices = kconfig.SortedSet(r.Indices)
+	rem.TimeField, rem.MessageField, rem.TieBreaker = r.TimeField, r.MessageField, r.TieBreaker
+	if rem.TimeField == "" {
+		rem.TimeField = "@timestamp"
+	}
+	if rem.MessageField == "" {
+		rem.MessageField = "message"
+	}
+	for _, f := range []struct{ key, val string }{{"time_field", rem.TimeField}, {"message_field", rem.MessageField}, {"tiebreaker", rem.TieBreaker}} {
+		if f.val != "" && !esFieldOK(f.val) {
+			return errf("%s: invalid field name %q", f.key, f.val)
+		}
+	}
+	for k, v := range r.Selector {
+		if !esFieldOK(k) {
+			return errf("selector: invalid field name %q", k)
+		}
+		if k == rem.MessageField || k == rem.TimeField {
+			return errf("selector: %s is the message or time field; the selector names keyword fields", k)
+		}
+		if v == "" || strings.IndexFunc(v, kconfig.UnsafeRune) >= 0 || strings.ContainsAny(v, "\"\\`") || len(v) > 1024 {
+			return errf("selector: field %s needs a non-empty value without quotes, backslashes or control characters", k)
+		}
+		rem.Selector[k] = v
+	}
+	for _, f := range r.TrustedFields {
+		switch {
+		case !esFieldOK(f):
+			return errf("trusted_fields: invalid field name %q", f)
+		case f == rem.MessageField || messageField(f):
+			return errf("trusted_fields: %s is message text, always served masked; it cannot be trusted", f)
+		case f == rem.TimeField:
+			return errf("trusted_fields: %s is the time field", f)
+		case pii.LooksPersonal(f) || pii.LooksQuasi(f):
+			return errf("trusted_fields: %q looks like personal data and cannot be trusted", f)
+		}
+	}
+	rem.TrustedFields = kconfig.SortedSet(r.TrustedFields)
+	for _, role := range r.ReadOnlyRoles {
+		if !roleRe.MatchString(role) {
+			return errf("read_only_roles: invalid role name %q", role)
+		}
+	}
+	if r.ReadOnlyRoles != nil {
+		rem.ReadOnlyRoles = kconfig.SortedSet(r.ReadOnlyRoles)
+	}
+	return nil
+}
+
+// esFieldOK reports a field name an Elasticsearch body may name: no
+// wildcard, space or quote, no empty dotted segment.
+func esFieldOK(f string) bool {
+	return fieldNameRe.MatchString(f) && !strings.Contains(f, "..") && !strings.HasSuffix(f, ".")
+}
+
+// indexRe is an Elasticsearch / OpenSearch index, alias or data stream
+// name: lower-case letters, digits, '.', '_' and '-', starting with a
+// letter or digit (no hidden or system index, no "_all", no remote cluster
+// "a:b"), with at most one '*', as its last character. egress.ValidIndex
+// is the same rule.
+var indexRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,253}\*?$`)
+
+// ValidIndex reports whether name is an index name or trailing-'*' pattern
+// a source may name.
+func ValidIndex(name string) bool {
+	return indexRe.MatchString(name) && !strings.Contains(name, "..")
+}
+
+var roleRe = regexp.MustCompile(`^[A-Za-z0-9_.@-]{1,128}$`)

@@ -384,6 +384,9 @@ func (c *Client) authorize(req *http.Request) {
 		req.SetBasicAuth(c.creds.User, c.creds.Secret)
 	case config.AuthBearer:
 		req.Header.Set("Authorization", "Bearer "+c.creds.Secret)
+	case config.AuthAPIKey:
+		// Elasticsearch: the secret is the encoded key, base64(id:key).
+		req.Header.Set("Authorization", "ApiKey "+c.creds.Secret)
 	}
 	if c.orgID != "" {
 		req.Header.Set("X-Scope-OrgID", c.orgID)

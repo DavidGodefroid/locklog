@@ -141,3 +141,35 @@ func TestElasticProbe(t *testing.T) {
 		}
 	}
 }
+
+func TestSendAuthModes(t *testing.T) {
+	for _, tt := range []struct {
+		auth  string
+		creds Credentials
+		want  string
+	}{
+		{config.AuthAPIKey, Credentials{Secret: "aWQ6a2V5"}, "ApiKey aWQ6a2V5"},
+		{config.AuthBearer, Credentials{Secret: "tok"}, "Bearer tok"},
+		{config.AuthBasic, Credentials{User: "reader", Secret: "pw"}, "Basic cmVhZGVyOnB3"},
+		{config.AuthNone, Credentials{}, ""},
+	} {
+		var s seen
+		srv := lokiServer(t, &s, func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(`{}`)) })
+		a, _ := ElasticRoutes([]string{"logs-*"})
+		c, err := New(remote(srv.URL, tt.auth, kconfig.TLSVerifyFull), a, tt.creds, Options{RootCAs: roots(srv)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.Send(context.Background(), "GET", "/", nil, nil); err != nil {
+			t.Fatal(err)
+		}
+		if s.auth != tt.want {
+			t.Errorf("%s: Authorization %q, want %q", tt.auth, s.auth, tt.want)
+		}
+		// The probe never sends them.
+		_, _ = c.Probe(context.Background(), "/logs-*/_mapping", ElasticData)
+		if s.auth != "" {
+			t.Errorf("%s: the probe sent %q", tt.auth, s.auth)
+		}
+	}
+}
