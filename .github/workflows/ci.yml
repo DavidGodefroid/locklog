@@ -140,6 +140,19 @@ jobs:
           version: v2.18.3
           args: check
 
+  # The static site in site/: local links and fragments, page metadata,
+  # site/CNAME and sitemap.xml (offline, no link is fetched).
+  site-check:
+    name: site check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: check-site
+        run: python3 scripts/check-site.py
+
   # main's scripts/install.sh is what locklog.dev serves: once a release
   # exists, it changes only in a release pull request (title "release:"),
   # so that it always matches the released logic. A convention the review
