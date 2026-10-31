@@ -251,7 +251,12 @@ func (r *Reader) continues(ln logical) bool {
 	case MultilinePattern:
 		return !r.p.start.MatchString(ln.Text)
 	}
-	t := ln.Text
+	return indentContinuation(ln.Text)
+}
+
+// indentContinuation reports a line that continues a free-text event in
+// indent mode.
+func indentContinuation(t string) bool {
 	if t == "" {
 		return false
 	}
@@ -283,7 +288,7 @@ func (r *Reader) start(ln logical, split bool) {
 	var continuation bool
 	switch r.p.opts.Multiline {
 	case MultilineIndent:
-		continuation = ln.Text != "" && (ln.Text[0] == ' ' || ln.Text[0] == '\t')
+		continuation = indentContinuation(ln.Text)
 	case MultilinePattern:
 		continuation = !r.p.start.MatchString(ln.Text)
 	}

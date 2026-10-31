@@ -126,10 +126,27 @@ func leadingTime(line string, loc *time.Location) (time.Time, string, bool) {
 	}
 	// Candidates: the first one to three space-separated tokens
 	// ("2006-01-02 15:04:05.000 +0000" uses three), longest first.
-	fields := strings.SplitN(line, " ", 4)
-	for n := min(3, len(fields)); n >= 1; n-- {
-		if t, ok := isoTime(strings.Join(fields[:n], " "), loc); ok {
-			return t, strings.TrimLeft(strings.Join(fields[n:], " "), " \t"), true
+	// Token ends: positions of the first three runs of spaces or tabs.
+	var ends []int
+	for i := 0; i < len(line) && len(ends) < 3; {
+		j := strings.IndexAny(line[i:], " \t")
+		if j < 0 {
+			break
+		}
+		ends = append(ends, i+j)
+		i += j
+		for i < len(line) && (line[i] == ' ' || line[i] == '\t') {
+			i++
+		}
+	}
+	ends = append(ends, len(line))
+	for n := min(3, len(ends)); n >= 1; n-- {
+		cand := line[:ends[n-1]]
+		if strings.ContainsRune(cand, '\t') {
+			continue // tokens of a timestamp are joined by spaces only
+		}
+		if t, ok := isoTime(cand, loc); ok {
+			return t, strings.TrimLeft(line[ends[n-1]:], " \t"), true
 		}
 	}
 	return time.Time{}, line, false

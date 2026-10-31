@@ -101,7 +101,8 @@ type Event struct {
 	Inherited bool
 
 	// Fields is the structured part (top-level members), without the keys
-	// that became Time and Message. Nil for free text.
+	// that became Time and Message. For free text, only parser-known
+	// fields (a plain line's level), else nil.
 	Fields []Member
 	// TimeKey and MessageKey name the keys Time and Message came from.
 	TimeKey    string
