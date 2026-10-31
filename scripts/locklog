@@ -17,6 +17,13 @@
 #              runs in a console of its own, with no file or journald
 #              source beside it (remote sources are fine)
 #   refresh    rewrite the containers map of this project's console once
+#   setup      as you, in the image: the trusted .locklog/ and its
+#              config.toml from this host's facts (log files, journal,
+#              containers, agents), the agent's project wiring or the
+#              own-container recipe, a Compose Loki's proxy (its files in
+#              ~/.config/locklog/proxy, outside the project)
+#   doctor     as the agent account, with the host's network: what an
+#              agent here can reach (advisory)
 #   mcp       as the image's agent account (uid 10052): the MCP server of
 #              a host agent (the non-production trial; the server refuses
 #              production profiles), with the socket volume and the
@@ -238,6 +245,14 @@ if [ -n "${HOME:-}" ]; then home_dir="$(cd "$HOME" 2>/dev/null && pwd -P)" || ho
 d="$here"
 while :; do
 	[ "$d" = / ] && break
+	# Your home directory is never a project: a ~/.locklog/ would choose
+	# the logs of every directory below it.
+	if [ -n "$home_dir" ] && [ "$d" = "$home_dir" ]; then
+		if [ -e "$d/.locklog" ] || [ -L "$d/.locklog" ]; then
+			say "warning: ignoring $d/.locklog: your home directory is not a project (run locklog setup in a project directory)"
+		fi
+		break
+	fi
 	if [ -e "$d/.locklog" ] || [ -L "$d/.locklog" ]; then
 		if ! shared "$d" && trusted_config "$d"; then
 			project="$d"
@@ -248,7 +263,6 @@ while :; do
 		break
 	fi
 	shared "$d" && break
-	[ -n "$home_dir" ] && [ "$d" = "$home_dir" ] && break
 	d="$(dirname "$d")"
 done
 case "$here" in
@@ -1108,6 +1122,130 @@ EOF
 		"$map_version" "$name" "$map_dir" "$map_c" "$map_x" "$map_skip"
 }
 
+# write_facts FILE [logs]: the facts of this host and account that setup
+# and doctor read in the image (internal/hostfacts): ids, group names,
+# states, paths and container names, never a log line or a secret. With
+# "logs", the files under the log roots follow, one per line, last.
+write_facts() {
+	{
+		echo 'locklog-facts 1'
+		echo "euid $(id -u)"
+		echo "groups $(id -Gn 2>/dev/null || :)"
+		if ! command -v sudo >/dev/null 2>&1; then
+			echo 'sudo absent'
+		elif sudo -n true >/dev/null 2>&1; then
+			echo 'sudo nopasswd'
+		else
+			echo 'sudo password'
+		fi
+		if [ -n "${DOCKER_HOST:-}" ]; then echo 'docker_host set'; fi
+		dk=
+		if docker version --format '{{.Server.Version}}' >/dev/null 2>&1; then
+			dk=1
+			echo 'docker reachable'
+		else
+			echo 'docker unreachable'
+		fi
+		for p in /var/log/journal /var/lib/docker; do
+			[ -e "$p" ] || continue
+			if ls "$p" >/dev/null 2>&1; then echo "readable $p"; else echo "unreadable $p"; fi
+		done
+		if [ -n "${HOME:-}" ]; then
+			for c in .aws/credentials .config/gcloud/application_default_credentials.json .azure/msal_token_cache.json .azure/accessTokens.json; do
+				if [ -f "$HOME/$c" ]; then echo "credfile ~/$c"; fi
+			done
+		fi
+		for j in /var/log/journal /run/log/journal; do
+			if [ -d "$j" ] && [ ! -L "$j" ]; then echo "journal $j"; fi
+		done
+		# The agents, as lockkit's agentwire detects them.
+		if command -v claude >/dev/null 2>&1; then echo 'agent claude'; fi
+		if command -v codex >/dev/null 2>&1 || [ -d "${CODEX_HOME:-${HOME:-/nonexistent}/.codex}" ]; then echo 'agent codex'; fi
+		if command -v cursor >/dev/null 2>&1 || command -v cursor-agent >/dev/null 2>&1 || [ -d "${HOME:-/nonexistent}/.cursor" ]; then echo 'agent cursor'; fi
+		if command -v gemini >/dev/null 2>&1 || [ -d "${HOME:-/nonexistent}/.gemini" ]; then echo 'agent gemini'; fi
+		if [ -n "$dk" ]; then
+			docker ps --format '{{.Names}} {{.Image}} {{with .Label "com.docker.compose.service"}}{{.}}{{else}}-{{end}} {{with .Label "com.docker.compose.project"}}{{.}}{{else}}-{{end}} {{with .Networks}}{{.}}{{else}}-{{end}}' 2>/dev/null |
+				sed 's/^/container /' || :
+			for cid in $(docker ps -q 2>/dev/null || :); do
+				rec=$(docker inspect --type container --format '{{.HostConfig.IpcMode}} {{.Name}}' "$cid" 2>/dev/null) || continue
+				case "$rec" in "shareable /"*) echo "ipc_shareable ${rec#shareable /}" ;; esac
+			done
+			sw=$(docker info --format '{{.Swarm.LocalNodeState}}' 2>/dev/null) || sw=
+			case "$sw" in '' | *[!a-z-]*) ;; *) echo "swarm $sw" ;; esac
+		fi
+		if [ "${2:-}" = logs ]; then
+			echo logs
+			set -f
+			# shellcheck disable=SC2086 # the roots are split on purpose
+			find $roots -maxdepth 3 -type f 2>/dev/null || :
+			set +f
+		fi
+	} >"$1"
+}
+
+# setup ARGS: `locklog setup` in the image, as you (your uid and gid, so
+# that .locklog/ and the agent files are yours), with this project
+# writable, the host's facts, and the directory of the proxies' files
+# (outside the project, 0700); no network. The trusted .locklog/ is checked
+# here afterwards, as console will check it.
+setup() {
+	need_docker
+	project_mount
+	shared "$project" && die "$project is writable by someone else than you, or not yours: run setup in a project directory of your own"
+	[ -z "$home_dir" ] || [ "$project" != "$home_dir" ] || die "run locklog setup in a project directory, not in your home directory"
+	cfg_home=${XDG_CONFIG_HOME:-}
+	case "$cfg_home" in /*) ;; *) [ -n "${HOME:-}" ] || die "HOME is not set"; cfg_home=$HOME/.config ;; esac
+	proxy_dir=$cfg_home/locklog/proxy
+	(umask 077 && mkdir -p "$proxy_dir") || die "could not create $proxy_dir"
+	proxy_dir=$(cd "$proxy_dir" && pwd -P) || die "could not enter $proxy_dir"
+	safe "$proxy_dir" || die "$proxy_dir holds a character a docker mount cannot carry"
+	trusted "$proxy_dir" || die "$proxy_dir is a link, has an ACL, or is owned or writable by someone else than you"
+	facts=$(mktemp) || die "mktemp failed"
+	chmod 0600 "$facts" || die "could not restrict $facts"
+	chmod 0600 "$facts" || die "could not restrict $facts"
+	chmod 0600 "$facts" || die "could not restrict $facts"
+	trap 'rm -f "$facts"' EXIT
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
+	write_facts "$facts" logs
+	rc=0
+	docker run --rm "$tty" --user "$(id -u):$(id -g)" --log-driver none --network none $confined \
+		--pids-limit 64 --memory 256m -e "LOCKLOG_IMAGE_REF=$image" -e "LOCKLOG_HOST_HOME=$home_dir" \
+		-v "$project:$project" -v "$proxy_dir:$proxy_dir" -v "$facts:/run/locklog-facts:ro" -w "$project" \
+		"$image" setup --facts /run/locklog-facts --proxy-dir "$proxy_dir" "$@" || rc=$?
+	[ "$rc" -eq 0 ] || exit "$rc"
+	trusted_config "$project" ||
+		die "$project/.locklog or its config.toml is a link, has an ACL, or is writable by someone else than you: fix it before locklog console"
+	if [ -f "$project/.claude/settings.local.json" ] && command -v git >/dev/null 2>&1 &&
+		git -C "$project" rev-parse --is-inside-work-tree >/dev/null 2>&1 &&
+		! git -C "$project" check-ignore -q .claude/settings.local.json; then
+		say "warning: git does not ignore .claude/settings.local.json (personal settings, with the allow list): add it to .gitignore"
+	fi
+}
+
+# doctor ARGS: `locklog doctor` in the image as the agent account, with the
+# host's facts on its input, the project read-only, and the host's network (its probes
+# see what an agent here reaches). Advisory: it never prints a response
+# body.
+doctor() {
+	need_docker
+	project_mount
+	facts=$(mktemp) || die "mktemp failed"
+	chmod 0600 "$facts" || die "could not restrict $facts"
+	chmod 0600 "$facts" || die "could not restrict $facts"
+	chmod 0600 "$facts" || die "could not restrict $facts"
+	trap 'rm -f "$facts"' EXIT
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
+	write_facts "$facts"
+	rc=0
+	# The facts go on stdin: the agent account cannot read your 0600 file.
+	docker run --rm -i --user agent --log-driver none --network host $confined --pids-limit 64 --memory 256m \
+		-v "$project:$project:ro" -w "$workdir" \
+		"$image" doctor --facts - "$@" <"$facts" || rc=$?
+	exit "$rc"
+}
+
 cmd="${1:-}"
 case "$cmd" in
 update)
@@ -1126,6 +1264,14 @@ console)
 refresh)
 	shift
 	refresh "$@"
+	;;
+setup)
+	shift
+	setup "$@"
+	;;
+doctor)
+	shift
+	doctor "$@"
 	;;
 mcp)
 	# The agent speaks MCP on stdin and stdout: no terminal. The server

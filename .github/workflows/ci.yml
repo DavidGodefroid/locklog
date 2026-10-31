@@ -45,6 +45,31 @@ jobs:
             exit 1
           }
 
+  # The engine and the sources under the race detector (cgo, -short: the
+  # heaviest equivalence cases run in full in the test job above).
+  race:
+    name: race (engine, sources)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CGO_ENABLED: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.x"
+          check-latest: true
+      - name: go test -race -short
+        shell: bash
+        run: |
+          set -o pipefail
+          go test -race -short -timeout 15m ./internal/engine/ ./internal/source/... 2>&1 | tee test.log || {
+            grep -E -- '--- FAIL|_test\.go:[0-9]+:|^FAIL|panic:|WARNING: DATA RACE' test.log | head -40 | sed 's/^/::error::/'
+            exit 1
+          }
+
   # Windows: the module builds and its unit tests run, but the locklog
   # console itself runs only on Linux (in Docker). Test files that need Unix
   # accounts, file modes, sockets or terminals carry `//go:build unix`.
@@ -424,6 +449,152 @@ jobs:
         run: |
           [ -n "${R:-}" ] || exit 0
           docker rm -f "$R-a" "$R-b" "other-$R" "locklog-console-it-$R" "$R-local" "$R-reader" "$R-shm" >/dev/null 2>&1 || true
+
+  # The P1 demo end to end: the image, the launcher's console approved at
+  # its terminal (script(1): the console refuses an input that is not
+  # one), a file source over rotated and compressed logs, and an MCP client
+  # speaking to the launcher's mcp (test/e2e, build tag e2e).
+  e2e-docker:
+    name: e2e (docker)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.x"
+          check-latest: true
+      - name: docker build
+        run: docker build -t locklog .
+      - name: test_count_rotated_gz
+        shell: bash
+        run: |
+          set -euxo pipefail
+          d="$RUNNER_TEMP/e2e-$(od -An -N4 -tx4 /dev/urandom | tr -d ' ')"
+          mkdir -m 0755 "$d"
+          LOCKLOG_E2E_DIR="$d" go test -tags e2e -count=1 -v -timeout 15m -run '^TestCountRotatedGz$' ./test/e2e 2>&1 | tee e2e.log
+          grep -q -- '--- PASS: TestCountRotatedGz' e2e.log
+      - name: remove the console and the volumes
+        if: always()
+        run: |
+          ids=$(docker ps -aq --filter label=locklog.console=1)
+          [ -z "$ids" ] || docker rm -f $ids >/dev/null
+          docker volume rm locklog-run locklog-home >/dev/null 2>&1 || true
+
+  # The five-minute path, timed from setup to the first answer (the image is
+  # built before the clock starts): the launcher installed on PATH, `setup
+  # --yes --no-production --agent host`, the console, and an MCP client
+  # spawning the server the written .mcp.json names (test/e2e).
+  five-minutes:
+    name: five-minutes
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.x"
+          check-latest: true
+      - name: docker build
+        run: docker build -t locklog .
+      - name: build the e2e test
+        run: go test -c -tags e2e -o "$RUNNER_TEMP/e2e.test" ./test/e2e
+      - name: TestFiveMinutes
+        shell: bash
+        run: |
+          set -euxo pipefail
+          d="$RUNNER_TEMP/e2e-$(od -An -N4 -tx4 /dev/urandom | tr -d ' ')"
+          mkdir -m 0755 "$d"
+          cd test/e2e
+          LOCKLOG_E2E_DIR="$d" "$RUNNER_TEMP/e2e.test" -test.count=1 -test.v -test.timeout 15m -test.run '^TestFiveMinutes$' 2>&1 | tee "$RUNNER_TEMP/e2e.log"
+          grep -q -- '--- PASS: TestFiveMinutes' "$RUNNER_TEMP/e2e.log"
+      - name: remove the consoles and the volumes
+        if: always()
+        run: |
+          ids=$(docker ps -aq --filter label=locklog.console=1)
+          [ -z "$ids" ] || docker rm -f $ids >/dev/null
+          docker volume rm locklog-run locklog-home >/dev/null 2>&1 || true
+
+  # The own-container recipe: an agent image built on the runner from the
+  # snippet setup prints, run as its non-root agent user, calls the console.
+  e2e-own-container:
+    name: own-container recipe (e2e)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CGO_ENABLED: "0"
+      LOCKLOG_E2E_AGENT_BASE: alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.x"
+          check-latest: true
+      - name: docker build
+        run: docker build -t locklog .
+      - name: build the e2e test
+        run: go test -c -tags e2e -o "$RUNNER_TEMP/e2e.test" ./test/e2e
+      - name: TestOwnContainer
+        shell: bash
+        run: |
+          set -euxo pipefail
+          d="$RUNNER_TEMP/e2e-$(od -An -N4 -tx4 /dev/urandom | tr -d ' ')"
+          mkdir -m 0755 "$d"
+          cd test/e2e
+          LOCKLOG_E2E_DIR="$d" "$RUNNER_TEMP/e2e.test" -test.count=1 -test.v -test.timeout 15m -test.run '^TestOwnContainer$' 2>&1 | tee "$RUNNER_TEMP/e2e.log"
+          grep -q -- '--- PASS: TestOwnContainer' "$RUNNER_TEMP/e2e.log"
+      - name: remove the consoles and the volumes
+        if: always()
+        run: |
+          ids=$(docker ps -aq --filter label=locklog.console=1)
+          [ -z "$ids" ] || docker rm -f $ids >/dev/null
+          docker volume rm locklog-run locklog-home >/dev/null 2>&1 || true
+
+  # The host-agent guard end to end: the launcher's mcp on a production
+  # profile served by a real console is refused (E_PRODUCTION_HOST_AGENT).
+  e2e-production-guard:
+    name: production guard (e2e)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.x"
+          check-latest: true
+      - name: docker build
+        run: docker build -t locklog .
+      - name: build the e2e test
+        run: go test -c -tags e2e -o "$RUNNER_TEMP/e2e.test" ./test/e2e
+      - name: TestProductionGuard
+        shell: bash
+        run: |
+          set -euxo pipefail
+          d="$RUNNER_TEMP/e2e-$(od -An -N4 -tx4 /dev/urandom | tr -d ' ')"
+          mkdir -m 0755 "$d"
+          cd test/e2e
+          LOCKLOG_E2E_DIR="$d" "$RUNNER_TEMP/e2e.test" -test.count=1 -test.v -test.timeout 15m -test.run '^TestProductionGuard$' 2>&1 | tee "$RUNNER_TEMP/e2e.log"
+          grep -q -- '--- PASS: TestProductionGuard' "$RUNNER_TEMP/e2e.log"
+      - name: remove the consoles and the volumes
+        if: always()
+        run: |
+          ids=$(docker ps -aq --filter label=locklog.console=1)
+          [ -z "$ids" ] || docker rm -f $ids >/dev/null
+          docker volume rm locklog-run locklog-home >/dev/null 2>&1 || true
 
   # install.sh of this commit against the latest published release: the
   # signatures (checksums.txt and the images), the checksum, the launcher

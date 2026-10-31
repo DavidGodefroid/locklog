@@ -1,0 +1,17 @@
+locklog doctor: what the agent's account can reach here (advisory: a check, not a boundary)
+
+  ok    no Docker client or socket here
+  ok    group docker: not a member
+  ok    group adm: not a member
+  ok    group systemd-journal: not a member
+  ok    no sudo
+  ok    euid 1000 (not root)
+  ok    /var/log/journal is not readable
+  ok    /var/lib/docker is not readable
+  ok    AWS metadata credentials: status 404
+
+residuals (the console's own guards; warnings, whatever the profile):
+  ok    Landlock ABI 5: the console confines its own file access
+  ok    swarm mode inactive
+
+no finding
