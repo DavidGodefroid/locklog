@@ -146,7 +146,8 @@ the host is not a swarm manager.
 Consequences, for LL-11 and LL-09a:
 
 - Read-only by construction does not hold for paths that appear later under
-  the containers root. Counter-measures, in order:
+  the containers root. Counter-measures, in order. They are **design, not
+  measured here** [NV]; the LL14 "no submount" test verifies them:
   1. the console opens only `<id>/<id>-json.log[.N[.gz]]` for mapped ids, with
      `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS |
      RESOLVE_NO_XDEV)` from a root opened `O_PATH | O_DIRECTORY` (the 0710
@@ -163,8 +164,15 @@ Consequences, for LL-11 and LL-09a:
      secrets) but not a bind mount of the same filesystem;
   2. a Landlock ruleset (kernel ≥ 5.13), applied by the console to itself
      before it opens any source, grants only read rights beneath each mount
-     root. A write to a propagated read-write mount then fails, even after a
-     parser exploit. Landlock does **not** limit reads: beneath the root it
+     root and handles every right the running ABI knows. Write, create,
+     remove and rename are denied from ABI 1. Truncate is denied only from
+     ABI 3 (kernel 6.2), and device ioctls from ABI 5. Landlock never covers
+     chmod, chown, utimes or xattrs. On 5.13-6.1 a compromised console could
+     still truncate a world-writable file in a propagated `/dev/shm`. Where
+     Landlock is missing (LSM off, or its syscalls blocked by seccomp) or
+     only partly available, the console starts anyway and reports it. It
+     shows in `:status`, and `doctor` names it as a residual, red on
+     production. Landlock does **not** limit reads: beneath the root it
      grants read on propagated mounts too, and no Landlock rule can exclude a
      subdirectory of an allowed tree. After an exploit, the console could
      therefore read other containers' `/dev/shm` files (1777) and, on a swarm
@@ -178,8 +186,9 @@ Consequences, for LL-11 and LL-09a:
      compromised console;
   4. `docs/security-model.md` (written in the docs PR, LL-20) must state it.
 - The `LL14` test "no submount" must start the console first, then start an
-  `--ipc=shareable` container, and assert that the console cannot open or
-  write anything under the propagated mount.
+  `--ipc=shareable` container, and assert that the console cannot open,
+  `open(O_WRONLY)`, create in or `truncate` anything under the propagated
+  mount.
 
 ### `docker events` for the map loop
 
@@ -214,7 +223,7 @@ and locklog takes no `CAP_DAC_READ_SEARCH`. Supported Podman paths in v1:
 
 - the `journald` log driver (Podman's default where journald runs), read by
   the journald source;
-- `--log-opt path=/var/log/containers/<name>.log` with `k8s-file`, read by the
+- candidate [NV]: `--log-opt path=/var/log/containers/<name>.log` with `k8s-file`, read by the
   file source with `format = "cri"`. The mode and owner Podman gives that file
   and its directory were **not** recorded [NV]; LL-11 must check that uid
   10051 with an allowlisted group can read it before calling this supported.
