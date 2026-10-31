@@ -1,13 +1,18 @@
 package elastic
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/DavidGodefroid/locklog/internal/egress"
 
 	"github.com/DavidGodefroid/locklog/internal/source"
 )
@@ -20,6 +25,19 @@ func padded(n, pad int) []fakeDoc {
 		docs[i].fields["message"] = fmt.Sprintf("doc %d %s", i, strings.Repeat("x", pad))
 	}
 	return docs
+}
+
+// countingClient counts the requests a source starts and has in flight.
+type countingClient struct {
+	inner           Client
+	started, active atomic.Int64
+}
+
+func (c *countingClient) Send(ctx context.Context, method, path string, q url.Values, body []byte) (egress.Response, error) {
+	c.started.Add(1)
+	c.active.Add(1)
+	defer c.active.Add(-1)
+	return c.inner.Send(ctx, method, path, q, body)
 }
 
 // searchedSlices returns the distinct range starts of the searches sent.
@@ -45,7 +63,8 @@ func searchedSlices(f *fakeES) []string {
 
 func TestScanFetchesLazilyAndStopsAtTheByteLimit(t *testing.T) {
 	f := newFake(padded(600, 2000)) // 10 minutes: 10 slices
-	s := newSource(t, f, func(o *Options) { o.InFlight = 2 })
+	cc := &countingClient{}
+	s := newSource(t, f, func(o *Options) { o.InFlight = 2; cc.inner = o.Client; o.Client = cc })
 	plan, err := s.Plan(ctx, source.Range{From: t0, To: t0.Add(10 * time.Minute)}, source.Selector{})
 	if err != nil || len(plan.Chunks[0].Granules) != 10 {
 		t.Fatalf("%v %+v", err, plan)
@@ -62,16 +81,17 @@ func TestScanFetchesLazilyAndStopsAtTheByteLimit(t *testing.T) {
 	if err := it.Close(); err != nil {
 		t.Fatal(err)
 	}
-	// Close waited for the fetches: nothing is sent after it.
-	f.mu.Lock()
-	n := len(f.requests)
-	f.mu.Unlock()
-	time.Sleep(50 * time.Millisecond)
-	f.mu.Lock()
-	if len(f.requests) != n {
-		t.Fatal("a fetch ran after Close")
+	// Close waited for the fetches: none is in flight, none starts after
+	// it. (Counted on the client: the server may still log a request the
+	// client already cancelled.)
+	n := cc.started.Load()
+	if a := cc.active.Load(); a != 0 {
+		t.Fatalf("%d requests in flight after Close", a)
 	}
-	f.mu.Unlock()
+	time.Sleep(50 * time.Millisecond)
+	if cc.started.Load() != n {
+		t.Fatal("a fetch started after Close")
+	}
 
 	// Under a byte limit, the scan fails with ErrByteLimit, having
 	// fetched at most the limit plus a page per slice in flight.
