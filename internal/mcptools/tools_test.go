@@ -279,7 +279,7 @@ func TestHostAgentGuard(t *testing.T) {
 	args := map[string]map[string]any{ToolPIIAdd: {"pattern": "x"}, ToolRequestChange: {"change": "y"}, ToolContext: {"ref": "r"}, ToolTrace: {"id": "i"},
 		ToolScan: {"tool": "search", "query": map[string]any{"text": "x"}}, ToolUnmask: {"ref": "r", "pseudonyms": []string{"⟦email:A⟧"}, "reason": "y"},
 		ToolLookup: {"kind": "email", "values": []string{"a@example.com"}}}
-	for _, tool := range []string{ToolSearch, ToolCount, ToolPatterns, ToolSources, ToolPIIList, ToolPIIAdd, ToolRequestChange} {
+	for _, tool := range []string{ToolSearch, ToolCount, ToolPatterns, ToolContext, ToolTrace, ToolTail, ToolScan, ToolUnmask, ToolLookup, ToolSources, ToolPIIList, ToolPIIAdd, ToolRequestChange} {
 		res := call(t, cs, tool, args[tool])
 		if !res.IsError || !strings.Contains(text(res), "non-production trial") {
 			t.Errorf("%s on production from a host agent: %s", tool, text(res))
