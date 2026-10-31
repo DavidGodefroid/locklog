@@ -82,17 +82,15 @@ type held struct {
 // timestamped from the call's start (to the second): new records are told
 // by their time, which every source has; records without one are never
 // tailed. Each record is evaluated and returned once: identical records are
-// told apart by their position, and a copy of a stream made during the tail
-// (copytruncate) is recognised by a record of the original at the same
-// offset with the same keyed digest, so the records it shares with the
-// original are not returned again. A stream that existed at the start or
-// at a poll and is gone at a later one (renamed out of the paths, deleted,
-// truncated) and that no copy holds makes the tail incomplete: it may have
-// grown after its last read. A stream linked as a copy of one that still
-// exists is not read (a copy is a snapshot of its original): one that grows
-// longer than it is a stream of its own and is read whole; one that does not
-// makes the tail incomplete. Which streams exist and their ends come from a
-// plan of every stream whole, unfiltered, at each poll. The duration ends with a poll planned after it.
+// told apart by their position. While the set of local streams stays the
+// same (no stream appears, goes or shrinks: which streams exist and their
+// ends come from a plan of every stream whole, unfiltered, at each poll),
+// complete:true means every new record was evaluated once. When it changes
+// (rotation, truncation, a new file), the tail is complete:false: a copy made
+// during the tail (copytruncate) is recognised by a record of the original
+// at the same offset with the same keyed digest and the records it shares
+// with the original are not returned again, but two streams of their own
+// can share such records. The duration ends with a poll planned after it.
 //
 // Work follows the new data: a plan of every local stream at the start (no
 // record read) gives each stream's end in its granules, and a poll scans
@@ -209,7 +207,9 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 	}
 	anchor := map[streamKey][]anchorRec{}
 	link := map[streamKey]streamKey{}
-	var lastPresent map[streamKey]bool // the streams of the last completed poll
+	// rotated: a local stream appeared, went or shrank during the tail
+	// (rotation, truncation, a new file).
+	rotated := false
 	type rkey struct {
 		k streamKey
 		p pos
@@ -266,8 +266,29 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 		}
 		pq := q
 		planAt := time.Now()
-		pq.To = e.o.Now().UTC().Truncate(time.Second).Add(time.Second)
-		plan, perr := e.planQuery(tctx, &pq, math.MaxInt64, math.MaxInt64)
+		// Local streams are planned up to a far bound: an indexed
+		// granule of records dated ahead (a writer's clock, a zone
+		// read as UTC) must not drop out of the plan. Remote slices
+		// end at now.
+		var plan source.Byteplan
+		var perr *Error
+		for _, remote := range []bool{false, true} {
+			sq := pq
+			sq.Sources = slices.DeleteFunc(slices.Clone(q.Sources), func(s string) bool { return e.remote(s) != remote })
+			if len(sq.Sources) == 0 {
+				continue
+			}
+			sq.To = e.o.Now().UTC().Add(24 * time.Hour)
+			if remote {
+				sq.To = e.o.Now().UTC().Truncate(time.Second).Add(time.Second)
+			}
+			p, err := e.planQuery(tctx, &sq, math.MaxInt64, math.MaxInt64)
+			if err != nil {
+				perr = err
+				break
+			}
+			plan.Chunks = append(plan.Chunks, p.Chunks...)
+		}
 		if perr != nil {
 			if ctx.Err() != nil {
 				return TailResult{}, cancelled
@@ -291,6 +312,14 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 		present := map[streamKey]bool{} // the local streams that exist
 		for k := range ends {
 			present[k] = true
+			if _, ok := base[k]; !ok {
+				rotated = true
+			}
+		}
+		for k := range base {
+			if !present[k] {
+				rotated = true
+			}
 		}
 		// A copy is a snapshot of its original: one longer than its
 		// original, while that still exists, is a stream of its own
@@ -306,6 +335,7 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 		}
 		for k, end := range ends {
 			if d, ok := done[k]; ok && end != math.MaxInt64 && end < d {
+				rotated = true
 				done[k] = 0
 				delete(anchor, k)
 				delete(frontier, k)
@@ -508,23 +538,9 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 			as := append(anchor[k], a)
 			anchor[k] = as[max(0, len(as)-maxTailAnchors):]
 		}
-		// A stream seen before and gone now (renamed out of the paths,
-		// deleted, truncated to a new generation) may have grown after
-		// its last read: unless a copy holds it, the tail may miss
-		// records.
-		originals := map[streamKey]bool{}
-		for _, sk := range link {
-			originals[sk] = true
-		}
-		for k := range known {
-			if !present[k] && !originals[k] {
-				covered = false
-			}
-		}
 		for k := range present {
 			known[k] = true
 		}
-		lastPresent = present
 		// The held record of an original that is no longer planned
 		// is its copy's to evaluate.
 		for _, sk := range link {
@@ -573,12 +589,11 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 		case <-t.C:
 		}
 	}
-	// A stream linked as a copy of one that still exists was not read: it
-	// may be a stream of its own sharing the original's first records.
-	for _, o := range link {
-		if lastPresent[o] {
-			covered = false
-		}
+	// The streams changed during the tail: copies are told by position
+	// and digest, which two streams of their own can share; the tail may
+	// have missed or repeated records.
+	if rotated {
+		covered = false
 	}
 	// At the end of the duration, the held records are what the streams
 	// end with: complete ones are evaluated, one still being written is

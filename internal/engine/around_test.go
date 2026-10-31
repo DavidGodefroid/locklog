@@ -434,6 +434,8 @@ func TestTailPartialLine(t *testing.T) {
 // TestTailRotation: a copytruncate rotation under a glob source returns
 // neither the old records of the copy nor the live ones again.
 func TestTailRotation(t *testing.T) {
+	// The streams change during this tail: every record once, and
+	// complete:false (the tail says rotation may have cost records).
 	f := newFixture(t, genLog(time.Now().Add(-time.Hour), 50, "c@example.org"), func(o *Options) { o.TailPoll = 50 * time.Millisecond })
 	p, _ := parse.New(parse.Options{})
 	src, err := file.New(file.Options{Name: "app", Paths: []string{f.root + "/logs/app.log*"}, Roots: []string{f.root}, Parser: p,
@@ -461,7 +463,7 @@ func TestTailRotation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Records) != 2 || !res.Complete || !strings.Contains(string(res.Records[0]), "live 1 ") || !strings.Contains(string(res.Records[1]), "live 2 ") {
+	if len(res.Records) != 2 || res.Complete || !strings.Contains(string(res.Records[0]), "live 1 ") || !strings.Contains(string(res.Records[1]), "live 2 ") {
 		t.Fatalf("%d records, complete %v: %s", len(res.Records), res.Complete, res.Records)
 	}
 
@@ -481,7 +483,7 @@ func TestTailRotation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Records) != 3 || !res.Complete {
+	if len(res.Records) != 3 || res.Complete {
 		t.Fatalf("%d records, complete %v: %s", len(res.Records), res.Complete, res.Records)
 	}
 	for i, r := range res.Records {
@@ -495,6 +497,8 @@ func TestTailRotation(t *testing.T) {
 // same line, in the same second, as a returned record is not a copy: both
 // are returned.
 func TestTailNewFileSameLine(t *testing.T) {
+	// The streams change during this tail: every record once, and
+	// complete:false (the tail says rotation may have cost records).
 	f := newFixture(t, genLog(time.Now().Add(-time.Hour), 5, "c@example.org"), func(o *Options) { o.TailPoll = 50 * time.Millisecond })
 	p, _ := parse.New(parse.Options{})
 	src, err := file.New(file.Options{Name: "app", Paths: []string{f.root + "/logs/*.log"}, Roots: []string{f.root}, Parser: p,
@@ -520,7 +524,7 @@ func TestTailNewFileSameLine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Records) != 2 || !res.Complete {
+	if len(res.Records) != 2 || res.Complete {
 		t.Fatalf("%d records, complete %v", len(res.Records), res.Complete)
 	}
 }
@@ -934,6 +938,8 @@ func rotEngine(t *testing.T) (*Engine, string) {
 
 // Two identical lines; first returned, second held; copytruncate.
 func TestTailCopytruncateIdentical(t *testing.T) {
+	// The streams change during this tail: every record once, and
+	// complete:false (the tail says rotation may have cost records).
 	eng, path := rotEngine(t)
 	go func() {
 		time.Sleep(200 * time.Millisecond)
@@ -953,13 +959,15 @@ func TestTailCopytruncateIdentical(t *testing.T) {
 	for _, r := range res.Records {
 		s = append(s, string(r))
 	}
-	if len(res.Records) != 3 || !res.Complete {
+	if len(res.Records) != 3 || res.Complete {
 		t.Fatalf("want 3 got %d complete=%v\n%s", len(res.Records), res.Complete, strings.Join(s, "\n"))
 	}
 }
 
 // Rename rotation (create): app.log -> app.log.1, new app.log.
 func TestTailRenameRotation(t *testing.T) {
+	// The streams change during this tail: every record once, and
+	// complete:false (the tail says rotation may have cost records).
 	eng, path := rotEngine(t)
 	go func() {
 		time.Sleep(200 * time.Millisecond)
@@ -977,7 +985,7 @@ func TestTailRenameRotation(t *testing.T) {
 	for _, r := range res.Records {
 		s = append(s, string(r))
 	}
-	if len(res.Records) != 3 || !res.Complete {
+	if len(res.Records) != 3 || res.Complete {
 		t.Fatalf("want 3 got %d complete=%v\n%s", len(res.Records), res.Complete, strings.Join(s, "\n"))
 	}
 }
@@ -1016,6 +1024,8 @@ func TestTailTruncateRegrow(t *testing.T) {
 
 // L returned, then an identical L appended just before a copytruncate.
 func TestTailIdenticalAcrossCopy(t *testing.T) {
+	// The streams change during this tail: every record once, and
+	// complete:false (the tail says rotation may have cost records).
 	eng, path := rotEngine(t)
 	go func() {
 		time.Sleep(200 * time.Millisecond)
@@ -1033,7 +1043,7 @@ func TestTailIdenticalAcrossCopy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Records) != 4 || !res.Complete {
+	if len(res.Records) != 4 || res.Complete {
 		t.Fatalf("want 4 got %d complete=%v: %s", len(res.Records), res.Complete, res.Records)
 	}
 }
@@ -1049,6 +1059,8 @@ func nextSecondHalf() {
 
 // Two copytruncate rotations in one tail (logrotate rotate N: .1 -> .2, copy -> .1).
 func TestTailDoubleCopytruncate(t *testing.T) {
+	// The streams change during this tail: every record once, and
+	// complete:false (the tail says rotation may have cost records).
 	eng, path := rotEngine(t)
 	ct := func() {
 		os.Rename(path+".1", path+".2")
@@ -1070,7 +1082,7 @@ func TestTailDoubleCopytruncate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Records) != 4 || !res.Complete {
+	if len(res.Records) != 4 || res.Complete {
 		t.Fatalf("want 4 got %d complete=%v: %s", len(res.Records), res.Complete, res.Records)
 	}
 }
@@ -1137,6 +1149,8 @@ func globEngine(t *testing.T, glob string) (*Engine, string) {
 // TestTailNewFileCopytruncate: a file created during the tail with one line,
 // then copytruncated: the line is returned once.
 func TestTailNewFileCopytruncate(t *testing.T) {
+	// The streams change during this tail: every record once, and
+	// complete:false (the tail says rotation may have cost records).
 	eng, dir := globEngine(t, "/logs/*.log*")
 	path := filepath.Join(dir, "svc.log")
 	go func() {
@@ -1151,13 +1165,15 @@ func TestTailNewFileCopytruncate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Records) != 1 || !res.Complete {
+	if len(res.Records) != 1 || res.Complete {
 		t.Fatalf("want 1 got %d complete=%v", len(res.Records), res.Complete)
 	}
 }
 
 // TestTailOneLineCopytruncate: one new line, then copytruncate: returned once.
 func TestTailOneLineCopytruncate(t *testing.T) {
+	// The streams change during this tail: every record once, and
+	// complete:false (the tail says rotation may have cost records).
 	eng, dir := globEngine(t, "/logs/app.log*")
 	path := filepath.Join(dir, "app.log")
 	nextSecond()
@@ -1173,7 +1189,7 @@ func TestTailOneLineCopytruncate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Records) != 1 || !res.Complete {
+	if len(res.Records) != 1 || res.Complete {
 		t.Fatalf("want 1 got %d complete=%v", len(res.Records), res.Complete)
 	}
 }
@@ -1181,6 +1197,8 @@ func TestTailOneLineCopytruncate(t *testing.T) {
 // TestTailGranuleEndCopytruncate: app.log ends exactly on a granule end at
 // the start; one line appended, then copytruncate: returned once.
 func TestTailGranuleEndCopytruncate(t *testing.T) {
+	// The streams change during this tail: every record once, and
+	// complete:false (the tail says rotation may have cost records).
 	if raceEnabled {
 		t.Skip("timing: the race detector slows masking several fold")
 	}
@@ -1219,7 +1237,7 @@ func TestTailGranuleEndCopytruncate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Records) != 1 || !res.Complete {
+	if len(res.Records) != 1 || res.Complete {
 		t.Fatalf("want 1 got %d complete=%v", len(res.Records), res.Complete)
 	}
 }
@@ -1306,6 +1324,8 @@ func TestTailIndexedDuringTail(t *testing.T) {
 // same first record (same offset, same second) are two streams: the second is
 // not taken for a copy of the first.
 func TestTailReplicasStartDuringTail(t *testing.T) {
+	// The streams change during this tail: every record once, and
+	// complete:false (the tail says rotation may have cost records).
 	f := newFixture(t, genLog(time.Now().Add(-time.Hour), 5, "c@example.org"), func(o *Options) { o.TailPoll = 50 * time.Millisecond })
 	p, _ := parse.New(parse.Options{})
 	src, err := file.New(file.Options{Name: "app", Paths: []string{f.root + "/logs/*.log"}, Roots: []string{f.root}, Parser: p,
@@ -1333,7 +1353,7 @@ func TestTailReplicasStartDuringTail(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Records) != 4 || !res.Complete {
+	if len(res.Records) != 4 || res.Complete {
 		t.Fatalf("%d of 4 records, complete %v: %s", len(res.Records), res.Complete, res.Records)
 	}
 }
@@ -1371,5 +1391,116 @@ func TestTailSameContentNewFiles(t *testing.T) {
 	}
 	if len(res.Records) == 1 && res.Complete {
 		t.Fatal("a record may be missing, and the tail says complete")
+	}
+}
+
+// TestTailRenameAwaySameHeader: a file with a constant header is renamed out
+// of the paths and a new one with the same header takes its place: the tail
+// is not complete.
+func TestTailRenameAwaySameHeader(t *testing.T) {
+	eng, dir := globEngine(t, "/logs/svc.log")
+	path := filepath.Join(dir, "svc.log")
+	hdr := "# svc log v1"
+	nextSecond()
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		os.WriteFile(path, []byte(hdr+"\n"), 0o644)
+		time.Sleep(250 * time.Millisecond)
+		appendLines(t, path, liveLine(1, "x"), liveLine(2, "x"), liveLine(3, "x"), liveLine(4, "x"), liveLine(5, "x"))
+		time.Sleep(250 * time.Millisecond)
+		os.Rename(path, path+".1")
+		os.WriteFile(path, []byte(hdr+"\n"+liveLine(6, "x")+"\n"+liveLine(7, "x")+"\n"), 0o644)
+	}()
+	res, err := eng.Tail(ctx, TailQuery{Duration: "1500ms"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Complete {
+		t.Fatalf("complete with %d records", len(res.Records))
+	}
+}
+
+// TestTailFutureIndexed: records dated ahead (a writer's clock, a zone read
+// as UTC), indexed before the next poll, are still tailed.
+func TestTailFutureIndexed(t *testing.T) {
+	if raceEnabled {
+		t.Skip("timing: the race detector slows masking several fold")
+	}
+	for _, idx := range []bool{false, true} {
+		f := newFixture(t, genLog(time.Now().Add(-time.Hour), 5, "c@example.org"), func(o *Options) { o.TailPoll = 700 * time.Millisecond })
+		path := filepath.Join(f.root, "logs", "app.log")
+		go func() {
+			time.Sleep(200 * time.Millisecond)
+			fut := time.Now().Add(20 * time.Second).UTC().Format(time.RFC3339Nano)
+			lines := []string{"time=" + fut + " level=error msg=\"skewed\""}
+			for range 6000 {
+				lines = append(lines, "time="+fut+" level=info msg=\""+strings.Repeat("p", 400)+"\"")
+			}
+			appendLines(t, path, lines...)
+			if idx {
+				for {
+					_, done, err := f.src.IndexStep(context.Background(), 1<<30, false)
+					if err != nil || done {
+						return
+					}
+				}
+			}
+		}()
+		res, err := f.eng.Tail(ctx, TailQuery{Duration: "2s", Where: []Pred{{Field: "level", Op: "=", Value: raw("error")}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(res.Records) != 1 || !res.Complete {
+			t.Fatalf("indexed %v: %d records, complete %v", idx, len(res.Records), res.Complete)
+		}
+	}
+}
+
+// TestTailStaleCopyThenRenameAway: a backup copy made during the tail, more
+// lines, then the original renamed out of the paths: not complete.
+func TestTailStaleCopyThenRenameAway(t *testing.T) {
+	eng, dir := globEngine(t, "/logs/app.log*")
+	path := filepath.Join(dir, "app.log")
+	nextSecond()
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		appendLines(t, path, liveLine(1, "x"), liveLine(2, "x"))
+		time.Sleep(250 * time.Millisecond)
+		b, _ := os.ReadFile(path)
+		os.WriteFile(path+".bak", b, 0o644)
+		time.Sleep(250 * time.Millisecond)
+		appendLines(t, path, liveLine(3, "x"))
+		os.Rename(path, filepath.Join(dir, "old-app"))
+	}()
+	res, err := eng.Tail(ctx, TailQuery{Duration: "1500ms"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Complete {
+		t.Fatalf("complete with %d records", len(res.Records))
+	}
+}
+
+// TestTailTwoCopies: two copies made at once, then truncation: not complete.
+func TestTailTwoCopies(t *testing.T) {
+	eng, dir := globEngine(t, "/logs/app.log*")
+	path := filepath.Join(dir, "app.log")
+	nextSecond()
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		appendLines(t, path, liveLine(1, "x"), liveLine(2, "x"))
+		time.Sleep(250 * time.Millisecond)
+		appendLines(t, path, liveLine(3, "x"))
+		b, _ := os.ReadFile(path)
+		os.WriteFile(path+".1", b, 0o644)
+		os.WriteFile(path+".bak", b, 0o644)
+		os.Truncate(path, 0)
+	}()
+	res, err := eng.Tail(ctx, TailQuery{Duration: "1500ms"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Complete {
+		t.Fatalf("complete with %d records", len(res.Records))
 	}
 }
