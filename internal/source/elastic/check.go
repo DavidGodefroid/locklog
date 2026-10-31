@@ -668,8 +668,8 @@ func (s *Source) mappingFacts(ctx context.Context, flavour string) (mappingFacts
 			for n, d := range props {
 				full := prefix + n
 				ix.fields[full] = d
-				if dynamicRuntime(d.Dynamic) {
-					ix.dynamicRisk = "dynamic: runtime on " + full
+				if dynamicRisky(d.Dynamic) {
+					ix.dynamicRisk = "dynamic: " + string(d.Dynamic) + " on " + full
 				}
 				if d.CopyTo != nil {
 					ts, ok := stringOrArray(d.CopyTo)
@@ -686,30 +686,20 @@ func (s *Source) mappingFacts(ctx context.Context, flavour string) (mappingFacts
 		if bad != nil {
 			return mappingFacts{}, bad
 		}
-		if dynamicRuntime(i.Mappings.Dynamic) {
-			ix.dynamicRisk = "dynamic: runtime"
+		if dynamicRisky(i.Mappings.Dynamic) {
+			ix.dynamicRisk = "dynamic: " + string(i.Mappings.Dynamic)
 		}
 		for _, tmpl := range i.Mappings.DynamicTemplates {
 			if len(tmpl) != 1 {
 				return mappingFacts{}, errResponse
 			}
 			for name, raw := range tmpl {
-				var t struct {
-					Mapping map[string]json.RawMessage `json:"mapping"`
-					Runtime json.RawMessage            `json:"runtime"`
+				risk, err := templateRisk(raw)
+				if err != nil {
+					return mappingFacts{}, err
 				}
-				if json.Unmarshal(raw, &t) != nil {
-					return mappingFacts{}, errResponse
-				}
-				var typ string
-				_ = json.Unmarshal(t.Mapping["type"], &typ)
-				switch {
-				case t.Runtime != nil || typ == "runtime":
-					ix.dynamicRisk = "the dynamic template " + strconv.Quote(name) + " maps new fields as runtime fields"
-				case t.Mapping["copy_to"] != nil:
-					ix.dynamicRisk = "the dynamic template " + strconv.Quote(name) + " has a copy_to"
-				case dynamicRuntime(t.Mapping["dynamic"]):
-					ix.dynamicRisk = "the dynamic template " + strconv.Quote(name) + " sets dynamic: runtime"
+				if risk != "" {
+					ix.dynamicRisk = "the dynamic template " + strconv.Quote(name) + " " + risk
 				}
 			}
 		}
@@ -729,11 +719,73 @@ func (s *Source) mappingFacts(ctx context.Context, flavour string) (mappingFacts
 	return m, nil
 }
 
-// dynamicRuntime reports a "dynamic" mapping parameter of "runtime": new
-// fields under it become runtime fields.
-func dynamicRuntime(raw json.RawMessage) bool {
+// dynamicRisky reports a "dynamic" mapping parameter other than a boolean
+// or one of "true", "false", "strict" (any case): "runtime" (new fields
+// become runtime fields), and anything not understood.
+func dynamicRisky(raw json.RawMessage) bool {
+	if raw == nil {
+		return false
+	}
+	var b bool
+	if json.Unmarshal(raw, &b) == nil {
+		return false
+	}
 	var v string
-	return raw != nil && json.Unmarshal(raw, &v) == nil && v == "runtime"
+	if json.Unmarshal(raw, &v) != nil {
+		return true
+	}
+	for _, ok := range []string{"true", "false", "strict"} {
+		if strings.EqualFold(v, ok) {
+			return false
+		}
+	}
+	return true
+}
+
+// templateRisk judges one dynamic template. It is accepted (provably
+// harmless) only when its mapping, walked at every depth (properties and
+// fields included), has no copy_to, no script, no runtime type and no
+// dynamic parameter other than a boolean, "true", "false" or "strict",
+// and the template has no runtime member: then the fields it creates are
+// ordinary indexed fields, which Check judges like any other where the
+// source names them. An answer that does not decode is an error (refused
+// on production).
+func templateRisk(raw json.RawMessage) (string, error) {
+	var t struct {
+		Mapping *mappingDef     `json:"mapping"`
+		Runtime json.RawMessage `json:"runtime"`
+	}
+	if err := json.Unmarshal(raw, &t); err != nil {
+		return "", errResponse
+	}
+	if t.Runtime != nil {
+		return "maps new fields as runtime fields", nil
+	}
+	if t.Mapping == nil {
+		return "", nil
+	}
+	var walk func(d mappingDef, at string) string
+	walk = func(d mappingDef, at string) string {
+		switch {
+		case strings.EqualFold(d.Type, "runtime"):
+			return "maps new fields as runtime fields" + at
+		case d.CopyTo != nil:
+			return "has a copy_to" + at
+		case d.Script != nil:
+			return "has a script" + at
+		case dynamicRisky(d.Dynamic):
+			return "sets dynamic: " + string(d.Dynamic) + at
+		}
+		for _, sub := range []map[string]mappingDef{d.Properties, d.Fields} {
+			for n, c := range sub {
+				if r := walk(c, at+" under "+n); r != "" {
+					return r
+				}
+			}
+		}
+		return ""
+	}
+	return walk(*t.Mapping, ""), nil
 }
 
 // stringOrArray decodes a string or an array of strings.
