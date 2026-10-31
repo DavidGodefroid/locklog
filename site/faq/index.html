@@ -45,7 +45,7 @@
 <div class="notice" role="note"><p><strong>Pre-release, in development.</strong> No release of locklog is published yet. It is built on <a href="https://github.com/DavidGodefroid/lockkit">lockkit</a>, and its design is public in <a href="https://github.com/DavidGodefroid/locklog/blob/main/docs/security-model.md">docs/security-model.md</a>.</p></div>
 <div class="prose faq">
 <h2 id="ready">Is locklog ready to use?</h2>
-<p>Not yet: it is a pre-release, in development, and no release is published. v0.1.0 is planned to ship files, journald, Docker and Loki with the standalone console. See the <a href="https://github.com/DavidGodefroid/locklog/blob/main/CHANGELOG.md">CHANGELOG</a>.</p>
+<p>Not yet: it is a pre-release, in development, and no release is published. v0.1.0 is planned to ship files, journald, Docker and Loki (with <a href="https://github.com/DavidGodefroid/locklog/pull/97">#97</a>) with the standalone console. See the <a href="https://github.com/DavidGodefroid/locklog/blob/main/CHANGELOG.md">CHANGELOG</a>.</p>
 
 <h2 id="agents">Which agents does it work with?</h2>
 <p>Any agent that speaks MCP: Claude Code, Codex, Cursor or Gemini CLI, for example. <code>locklog setup</code> wires the agents it detects (Claude Code, Codex, Gemini CLI).</p>
@@ -66,7 +66,7 @@
 <p>No. On production the agent must not be able to read the logs itself: run it in its own container (<code>locklog setup --agent container</code>); <a href="https://github.com/DavidGodefroid/lea">lea</a> support is planned. For a trial on non-production data, the agent can run on your own account (<code>locklog setup --agent host</code>).</p>
 
 <h2 id="sources">Which log sources are supported?</h2>
-<p>Files (globs, rotation, gzip, zstd), journald, Docker container logs and Loki in v0.1.0; Elasticsearch and OpenSearch in v0.3.0. Text is never sent to a backend.</p>
+<p>Files (globs, rotation, gzip, zstd), journald, Docker container logs and Loki in v0.1.0 (Loki once <a href="https://github.com/DavidGodefroid/locklog/pull/97">#97</a> lands); Elasticsearch and OpenSearch in v0.3.0. Text is never sent to a backend.</p>
 
 <h2 id="budgets">What does the agent get for free?</h2>
 <p>Reads within budgets: <code>status</code>, <code>sources</code>, <code>search</code>, <code>count</code>, <code>patterns</code>, <code>context</code>, <code>trace</code>, <code>tail</code>, bounded per call and per hour, and audited. A call over a budget is refused before it touches data; <code>locklog_scan</code> asks you once for the whole plan.</p>
