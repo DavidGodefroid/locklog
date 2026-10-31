@@ -216,3 +216,43 @@ var (
 	ErrStale    = errors.New("source: the stream changed since the plan or reference was made")
 	ErrNotFound = errors.New("source: no such stream")
 )
+
+// ErrNotIndexable is returned by IndexCounts when a selector or group field
+// is not in the index of every stream.
+var ErrNotIndexable = errors.New("source: the count needs fields the index (or the server) does not hold")
+
+// CountQuery is a count of records by trusted fields per time bucket.
+type CountQuery struct {
+	Range    Range
+	Selector Selector
+	By       []string
+	// Bucket is a whole number of minutes (0: one bucket for the range).
+	Bucket time.Duration
+}
+
+// CountRow is the count of one bucket and one tuple of By values (raw:
+// index.Absent, index.Redacted and index.Other stand for themselves).
+type CountRow struct {
+	Bucket time.Time
+	Vals   []string
+	N      int64
+}
+
+// CountResult is what an index (or a server-side metric query) answers, and the plan of what it cannot.
+type CountResult struct {
+	Rows []CountRow
+	// Untimed counts indexed records without a time in matching
+	// granules (not in any bucket).
+	Untimed int64
+	// Residual is the plan of the granules the index does not hold: the
+	// caller scans them and adds their counts.
+	Residual Byteplan
+	// IndexedFrom: see Schema.
+	IndexedFrom time.Time
+}
+
+// Counter is a source that answers trusted-field counts without a scan (the
+// local index, Loki metric queries), returning the plan of what it cannot.
+type Counter interface {
+	IndexCounts(ctx context.Context, q CountQuery) (CountResult, error)
+}
