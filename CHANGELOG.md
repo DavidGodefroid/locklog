@@ -25,3 +25,16 @@ uses [Semantic Versioning](https://semver.org/).
   read-only allowlist checked segment by segment, response caps, the tls
   modes, and the production check that refuses a backend answering a data
   read without credentials.
+- The Docker source: containers' `json-file` logs (rotated `.N[.gz]` files
+  included) read by name from the containers root through a name → id map,
+  approved globs checked again at read time, console containers never served,
+  no read across a mount point; the `docker-json` format with an `attrs`
+  allowlist. The launcher binds the containers root (gid 0 for it only), keeps
+  the map current with a `docker events` loop, labels console containers, and
+  gains `locklog refresh`.
+
+### Fixed
+
+- The launcher chooses the non-recursive bind option from the Docker CLI
+  version, which parses it (`bind-recursive=disabled` from CLI 25), not from
+  the engine's.
