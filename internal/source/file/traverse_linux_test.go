@@ -1,4 +1,4 @@
-//go:build unix
+//go:build linux
 
 package file
 
@@ -12,8 +12,8 @@ import (
 )
 
 // Directories that grant search but not read (Docker's 0710 directories,
-// reached through the group): a literal path is still opened; a glob that
-// must list them matches nothing.
+// reached through the group): a literal path is still opened (O_PATH, Linux
+// only); a glob that must list them matches nothing.
 func TestSearchOnlyDirectories(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores directory modes")
