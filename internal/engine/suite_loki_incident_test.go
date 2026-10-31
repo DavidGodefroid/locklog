@@ -18,7 +18,10 @@ package engine
 // It runs when LOCKLOG_LOKI_INCIDENT_URL names that Loki (the CI
 // loki-incident job); LOCKLOG_TOXIPROXY_URL names Toxiproxy's API for the
 // latency variant. LOCKLOG_LOKI_INCIDENT_VOLUME scales the data (bytes per
-// day of the dense hour; default 5GiB).
+// day of the dense hour; default 5GiB) and LOCKLOG_LOKI_INCIDENT_BACKGROUND
+// the background (default 512MiB). With LOCKLOG_LOKI_INCIDENT_URL=fake, a
+// scaled-down run uses the suites' fake Loki (no Docker; the gates then say
+// nothing about Loki).
 
 import (
 	"bytes"
@@ -29,7 +32,9 @@ import (
 	"io"
 	"math/rand/v2"
 	"net/http"
+	"net/http/httptest"
 	"os"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -47,8 +52,6 @@ import (
 )
 
 const (
-	// lokiBackground is the sparse 7-day background of each copy.
-	lokiBackground = 512 << 20
 	// lokiIngestGate bounds the ingestion of both copies (§9.1).
 	lokiIngestGate = 10 * time.Minute
 	// lokiDataCap bounds the data in all (§9.1: ≤ 8 GiB).
@@ -66,11 +69,11 @@ type lokiPlan struct {
 	bgStep, denseStep            time.Duration // per writer
 }
 
-func newLokiPlan(perDay int64) lokiPlan {
+func newLokiPlan(perDay, background int64) lokiPlan {
 	T := time.Now().UTC().Truncate(15 * time.Minute)
 	writers := lokiApps2 * lokiPods
 	const line = 190 // bytes, about
-	bgN := int64(lokiBackground) / line / int64(writers)
+	bgN := background / line / int64(writers)
 	denseN := perDay / 24 / line / int64(writers)
 	return lokiPlan{T: T, dense: T.Add(-90 * time.Minute), incident: T.Add(-70 * time.Minute), denseEnd: T.Add(-30 * time.Minute),
 		bgStep: 7 * 24 * time.Hour / time.Duration(bgN), denseStep: time.Hour / time.Duration(max(denseN, 1))}
@@ -79,11 +82,11 @@ func newLokiPlan(perDay int64) lokiPlan {
 // lokiLine is one line of the shop's JSON log at ts, and its level.
 func lokiLine(r *rand.Rand, p lokiPlan, app string, ts time.Time, seq int64) (string, string) {
 	user := fmt.Sprintf("user%d@shop.example", r.IntN(500))
-	trace := fmt.Sprintf("tr-%s-%d", app[5:], seq)
+	trace := fmt.Sprintf("tr-%s-%d-%d", app[5:], seq>>40, seq&(1<<40-1))
 	tsS := ts.Format(time.RFC3339Nano)
 	if !ts.Before(p.incident) && ts.Before(p.denseEnd) && r.IntN(3) == 0 {
-		return fmt.Sprintf(`{"ts":%q,"level":"error","app":%q,"order":4812,"user":%q,"trace":%q,"status":502,"msg":"render pdf for %s failed: upstream timed out (order 4812)"}`,
-			tsS, app, user, trace, user), "error"
+		return fmt.Sprintf(`{"ts":%q,"level":"error","app":%q,"order":4812,"user":%q,"trace":%q,"status":502,"msg":"render pdf for %s failed: upstream timed out (order 4812, trace %s)"}`,
+			tsS, app, user, trace, user, trace), "error"
 	}
 	order := 4000 + r.IntN(1000)
 	if r.IntN(2000) == 0 {
@@ -238,7 +241,7 @@ func lokiIngest(t *testing.T, base string, p lokiPlan) (bytesPushed int64, entri
 // many entries a selector holds over [from, to).
 func lokiCount(t testing.TB, base, sel string, from, to time.Time) int64 {
 	t.Helper()
-	q := fmt.Sprintf("sum(count_over_time(%s [%ds]))", sel, int64(to.Sub(from)/time.Second))
+	q := fmt.Sprintf("sum by () (count_over_time(%s [%ds]))", sel, int64(to.Sub(from)/time.Second))
 	resp, err := http.Get(base + "/loki/api/v1/query?query=" + urlEscape(q) + "&time=" + strconv.FormatInt(to.UnixNano()-1, 10))
 	if err != nil {
 		t.Fatal(err)
@@ -390,6 +393,8 @@ func spike(t *testing.T, res CountResult, key string, frac float64) time.Time {
 	return time.Time{}
 }
 
+var traceRe = regexp.MustCompile(`trace (tr-[a-z]+-\d+-\d+)`)
+
 // lokiJob runs job 1 and returns the prompts and the time to the answer.
 // With the level label: (1) count by the trusted level label per 15 min
 // over 7 days, then per minute over the narrowed hour (Loki's metric
@@ -417,8 +422,9 @@ func lokiJob(t *testing.T, s *suite, p lokiPlan, level bool) (int, time.Duration
 		cq = CountQuery{Query: Query{From: hourFrom, To: hourFrom.Add(time.Hour), Sources: []string{srcLoki}}, ByLabels: []string{"level"}, Bucket: "1m"}
 		first = spike(t, lastCount(t, a.mustFree(agentCall{"count by level per 1m over the hour", MethodCount, cq}, 0)), "error", 0.1)
 	} else {
-		errs := CountQuery{Query: Query{From: from, To: p.T, Sources: []string{srcLoki},
-			Where: []Pred{{Field: "level", Op: OpEq, Value: raw("error")}}}, Bucket: "15m"}
+		// The errors, without a trusted level: by their text (the
+		// production default redacts the values of untrusted fields).
+		errs := CountQuery{Query: Query{From: from, To: p.T, Sources: []string{srcLoki}, Text: "failed"}, Bucket: "15m"}
 		if _, r := a.free(agentCall{"count errors per 15m over 7d", MethodCount, errs}, 1); r == nil || r.Code != EOverBudget {
 			t.Fatalf("step 1: the 7-day error count without a level label: %v", r)
 		}
@@ -428,8 +434,7 @@ func lokiJob(t *testing.T, s *suite, p lokiPlan, level bool) (int, time.Duration
 			t.Errorf("step 1: the 7-day volume count was scanned, not answered by Loki's counts")
 		}
 		hourFrom = spike(t, res, "", 5)
-		errs = CountQuery{Query: Query{From: hourFrom, To: hourFrom.Add(time.Hour), Sources: []string{srcLoki},
-			Where: []Pred{{Field: "level", Op: OpEq, Value: raw("error")}}}, Bucket: "1m"}
+		errs = CountQuery{Query: Query{From: hourFrom, To: hourFrom.Add(time.Hour), Sources: []string{srcLoki}, Text: "failed"}, Bucket: "1m"}
 		r := a.scan(agentCall{"count errors per 1m over the hour", MethodCount, errs})
 		if n := a.con.count(); n != 1 {
 			t.Errorf("the scan took %d approvals, want 1 for its whole plan", n)
@@ -467,9 +472,8 @@ func lokiJob(t *testing.T, s *suite, p lokiPlan, level bool) (int, time.Duration
 	// Step 3: the order's records (a page), and one's trace.
 	sq := Query{From: first, To: hourTo, Text: "4812", Sources: []string{srcLoki}, Limit: 50}
 	var rec struct {
-		TS     time.Time         `json:"ts"`
-		Fields map[string]any    `json:"fields"`
-		Attrs  map[string]string `json:"attrs"`
+		TS  time.Time `json:"ts"`
+		Msg string    `json:"msg"`
 	}
 	for _, pg := range a.mustFree(agentCall{"search the order", MethodSearch, sq}, 3) {
 		var sr SearchResult
@@ -478,15 +482,17 @@ func lokiJob(t *testing.T, s *suite, p lokiPlan, level bool) (int, time.Duration
 			if strings.Contains(string(r), "@shop.example") {
 				t.Fatalf("step 3: an e-mail reached the agent: %s", r)
 			}
-			if rec.Fields == nil {
+			if rec.Msg == "" {
 				json.Unmarshal(r, &rec)
 			}
 		}
 	}
-	trace, _ := rec.Fields["trace"].(string)
-	if trace == "" {
+	// The request id the message shows.
+	m := traceRe.FindStringSubmatch(rec.Msg)
+	if m == nil {
 		t.Fatalf("step 3: no record of the order with a trace id: %+v", rec)
 	}
+	trace := m[1]
 	tq := TraceQuery{ID: trace, From: rec.TS.Add(-5 * time.Minute).Truncate(time.Second), To: rec.TS.Add(5 * time.Minute).Truncate(time.Second), Sources: []string{srcLoki}, Limit: 50}
 	n := 0
 	for _, pg := range a.mustFree(agentCall{"trace", MethodTrace, tq}, 0) {
@@ -572,12 +578,21 @@ func TestLokiIncident(t *testing.T) {
 	if v := os.Getenv("LOCKLOG_LOKI_INCIDENT_VOLUME"); v != "" {
 		perDay = parseSize(t, v)
 	}
-	p := newLokiPlan(perDay)
+	background := int64(512 << 20)
+	if v := os.Getenv("LOCKLOG_LOKI_INCIDENT_BACKGROUND"); v != "" {
+		background = parseSize(t, v)
+	}
+	if base == "fake" {
+		srv := httptest.NewServer(&suiteLoki{})
+		t.Cleanup(srv.Close)
+		base = srv.URL
+	}
+	p := newLokiPlan(perDay, background)
 	start := time.Now()
 	pushed, entries := lokiIngest(t, base, p)
 	ingest := time.Since(start)
 	t.Logf("pushed %.2f GiB of lines (%d + %d entries) in %v: the dense hour at %.1f GiB/day, a %d MiB background per copy",
-		float64(pushed)/(1<<30), entries["lvl"], entries["nolvl"], ingest.Round(time.Second), float64(perDay)/(1<<30), lokiBackground>>20)
+		float64(pushed)/(1<<30), entries["lvl"], entries["nolvl"], ingest.Round(time.Second), float64(perDay)/(1<<30), background>>20)
 	if pushed > lokiDataCap {
 		t.Fatalf("%d bytes pushed, over the %d cap", pushed, int64(lokiDataCap))
 	}

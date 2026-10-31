@@ -18,11 +18,13 @@ package engine
 // the source reads them there.
 
 import (
+	"compress/gzip"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -32,6 +34,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -64,9 +67,51 @@ type lokiEntry struct {
 	line   string
 }
 
-// suiteLoki is the fake Loki.
+// suiteLoki is the fake Loki. Its push API (for TestLokiIncident's
+// scaled-down local runs) takes gzip JSON streams.
 type suiteLoki struct {
+	mu      sync.RWMutex
 	entries []lokiEntry
+}
+
+func (f *suiteLoki) push(w http.ResponseWriter, r *http.Request) {
+	var body io.Reader = r.Body
+	if r.Header.Get("Content-Encoding") == "gzip" {
+		zr, err := gzip.NewReader(r.Body)
+		if err != nil {
+			http.Error(w, "gzip", 400)
+			return
+		}
+		body = zr
+	}
+	var req struct {
+		Streams []struct {
+			Stream map[string]string   `json:"stream"`
+			Values [][]json.RawMessage `json:"values"`
+		} `json:"streams"`
+	}
+	if err := json.NewDecoder(body).Decode(&req); err != nil {
+		http.Error(w, "json", 400)
+		return
+	}
+	var es []lokiEntry
+	for _, st := range req.Streams {
+		for _, v := range st.Values {
+			var tsS, line string
+			json.Unmarshal(v[0], &tsS)
+			json.Unmarshal(v[1], &line)
+			ts, _ := strconv.ParseInt(tsS, 10, 64)
+			meta := map[string]string{}
+			if len(v) > 2 {
+				json.Unmarshal(v[2], &meta)
+			}
+			es = append(es, lokiEntry{ts: ts, labels: st.Stream, meta: meta, line: line})
+		}
+	}
+	f.mu.Lock()
+	f.entries = append(f.entries, es...)
+	f.mu.Unlock()
+	w.WriteHeader(204)
 }
 
 // lokiLabelMax bounds the payload an entry's untrusted label carries
@@ -235,6 +280,16 @@ func writeJSON(w http.ResponseWriter, v any) {
 }
 
 func (f *suiteLoki) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/loki/api/v1/push" && r.Method == "POST" {
+		f.push(w, r)
+		return
+	}
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if r.URL.Path == "/loki/api/v1/query" && r.Header.Get("X-Loki-Response-Encoding-Flags") == "" {
+		// The test's own count (lokiCount), not the source's.
+		r.Header.Set("X-Loki-Response-Encoding-Flags", "categorize-labels")
+	}
 	if r.Header.Get("X-Loki-Response-Encoding-Flags") != "categorize-labels" {
 		http.Error(w, "the fixture answers in the categorize-labels encoding only", 400)
 		return
