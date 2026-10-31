@@ -20,8 +20,8 @@
 // name (a container name the config accepts), its max-file (1..100) and
 // whether rotated files are compressed (0 or 1). An "x" line names a locklog
 // console container (by its label or its name prefix): never served. Any
-// malformed line, a duplicate id or name, refuses that version, and the next
-// older valid one is used; with none valid, nothing is served.
+// malformed line, a duplicate id or name, refuses that version, and then
+// nothing is served (fail closed: an older version is never used instead).
 //
 // # What is served
 //
@@ -29,7 +29,8 @@
 // of the source's approved globs (path.Match: '*' and '?'), its name does not
 // start with config.ConsolePrefix, and its id is neither an "x" id nor the
 // console's own. Of a served container, only <Root>/<id>/<id>-json.log and
-// <id>-json.log.N (.N.gz when compressed), 1 <= N < max_file, are opened:
+// <id>-json.log.N (.N.gz when compressed; .1 while Docker has not gzipped it
+// yet), 1 <= N < max_file, are opened:
 // probed by name (the 0710 directories cannot be listed with gid 0), beneath
 // the root, never across a mount point (file.Options.NoXDev). Every record
 // carries the trusted field "container" (the name).
@@ -128,9 +129,8 @@ type Source struct {
 
 // cont is one served container and its file source.
 type cont struct {
-	c     Container
-	src   *file.Source
-	paths []string
+	c   Container
+	src *file.Source
 }
 
 // New validates opts.
@@ -212,18 +212,26 @@ func (s *Source) approved(c Container, consoles map[string]bool) bool {
 	return false
 }
 
-// paths returns the literal paths of a container's log files.
-func (s *Source) paths(c Container) []string {
+// paths returns the literal paths of a container's log files, and the
+// alternates: with compression, Docker gzips <id>-json.log.1 in the
+// background, so .1 is read while it exists, else .1.gz (a .1.gz beside a .1
+// is still being written).
+func (s *Source) paths(c Container) ([]string, map[string]string) {
 	base := s.opts.Root + "/" + c.ID + "/" + c.ID + "-json.log"
 	out := []string{base}
+	alt := map[string]string{}
 	for n := 1; n < c.MaxFile; n++ {
 		p := base + "." + strconv.Itoa(n)
-		if c.Compress {
+		switch {
+		case !c.Compress:
+		case n == 1:
+			alt[p] = p + ".gz"
+		default:
 			p += ".gz"
 		}
 		out = append(out, p)
 	}
-	return out
+	return out, alt
 }
 
 // containers returns the served containers, sorted by name, re-reading the
@@ -267,9 +275,6 @@ func (s *Source) apply(m Map) error {
 			next[c.ID] = old
 			continue
 		}
-		if old, ok := s.conts[c.ID]; ok && old.c.Name != c.Name {
-			s.dropIndex(old)
-		}
 		cs, err := s.newCont(c)
 		if err != nil {
 			return err
@@ -285,29 +290,19 @@ func (s *Source) newCont(c Container) (*cont, error) {
 	if err != nil {
 		return nil, fmt.Errorf("docker source: %w", err)
 	}
-	paths := s.paths(c)
-	src, err := file.New(file.Options{Name: s.opts.Name, Paths: paths, Roots: []string{s.opts.Root}, Parser: p,
-		Trusted: s.opts.Trusted, Index: s.opts.Index, Sensitive: s.opts.Sensitive, Now: s.opts.Now, NoXDev: true})
+	paths, alt := s.paths(c)
+	// The index is tagged with the name every record carries: a renamed
+	// container's granules (counted under the old name) are rebuilt, also
+	// across a restart or a rename through a name that is not served.
+	src, err := file.New(file.Options{Name: s.opts.Name, Paths: paths, Alternates: alt, Roots: []string{s.opts.Root}, Parser: p,
+		Trusted: s.opts.Trusted, Index: s.opts.Index, Sensitive: s.opts.Sensitive, Now: s.opts.Now, NoXDev: true, Tag: c.Name})
 	if err != nil {
 		return nil, fmt.Errorf("docker source: %w", err)
 	}
-	return &cont{c: c, src: src, paths: paths}, nil
+	return &cont{c: c, src: src}, nil
 }
 
-// dropIndex forgets the index of a renamed container's files: their
-// granules count the old name.
-func (s *Source) dropIndex(c *cont) {
-	if s.opts.Index == nil {
-		return
-	}
-	for _, p := range c.paths {
-		if dev, ino, ok := devIno(p); ok {
-			s.opts.Index.Delete(s.opts.Name, dev, ino)
-		}
-	}
-}
-
-// byName returns the served container of a stream, checking its name.
+// byStream returns the served container of a stream, checking its name.
 func (s *Source) byStream(stream string) (*cont, string, error) {
 	id, rest, ok := strings.Cut(stream, "/")
 	if !ok {

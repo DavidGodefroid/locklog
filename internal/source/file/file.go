@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"os"
 	"slices"
@@ -61,8 +62,18 @@ type Options struct {
 	// NoXDev refuses to open a file across a mount point under its root
 	// (RESOLVE_NO_XDEV; the fallback walk compares mount ids, else
 	// devices): the docker source, whose root may receive propagated
-	// mounts after the console started.
+	// mounts after the console started. On a kernel without openat2 and
+	// before 5.8 (no statx mount id), only the device is compared: a bind
+	// mount of the same filesystem is not detected there.
 	NoXDev bool
+	// Tag is stored with each stream's index and checked like the trusted
+	// fields: an index built under another tag is rebuilt (the docker
+	// source's container name, which every record carries).
+	Tag string
+	// Alternates maps a literal path to the path read instead while the
+	// first is absent (docker: <id>-json.log.1, then .1.gz once Docker
+	// compressed it): never both.
+	Alternates map[string]string
 }
 
 // Source is a file source. It is safe for concurrent use.
@@ -99,7 +110,7 @@ func New(opts Options) (*Source, error) {
 	if len(opts.Paths) == 0 {
 		return nil, errors.New("file source: no paths")
 	}
-	for _, p := range opts.Paths {
+	for _, p := range append(slices.Clone(opts.Paths), slices.Collect(maps.Values(opts.Alternates))...) {
 		if err := checkPattern(p, opts.Recursive); err != nil {
 			return nil, err
 		}
@@ -129,6 +140,11 @@ func (s *Source) files(ctx context.Context) ([]fileInfo, error) {
 		got, err := expand(s.opts.Roots, p, s.opts.Recursive)
 		if err != nil {
 			return nil, err
+		}
+		if alt := s.opts.Alternates[p]; len(got) == 0 && alt != "" {
+			if got, err = expand(s.opts.Roots, alt, s.opts.Recursive); err != nil {
+				return nil, err
+			}
 		}
 		for _, m := range got {
 			if !seen[m.path()] {
@@ -320,11 +336,12 @@ func (s *Source) streamIndex(fi fileInfo) (fields []string, size int64, granules
 	return fields, size, granules
 }
 
-// sameFields reports whether st indexes the source's trusted fields.
+// sameFields reports whether st indexes the source's trusted fields, under
+// the source's tag.
 func (s *Source) sameFields(st *index.Stream) bool {
 	all := append(slices.Clone(st.Fields), st.Dropped...)
 	sort.Strings(all)
-	return slices.Equal(all, s.opts.Trusted)
+	return slices.Equal(all, s.opts.Trusted) && st.Tag == s.opts.Tag
 }
 
 // streamSize returns the length of fi's stream: the file size for a plain

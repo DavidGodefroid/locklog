@@ -171,7 +171,6 @@ func TestServesOnlyApprovedContainers(t *testing.T) {
 	e.write(a, a+"-json.log.1.gz", gz(t, frames("rot1", 2, t0.Add(10*time.Second))))
 	e.write(a, a+"-json.log.2.gz", gz(t, frames("rot2", 2, t0)))
 	e.write(a, a+"-json.log.3.gz", gz(t, frames("beyond", 1, t0))) // N >= max-file
-	e.write(a, a+"-json.log.1", frames("uncompressed", 1, t0))     // not a name of a compressed container
 	e.write(a, "config.v2.json", `{"log":"config\n"}`+"\n")
 	for _, c := range []string{b, cons, x, self, short} {
 		e.write(c, c+"-json.log", frames("other", 1, t0))
@@ -257,15 +256,20 @@ func TestMapChangesPickedUp(t *testing.T) {
 		t.Fatalf("v1: %q", got)
 	}
 	ref := rs[0].Ref
-	// v2: a renamed, b added. A malformed v3 is skipped.
+	// v2: a renamed, b added.
 	e.writeMap(2, "locklog-map 1\nc "+a+" shop-a2 1 0\nc "+b+" shop-b 1 0\n")
-	e.writeMap(3, "locklog-map 1\nc "+a+" shop-a3 1 0\nbroken\n")
 	e.now = e.now.Add(3 * time.Second)
 	if got := messages(scanAll(t, s, source.Selector{})); !slices.Equal(got, append(lines("shop-a2|a", 0, 1), "shop-b: b 0")) {
 		t.Fatalf("v2: %q", got)
 	}
 	if _, err := s.Reread(ctx, ref); !errors.Is(err, source.ErrStale) {
 		t.Errorf("a reference from before the rename: %v", err)
+	}
+	// A malformed newest version serves nothing (no fallback to v2).
+	e.writeMap(3, "locklog-map 1\nc "+a+" shop-a3 1 0\nbroken\n")
+	e.now = e.now.Add(3 * time.Second)
+	if rs := scanAll(t, s, source.Selector{}); len(rs) != 0 {
+		t.Fatalf("malformed newest map: %d records", len(rs))
 	}
 	// v4: b gone.
 	e.writeMap(4, "locklog-map 1\nc "+a+" shop-a2 1 0\n")
@@ -274,7 +278,7 @@ func TestMapChangesPickedUp(t *testing.T) {
 		t.Fatalf("v4: %q", got)
 	}
 	// Every version malformed or removed: nothing served.
-	for _, v := range []int{1, 2, 4} {
+	for _, v := range []int{1, 2, 3, 4} {
 		os.Remove(filepath.Join(e.mapDir, fmt.Sprintf("map.v%d", v)))
 	}
 	e.now = e.now.Add(3 * time.Second)
@@ -393,13 +397,18 @@ func TestReadMapNewestValid(t *testing.T) {
 	e.writeMap(1, "locklog-map 1\nc "+a+" one 1 0\n")
 	e.writeMap(9, "locklog-map 1\nc "+a+" nine 1 0\n")
 	e.writeMap(10, "locklog-map 1\nc "+a+" ten 1 0\n")
-	e.writeMap(11, "garbage\n")
+	// A symbolic link is not a version.
 	if err := os.Symlink(filepath.Join(e.mapDir, "map.v1"), filepath.Join(e.mapDir, "map.v12")); err != nil {
 		t.Fatal(err)
 	}
 	m, ok := ReadMap(e.mapDir)
 	if !ok || m.Version != 10 || m.Containers[0].Name != "ten" {
 		t.Fatalf("%+v %v", m, ok)
+	}
+	// A malformed newest version: nothing, never v10 (fail closed).
+	e.writeMap(11, "garbage\n")
+	if m, ok := ReadMap(e.mapDir); ok {
+		t.Fatalf("fell back to %+v", m)
 	}
 }
 
@@ -433,4 +442,114 @@ func TestNewRefusals(t *testing.T) {
 			t.Errorf("%+v accepted", o)
 		}
 	}
+}
+
+// With compression, .1 is read while it exists (Docker gzips it in the
+// background, and the .1.gz beside it is still being written), else .1.gz;
+// never both.
+func TestFirstRotationBeforeCompression(t *testing.T) {
+	e := newEnv(t)
+	a := id('a')
+	e.write(a, a+"-json.log", frames("live", 1, t0.Add(time.Minute)))
+	e.write(a, a+"-json.log.1", frames("rot1", 2, t0))
+	e.write(a, a+"-json.log.1.gz", gz(t, frames("rot1", 1, t0))[:10]) // partial
+	e.writeMap(1, "locklog-map 1\nc "+a+" shop-a 2 1\n")
+	s := e.source("shop-*")
+	want := append(lines("shop-a|live", 0), lines("shop-a|rot1", 0, 1)...)
+	sort.Strings(want)
+	if got := messages(scanAll(t, s, source.Selector{})); !slices.Equal(got, want) {
+		t.Fatalf(".1 and a partial .1.gz: %q", got)
+	}
+	// Compressed: .1 gone, .1.gz complete.
+	os.Remove(filepath.Join(e.root, a, a+"-json.log.1"))
+	e.write(a, a+"-json.log.1.gz", gz(t, frames("rot1", 2, t0)))
+	e.now = e.now.Add(time.Minute)
+	if got := messages(scanAll(t, s, source.Selector{})); !slices.Equal(got, want) {
+		t.Fatalf(".1.gz: %q", got)
+	}
+}
+
+// countsBy indexes s fully, then counts its records by container.
+func countsBy(t *testing.T, s *Source, index bool, sel source.Selector) (map[string]int64, source.CountResult) {
+	t.Helper()
+	for index {
+		_, done, err := s.IndexStep(ctx, 1<<20, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		index = !done
+	}
+	res, err := s.IndexCounts(ctx, source.CountQuery{Range: everything, Selector: sel, By: []string{ContainerField}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]int64{}
+	for _, r := range res.Rows {
+		got[r.Vals[0]] += r.N
+	}
+	return got, res
+}
+
+// The index counts the container name: a renamed container's granules are
+// rebuilt, never counted under the old name, whether the rename is seen
+// directly, across a restart, or through a name that is not served.
+func TestIndexFollowsRenames(t *testing.T) {
+	a := id('a')
+	setup := func(t *testing.T) *env {
+		e := newEnv(t)
+		e.write(a, a+"-json.log", frames("a", 3, t0))
+		e.writeMap(1, "locklog-map 1\nc "+a+" shop-a 1 0\n")
+		if got, _ := countsBy(t, e.source("shop-*"), true, source.Selector{}); got["shop-a"] != 3 {
+			t.Fatalf("before: %v", got)
+		}
+		return e
+	}
+	check := func(t *testing.T, e *env, s *Source, name string) {
+		t.Helper()
+		// Before indexing again: nothing under the old name, the rest a
+		// residual to scan.
+		got, res := countsBy(t, s, false, source.Selector{})
+		if got["shop-a"] != 0 || len(res.Residual.Chunks) == 0 {
+			t.Errorf("stale counts %v, residual %d", got, len(res.Residual.Chunks))
+		}
+		sel := source.Selector{Terms: []source.Term{{Field: ContainerField, Op: "=", Values: []string{name}}}}
+		got, res = countsBy(t, s, true, sel)
+		if got[name] != 3 || len(got) != 1 || len(res.Residual.Chunks) != 0 {
+			t.Errorf("after indexing: %v, residual %d", got, len(res.Residual.Chunks))
+		}
+	}
+	t.Run("direct", func(t *testing.T) {
+		e := setup(t)
+		s := e.source("shop-*")
+		countsBy(t, s, false, source.Selector{})
+		e.writeMap(2, "locklog-map 1\nc "+a+" shop-a2 1 0\n")
+		e.now = e.now.Add(3 * time.Second)
+		check(t, e, s, "shop-a2")
+	})
+	t.Run("restart", func(t *testing.T) {
+		e := setup(t)
+		if err := e.store.Flush(); err != nil {
+			t.Fatal(err)
+		}
+		st, err := index.Open(e.store.Dir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		e.store = st
+		e.writeMap(2, "locklog-map 1\nc "+a+" shop-a2 1 0\n")
+		check(t, e, e.source("shop-*"), "shop-a2")
+	})
+	t.Run("through an unserved name", func(t *testing.T) {
+		e := setup(t)
+		s := e.source("shop-*")
+		countsBy(t, s, false, source.Selector{})
+		e.writeMap(2, "locklog-map 1\nc "+a+" tmp-a 1 0\n")
+		e.now = e.now.Add(3 * time.Second)
+		if got, _ := countsBy(t, s, false, source.Selector{}); len(got) != 0 {
+			t.Errorf("an unserved name counted: %v", got)
+		}
+		e.writeMap(3, "locklog-map 1\nc "+a+" shop-a3 1 0\n")
+		e.now = e.now.Add(3 * time.Second)
+		check(t, e, s, "shop-a3")
+	})
 }

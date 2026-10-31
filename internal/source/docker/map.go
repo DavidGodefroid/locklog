@@ -142,28 +142,29 @@ func mapFiles(dir string) ([]string, string) {
 	return out, key.String()
 }
 
-// ReadMap returns the newest valid map version in dir. A malformed version
-// is skipped for the next older one; with none valid, ok is false and
-// nothing is served.
+// ReadMap returns the newest map version in dir. When it is malformed (or
+// unreadable), ok is false and nothing is served: an older version is never
+// used instead (fail closed; versions are written atomically, so the newest
+// is never partial).
 func ReadMap(dir string) (Map, bool) {
 	names, _ := mapFiles(dir)
 	return readNewest(dir, names)
 }
 
 func readNewest(dir string, names []string) (Map, bool) {
-	for _, name := range names {
-		b, ok := readSmall(filepath.Join(dir, name))
-		if !ok {
-			continue
-		}
-		m, err := ParseMap(b)
-		if err != nil {
-			continue
-		}
-		m.Version, _ = mapVersion(name)
-		return m, true
+	if len(names) == 0 {
+		return Map{}, false
 	}
-	return Map{}, false
+	b, ok := readSmall(filepath.Join(dir, names[0]))
+	if !ok {
+		return Map{}, false
+	}
+	m, err := ParseMap(b)
+	if err != nil {
+		return Map{}, false
+	}
+	m.Version, _ = mapVersion(names[0])
+	return m, true
 }
 
 // readSmall reads a regular file of at most maxMapSize bytes, refusing a
