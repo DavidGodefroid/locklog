@@ -169,6 +169,7 @@ func TestPatternsBaseline(t *testing.T) {
 // Continuations give the one-call answer; stopping points depend on the
 // plan, never on what the predicates match.
 func TestPatternsContinuationAndStoppingPoints(t *testing.T) {
+	heavyRace(t)
 	content := genLog(t0, 30000, "alpha.canary@example.org")
 	one := newFixture(t, content, nil)
 	want, err := one.eng.Patterns(ctx, PatternsQuery{Query: q(nil), Baseline: "24h"})
