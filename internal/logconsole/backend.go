@@ -437,6 +437,9 @@ const SystemFile = "/etc/locklog/system.toml"
 
 // InImage reports whether this process runs in locklog's image: as the
 // console account, or with the image's system file present.
+// The console runs only in the launcher's container (or lock up's), which
+// always passes LOCKLOG_EXPECT_DIR: a host holding the system file but
+// started without the launcher is refused, by design.
 func InImage(uid int, stat func(string) (os.FileInfo, error)) bool {
 	if uid == product.ConsoleUID {
 		return true
