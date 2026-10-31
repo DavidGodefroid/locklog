@@ -1414,8 +1414,15 @@ func TestScannedCountKeepsRemoteRange(t *testing.T) {
 // TestHugeExponentsAreNotNumbers: a number literal beyond the bounds is not
 // parsed (its cost grows with the exponent, and log content chooses it).
 func TestHugeExponentsAreNotNumbers(t *testing.T) {
-	if _, ok := parseNumber("1e999999"); ok {
-		t.Fatal("1e999999 parsed")
+	for _, n := range []string{"1e999999", "0x1p9999999", "1p9999999", "0x1p-9999999", "1/3", "0o17", "0b1", "1_000", "+1", ".5", "01"} {
+		if _, ok := parseNumber(n); ok {
+			t.Fatalf("%s parsed", n)
+		}
+	}
+	for _, n := range []string{"0", "-1", "200", "2.5", "1e400", "-3.25E-7"} {
+		if _, ok := parseNumber(n); !ok {
+			t.Fatalf("%s not parsed", n)
+		}
 	}
 	if n, ok := parseNumber("2.5e3"); !ok || n.FloatString(0) != "2500" {
 		t.Fatal(n, ok)
@@ -1424,10 +1431,69 @@ func TestHugeExponentsAreNotNumbers(t *testing.T) {
 	for i := 0; i < 200; i++ {
 		fmt.Fprintf(&b, "{\"time\":\"2026-10-30T12:%02d:%02dZ\",\"n\":1e999999,\"msg\":\"m\"}\n", i/60, i%60)
 	}
+	for i := 0; i < 200; i++ {
+		fmt.Fprintf(&b, "{\"time\":\"2026-10-30T13:%02d:%02dZ\",\"status\":\"0x1p9999999\",\"msg\":\"m\"}\n", i/60, i%60)
+	}
 	f := newFixture(t, b.String(), nil)
 	start := time.Now()
 	recs, _ := allRecords(t, f.eng, q(func(q *Query) { q.Where = []Pred{{Field: "n", Op: "=", Value: raw(200)}} }))
-	if len(recs) != 0 || time.Since(start) > 2*time.Second {
+	// A hex string in a trusted field is not the number 2^9999999.
+	gt, _ := allRecords(t, f.eng, q(func(q *Query) { q.Where = []Pred{{Field: "status", Op: ">", Value: raw(200)}} }))
+	if len(recs) != 0 || len(gt) != 0 || time.Since(start) > 2*time.Second {
+		t.Fatalf("%d, %d records in %v", len(recs), len(gt), time.Since(start))
+	}
+}
+
+// TestInMatchesEqual: the in predicate's set lookup answers as comparing
+// value by value would, numbers by exact value, text by text.
+func TestInMatchesEqual(t *testing.T) {
+	p := &Pred{Field: "v", Op: OpIn}
+	for _, r := range []string{`1`, `2.50`, `"3"`, `"x"`, `1e2`, `"⟦email:ABC⟧"`} {
+		s, n, err := scalarValue(json.RawMessage(r))
+		if err != nil {
+			t.Fatal(err)
+		}
+		p.vals, p.nums = append(p.vals, s), append(p.nums, n)
+	}
+	for _, v := range []val{
+		{mask.Number, "1"}, {mask.Number, "1.0"}, {mask.Number, "2.5"}, {mask.Number, "100"}, {mask.Number, "3"},
+		{mask.String, "3"}, {mask.String, "1"}, {mask.String, "x"}, {mask.String, "⟦email:ABC⟧"}, {mask.Number, "4"},
+		{mask.String, "2.5"}, {mask.Number, "0x1p3"}, {mask.Object, ""}, {mask.Bool, "true"},
+	} {
+		want := false
+		for i := range p.vals {
+			want = want || equal(p, i, v)
+		}
+		if got := p.inMatch(v); got != want {
+			t.Errorf("%+v: in %v, value by value %v", v, got, want)
+		}
+	}
+}
+
+// TestNumericInOnLongArrays: an in predicate with many numeric values on
+// records with long numeric arrays stays linear in the leaves.
+func TestNumericInOnLongArrays(t *testing.T) {
+	var b strings.Builder
+	for r := 0; r < 4; r++ {
+		fmt.Fprintf(&b, "{\"time\":\"2026-10-30T12:00:0%dZ\",\"v\":[", r)
+		for i := 0; i < 5000; i++ {
+			b.WriteString("1,")
+		}
+		b.WriteString("2],\"msg\":\"m\"}\n")
+	}
+	f := newFixture(t, b.String(), nil)
+	vals := make([]int, 64)
+	for i := range vals {
+		vals[i] = 1000 + i
+	}
+	vals[63] = 2
+	var preds []Pred
+	for i := 0; i < 32; i++ {
+		preds = append(preds, Pred{Field: "v", Op: OpIn, Value: raw(vals)})
+	}
+	start := time.Now()
+	recs, _ := allRecords(t, f.eng, q(func(q *Query) { q.Where = preds }))
+	if len(recs) != 4 || time.Since(start) > 3*time.Second {
 		t.Fatalf("%d records in %v", len(recs), time.Since(start))
 	}
 }

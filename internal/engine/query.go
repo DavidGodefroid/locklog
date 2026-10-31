@@ -97,6 +97,7 @@ type Pred struct {
 	// Validated forms.
 	vals   []string // = != in: the values as text (numbers canonical)
 	nums   []*big.Rat
+	in     *inSet // OpIn's values as sets (built on first use)
 	re     *regexp.Regexp
 	needle string
 }
@@ -385,6 +386,10 @@ func (v *validator) pred(q *Query, p *Pred, span string) *Error {
 	}
 	if (p.Op == OpLt || p.Op == OpLe || p.Op == OpGt || p.Op == OpGe) && p.nums[0] == nil && isToken(p.vals[0]) {
 		return refuse(EBadQuery, span+".value", "ordering on a pseudonym")
+	}
+	if p.Op == OpIn {
+		p.in = nil
+		p.inSet() // built here, once: evaluation only reads it
 	}
 	return nil
 }
