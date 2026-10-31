@@ -58,6 +58,16 @@ const (
 // cuts the range into at most MaxSlices epoch-aligned slices.
 var sliceWidths = []time.Duration{time.Minute, 5 * time.Minute, 15 * time.Minute, time.Hour, 6 * time.Hour, 24 * time.Hour}
 
+// subWidths are the widths a slice holding more than one call's byte
+// budget is split into (Split), narrowest first: the next narrower one than
+// the slice's, down to MinSlice. Each one divides the next, so sub-slices
+// stay epoch-aligned (and whole milliseconds, as the range bounds).
+var subWidths = append([]time.Duration{MinSlice, 10 * time.Second}, sliceWidths...)
+
+// MinSlice is the narrowest slice: one holding more than a call's budget is
+// refused.
+const MinSlice = time.Second
+
 // Client is the egress client of the source (egress.Client).
 type Client interface {
 	Send(ctx context.Context, method, path string, q url.Values, body []byte) (egress.Response, error)
@@ -276,6 +286,29 @@ func (s *Source) Plan(ctx context.Context, r source.Range, sel source.Selector) 
 		gs = append(gs, source.Granule{Start: t.UnixNano(), End: t.Add(w).UnixNano(), From: t, To: t.Add(w)})
 	}
 	return source.Byteplan{Chunks: []source.Chunk{{Source: s.o.Name, Stream: stream, Granules: gs}}}, nil
+}
+
+// Split cuts slice g into the epoch-aligned slices of the next narrower
+// width of subWidths (clipped to g), or returns nil when g is no wider than
+// MinSlice. Documents of one nanosecond stay in one slice, so refs (a
+// timestamp and an ordinal within it) are unchanged.
+func (s *Source) Split(g source.Granule) []source.Granule {
+	w := time.Duration(g.End - g.Start)
+	var sw time.Duration
+	for _, x := range subWidths {
+		if x < w {
+			sw = x
+		}
+	}
+	if sw == 0 {
+		return nil
+	}
+	var out []source.Granule
+	for t := time.Unix(0, g.Start).UTC().Truncate(sw); t.UnixNano() < g.End; t = t.Add(sw) {
+		a, b := max(t.UnixNano(), g.Start), min(t.Add(sw).UnixNano(), g.End)
+		out = append(out, source.Granule{Start: a, End: b, From: time.Unix(0, a).UTC(), To: time.Unix(0, b).UTC()})
+	}
+	return out
 }
 
 // hit is one document of a response, reduced to what locklog keeps.

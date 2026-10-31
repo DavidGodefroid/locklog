@@ -289,3 +289,92 @@ func TestElasticMultiValuedTerms(t *testing.T) {
 		t.Fatal("fake docs out of order")
 	}
 }
+
+// TestElasticDenseSliceSplit: a 1-minute slice holding about ten times one
+// call's byte budget is split into narrower slices and paged with a
+// cursor, ascending and descending: every record of the range is returned
+// once, in order, each call fetching about its budget; one frozen plan is
+// left.
+func TestElasticDenseSliceSplit(t *testing.T) {
+	const budget = 256 << 10
+	for _, order := range []string{"asc", "desc"} {
+		t.Run(order, func(t *testing.T) {
+			fe := &fakeElastic{}
+			dense, denseEnd := t0.Add(3*time.Minute), t0.Add(4*time.Minute)
+			for ts := t0; ts.Before(t0.Add(10 * time.Minute)); {
+				msg := fmt.Sprintf("time=%s msg=\"entry %d\"", ts.Format(time.RFC3339Nano), ts.UnixNano())
+				step := 5 * time.Second
+				if !ts.Before(dense) && ts.Before(denseEnd) {
+					msg += " pad=" + strings.Repeat("x", 4<<10)
+					step = 100 * time.Millisecond
+				}
+				fe.docs = append(fe.docs, esDoc{ts: ts.UnixNano(), id: strconv.FormatInt(ts.UnixNano(), 10),
+					fields: map[string][]string{"message": {msg}, "level": {"error"}}})
+				ts = ts.Add(step)
+			}
+			p, _ := parse.New(parse.Options{})
+			src, err := elastic.New(elastic.Options{Name: "es", Client: fe, Parser: p, Indices: []string{"logs"},
+				TrustedFields: []string{"level"}, InFlight: 2, Size: 8, Now: func() time.Time { return t0.Add(2 * time.Hour) }})
+			if err != nil {
+				t.Fatal(err)
+			}
+			f := newFixture(t, "x\n", func(o *Options) {
+				o.Sources["es"] = src
+				o.Limits.RemoteBytes = budget
+			})
+			qq := q(func(q *Query) {
+				q.From, q.To = t0, t0.Add(10*time.Minute)
+				q.Sources = []string{"es"}
+				q.Limit = 200
+				q.Order = order
+			})
+			var recs []json.RawMessage
+			calls, empty := 0, 0
+			for {
+				fe.mu.Lock()
+				fe.served = 0
+				fe.mu.Unlock()
+				res, err := f.eng.Search(ctx, qq)
+				if err != nil {
+					t.Fatalf("call %d: %v", calls, err)
+				}
+				calls++
+				fe.mu.Lock()
+				served, page := fe.served, fe.maxPage
+				fe.mu.Unlock()
+				if bound := int64(budget) + 3*page; served > bound {
+					t.Fatalf("call %d fetched %d bytes, bound %d", calls, served, bound)
+				}
+				if len(res.Records) == 0 {
+					empty++
+				}
+				recs = append(recs, res.Records...)
+				if res.Complete {
+					break
+				}
+				if res.Cursor == "" || calls > 400 {
+					t.Fatalf("call %d: incomplete without a cursor", calls)
+				}
+				qq.Cursor = res.Cursor
+			}
+			if empty == 0 {
+				t.Fatal("no call split a slice: the dense minute fitted a call's budget")
+			}
+			f.eng.mu.Lock()
+			plans := len(f.eng.plans)
+			f.eng.mu.Unlock()
+			if plans != 1 {
+				t.Fatalf("%d frozen plans after one query", plans)
+			}
+			ts := recordTimes(t, recs)
+			checkOrder(t, ts, len(fe.docs), order == "desc")
+			seen := map[time.Time]bool{}
+			for _, x := range ts {
+				if seen[x] {
+					t.Fatalf("record at %v returned twice", x)
+				}
+				seen[x] = true
+			}
+		})
+	}
+}

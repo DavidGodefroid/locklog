@@ -496,6 +496,7 @@ func (s *Source) Describe(ctx context.Context) (source.Schema, error) {
 
 // The source is a source and answers counts on the server.
 var (
-	_ source.Source  = (*Source)(nil)
-	_ source.Counter = (*Source)(nil)
+	_ source.Source   = (*Source)(nil)
+	_ source.Counter  = (*Source)(nil)
+	_ source.Splitter = (*Source)(nil)
 )
