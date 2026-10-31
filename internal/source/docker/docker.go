@@ -372,11 +372,15 @@ func (s *Source) wrapRecord(c *cont, r source.RawRecord) source.RawRecord {
 }
 
 // selected returns the containers whose name satisfies sel's terms on the
-// ContainerField label (other terms are left to the file sources).
-func selected(cs []*cont, sel source.Selector) []*cont {
+// ContainerField label (other terms are left to the file sources). The
+// agent sees a name a detector flags as a pseudonym, never in clear: such a
+// container, and a term holding a placeholder, may match and are kept (the
+// engine evaluates every term after masking), as the index does with a
+// redacted value.
+func (s *Source) selected(cs []*cont, sel source.Selector) []*cont {
 	var terms []source.Term
 	for _, t := range sel.Terms {
-		if t.Label && t.Field == ContainerField {
+		if t.Label && t.Field == ContainerField && !slices.ContainsFunc(t.Values, func(v string) bool { return strings.Contains(v, "⟦") }) {
 			terms = append(terms, t)
 		}
 	}
@@ -386,7 +390,7 @@ func selected(cs []*cont, sel source.Selector) []*cont {
 	ts := source.Selector{Terms: terms}
 	var out []*cont
 	for _, c := range cs {
-		if ts.Match(nil, map[string]string{ContainerField: c.c.Name}) {
+		if (s.opts.Sensitive != nil && s.opts.Sensitive(ContainerField, c.c.Name)) || ts.Match(nil, map[string]string{ContainerField: c.c.Name}) {
 			out = append(out, c)
 		}
 	}
@@ -401,7 +405,7 @@ func (s *Source) Plan(ctx context.Context, r source.Range, sel source.Selector) 
 		return source.Byteplan{}, err
 	}
 	var plan source.Byteplan
-	for _, c := range selected(cs, sel) {
+	for _, c := range s.selected(cs, sel) {
 		p, err := c.src.Plan(ctx, r, sel)
 		if err != nil {
 			return source.Byteplan{}, err
@@ -597,7 +601,7 @@ func (s *Source) IndexCounts(ctx context.Context, q source.CountQuery) (source.C
 	var res source.CountResult
 	acc := map[string]*source.CountRow{}
 	var from []coverage
-	for _, c := range selected(cs, q.Selector) {
+	for _, c := range s.selected(cs, q.Selector) {
 		r, err := c.src.IndexCounts(ctx, q)
 		if err != nil {
 			return source.CountResult{}, err

@@ -101,15 +101,18 @@ type Pred struct {
 	needle string
 }
 
-// name is the field or label the predicate is about. Trusted fields and
-// trusted labels (or Loki structured metadata) share one namespace per
-// source: the console's trusted function answers for both.
+// name is the field or label the predicate is about; label tells which
+// namespace (a Loki stream label or structured metadata, a docker container
+// or stream are labels).
 func (p *Pred) name() string {
 	if p.Label != "" {
 		return p.Label
 	}
 	return p.Field
 }
+
+// label reports whether the predicate is about a label.
+func (p *Pred) label() bool { return p.Label != "" }
 
 // Query is a search or count query (design §3.2).
 type Query struct {
@@ -159,7 +162,7 @@ func (p *Pred) numeric() bool {
 // trustedOnly reports whether the query uses only trusted-field selection:
 // no text, no regex, every predicate an equality on a trusted field with
 // non-numeric values (see numeric).
-func (q *Query) trustedOnly(trusted func(src, field string) bool) bool {
+func (q *Query) trustedOnly(trusted func(src, name string, label bool) bool) bool {
 	if q.Text != "" || q.Regex != "" {
 		return false
 	}
@@ -168,7 +171,7 @@ func (q *Query) trustedOnly(trusted func(src, field string) bool) bool {
 			return false
 		}
 		for _, s := range q.Sources {
-			if !trusted(s, p.name()) {
+			if !trusted(s, p.name(), p.label()) {
 				return false
 			}
 		}
@@ -178,19 +181,19 @@ func (q *Query) trustedOnly(trusted func(src, field string) bool) bool {
 
 // selector returns the trusted-field terms of the query, used for planning;
 // numeric terms are left out (see numeric).
-func (q *Query) selector(src string, trusted func(src, field string) bool) source.Selector {
+func (q *Query) selector(src string, trusted func(src, name string, label bool) bool) source.Selector {
 	var sel source.Selector
 	for _, p := range q.Where {
-		if !trusted(src, p.name()) || p.numeric() {
+		if !trusted(src, p.name(), p.label()) || p.numeric() {
 			continue
 		}
 		// A label predicate is pushed as a label term, a field one
 		// as a field term: a source applies each in its namespace.
 		switch p.Op {
 		case OpEq, OpIn:
-			sel.Terms = append(sel.Terms, source.Term{Field: p.name(), Label: p.Label != "", Op: OpIn, Values: p.vals})
+			sel.Terms = append(sel.Terms, source.Term{Field: p.name(), Label: p.label(), Op: OpIn, Values: p.vals})
 		case OpNe:
-			sel.Terms = append(sel.Terms, source.Term{Field: p.name(), Label: p.Label != "", Op: OpNe, Values: p.vals})
+			sel.Terms = append(sel.Terms, source.Term{Field: p.name(), Label: p.label(), Op: OpNe, Values: p.vals})
 		}
 	}
 	return sel
@@ -200,7 +203,7 @@ func (q *Query) selector(src string, trusted func(src, field string) bool) sourc
 type validator struct {
 	now     time.Time
 	sources []string
-	trusted func(src, field string) bool
+	trusted func(src, name string, label bool) bool
 	// detect reports a value a detector flags (personal data, secret).
 	detect func(string) bool
 	// nameMasked reports a clear path whose name the masker shows masked.
@@ -353,7 +356,7 @@ func (v *validator) pred(q *Query, p *Pred, span string) *Error {
 	case OpLt, OpLe, OpGt, OpGe:
 		// Ordering on a masked field is an oracle (as MIN/MAX would be).
 		for _, s := range q.Sources {
-			if !v.trusted(s, p.name()) {
+			if !v.trusted(s, p.name(), p.label()) {
 				return refuse(EBadQuery, span+".op", "ordering operators apply to trusted fields and labels only")
 			}
 		}

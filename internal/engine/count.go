@@ -209,14 +209,14 @@ func (q *CountQuery) bucketOf(t time.Time) time.Time {
 func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr error) {
 	cursor := q.Cursor
 	q.Cursor = ""
-	trustedOnly := q.trustedOnly(func(s, f string) bool { return e.o.Trusted(s, f) })
+	trustedOnly := q.trustedOnly(e.o.Trusted)
 	if len(q.Sources) == 0 {
 		q.Sources = append([]string(nil), e.names...)
-		trustedOnly = q.trustedOnly(func(s, f string) bool { return e.o.Trusted(s, f) })
+		trustedOnly = q.trustedOnly(e.o.Trusted)
 	}
-	for _, b := range append(slices.Clone(q.By), q.ByLabels...) {
+	for _, p := range q.groupBy() {
 		for _, s := range q.Sources {
-			if !e.o.Trusted(s, b) {
+			if !e.o.Trusted(s, p.name(), p.label()) {
 				trustedOnly = false
 			}
 		}
