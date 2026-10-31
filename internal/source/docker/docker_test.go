@@ -141,8 +141,9 @@ func scanAll(t *testing.T, s *Source, sel source.Selector) []source.RawRecord {
 
 // attr is a trusted attribute of a record ("attrs.<key>" into the frame's
 // attrs object), as the index reads it.
+// attr returns a label (frame attribute) of r.
 func attr(r source.RawRecord, k string) string {
-	v, _ := index.Lookup(r.Event, k)
+	v, _ := index.LookupAttr(r.Event, k)
 	return v
 }
 
@@ -225,8 +226,12 @@ func TestRecordsCarryTrustedFields(t *testing.T) {
 		attr(r, ContainerField) != "shop-api-1" || attr(r, "attrs.env") != "" {
 		t.Fatalf("%+v", r.Event)
 	}
-	if v, _ := index.Lookup(r.Event, ContainerField); v != "shop-api-1" {
-		t.Errorf("the payload's container field stands for the trusted one: %q", v)
+	// The label and the payload's field of the same name are apart.
+	if v, _ := index.LookupAttr(r.Event, ContainerField); v != "shop-api-1" {
+		t.Errorf("the payload's container field stands for the trusted label: %q", v)
+	}
+	if v, _ := index.Lookup(r.Event, ContainerField); v != "spoof" {
+		t.Errorf("payload field container = %q", v)
 	}
 	if !strings.HasPrefix(r.Ref.Stream, a+"/shop-api-1/") || r.Ref.Source != "web" {
 		t.Errorf("ref %+v", r.Ref)
@@ -302,7 +307,7 @@ func TestIndexCountsAndSelector(t *testing.T) {
 	e.write(b, b+"-json.log", frames("b", 2, t0))
 	e.writeMap(1, "locklog-map 1\nc "+a+" shop-a 1 0\nc "+b+" shop-b 1 0\n")
 	s := e.source("shop-*")
-	sel := source.Selector{Terms: []source.Term{{Field: ContainerField, Op: "=", Values: []string{"shop-b"}}}}
+	sel := source.Selector{Terms: []source.Term{{Field: ContainerField, Label: true, Op: "=", Values: []string{"shop-b"}}}}
 	if got := messages(scanAll(t, s, sel)); !slices.Equal(got, lines("shop-b|b", 0, 1)) {
 		t.Fatalf("selector: %q", got)
 	}
@@ -315,7 +320,7 @@ func TestIndexCountsAndSelector(t *testing.T) {
 			break
 		}
 	}
-	res, err := s.IndexCounts(ctx, source.CountQuery{Range: everything, By: []string{ContainerField}})
+	res, err := s.IndexCounts(ctx, source.CountQuery{Range: everything, ByLabels: []string{ContainerField}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -326,7 +331,7 @@ func TestIndexCountsAndSelector(t *testing.T) {
 	if got["shop-a"] != 3 || got["shop-b"] != 2 || len(got) != 2 || len(res.Residual.Chunks) != 0 || !res.IndexedFrom.Equal(t0) {
 		t.Fatalf("counts %v residual %d from %v", got, len(res.Residual.Chunks), res.IndexedFrom)
 	}
-	res, err = s.IndexCounts(ctx, source.CountQuery{Range: everything, Selector: sel, By: []string{"stream"}})
+	res, err = s.IndexCounts(ctx, source.CountQuery{Range: everything, Selector: sel, ByLabels: []string{"stream"}})
 	if err != nil || len(res.Rows) != 1 || res.Rows[0].N != 2 || res.Rows[0].Vals[0] != "stdout" {
 		t.Fatalf("selected counts %+v %v", res, err)
 	}
@@ -337,10 +342,23 @@ func TestIndexCountsAndSelector(t *testing.T) {
 	if d.Kind != Kind || d.Streams != 2 || !d.FullyIndexed || d.Format != "docker-json" {
 		t.Fatalf("describe %+v", d)
 	}
+	found := false
 	for _, f := range d.Fields {
-		if f.Name == ContainerField && !slices.Equal(f.Values, []string{"shop-a", "shop-b"}) {
-			t.Errorf("container values %v", f.Values)
+		if f.Name == ContainerField {
+			found = true
+			if !f.Label || !f.Trusted || !slices.Equal(f.Values, []string{"shop-a", "shop-b"}) {
+				t.Errorf("container %+v", f)
+			}
 		}
+	}
+	if !found {
+		t.Errorf("no container label in %+v", d.Fields)
+	}
+	// A line-field term named like the label neither prunes containers
+	// nor reads the label: the index holds no such field.
+	fieldSel := source.Selector{Terms: []source.Term{{Field: ContainerField, Op: "=", Values: []string{"shop-b"}}}}
+	if _, err := s.IndexCounts(ctx, source.CountQuery{Range: everything, Selector: fieldSel}); !errors.Is(err, source.ErrNotIndexable) {
+		t.Errorf("field term on the container label's name: %v", err)
 	}
 }
 
@@ -487,7 +505,7 @@ func countsBy(t *testing.T, s *Source, index bool, sel source.Selector) (map[str
 		}
 		index = !done
 	}
-	res, err := s.IndexCounts(ctx, source.CountQuery{Range: everything, Selector: sel, By: []string{ContainerField}})
+	res, err := s.IndexCounts(ctx, source.CountQuery{Range: everything, Selector: sel, ByLabels: []string{ContainerField}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -520,7 +538,7 @@ func TestIndexFollowsRenames(t *testing.T) {
 		if got["shop-a"] != 0 || len(res.Residual.Chunks) == 0 {
 			t.Errorf("stale counts %v, residual %d", got, len(res.Residual.Chunks))
 		}
-		sel := source.Selector{Terms: []source.Term{{Field: ContainerField, Op: "=", Values: []string{name}}}}
+		sel := source.Selector{Terms: []source.Term{{Field: ContainerField, Label: true, Op: "=", Values: []string{name}}}}
 		got, res = countsBy(t, s, true, sel)
 		if got[name] != 3 || len(got) != 1 || len(res.Residual.Chunks) != 0 {
 			t.Errorf("after indexing: %v, residual %d", got, len(res.Residual.Chunks))
@@ -587,5 +605,30 @@ func TestFileSourcesNeverCrossMounts(t *testing.T) {
 				t.Errorf("%s: path %s", c.Name, p)
 			}
 		}
+	}
+}
+
+// A container name a detector flags reaches the agent as a pseudonym: a
+// term holding a placeholder, and a flagged name, never prune a container
+// (the engine matches after masking).
+func TestSelectorKeepsPseudonymisedContainers(t *testing.T) {
+	e := newEnv(t)
+	a, b := id('a'), id('b')
+	e.write(a, a+"-json.log", frames("a", 1, t0))
+	e.write(b, b+"-json.log", frames("b", 1, t0))
+	e.writeMap(1, "locklog-map 1\nc "+a+" shop-a 1 0\nc "+b+" shop-jane 1 0\n")
+	s := e.source("shop-*")
+	s.opts.Sensitive = func(_, v string) bool { return v == "shop-jane" }
+	term := func(v string) source.Selector {
+		return source.Selector{Terms: []source.Term{{Field: ContainerField, Label: true, Op: "=", Values: []string{v}}}}
+	}
+	if got := messages(scanAll(t, s, term("⟦person:0123456789⟧"))); !slices.Equal(got, []string{"shop-a: a 0", "shop-jane: b 0"}) {
+		t.Errorf("placeholder term: %q", got)
+	}
+	if got := messages(scanAll(t, s, term("shop-a"))); !slices.Equal(got, []string{"shop-a: a 0", "shop-jane: b 0"}) {
+		t.Errorf("flagged name pruned: %q", got)
+	}
+	if got := messages(scanAll(t, s, term("shop-x"))); !slices.Equal(got, []string{"shop-jane: b 0"}) {
+		t.Errorf("unflagged name kept: %q", got)
 	}
 }

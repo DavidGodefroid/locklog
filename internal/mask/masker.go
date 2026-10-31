@@ -180,11 +180,11 @@ func (m *Masker) Epoch() string { return m.o.Pseudonyms.Epoch() }
 func (m *Masker) Mask(source string, ev parse.Event) (rec Record) {
 	defer func() {
 		if recover() != nil {
-			rec = Record{ok: true, failed: true, ts: ev.Time, hasTime: ev.HasTime, offset: ev.Offset, length: ev.Length}
+			rec = Record{ok: true, failed: true, ts: ev.Time, hasTime: ev.HasTime || ev.Inherited, offset: ev.Offset, length: ev.Length}
 		}
 	}()
 	w := &walk{m: m, source: source, kinds: map[string]bool{}}
-	rec = Record{ok: true, ts: ev.Time, hasTime: ev.HasTime, format: ev.Format, offset: ev.Offset, length: ev.Length}
+	rec = Record{ok: true, ts: ev.Time, hasTime: ev.HasTime || ev.Inherited, format: ev.Format, offset: ev.Offset, length: ev.Length}
 	rec.fields = w.members(ev.Fields, "", "", false, inherited{})
 	// Attrs come from the source's own frame (journald, docker), never
 	// from the line: only allowlisted ones reach here (LL-11 `attrs`,
@@ -215,6 +215,51 @@ func (m *Masker) Text(s string) (out string) {
 	}()
 	w := &walk{m: m, kinds: map[string]bool{}}
 	return w.text(s)
+}
+
+// TrustedValue masks a trusted value read outside a record (an index value,
+// a value compared with a trusted field) as Mask masks a trusted leaf at
+// path of source: secret names, human and agent rules (an ancestor's too),
+// then the detectors, a number in exponent or decimal form read as the
+// integer it is. Its JSON kind and how path splits into keys are unknown,
+// so every reading is tried (string and, for a number literal, number; the
+// dotted path as nested keys and as one key): the first that changes the
+// value is returned, else the value. A value it changes must never be
+// shown or matched clear.
+func (m *Masker) TrustedValue(source, path, v string) (out string) {
+	defer func() {
+		if recover() != nil {
+			out = Redacted // a failure withholds it all
+		}
+	}()
+	kinds := []parse.Kind{parse.KindString}
+	if validLiteral(parse.KindNumber, v) {
+		kinds = append(kinds, parse.KindNumber)
+	}
+	splits := [][]string{{path}}
+	if strings.Contains(path, ".") {
+		splits = append(splits, strings.Split(path, "."))
+	}
+	for _, k := range kinds {
+		for _, parts := range splits {
+			val := parse.Value{Kind: k, Str: v}
+			for i := len(parts) - 1; i > 0; i-- {
+				val = parse.Value{Kind: parse.KindObject, Members: []parse.Member{{Key: parts[i], Value: val}}}
+			}
+			w := &walk{m: m, source: source, kinds: map[string]bool{}}
+			o := w.members([]parse.Member{{Key: parts[0], Value: val}}, "", "", true, inherited{})[0].value
+			for o.kind == Object && len(o.members) == 1 {
+				o = o.members[0].value
+			}
+			if o.kind == Object || o.kind == Array {
+				return Redacted
+			}
+			if o.text != v {
+				return o.text
+			}
+		}
+	}
+	return v
 }
 
 // RedactText masks text the agent wrote before it is echoed back (refusal
@@ -774,6 +819,13 @@ var jsonNumber = regexp.MustCompile(`^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9
 // controls (but tab and newline) and invisible characters are dropped
 // (§5.4), as are invalid bytes and U+FFFD, before detection, so that the detectors see exactly the text
 // that will be shown.
+// Clean is the text the masker reads of a clear string before masking it:
+// invalid bytes, U+FFFD, controls and invisible runes dropped (which can
+// join text that is apart in the clear), brackets made U+FFFD. Every
+// unmasked segment of a masked string is a substring of Clean of the clear
+// string (the engine's pre-filter relies on it).
+func Clean(s string) string { return cleanSource(s) }
+
 func cleanSource(s string) string {
 	dirty := !utf8.ValidString(s)
 	for _, r := range s {

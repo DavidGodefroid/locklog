@@ -88,8 +88,9 @@ type Options struct {
 	// Parse is the base of the parser options (multiline, location);
 	// the format and the attributes are set by the source.
 	Parse parse.Options
-	// Trusted are the trusted fields the index counts; ContainerField is
-	// always added.
+	// Trusted are the trusted names the index counts; ContainerField is
+	// always added. The container, the stream and attrs.<key> are labels
+	// (frame attributes, parse.Event.Attrs), the others line fields.
 	Trusted []string
 	// Index is the local index store (nil: no index).
 	Index *index.Store
@@ -163,11 +164,7 @@ func New(opts Options) (*Source, error) {
 	}
 	opts.Containers = slices.Clone(opts.Containers)
 	opts.Attrs = slices.Clone(opts.Attrs)
-	opts.Trusted = slices.Clone(opts.Trusted)
-	if !slices.Contains(opts.Trusted, ContainerField) {
-		opts.Trusted = append(opts.Trusted, ContainerField)
-	}
-	sort.Strings(opts.Trusted)
+	opts.Trusted = trustedKeys(opts.Trusted)
 	// The parser options are checked once here.
 	if _, err := parse.New(parserOptions(opts, "x")); err != nil {
 		return nil, fmt.Errorf("docker source: %w", err)
@@ -179,6 +176,25 @@ func New(opts Options) (*Source, error) {
 		}
 	}
 	return &Source{opts: opts, self: self, conts: map[string]*cont{}}, nil
+}
+
+// trustedKeys returns the indexed names (index.TermKey) of the trusted
+// names, ContainerField added, sorted: the container and the frame keys
+// (parse.FrameKeys) are labels.
+func trustedKeys(trusted []string) []string {
+	out := []string{index.LabelKey(ContainerField)}
+	for _, f := range trusted {
+		out = append(out, index.TermKey(f, IsLabel(f)))
+	}
+	slices.Sort(out)
+	return slices.Compact(out)
+}
+
+// IsLabel reports whether a trusted name of a docker source is a label:
+// the container, the runtime's stream, an attrs.<key>.
+func IsLabel(name string) bool {
+	head, _, _ := strings.Cut(name, ".")
+	return name == ContainerField || slices.Contains(parse.FrameKeys, head)
 }
 
 func parserOptions(opts Options, name string) parse.Options {
@@ -355,12 +371,16 @@ func (s *Source) wrapRecord(c *cont, r source.RawRecord) source.RawRecord {
 	return r
 }
 
-// selected returns the containers whose name satisfies sel's terms on
-// ContainerField (other terms are left to the file sources).
-func selected(cs []*cont, sel source.Selector) []*cont {
+// selected returns the containers whose name satisfies sel's terms on the
+// ContainerField label (other terms are left to the file sources). The
+// agent sees a name a detector flags as a pseudonym, never in clear: such a
+// container, and a term holding a placeholder, may match and are kept (the
+// engine evaluates every term after masking), as the index does with a
+// redacted value.
+func (s *Source) selected(cs []*cont, sel source.Selector) []*cont {
 	var terms []source.Term
 	for _, t := range sel.Terms {
-		if t.Field == ContainerField {
+		if t.Label && t.Field == ContainerField && !slices.ContainsFunc(t.Values, func(v string) bool { return strings.Contains(v, "⟦") }) {
 			terms = append(terms, t)
 		}
 	}
@@ -370,7 +390,7 @@ func selected(cs []*cont, sel source.Selector) []*cont {
 	ts := source.Selector{Terms: terms}
 	var out []*cont
 	for _, c := range cs {
-		if ts.Match(map[string]string{ContainerField: c.c.Name}) {
+		if (s.opts.Sensitive != nil && s.opts.Sensitive(ContainerField, c.c.Name)) || ts.Match(nil, map[string]string{ContainerField: c.c.Name}) {
 			out = append(out, c)
 		}
 	}
@@ -385,7 +405,7 @@ func (s *Source) Plan(ctx context.Context, r source.Range, sel source.Selector) 
 		return source.Byteplan{}, err
 	}
 	var plan source.Byteplan
-	for _, c := range selected(cs, sel) {
+	for _, c := range s.selected(cs, sel) {
 		p, err := c.src.Plan(ctx, r, sel)
 		if err != nil {
 			return source.Byteplan{}, err
@@ -487,15 +507,16 @@ func (s *Source) Describe(ctx context.Context) (source.Schema, error) {
 		sch.FullyIndexed = sch.FullyIndexed && d.FullyIndexed
 		from = append(from, coverage{d.IndexedFrom, d.FullyIndexed})
 		for _, f := range d.Fields {
+			k := index.TermKey(f.Name, f.Label)
 			if f.Values == nil {
-				unknown[f.Name] = true
+				unknown[k] = true
 				continue
 			}
-			if values[f.Name] == nil {
-				values[f.Name] = map[string]bool{}
+			if values[k] == nil {
+				values[k] = map[string]bool{}
 			}
 			for _, v := range f.Values {
-				values[f.Name][v] = true
+				values[k][v] = true
 			}
 		}
 	}
@@ -505,9 +526,10 @@ func (s *Source) Describe(ctx context.Context) (source.Schema, error) {
 		names[i] = c.c.Name
 	}
 	for _, f := range s.opts.Trusted {
-		info := source.FieldInfo{Name: f, Trusted: true}
+		name, label := index.SplitKey(f)
+		info := source.FieldInfo{Name: name, Label: label, Trusted: true}
 		switch {
-		case f == ContainerField:
+		case f == index.LabelKey(ContainerField):
 			if len(names) <= index.MaxDistinct {
 				info.Values = names
 			}
@@ -579,7 +601,7 @@ func (s *Source) IndexCounts(ctx context.Context, q source.CountQuery) (source.C
 	var res source.CountResult
 	acc := map[string]*source.CountRow{}
 	var from []coverage
-	for _, c := range selected(cs, q.Selector) {
+	for _, c := range s.selected(cs, q.Selector) {
 		r, err := c.src.IndexCounts(ctx, q)
 		if err != nil {
 			return source.CountResult{}, err
