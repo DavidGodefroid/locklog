@@ -723,9 +723,59 @@ func TestSharedLargeObjectsDecodedOnceAndCounted(t *testing.T) {
 		if processed < 2<<20 {
 			t.Fatalf("%s: processed %d, below the bytes decoded", comp, processed)
 		}
+		// Each shared object decoded once: entries' own bytes plus a few
+		// MiB, not 2 MiB per entry.
+		if processed > int64(len(raw))+8<<20 {
+			t.Fatalf("%s: processed %d for a %d-byte file: shared objects decoded again", comp, processed, len(raw))
+		}
 		// Without the cache, xz alone took minutes for this file.
 		if d := time.Since(start); d > 10*time.Second {
 			t.Fatalf("%s: scan took %v", comp, d)
 		}
+	}
+}
+
+func TestCorruptSharedObjectFailsOnceAndIsCounted(t *testing.T) {
+	big := "MESSAGE=" + strings.Repeat("m", 1<<20-100)
+	var es []journaltest.Entry
+	for i := 0; i < 2000; i++ {
+		es = append(es, journaltest.Entry{Realtime: 1761800000000000 + uint64(i), Fields: []string{big, "PRIORITY=6"}})
+	}
+	raw := journaltest.Build(journaltest.Options{Compact: true, Compress: "lz4"}, es)
+	jf, _ := journal.Open(bytes.NewReader(raw), int64(len(raw)))
+	// Find the MESSAGE object and make its declared size one byte off:
+	// the whole block decodes, then fails.
+	var msg uint64
+	jf.EntryOffsets(func(_, off uint64) bool {
+		h, _ := jf.Head(off)
+		items := raw[off+64 : off+h.Size]
+		msg = uint64(binary.LittleEndian.Uint32(items))
+		return false
+	})
+	n := binary.LittleEndian.Uint64(raw[msg+72:])
+	binary.LittleEndian.PutUint64(raw[msg+72:], n+1)
+	s := newSource(t, Options{Roots: []string{rootWith(t, raw)}})
+	ctx := context.Background()
+	plan, _ := s.Plan(ctx, everything, source.Selector{})
+	start := time.Now()
+	var processed int64
+	for _, c := range plan.Chunks {
+		it, err := s.Scan(ctx, c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for {
+			if _, err := it.Next(); err != nil {
+				break
+			}
+		}
+		processed += it.Processed()
+		it.Close()
+	}
+	if processed < 1<<20 {
+		t.Fatalf("processed %d: the failed decode is not counted", processed)
+	}
+	if d := time.Since(start); d > 5*time.Second {
+		t.Fatalf("scan took %v: the corrupt object is decoded again per entry", d)
 	}
 }

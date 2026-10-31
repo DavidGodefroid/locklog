@@ -109,6 +109,7 @@ type File struct {
 	names map[uint64]string
 	data  map[uint64][]byte
 	big   map[uint64][]byte
+	bad   map[uint64]bool // DATA objects that failed to decode
 	bigN  int
 	buf   [entryHeaderSize]byte
 }
@@ -152,7 +153,7 @@ func Open(r io.ReaderAt, size int64) (*File, error) {
 		return nil, err
 	}
 	return &File{r: r, size: uint64(size), h: h, compact: h.Incompatible&incompatCompact != 0, zd: zd,
-		names: map[uint64]string{}, data: map[uint64][]byte{}, big: map[uint64][]byte{}}, nil
+		names: map[uint64]string{}, data: map[uint64][]byte{}, big: map[uint64][]byte{}, bad: map[uint64]bool{}}, nil
 }
 
 // Header returns the file header.
@@ -316,7 +317,9 @@ type Field struct {
 }
 
 // Entry reads the entry at off. keep is called with each field's name
-// (before its value is decompressed); only fields it accepts are read.
+// (before its value is decompressed); only fields it accepts are read. On
+// an error after the entry's header, the partial entry (its Size and the
+// work Decoded so far) is returned with the error.
 func (f *File) Entry(off uint64, keep func(name string) bool) (*Entry, error) {
 	h, err := f.Head(off)
 	if err != nil {
@@ -350,11 +353,11 @@ func (f *File) Entry(off uint64, keep func(name string) bool) (*Entry, error) {
 			e.Dropped++
 			continue
 		}
-		if err != nil {
-			return nil, err
-		}
 		work -= cost
 		e.Decoded += int64(cost)
+		if err != nil {
+			return e, err
+		}
 		if !keep(name) {
 			continue
 		}
@@ -371,7 +374,7 @@ func (f *File) Entry(off uint64, keep func(name string) bool) (*Entry, error) {
 		}
 		work -= len(v)
 		if err != nil {
-			return nil, err
+			return e, err
 		}
 		if budget -= len(v); budget < 0 {
 			e.Dropped++
@@ -414,6 +417,26 @@ func (f *File) nameCost(off uint64, compressed bool) (string, int, error) {
 	if n, ok := f.names[off]; ok {
 		return n, 0, nil
 	}
+	if f.bad[off] {
+		return "", 0, corrupt("data object", off)
+	}
+	name, cost, err := f.nameCost0(off, compressed)
+	if err != nil && !errors.Is(err, errNoWork) {
+		f.markBad(off)
+	}
+	return name, cost, err
+}
+
+// markBad remembers a DATA object that failed to decode, so entries that
+// share it fail at once instead of decoding it again.
+func (f *File) markBad(off uint64) {
+	if len(f.bad) >= cacheMax {
+		clear(f.bad)
+	}
+	f.bad[off] = true
+}
+
+func (f *File) nameCost0(off uint64, compressed bool) (string, int, error) {
 	start := f.payloadStart()
 	flags, size, err := f.objectHeader(off, typeData, start+2, 1<<62)
 	if err != nil {
@@ -435,32 +458,32 @@ func (f *File) nameCost(off uint64, compressed bool) (string, int, error) {
 		cost = nameCompressedCost
 		r, err := f.stream(flags, off+start, stored, true)
 		if err != nil {
-			return "", 0, corrupt("compressed data", off)
+			return "", cost, corrupt("compressed data", off)
 		}
 		prefix = make([]byte, MaxNameBytes+1)
 		k, err := io.ReadFull(r, prefix)
 		if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
-			return "", 0, corrupt("compressed data", off)
+			return "", cost, corrupt("compressed data", off)
 		}
 		prefix = prefix[:k]
 	case objCompressedLZ4:
 		// Only the first bytes of the block are decoded: an LZ4 match
 		// only points backwards, so a prefix stands on its own.
 		if stored < 8 {
-			return "", 0, corrupt("lz4 data", off)
+			return "", cost, corrupt("lz4 data", off)
 		}
 		src := make([]byte, min(stored-8, lz4PrefixSource))
 		cost = len(src)
 		if err := f.read(src, off+start+8); err != nil {
-			return "", 0, err
+			return "", cost, err
 		}
 		prefix = lz4Prefix(src, MaxNameBytes+1)
 	default:
-		return "", 0, corrupt("data compression flags", off)
+		return "", cost, corrupt("data compression flags", off)
 	}
 	eq := bytes.IndexByte(prefix, '=')
 	if eq <= 0 || !validName(prefix[:eq]) {
-		return "", 0, corrupt("data field name", off)
+		return "", cost, corrupt("data field name", off)
 	}
 	name := string(prefix[:eq])
 	if len(f.names) >= cacheMax {
@@ -500,12 +523,18 @@ func (f *File) valueCost(off uint64, nameLen int) ([]byte, int, error) {
 	if v, ok := f.big[off]; ok {
 		return v[nameLen+1:], 0, nil
 	}
+	if f.bad[off] {
+		return nil, 0, corrupt("data object", off)
+	}
 	v, err := f.value0(off, nameLen)
 	if errors.Is(err, errTooLarge) {
 		return nil, MaxData, err
 	}
 	if err != nil {
-		return nil, 0, err
+		// A failed decode may have run to the end of the payload: charge
+		// the cap, and remember the object.
+		f.markBad(off)
+		return nil, MaxData, err
 	}
 	return v, nameLen + 1 + len(v), nil
 }

@@ -501,11 +501,16 @@ func (it *iter) Close() error {
 }
 
 // read reads one entry: the record, whether its unit is served, and the
-// bytes processed (the entry's object size).
+// bytes processed (the entry's object size plus what it decompressed, also
+// on an error).
 func (s *Source) read(jf *journal.File, stream string, off uint64) (source.RawRecord, bool, int64, error) {
 	e, err := jf.Entry(off, s.keep)
 	if err != nil {
-		return source.RawRecord{}, false, 0, err
+		var n int64
+		if e != nil { // the work done before the error is processed too
+			n = int64(e.Size) + e.Decoded
+		}
+		return source.RawRecord{}, false, n, err
 	}
 	size := int64(e.Size)
 	n := size + e.Decoded // processed: read and decompressed
