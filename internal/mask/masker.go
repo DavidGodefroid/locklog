@@ -278,7 +278,46 @@ func (w *walk) text(s string) string {
 	return outputSafe(w.pseudonymise(s, w.values(s)))
 }
 
+// pseudonymise replaces the matches of s, then masks again what the
+// detectors find once those are replaced (a value glued to a neighbour is
+// one only when the neighbour is gone): no detectable value is left.
 func (w *walk) pseudonymise(s string, ms []pii.Match) string {
+	out := w.replaceValues(s, ms)
+	for round := 0; round < 3 && len(ms) > 0; round++ {
+		ms = w.values(blankLen(out))
+		if len(ms) == 0 {
+			break
+		}
+		out = w.replaceValues(out, ms)
+	}
+	return out
+}
+
+// blankLen replaces every placeholder of s by spaces of its length, so
+// that offsets hold and a placeholder's ID is never read as a value.
+func blankLen(s string) string {
+	if !strings.Contains(s, Open) {
+		return s
+	}
+	b := []byte(s)
+	for i := 0; i < len(s); {
+		j := strings.Index(s[i:], Open)
+		if j < 0 {
+			break
+		}
+		k := strings.Index(s[i+j:], Close)
+		if k < 0 {
+			break
+		}
+		for x := i + j; x < i+j+k+len(Close); x++ {
+			b[x] = ' '
+		}
+		i += j + k + len(Close)
+	}
+	return string(b)
+}
+
+func (w *walk) replaceValues(s string, ms []pii.Match) string {
 	return replace(s, ms, func(s string, m pii.Match) string {
 		v := s[m.Start:m.End]
 		if v == Secret || !pii.ValidKind(m.Kind) || m.Kind == pii.CutKind {
@@ -407,13 +446,31 @@ func validLiteral(k parse.Kind, s string) bool {
 	return true
 }
 
-// cleanSource replaces the placeholder brackets in source text by U+FFFD
-// (design §4.4 rule 6): only the masker writes them.
+// cleanSource prepares source text for masking: the placeholder brackets
+// become U+FFFD (design §4.4 rule 6: only the masker writes them), and
+// controls (but tab and newline) and invisible characters are dropped
+// (§5.4), before detection, so that the detectors see exactly the text
+// that will be shown.
 func cleanSource(s string) string {
-	if !strings.Contains(s, Open) && !strings.Contains(s, Close) {
+	dirty := false
+	for _, r := range s {
+		if unsafeRune(r) || r == '\u27e6' || r == '\u27e7' {
+			dirty = true
+			break
+		}
+	}
+	if !dirty {
 		return s
 	}
-	return strings.NewReplacer(Open, "�", Close, "�").Replace(s)
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r == '\u27e6' || r == '\u27e7':
+			return utf8.RuneError
+		case unsafeRune(r):
+			return -1
+		}
+		return r
+	}, s)
 }
 
 // outputSafe replaces control characters (but tab and newline), format

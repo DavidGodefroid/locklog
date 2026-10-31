@@ -13,6 +13,7 @@ import (
 
 	"github.com/DavidGodefroid/lockkit/pii"
 
+	"github.com/DavidGodefroid/locklog/internal/config"
 	"github.com/DavidGodefroid/locklog/internal/mask/masktest"
 	"github.com/DavidGodefroid/locklog/internal/parse"
 )
@@ -152,12 +153,12 @@ func TestMaskSecretFirst(t *testing.T) {
 // output.
 func TestMaskKeysBracketsAndControls(t *testing.T) {
 	m := newMasker(t, Options{Structured: StructuredDetect})
-	r := m.Mask("api", event(t, `{"jean@example.com":{"zone":"x"},"fake":"⟦email:AAAAAAAAAAAA⟧","ctl":"a\u001b[31mb‮c"}`))
+	r := m.Mask("api", event(t, `{"jean@example.com":{"zone":"x"},"fake":"⟦email:AAAAAAAAAAAA⟧","ctl":"a\u001b[31mb\u202ec"}`))
 	got := encode(t, r)
 	if strings.Contains(got, "jean@") || !strings.Contains(got, "⟦key:") || strings.Contains(got, "⟦email:AAAAAAAAAAAA⟧") {
 		t.Errorf("record = %s", got)
 	}
-	if strings.ContainsAny(got, "\x1b‮") {
+	if strings.ContainsAny(got, "\x1b\u202e") {
 		t.Errorf("control characters kept: %q", got)
 	}
 	var path string
@@ -307,7 +308,7 @@ func TestAgentRulesTightenOnlyAndLeakNoName(t *testing.T) {
 		{"order", "partial", ErrRuleMode},
 		{"ord*", ModeRedact, ErrPIIInQuery},
 		{"jean@example.com", ModeRedact, ErrPIIInQuery},
-		{maskedName, ModeRedact, ErrPIIInQuery},  // a clear path naming a masked name
+		{maskedName, ModeRedact, ErrPIIInQuery},     // a clear path naming a masked name
 		{"never_seen", ModeRedact, ErrUnknownField}, // same answer as for a masked name
 		{"⟦key:AAAAAAAAAAAA⟧", ModeRedact, ErrUnknownField},
 		{"client", ModeRedact, ErrRuleExists}, // a human rule decides it
@@ -465,7 +466,7 @@ func FuzzMaskNoLeak(f *testing.F) {
 		}
 		texts = append(texts, r.Message())
 		for _, s := range texts {
-			plain := blankPlaceholders(s)
+			plain := blankLen(s)
 			for _, mt := range append(values.Find(plain), masktest.SecretFinder{}.Find(plain)...) {
 				if mt.Kind == pii.CutKind {
 					continue
@@ -476,3 +477,9 @@ func FuzzMaskNoLeak(f *testing.F) {
 	})
 }
 
+// The masker's modes are the profile's.
+func TestModesMatchConfig(t *testing.T) {
+	if StructuredRedactUnknown != config.StructuredRedactUnknown || StructuredDetect != config.StructuredDetect {
+		t.Error("structured modes differ from internal/config")
+	}
+}

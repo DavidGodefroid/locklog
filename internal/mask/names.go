@@ -1,7 +1,5 @@
 package mask
 
-
-
 // maxNames bounds the console-memory name book.
 const maxNames = 10000
 
@@ -56,4 +54,3 @@ func (m *Masker) shownClear(source, name string) bool {
 	defer m.mu.Unlock()
 	return m.names.clear[source][name]
 }
-
