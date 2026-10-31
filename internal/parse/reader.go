@@ -13,8 +13,9 @@ import (
 // order, never overlap, and the bytes between two events (blank lines) are
 // only those the Reader skipped. Offset reports the stream position.
 type Reader struct {
-	p  *Parser
-	lr *LineReader
+	p   *Parser
+	lr  *LineReader
+	end int64 // lines starting at or after end are left in lr; -1: none
 
 	peeks   []logical // lines read ahead, in order
 	pending *assembly
@@ -46,7 +47,16 @@ type assembly struct {
 // NewReader reads events from r; base is the stream offset of r's first
 // byte. A scan that starts inside a file must start at a line boundary.
 func (p *Parser) NewReader(r io.Reader, base int64) *Reader {
-	return &Reader{p: p, lr: NewLineReader(r, base)}
+	return &Reader{p: p, lr: NewLineReader(r, base), end: -1}
+}
+
+// NewSectionReader reads the events of the lines of lr that start before
+// end. The first line starting at or after end is left in lr, so the next
+// section reads on from it. Events never cross a section boundary: a section
+// read alone yields the same events as when it is read after the previous
+// one, which makes fixed byte sections independent plan granules.
+func (p *Parser) NewSectionReader(lr *LineReader, end int64) *Reader {
+	return &Reader{p: p, lr: lr, end: end}
 }
 
 // Offset returns the stream offset up to which events have been returned or
@@ -122,6 +132,11 @@ func (r *Reader) nextLogical() (logical, error) {
 		r.err = err
 		return logical{}, err
 	}
+	if r.end >= 0 && l.Offset >= r.end {
+		r.lr.Unread(l)
+		r.err = io.EOF
+		return logical{}, io.EOF
+	}
 	if r.p.framer == nil {
 		return logical{Line: l}, nil
 	}
@@ -136,11 +151,17 @@ func (r *Reader) nextLogical() (logical, error) {
 			r.err = err
 			break
 		}
+		if r.end >= 0 && l2.Offset >= r.end {
+			// A partial run is cut at a section boundary, so that
+			// sections stay independent.
+			r.lr.Unread(l2)
+			break
+		}
 		next, ok := r.p.framer.Unwrap(l2.Text, &r.p.opts)
 		if !ok {
 			// A non-frame line ends the partial run; it is read
 			// again as the next logical line.
-			r.peeks = append(r.peeks, logical{Line: l2})
+			r.lr.Unread(l2)
 			break
 		}
 		out.Length += l2.Length

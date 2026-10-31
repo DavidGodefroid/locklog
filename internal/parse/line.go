@@ -26,9 +26,10 @@ type Line struct {
 // LineReader reads bounded lines. Its memory use is bounded by MaxLineBytes
 // plus the bufio buffer, whatever the input.
 type LineReader struct {
-	r   *bufio.Reader
-	off int64
-	buf []byte
+	r      *bufio.Reader
+	off    int64
+	buf    []byte
+	unread *Line
 }
 
 // NewLineReader reads lines from r; base is the stream offset of r's first
@@ -37,12 +38,31 @@ func NewLineReader(r io.Reader, base int64) *LineReader {
 	return &LineReader{r: bufio.NewReaderSize(r, 64<<10), off: base}
 }
 
-// Offset returns the stream offset of the next byte to read.
-func (lr *LineReader) Offset() int64 { return lr.off }
+// Offset returns the stream offset of the next line Next returns.
+func (lr *LineReader) Offset() int64 {
+	if lr.unread != nil {
+		return lr.unread.Offset
+	}
+	return lr.off
+}
+
+// Unread pushes l back: the next call to Next returns it. At most one line
+// can be pushed back, and it must be the line Next returned last.
+func (lr *LineReader) Unread(l Line) {
+	if lr.unread != nil {
+		panic("parse: Unread twice")
+	}
+	lr.unread = &l
+}
 
 // Next returns the next line, or io.EOF when the stream is exhausted. A final
 // line without a terminator is returned as a line.
 func (lr *LineReader) Next() (Line, error) {
+	if lr.unread != nil {
+		l := *lr.unread
+		lr.unread = nil
+		return l, nil
+	}
 	start := lr.off
 	lr.buf = lr.buf[:0]
 	var n int64
