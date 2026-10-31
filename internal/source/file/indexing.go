@@ -90,6 +90,7 @@ func (s *Source) store(fi fileInfo, size int64, gs []index.Granule) {
 		if st == nil || st.Gen != fi.gen || !s.sameFields(st) {
 			st = index.NewStream(fi.id.dev, fi.id.ino, fi.gen, s.opts.Trusted)
 			st.Compression = fi.id.compression
+			st.Tag = s.opts.Tag
 		}
 		st.PrefixLen, st.PrefixHash = fi.id.prefixLen, fi.id.prefixHash
 		if fi.id.compression != compNone {

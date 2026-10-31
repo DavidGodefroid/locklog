@@ -259,3 +259,42 @@ func TestRunBusyPausesUpkeepNotBackfill(t *testing.T) {
 		t.Fatal("run ended early")
 	}
 }
+
+// A frame attribute (the trusted container name, the runtime's stream) wins
+// over a payload field of the same name.
+func TestLookupPrefersFrameAttrs(t *testing.T) {
+	e := ev(t0, "container", "spoofed", "level", "warn")
+	e.Attrs = []parse.Member{{Key: "container", Value: parse.Value{Kind: parse.KindString, Str: "shop-api-1"}}}
+	if v, ok := Lookup(e, "container"); !ok || v != "shop-api-1" {
+		t.Errorf("container = %q %v", v, ok)
+	}
+	if v, ok := Lookup(e, "level"); !ok || v != "warn" {
+		t.Errorf("level = %q %v", v, ok)
+	}
+}
+
+// On a framed event, the frame keys resolve against the attributes only:
+// a payload "stream" never stands for the runtime's; attrs.<key> reaches
+// into the frame's attrs object.
+func TestLookupFrameKeys(t *testing.T) {
+	e := ev(t0, "stream", "spoofed", "level", "warn")
+	e.Framed = true
+	if v, ok := Lookup(e, "stream"); ok {
+		t.Errorf("framed: payload stream %q used", v)
+	}
+	e.Attrs = []parse.Member{{Key: "attrs", Value: parse.Value{Kind: parse.KindObject,
+		Members: []parse.Member{{Key: "team", Value: parse.Value{Kind: parse.KindString, Str: "shop"}}}}}}
+	if v, ok := Lookup(e, "attrs.team"); !ok || v != "shop" {
+		t.Errorf("attrs.team = %q %v", v, ok)
+	}
+	if _, ok := Lookup(e, "attrs.other"); ok {
+		t.Error("attrs.other found")
+	}
+	if v, ok := Lookup(e, "level"); !ok || v != "warn" {
+		t.Errorf("level = %q %v", v, ok)
+	}
+	e.Framed = false
+	if v, _ := Lookup(e, "stream"); v != "spoofed" {
+		t.Errorf("not framed: %q", v)
+	}
+}

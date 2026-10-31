@@ -321,7 +321,10 @@ func TestOpenRefusesSymlinkComponents(t *testing.T) {
 	e := newEnv(t)
 	e.write("logs/real/a.log", "x\n", time.Time{})
 	os.Symlink(filepath.Join(e.root, "logs/real"), filepath.Join(e.root, "logs/via"))
-	for name, open := range map[string]func(string, string) (*os.File, error){"beneath": openBeneath, "walk": walkOpen} {
+	for name, open := range map[string]func(string, string) (*os.File, error){
+		"beneath": func(r, p string) (*os.File, error) { return openBeneath(r, p, false) },
+		"walk":    func(r, p string) (*os.File, error) { return walkOpen(r, p, false) },
+	} {
 		if f, err := open(e.root, "logs/real/a.log"); err != nil {
 			t.Fatalf("%s: %v", name, err)
 		} else {
@@ -689,7 +692,10 @@ func TestOpenRefusesNonRegularLastComponent(t *testing.T) {
 	os.Symlink(filepath.Join(e.root, "logs/real.log"), filepath.Join(e.root, "logs/link.log"))
 	syscall.Mkfifo(filepath.Join(e.root, "logs/fifo.log"), 0o644)
 	os.Mkdir(filepath.Join(e.root, "logs/dir.log"), 0o755)
-	for name, open := range map[string]func(string, string) (*os.File, error){"beneath": openBeneath, "walk": walkOpen} {
+	for name, open := range map[string]func(string, string) (*os.File, error){
+		"beneath": func(r, p string) (*os.File, error) { return openBeneath(r, p, false) },
+		"walk":    func(r, p string) (*os.File, error) { return walkOpen(r, p, false) },
+	} {
 		for _, rel := range []string{"logs/link.log", "logs/fifo.log", "logs/dir.log"} {
 			done := make(chan error, 1)
 			go func() {
@@ -709,7 +715,7 @@ func TestOpenRefusesNonRegularLastComponent(t *testing.T) {
 			}
 		}
 	}
-	if f, err := openBeneath("/dev", "null"); err == nil {
+	if f, err := openBeneath("/dev", "null", false); err == nil {
 		f.Close()
 		t.Fatal("a device was opened")
 	}
