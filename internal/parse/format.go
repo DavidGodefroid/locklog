@@ -3,6 +3,7 @@ package parse
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -117,6 +118,13 @@ type Options struct {
 	Start string
 	// Location reads zone-less timestamps; nil means UTC.
 	Location *time.Location
+	// FrameAttrs are the keys of a frame's own attributes a framer keeps
+	// (docker-json "attrs", kept as "attrs.<key>"); the others are
+	// dropped. Default: none.
+	FrameAttrs []string
+	// StaticAttrs are attributes the source puts on every event, framed or
+	// not, before the frame's own (docker: the trusted container name).
+	StaticAttrs []Member
 }
 
 func (o *Options) location() *time.Location {
@@ -138,6 +146,8 @@ type Parser struct {
 // New validates opts.
 func New(opts Options) (*Parser, error) {
 	p := &Parser{opts: opts}
+	p.opts.FrameAttrs = slices.Clone(opts.FrameAttrs)
+	p.opts.StaticAttrs = slices.Clone(opts.StaticAttrs)
 	if p.opts.Format == "" {
 		p.opts.Format = "auto"
 	}
@@ -244,11 +254,20 @@ func (p *Parser) Line(text string) Event {
 		text, truncated = text[:cut], true
 	}
 	ev := p.decode(text, p.structured(text))
+	ev.Attrs = p.attrs(nil)
 	ev.Raw = text
 	ev.Length = length
 	ev.Lines = strings.Count(text, "\n") + 1
 	ev.Truncated = truncated
 	return ev
+}
+
+// attrs returns an event's attributes: the static ones, then the frame's.
+func (p *Parser) attrs(frame []Member) []Member {
+	if len(p.opts.StaticAttrs) == 0 {
+		return frame
+	}
+	return append(slices.Clone(p.opts.StaticAttrs), frame...)
 }
 
 // plainFormat is free text: an optional leading timestamp (bare or in

@@ -251,3 +251,16 @@ func TestRunBusyPausesOnlyAfterBackfill(t *testing.T) {
 		t.Fatal("run ended early")
 	}
 }
+
+// A frame attribute (the trusted container name, the runtime's stream) wins
+// over a payload field of the same name.
+func TestLookupPrefersFrameAttrs(t *testing.T) {
+	e := ev(t0, "container", "spoofed", "level", "warn")
+	e.Attrs = []parse.Member{{Key: "container", Value: parse.Value{Kind: parse.KindString, Str: "shop-api-1"}}}
+	if v, ok := Lookup(e, "container"); !ok || v != "shop-api-1" {
+		t.Errorf("container = %q %v", v, ok)
+	}
+	if v, ok := Lookup(e, "level"); !ok || v != "warn" {
+		t.Errorf("level = %q %v", v, ok)
+	}
+}

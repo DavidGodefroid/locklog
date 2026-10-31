@@ -326,8 +326,9 @@ func (r *Reader) emit() Event {
 	if a.unterminated && r.hold < 0 {
 		r.hold = a.offset
 	}
+	ev.Attrs = r.p.attrs(nil)
 	if a.frame != nil {
-		ev.Attrs = a.frame.Attrs
+		ev.Attrs = r.p.attrs(a.frame.Attrs)
 		if a.frame.HasTime {
 			// The runtime's timestamp is authoritative for ordering;
 			// a payload timestamp stays in the payload text/fields.
