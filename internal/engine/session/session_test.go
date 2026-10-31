@@ -217,24 +217,18 @@ func TestSessionRotation(t *testing.T) {
 }
 
 func TestRefusedProfiles(t *testing.T) {
-	loki := func(logs string) string {
-		return fileProfile(logs) + `[profiles.staging.sources.loki]
-kind = "loki"
-url = "https://loki.example.com"
-selector = { app = "api" }
-auth = "basic"
-user = "reader"
-`
-	}
-	f := newFixture(t, loki, appLog)
-	if err := CheckKinds(f.policy.Profile); err == nil || !strings.Contains(err.Error(), "loki source, which this build of locklog does not read yet") {
+	// A kind this build does not read (a newer config's).
+	pr := config.Profile{Name: "staging", Sources: []config.Source{{Name: "x", Kind: "splunk"}}}
+	if err := CheckKinds(pr); err == nil || !strings.Contains(err.Error(), "splunk source, which this build of locklog does not read yet") {
 		t.Errorf("CheckKinds: %v", err)
 	}
-	if _, err := Open(context.Background(), f.options(nil)); err == nil || !strings.Contains(err.Error(), "does not read yet") {
-		t.Errorf("Open loki: %v", err)
+	f := newFixture(t, fileProfile, appLog)
+	o := f.options(nil)
+	o.Policy.Profile = pr
+	if _, err := Open(context.Background(), o); err == nil || !strings.Contains(err.Error(), "does not read yet") {
+		t.Errorf("Open splunk: %v", err)
 	}
 	// A file glob outside the checked roots.
-	f = newFixture(t, fileProfile, appLog)
 	if _, err := Open(context.Background(), f.options(func(o *Options) { o.Roots.Dirs = []string{"/var/log"} })); err == nil || !strings.Contains(err.Error(), "not a checked mount root") {
 		t.Errorf("unchecked root: %v", err)
 	}

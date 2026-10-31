@@ -32,6 +32,7 @@ import (
 	"github.com/DavidGodefroid/lockkit/refusal"
 
 	"github.com/DavidGodefroid/locklog/internal/config"
+	"github.com/DavidGodefroid/locklog/internal/egress"
 	"github.com/DavidGodefroid/locklog/internal/engine"
 	"github.com/DavidGodefroid/locklog/internal/index"
 	"github.com/DavidGodefroid/locklog/internal/landlock"
@@ -46,10 +47,11 @@ import (
 )
 
 // Supported are the source kinds this build reads.
-var Supported = []string{config.KindFile, config.KindJournald, config.KindDocker}
+var Supported = []string{config.KindFile, config.KindJournald, config.KindDocker,
+	config.KindLoki, config.KindElastic, config.KindOpenSearch}
 
 // CheckKinds refuses a profile with a source kind this build does not
-// read yet (Loki): before the console confines itself or opens anything.
+// read: before the console confines itself or opens anything.
 func CheckKinds(p config.Profile) error {
 	for _, s := range p.Sources {
 		if !slices.Contains(Supported, s.Kind) {
@@ -88,6 +90,8 @@ type Options struct {
 	Cost *engine.CostModel
 	// MapDir replaces the docker source's map directory (tests).
 	MapDir string
+	// Egress tunes the remote sources' clients (tests: timeouts).
+	Egress egress.Options
 }
 
 // IndexBytesPerHour is the local index building budget (design §3.3).
@@ -106,6 +110,9 @@ type Session struct {
 	docker   bool
 	notes    []string
 	inflight atomic.Int64
+	// requests paces the remote sources' requests of the agent's calls
+	// (limits.remote.requests_per_minute); nil without a remote source.
+	requests *rateLimiter
 
 	stop    context.CancelFunc
 	indexer sync.WaitGroup
@@ -183,9 +190,12 @@ func Open(ctx context.Context, o Options) (_ *Session, err error) {
 	// Sources last: nothing is read before the keys, the rules and the
 	// masker are in place.
 	for _, src := range pr.Sources {
-		ss, err := s.openSource(src, o)
+		ss, err := s.openSource(ctx, src, o)
 		if err != nil {
 			return nil, fmt.Errorf("source %s: %w", src.Name, err)
+		}
+		if src.Remote != nil && s.requests == nil {
+			s.requests = newRateLimiter(pr.Limits.Remote.RequestsPerMinute, nil)
 		}
 		s.srcs[src.Name] = ss
 		s.names = append(s.names, src.Name)
@@ -383,8 +393,9 @@ func limits(l config.Limits) engine.Limits {
 	d := engine.DefaultLimits()
 	return engine.Limits{
 		LocalRange: l.Local.Range, RemoteRange: l.Remote.Range,
-		// Only local sources are read: the count range is the local one.
-		CountRange: l.Local.CountRange,
+		// A trusted-only count is bounded by the count range of each kind
+		// of source it reads (the local index, or the server's counts).
+		CountRange: l.Local.CountRange, RemoteCountRange: l.Remote.CountRange,
 		LocalBytes: l.Local.MaxBytes, RemoteBytes: l.Remote.MaxBytes,
 		MaxRecords: l.MaxRecords, MaxOutput: int(l.MaxOutputBytes),
 		Deadline: d.Deadline,
@@ -410,6 +421,22 @@ func isLabel(s config.Source, name string) bool {
 	return slices.Contains(attrKeys(s), head)
 }
 
+// remoteLabels are the trusted names a remote source returns as
+// attributes (labels): Loki's trusted stream labels and structured
+// metadata, the trusted keyword fields of Elasticsearch / OpenSearch.
+func remoteLabels(s config.Source) []string {
+	if s.Remote == nil {
+		return nil
+	}
+	switch s.Kind {
+	case config.KindLoki:
+		return append(slices.Clone(s.Remote.TrustedLabels), s.Remote.TrustedMetadata...)
+	case config.KindElastic, config.KindOpenSearch:
+		return slices.Clone(s.Remote.TrustedFields)
+	}
+	return nil
+}
+
 // trustedNames are the trusted names of s: its line fields and its labels.
 func trustedNames(s config.Source) (fields, labels []string) {
 	for _, f := range s.TrustedFields() {
@@ -421,6 +448,11 @@ func trustedNames(s config.Source) (fields, labels []string) {
 	}
 	if s.Kind == config.KindDocker && !slices.Contains(labels, docker.ContainerField) {
 		labels = append(labels, docker.ContainerField)
+	}
+	for _, l := range remoteLabels(s) {
+		if !slices.Contains(labels, l) {
+			labels = append(labels, l)
+		}
 	}
 	return fields, labels
 }
@@ -438,7 +470,7 @@ func (s *Session) trusted(src, name string, label bool) bool {
 	return slices.Contains(fields, name)
 }
 
-func (s *Session) openSource(c config.Source, o Options) (source.Source, error) {
+func (s *Session) openSource(ctx context.Context, c config.Source, o Options) (source.Source, error) {
 	m := s.maskers.of(c.Name)
 	sensitive := func(f, v string) bool { return m.TrustedValue(c.Name, f, v) != v }
 	switch c.Kind {
@@ -486,6 +518,8 @@ func (s *Session) openSource(c config.Source, o Options) (source.Source, error) 
 		}
 		do.Index, do.Sensitive, do.Now = s.store, sensitive, o.Now
 		return docker.New(do)
+	case config.KindLoki, config.KindElastic, config.KindOpenSearch:
+		return s.openRemote(ctx, c, o)
 	}
 	return nil, fmt.Errorf("unsupported source kind %q", c.Kind)
 }
@@ -548,6 +582,9 @@ func (s *Session) Handle(ctx context.Context, method string, params json.RawMess
 			return nil, r, nil
 		}
 		return s.describe(ctx), nil, nil
+	}
+	if s.requests != nil && source.LimiterFrom(ctx) == nil {
+		ctx = source.WithLimiter(ctx, s.requests)
 	}
 	res, ref, err := s.eng.Handle(ctx, method, params)
 	if ref != nil {
