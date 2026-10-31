@@ -46,11 +46,21 @@ jobs:
           }
 
   # The engine and the sources under the race detector (cgo, -short: the
-  # heaviest equivalence cases run in full in the test job above).
+  # heaviest equivalence cases run in full in the test job above). The
+  # engine's read-around tests (tail, context, trace) run in a shard of
+  # their own: under -race they take as long as the rest.
   race:
-    name: race (engine, sources)
+    name: race (${{ matrix.shard }})
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: engine read-around
+            args: -run '^(TestTail|TestContext|TestTrace)' ./internal/engine/
+          - shard: engine, sources
+            args: -skip '^(TestTail|TestContext|TestTrace)' ./internal/engine/ ./internal/source/...
     env:
       CGO_ENABLED: "1"
     steps:
@@ -65,7 +75,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          go test -race -short -timeout 15m ./internal/engine/ ./internal/source/... 2>&1 | tee test.log || {
+          go test -race -short -timeout 30m ${{ matrix.args }} 2>&1 | tee test.log || {
             grep -E -- '--- FAIL|_test\.go:[0-9]+:|^FAIL|panic:|WARNING: DATA RACE' test.log | head -40 | sed 's/^/::error::/'
             exit 1
           }

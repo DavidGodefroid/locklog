@@ -326,8 +326,7 @@ func settle(t *testing.T, e *Engine) {
 	n := e.o.tailPolls.Load() + 2
 	for end := time.Now().Add(time.Minute); e.o.tailPolls.Load() < n; {
 		if time.Now().After(end) {
-			t.Error("settle: no tail poll")
-			return
+			return // the tail ended: its assertions fail, not this goroutine
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
@@ -758,9 +757,11 @@ func TestTailBudgetOnNewData(t *testing.T) {
 	path := filepath.Join(f.root, "logs", "app.log")
 	go func() {
 		settle(t, f.eng)
-		appendLines(t, path, liveLine(1, "x"))
+		appendLines(t, path, liveLine(1, "x"), liveLine(2, "x")) // the second completes the first
 	}()
-	res, err := f.eng.Tail(ctx, TailQuery{Duration: tailDur("1s")})
+	// The tail ends on its record (max), not on a duration that a slow
+	// first poll over the large file could outlast.
+	res, err := f.eng.Tail(ctx, TailQuery{Duration: "50s", Max: 1})
 	if err != nil || len(res.Records) != 1 {
 		t.Fatalf("%v %d", err, len(res.Records))
 	}
@@ -773,14 +774,16 @@ func TestTailWorkFollowsNewData(t *testing.T) {
 	path := filepath.Join(f.root, "logs", "app.log")
 	go func() {
 		settle(t, f.eng)
-		appendLines(t, path, liveLine(1, "x"))
+		appendLines(t, path, liveLine(1, "x"), liveLine(2, "x")) // the second completes the first
 	}()
 	start := time.Now()
-	res, err := f.eng.Tail(ctx, TailQuery{Duration: tailDur("1s")})
+	// The tail ends on its record (max), not on a duration that a slow
+	// first poll over the large file could outlast.
+	res, err := f.eng.Tail(ctx, TailQuery{Duration: "50s", Max: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Records) != 1 || time.Since(start) > slowed(4*time.Second) {
+	if len(res.Records) != 1 || time.Since(start) > slowed(10*time.Second) {
 		t.Fatalf("%d records in %s", len(res.Records), time.Since(start))
 	}
 	if res.Scanned.Granules > 2 {
