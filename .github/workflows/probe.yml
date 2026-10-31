@@ -1,0 +1,51 @@
+name: visibility probe
+
+# Pushes ghcr.io/davidgodefroid/locklog:probe, then pulls it from a runner
+# that never logged in: it tells whether the ghcr.io package is public
+# before the first release depends on it. Run by hand (Actions, "visibility
+# probe", Run workflow).
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/davidgodefroid/locklog
+
+jobs:
+  push:
+    name: push :probe
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write # push to ghcr.io
+    steps:
+      - name: log in to ghcr.io
+        run: printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: build and push
+        run: |
+          printf '%s\n' 'FROM scratch' \
+            'LABEL org.opencontainers.image.source="https://github.com/DavidGodefroid/locklog"' \
+            'LABEL org.opencontainers.image.description="locklog visibility probe"' > Dockerfile.probe
+          docker build -f Dockerfile.probe -t "$IMAGE:probe" .
+          docker push "$IMAGE:probe"
+
+  pull:
+    name: anonymous pull of :probe
+    needs: push
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions: {}
+    steps:
+      - name: docker pull (not logged in)
+        run: |
+          if docker pull "$IMAGE:probe"; then
+            echo "::notice::the ghcr.io package is public: anonymous pulls work"
+          else
+            echo "::error::the ghcr.io package is private: Package settings, Change visibility, Public"
+            exit 1
+          fi
