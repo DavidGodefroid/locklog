@@ -337,30 +337,9 @@ func (a *jobAgent) job1(from, to time.Time, srcs []string) {
 	if len(cr.Groups) == 0 {
 		t.Fatal("step 2: no record of order 4812 in the hour")
 	}
-	// Step 3: the order's records, in every source.
-	sq := Query{From: incidentStart, To: hourTo, Text: "4812", Sources: srcs, Limit: 200}
-	seen := map[string]bool{}
-	for _, p := range a.ask(agentCall{"search the order", MethodSearch, sq}) {
-		var sr SearchResult
-		json.Unmarshal(p, &sr)
-		for _, r := range sr.Records {
-			var h struct {
-				Source string `json:"source"`
-			}
-			json.Unmarshal(r, &h)
-			seen[h.Source] = true
-			if strings.Contains(string(r), "@shop.example") {
-				t.Fatalf("step 3: an e-mail reached the agent: %s", r)
-			}
-		}
-	}
-	for _, src := range srcs {
-		if !seen[src] {
-			t.Errorf("step 3: no record of order 4812 from %s", src)
-		}
-	}
-	// Step 3, continued: the order traced across the sources (LL-14), and
-	// the context around one of its records.
+	// Step 3: the order traced across the sources (LL-14; it replaces
+	// the text search the job ran before), and the context around one of
+	// its records.
 	tq := TraceQuery{ID: "4812", From: incidentStart, To: hourTo, Sources: srcs, Limit: 200}
 	traced := map[string]bool{}
 	var ref string
@@ -374,6 +353,9 @@ func (a *jobAgent) job1(from, to time.Time, srcs []string) {
 			}
 			json.Unmarshal(r, &h)
 			traced[h.Source] = true
+			if strings.Contains(string(r), "@shop.example") {
+				t.Fatalf("step 3: an e-mail reached the agent: %s", r)
+			}
 			if ref == "" {
 				ref = h.Ref
 			}
@@ -389,6 +371,9 @@ func (a *jobAgent) job1(from, to time.Time, srcs []string) {
 	}
 	var around ContextResult
 	pages = a.ask(agentCall{"context of a traced record", MethodContext, ContextQuery{Ref: ref, Before: 5, After: 5}})
+	if len(pages) != 1 {
+		t.Fatalf("step 3: context in %d pages", len(pages))
+	}
 	json.Unmarshal(pages[0], &around)
 	if len(around.Records) < 2 {
 		t.Errorf("step 3: context of %d records", len(around.Records))
@@ -547,11 +532,10 @@ func TestIncidentVolume(t *testing.T) {
 			}
 			// No prompt (§9.1 allows 3): the count is served from the
 			// index, the text calls cover the narrowed hour.
-			// Cold: the count scans the rest with full masking while
-			// the backfill runs (#94); the margin is thin idle and
-			// negative with the host slowed.
+			// Cold with the host slowed: the count scans the rest with
+			// full masking while the backfill runs (#94).
 			gap := ""
-			if tc.cold {
+			if tc.cold && tc.hog {
 				gap = "https://github.com/DavidGodefroid/locklog/issues/94"
 			}
 			runJob(t, s, tc.cold, 0, gate, gap, from, end, srcs)

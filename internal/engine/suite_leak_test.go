@@ -346,8 +346,8 @@ func TestSuiteLeak(t *testing.T) {
 				if c.name == "search all" {
 					matched = l.nrecs
 					// LL-14's calls from what the agent read:
-					// context around records of every source, trace,
-					// tail.
+					// context around the first, middle and last
+					// record returned, trace, tail.
 					calls = append(calls, refCalls(t, r.pages, "4812")...)
 				}
 			}
@@ -484,6 +484,11 @@ func leakRefusals(t *testing.T, whole *suite, mode string, l *leakScanner, recs 
 	l.refusal("over budget", r.refusal, nil)
 }
 
+var (
+	hexRun      = regexp.MustCompile(`[0-9a-f]{32,}`)
+	sealedValue = regexp.MustCompile(`"(ref|cursor)":"[^"]*"`)
+)
+
 // TestSuiteAgentRuleNamesNothing is the round-6 leak case: an agent rule
 // naming a field shown masked (by its pseudonym) and one naming a clear
 // field, added from what the engine showed, never put a name, nor any name
@@ -516,7 +521,7 @@ func TestSuiteAgentRuleNamesNothing(t *testing.T) {
 						shown = k
 					}
 				}
-				if strings.Contains(string(r), "secretname") || strings.Contains(string(r), "Lyon") && mode == mask.StructuredRedactUnknown {
+				if rr := sealedValue.ReplaceAllString(string(r), `"$1":""`); strings.Contains(rr, "secretname") || strings.Contains(rr, "Lyon") && mode == mask.StructuredRedactUnknown {
 					t.Fatalf("shown: %s", r)
 				}
 			}
@@ -555,8 +560,11 @@ func TestSuiteAgentRuleNamesNothing(t *testing.T) {
 				}
 				nfiles++
 				b, _ := os.ReadFile(p)
+				// Keyed digests and keys are random hex: a short name of
+				// hex digits ("4812") would match them by chance.
+				scan := hexRun.ReplaceAll(bytes.ToLower(b), []byte("#"))
 				for _, n := range names {
-					if bytes.Contains(bytes.ToLower(b), bytes.ToLower([]byte(n))) {
+					if bytes.Contains(scan, bytes.ToLower([]byte(n))) {
 						t.Errorf("%s holds %q", filepath.Base(p), n)
 					}
 				}
@@ -583,6 +591,9 @@ func TestSuiteAgentRuleNamesNothing(t *testing.T) {
 			// The rules apply to what the engine shows next.
 			pages = s.mustRun(agentCall{"search", MethodSearch, suiteQuery(func(q *Query) { q.Limit = 200 })})
 			for _, p := range pages {
+				// Refs and cursors are random base64: "Lyon" can occur
+				// in them by chance.
+				p := sealedValue.ReplaceAll(p, []byte(`"$1":""`))
 				if strings.Contains(string(p), "Lyon") || strings.Contains(string(p), "secretname") {
 					t.Fatalf("after the rule: %.400s", p)
 				}

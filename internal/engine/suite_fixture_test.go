@@ -552,7 +552,8 @@ func suiteCalls() []agentCall {
 // refCalls are the calls LL-14 adds that start from what the agent read:
 // log.context around records of pages (the first, middle and last record,
 // with and without a projection), log.trace by the first pseudonym those
-// records show and by a clear id, and a short log.tail. The records are
+// records show and by a clear id, and a short log.tail (the fixtures do
+// not grow: it covers the empty tail and its validation only). The records are
 // picked by position, so fixtures with the same layout get corresponding
 // calls.
 func refCalls(t testing.TB, pages []json.RawMessage, clearID string) []agentCall {
@@ -597,8 +598,8 @@ func comparePairedRefCalls(t *testing.T, sa, sb *suite, base agentCall, clearID,
 	t.Helper()
 	ca := refCalls(t, sa.mustRun(base), clearID)
 	cb := refCalls(t, sb.mustRun(base), clearID)
-	if len(ca) != len(cb) || len(ca) < 8 {
-		t.Fatalf("%d vs %d ref calls", len(ca), len(cb))
+	if len(ca) != len(cb) || len(ca) != 9 {
+		t.Fatalf("%d vs %d ref calls, want 9 (6 context, 2 trace, tail)", len(ca), len(cb))
 	}
 	for i := range ca {
 		x, nx := normalizePages(t, sa.eng, sa.mustRun(ca[i]))
