@@ -439,9 +439,9 @@ func scalarValue(r json.RawMessage) (string, *big.Rat, error) {
 	case string:
 		return t, nil, nil
 	case json.Number:
-		n, ok := new(big.Rat).SetString(string(t))
+		n, ok := parseNumber(string(t))
 		if !ok {
-			return "", nil, fmt.Errorf("number")
+			return "", nil, fmt.Errorf("number (at most %d characters, exponent within ±%d)", maxNumberLen, maxNumberExponent)
 		}
 		return string(t), n, nil
 	case bool:
