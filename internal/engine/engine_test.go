@@ -1701,8 +1701,11 @@ func TestUnmeasuredCompressedBudget(t *testing.T) {
 	if processed > 2*(budget+1<<20) {
 		t.Fatalf("processed %d bytes for two calls of %d", processed, budget)
 	}
-	// Within the budget, the same file is searched whole.
+	// Within the budget, the same file is searched whole (masking it in
+	// one group takes long under the race detector: the deadline is not
+	// what this tests).
 	f.eng.o.Limits.LocalBytes = 4 * int64(len(plain))
+	f.eng.o.Limits.Deadline = 10 * time.Minute
 	if _, err := f.eng.Search(ctx, q(func(q *Query) { q.Text = "upstream" })); err != nil {
 		t.Fatalf("within the budget: %v", err)
 	}
