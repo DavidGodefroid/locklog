@@ -541,8 +541,9 @@ func mergeCoverage(cs []coverage) time.Time {
 	return out
 }
 
-// IndexStep indexes the served containers in turn, within maxBytes.
-func (s *Source) IndexStep(ctx context.Context, maxBytes int64) (int64, bool, error) {
+// IndexStep indexes the served containers in turn, within maxBytes (upkeep:
+// see file.Source.IndexStep).
+func (s *Source) IndexStep(ctx context.Context, maxBytes int64, upkeep bool) (int64, bool, error) {
 	cs, err := s.containers()
 	if err != nil {
 		return 0, false, err
@@ -553,7 +554,7 @@ func (s *Source) IndexStep(ctx context.Context, maxBytes int64) (int64, bool, er
 		if done >= maxBytes {
 			return done, false, nil
 		}
-		n, ok, err := c.src.IndexStep(ctx, maxBytes-done)
+		n, ok, err := c.src.IndexStep(ctx, maxBytes-done, upkeep)
 		done += n
 		if err != nil {
 			return done, false, err

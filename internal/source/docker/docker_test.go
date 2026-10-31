@@ -295,7 +295,7 @@ func TestIndexCountsAndSelector(t *testing.T) {
 		t.Fatalf("selector: %q", got)
 	}
 	for {
-		_, done, err := s.IndexStep(ctx, 1<<20)
+		_, done, err := s.IndexStep(ctx, 1<<20, true)
 		if err != nil {
 			t.Fatal(err)
 		}

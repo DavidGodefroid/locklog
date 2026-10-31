@@ -170,21 +170,24 @@ func TestStoreRefusesOpenDirectory(t *testing.T) {
 	}
 }
 
-// fakeIndexer has work units of unit bytes; extra adds work later.
+// fakeIndexer has backfill units and upkeep units of unit bytes.
 type fakeIndexer struct {
-	left  int
-	unit  int64
-	calls []int64
+	left   int // backfill
+	upkeep int
+	unit   int64
 }
 
-func (f *fakeIndexer) IndexStep(_ context.Context, max int64) (int64, bool, error) {
-	f.calls = append(f.calls, max)
+func (f *fakeIndexer) IndexStep(_ context.Context, max int64, upkeep bool) (int64, bool, error) {
 	var n int64
 	for f.left > 0 && n < max {
 		n += f.unit
 		f.left--
 	}
-	return n, f.left == 0, nil
+	for upkeep && f.upkeep > 0 && n < max {
+		n += f.unit
+		f.upkeep--
+	}
+	return n, f.left == 0 && (!upkeep || f.upkeep == 0), nil
 }
 
 type fakeClock struct{ now time.Time }
@@ -216,9 +219,9 @@ func TestRunRespectsBudget(t *testing.T) {
 	}
 }
 
-func TestRunBusyPausesOnlyAfterBackfill(t *testing.T) {
+func TestRunBusyPausesUpkeepNotBackfill(t *testing.T) {
 	clk := &fakeClock{now: t0}
-	src := &fakeIndexer{left: 20, unit: 1 << 20}
+	src := &fakeIndexer{left: 20, upkeep: 5, unit: 1 << 20}
 	ctx, cancel := context.WithCancel(context.Background())
 	busy := true
 	rounds := 0
@@ -231,15 +234,20 @@ func TestRunBusyPausesOnlyAfterBackfill(t *testing.T) {
 			rounds++
 			switch rounds {
 			case 1:
-				// Backfill ran while busy. New work appears: the
-				// zero-budget probe sees it and it runs too.
-				if src.left != 0 {
-					t.Fatalf("backfill paused while busy: %d left", src.left)
+				// Busy: the backfill ran, the upkeep did not.
+				if src.left != 0 || src.upkeep != 5 {
+					t.Fatalf("busy: backfill left %d, upkeep left %d", src.left, src.upkeep)
 				}
-				src.left = 5
+				// A new file appears while still busy: backfilled.
+				src.left = 3
 			case 2:
-				if src.left != 0 {
-					t.Fatalf("new work not indexed while busy: %d left", src.left)
+				if src.left != 0 || src.upkeep != 5 {
+					t.Fatalf("busy again: backfill left %d, upkeep left %d", src.left, src.upkeep)
+				}
+				busy = false
+			case 3:
+				if src.upkeep != 0 {
+					t.Fatalf("idle: upkeep left %d", src.upkeep)
 				}
 				cancel()
 				return false
@@ -247,7 +255,7 @@ func TestRunBusyPausesOnlyAfterBackfill(t *testing.T) {
 			return true
 		},
 	})
-	if rounds < 2 {
+	if rounds < 3 {
 		t.Fatal("run ended early")
 	}
 }

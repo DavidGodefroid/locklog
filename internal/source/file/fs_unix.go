@@ -104,7 +104,7 @@ func (d *dir) open(name string) (*os.File, error) {
 	if err := validName(name); err != nil {
 		return nil, err
 	}
-	fd, err := unix.Openat(d.fd, name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	fd, err := unix.Openat(d.fd, name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_NOCTTY, 0)
 	if err != nil {
 		return nil, &fs.PathError{Op: "openat", Path: d.path + "/" + name, Err: err}
 	}
