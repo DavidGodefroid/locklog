@@ -1,0 +1,143 @@
+# Using locklog
+
+This page covers the profile file, the sources, the agent's tools and the
+budgets. The security model is in [security-model.md](security-model.md).
+
+## The profile file
+
+`locklog setup` writes `.locklog/config.toml` in your project. The console
+reviews it at its first start. After that it serves only the **approved**
+copy. A change that loosens the policy waits for you at the console's
+`:review`.
+
+```toml
+version = 1
+
+[profiles.staging]
+production = false          # setup asks; unanswered means true
+
+[profiles.staging.sources.nginx]
+kind = "file"
+paths = ["/var/log/nginx/access.log*"]   # rotated and .gz/.zst files included
+format = "combined"
+
+[profiles.staging.sources.api]
+kind = "docker"
+containers = ["shop-api-*"]
+format = "json"
+
+[profiles.staging.sources.system]
+kind = "journald"
+units = ["nginx.service", "shop-*.service"]
+
+[profiles.staging.sources.loki]
+kind = "loki"
+url = "https://loki.internal:3100"
+selector = { namespace = "shop" }
+trusted_labels = ["app", "level", "pod"]
+auth = "bearer"
+credentials = "ask"          # typed at the console, never written to disk
+```
+
+### Profile keys
+
+| Key | Default | Meaning |
+|---|---|---|
+| `production` | `true` when unanswered | Turns on the production rules: `redact-unknown`, unmask never, authenticated backends over TLS, tighter rolling budgets, `prefilter` refused, the host-agent trial refused |
+| `structured` | `redact-unknown` on production, else `detect` | How structured leaves are masked: `redact-unknown` redacts every leaf that is neither trusted nor allowed |
+| `text` | `detect` | Free text: `detect`, or `template` (every variable token of a clustered template masked too) |
+| `detectors` | all default detectors | Value detectors to run |
+| `unmask` | `never` on production, else `approved` | Whether the agent may ask you to unmask a value |
+| `lookup` | `free` | `locklog_lookup` free and rate-limited, or `approved` (a ticket each time) |
+| `strict` | `false` | Every search and count becomes a ticket |
+| `prefilter` | `false` | Opt-in speed-up for non-production; reveals through latency how many records hold a clear substring |
+| `user_journals` | `false` | Also serve `user-*.journal` files |
+| `pseudonym_rotation` | `7d` | Epoch length (`session` or a duration; `never` is refused on production) |
+| `pseudonym_max_age` | `30d` | Past this, rotation at the next idle moment |
+| `limits` | see Budgets | Per-call and rolling budgets |
+
+Sources take `kind`, `format`, `multiline` (`none` or `indent`) and
+`trusted` (fields shown in clear after the detectors, selectable and
+countable), plus per kind:
+
+| Kind | Keys |
+|---|---|
+| `file` | `paths` (absolute globs; `**` only with `recursive = true`, depth ≤ 4) |
+| `journald` | `units` (globs on `_SYSTEMD_UNIT`), `allow` (extra fields, reviewed; core dumps, command lines, executables, audit and `OBJECT_` fields can never be allowed) |
+| `docker` | `containers` (name globs; a glob matching a locklog console is refused), `attrs` (json-file log-opt attributes to keep) |
+| `loki` | `url`, `selector`, `trusted_labels`, `trusted_metadata`, `auth` (`none` refused on production, `basic`, `bearer`, `mtls`), `org_id`, `credentials` (`ask` or `vault`), `tls`, `tls_ca` |
+
+## The agent's tools
+
+| Tool | What it does | Cost |
+|---|---|---|
+| `locklog_status` | consoles, profiles, sources, budgets left, the pseudonym epoch | free |
+| `locklog_sources` | per source: kind, format, field and label names (masked names as `⟦key:ID⟧`), trusted values, coverage | free |
+| `locklog_search` | masked records of a range: `where`, `text`, `regex`, `fields`, `limit ≤ 200`, cursor | free within budgets |
+| `locklog_count` | histogram, `by` ≤ 2 trusted or pseudonym fields, `first_last` | free within budgets |
+| `locklog_patterns` | top templates of the masked text, `baseline` diff | free within budgets |
+| `locklog_context` | records around a `ref` (≤ 50 each side) | free |
+| `locklog_trace` | one id or pseudonym across sources, merged timeline | free within budgets |
+| `locklog_tail` | new records for ≤ 50 s | free (rolling budgets) |
+| `locklog_lookup` | a clear value → its pseudonym (detector kinds only) | free, rate-limited |
+| `locklog_pii_list`, `locklog_pii_add` | the masking rules; add masking (never remove it) | free, capped |
+| `locklog_request_change` | ask for a loosening | you decide at `:review` |
+| `locklog_scan` | one call over a budget, approved for its whole plan | you approve |
+| `locklog_unmask` | the clear value of exact pseudonym spans of one record, once | you approve on a terminal facade; off on production |
+
+Every result carries the pseudonym `epoch`. A result with
+`complete: false` has a `cursor`: passing it back continues the same plan
+for free. Log lines are untrusted data. The skill installed by `locklog
+init` tells the agent so, and tells it to start with `locklog_count` on
+trusted fields.
+
+### Query model
+
+```json
+{ "sources": ["nginx", "api"], "from": "2026-10-30T13:00:00Z", "to": "2026-10-30T15:00:00Z",
+  "where": [ {"field": "status", "op": ">=", "value": 500},
+             {"field": "user.email", "op": "=", "value": "⟦email:7F3KQ2M9ZD4X⟧"} ],
+  "text": "upstream timed out", "limit": 100 }
+```
+
+- `= != in exists` on any field. `< <= > >=` only on trusted fields: ordering
+  on a masked field would reveal it.
+- `contains` and `matches` (RE2, ≤ 256 bytes) run on the **masked** view. They
+  never match inside a placeholder.
+- A predicate value the detectors flag as personal is refused with
+  `E_PII_IN_QUERY`. Use `locklog_lookup` to get its pseudonym.
+
+## Budgets
+
+| Per call | Local (files, journald, Docker) | Remote (Loki) | Ceiling |
+|---|---|---|---|
+| range with text, regex or masked-field predicates | 7 d | 24 h | 400 d |
+| range of trusted-field-only counts | 30 d | 30 d | 400 d |
+| bytes admitted | 512 MiB | 512 MiB (decompressed responses) | 64 GiB |
+| records / output | 200 / 64 KiB | 200 / 64 KiB | 1,000 / 1 MiB |
+
+| Rolling | Local | Remote (non-production / production) |
+|---|---|---|
+| bytes per hour | 40 GiB | 20 GiB / 10 GiB |
+| backend requests per minute | — | 600 / 240 |
+| server-side metric queries per hour | — | 120 / 60 |
+| `lookup` distinct values per hour | 50 per console, 20 per uid (production: 10 per console) | same |
+| agent `pii.add` | 10 per hour, 50 rules | same |
+
+A call over a budget is refused with `E_OVER_BUDGET` and the estimate,
+before it touches any data. `locklog_scan` is the only way past. A call
+also stops at its deadline (30 s) and returns `complete: false` with a
+cursor. The numbers behind these defaults are in
+[performance.md](performance.md).
+
+## The console
+
+`locklog console` shows each call as a one-line note. It opens an
+approval screen for scans, unmasks and change requests.
+
+| Command | What it does |
+|---|---|
+| `:status` | consoles, sources, budgets, epoch age, lookups used |
+| `:review` | the policy diff waiting for you |
+| `:reveal <ref>` | a record in clear, on this terminal only (secrets redacted) |
+| Ctrl-O on an approval | the record in clear, on this terminal only |
