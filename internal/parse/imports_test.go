@@ -15,9 +15,10 @@ import (
 const parsePkg = "github.com/DavidGodefroid/locklog/internal/parse"
 
 // rawImporters are the only packages allowed to import raw events: the
-// sources that produce them, the masker, the local index and the engine.
-// Everything else (console, IPC, MCP) sees masked records only.
-var rawImporters = []string{"internal/parse", "internal/source", "internal/mask", "internal/index", "internal/engine"}
+// sources that produce them, the masker, the local index and the engine,
+// plus the integration tests under test/ (test code only, never linked into
+// a binary). Everything else (console, IPC, MCP) sees masked records only.
+var rawImporters = []string{"internal/parse", "internal/source", "internal/mask", "internal/index", "internal/engine", "test"}
 
 // importViolations returns the files under root that import internal/parse
 // from a package outside rawImporters.

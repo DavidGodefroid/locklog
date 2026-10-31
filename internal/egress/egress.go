@@ -166,6 +166,7 @@ type Client struct {
 	probe     *http.Client
 	userAgent string
 	maxBody   int64
+	headers   map[string]string
 }
 
 // Options tune a client; tests set them.
@@ -181,6 +182,10 @@ type Options struct {
 	AllowLinkLocal bool
 	// MaxResponseBytes overrides MaxResponseBytes (tests).
 	MaxResponseBytes int64
+	// Headers are fixed request headers of the source (e.g. Loki's
+	// response-encoding flags). They never carry credentials: those go
+	// through the auth mode.
+	Headers map[string]string
 }
 
 // New builds the client of a remote source. creds are the source's
@@ -209,6 +214,13 @@ func New(r *config.Remote, allow *Allowlist, creds Credentials, opt Options) (*C
 	if opt.MaxResponseBytes > 0 {
 		c.maxBody = opt.MaxResponseBytes
 	}
+	for k := range opt.Headers {
+		switch http.CanonicalHeaderKey(k) {
+		case "Authorization", "Proxy-Authorization", "Cookie", "X-Scope-Orgid", "Host":
+			return nil, fmt.Errorf("egress: header %s is not a fixed header", k)
+		}
+	}
+	c.headers = opt.Headers
 	timeout := opt.Timeout
 	if timeout == 0 {
 		timeout = 60 * time.Second
@@ -346,6 +358,9 @@ func (c *Client) request(ctx context.Context, method, path string, q url.Values,
 	}
 	req.Header.Set("User-Agent", c.userAgent)
 	req.Header.Set("X-Query-Tags", "source=locklog")
+	for k, v := range c.headers {
+		req.Header.Set(k, v)
+	}
 	return req, nil
 }
 
@@ -488,6 +503,11 @@ func (c *Client) Probe(ctx context.Context, path string, recognize Recognizer) (
 	}
 	return false, nil
 }
+
+// LokiHeaders are the fixed headers of a Loki source: structured metadata
+// comes back apart from the stream labels (without the flag, Loki 3 merges
+// it into each stream's label set).
+var LokiHeaders = map[string]string{"X-Loki-Response-Encoding-Flags": "categorize-labels"}
 
 // LokiProbePath is the data endpoint the unauthenticated-read check reads.
 const LokiProbePath = "/loki/api/v1/labels"
