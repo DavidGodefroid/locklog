@@ -67,7 +67,7 @@ func mounts(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "locklog mounts: %v\n", err)
 		return 1
 	}
-	ps, _, err := config.Load(cwd)
+	ps, root, err := config.Load(cwd)
 	if err != nil {
 		fmt.Fprintf(stderr, "locklog mounts: %v\n", err)
 		return 1
@@ -79,6 +79,10 @@ func mounts(args []string, stdout, stderr io.Writer) int {
 	}
 	lines, err := mountplan.Lines(p)
 	if err != nil {
+		fmt.Fprintf(stderr, "locklog mounts: profile %s: %v\n", p.Name, err)
+		return 1
+	}
+	if err := mountplan.TLSFiles(p, root); err != nil {
 		fmt.Fprintf(stderr, "locklog mounts: profile %s: %v\n", p.Name, err)
 		return 1
 	}

@@ -200,6 +200,33 @@ func TestBackendProbeElastic(t *testing.T) {
 	}
 }
 
+// The remote sources' TLS files the console could not read, or a client
+// key agents could, are findings.
+func TestTLSItem(t *testing.T) {
+	project := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(project, ".locklog"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	prof := func(ca, cert, key string) config.Profile {
+		r := &config.Remote{URL: "https://es:9200"}
+		r.TLSCA, r.TLSCert, r.TLSKey = ca, cert, key
+		return config.Profile{Sources: []config.Source{{Name: "es", Kind: config.KindElastic, Remote: r}}}
+	}
+	ca := filepath.Join(project, ".locklog", "ca.crt")
+	if it, ok := tlsItem("p", prof(ca, "", ""), project); !ok || !it.Finding || !strings.Contains(it.Text, "cannot be read") {
+		t.Errorf("missing CA: %+v %v", it, ok)
+	}
+	if err := os.WriteFile(ca, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if it, ok := tlsItem("p", prof(ca, "", ""), project); ok {
+		t.Errorf("readable CA: %+v", it)
+	}
+	if it, ok := tlsItem("p", prof("", "/home/locklog/c.crt", filepath.Join(project, ".locklog", "c.key")), project); !ok || !it.Finding || !strings.Contains(it.Text, "readable by agents") {
+		t.Errorf("key in the project: %+v", it)
+	}
+}
+
 // No metadata probe asks for a token (it would mint one on a VM with an
 // identity); Azure's answer reads as a possible identity.
 func TestMetadataEndpoints(t *testing.T) {

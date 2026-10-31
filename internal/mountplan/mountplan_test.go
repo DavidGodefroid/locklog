@@ -130,3 +130,37 @@ auth = "bearer"
 		}
 	}
 }
+
+// TLS files: a CA in the project's .locklog/, the console's home volume
+// or the image's /etc/ssl; a client certificate and key only in the home
+// volume.
+func TestTLSFiles(t *testing.T) {
+	prof := func(ca, cert, key string) config.Profile {
+		r := &config.Remote{URL: "https://es:9200"}
+		r.TLSCA, r.TLSCert, r.TLSKey = ca, cert, key
+		return config.Profile{Name: "p", Sources: []config.Source{{Name: "file", Kind: config.KindFile}, {Name: "es", Kind: config.KindElastic, Remote: r}}}
+	}
+	for _, c := range []struct {
+		ca, cert, key string
+		want          string
+	}{
+		{"", "", "", ""},
+		{"/p/.locklog/ca.crt", "", "", ""},
+		{"/p/.locklog/sub/ca.crt", "", "", ""},
+		{"/etc/ssl/certs/corp.pem", "", "", ""},
+		{"/home/locklog/tls/ca.crt", "/home/locklog/tls/c.crt", "/home/locklog/tls/c.key", ""},
+		{"/p/ca.crt", "", "", "copy the CA certificate into /p/.locklog/"},
+		{"/p/.locklog", "", "", "copy the CA certificate"},
+		{"/home/david/ca.crt", "", "", "copy the CA certificate"},
+		{"/p/.locklog/../ca.crt", "", "", "absolute, clean"},
+		{"", "/p/.locklog/c.crt", "/home/locklog/c.key", "tls_cert /p/.locklog/c.crt"},
+		{"", "/home/locklog/c.crt", "/p/.locklog/c.key", "would be readable by agents"},
+		{"", "/home/locklog", "/home/locklog/c.key", "tls_cert"},
+		{"", "/etc/ssl/c.crt", "/etc/ssl/c.key", "tls_cert"},
+	} {
+		err := TLSFiles(prof(c.ca, c.cert, c.key), "/p")
+		if c.want == "" && err != nil || c.want != "" && (err == nil || !strings.Contains(err.Error(), c.want)) {
+			t.Errorf("%+v: %v", c, err)
+		}
+	}
+}

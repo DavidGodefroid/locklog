@@ -23,6 +23,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -31,6 +32,7 @@ import (
 	"github.com/DavidGodefroid/locklog/internal/config"
 	"github.com/DavidGodefroid/locklog/internal/egress"
 	"github.com/DavidGodefroid/locklog/internal/hostfacts"
+	"github.com/DavidGodefroid/locklog/internal/mountplan"
 )
 
 // Item is one line of the report.
@@ -101,6 +103,9 @@ type Options struct {
 	Metadata []Endpoint
 	// Timeout of one probe (default 2 s).
 	Timeout time.Duration
+	// Project is the project root ("" for none): the TLS files of the
+	// remote sources are checked against what the console can read.
+	Project string
 }
 
 // Run checks and returns the report.
@@ -185,6 +190,13 @@ func Run(ctx context.Context, o Options) (Report, error) {
 	for _, c := range f.CredFiles {
 		add(Item{Finding: true, Text: "cloud credentials file " + c + " is present: the agent can use them to read logs at the provider",
 			Remedy: "keep cloud credentials out of the agent's account (another account, or short-lived credentials the agent cannot reach)"})
+	}
+
+	// The remote sources' TLS files: where the console can read them.
+	for _, n := range names {
+		if it, ok := tlsItem(n, profiles[n], o.Project); ok {
+			add(it)
+		}
 	}
 
 	// Probes, concurrently, each bounded: backends, then metadata.
@@ -349,6 +361,28 @@ func article(api string) string {
 		return "an " + api
 	}
 	return "a " + api
+}
+
+// tlsItem reports the TLS files of profile n that the console could not
+// read (or agents could), and a CA certificate in .locklog/ that cannot be
+// read.
+func tlsItem(n string, p config.Profile, project string) (Item, bool) {
+	if err := mountplan.TLSFiles(p, project); err != nil {
+		return Item{Finding: true, Text: "profile " + n + ": " + err.Error(),
+			Remedy: "move the file as the message says; the console refuses to start otherwise"}, true
+	}
+	for _, s := range p.Sources {
+		if s.Remote == nil || s.Remote.TLSCA == "" || project == "" || !strings.HasPrefix(s.Remote.TLSCA, project+"/") {
+			continue
+		}
+		f, err := os.Open(s.Remote.TLSCA)
+		if err != nil {
+			return Item{Finding: true, Text: "profile " + n + ": source " + s.Name + ": tls_ca " + s.Remote.TLSCA + " cannot be read",
+				Remedy: "copy the CA certificate there, readable by all (0644): the console reads it from the project's .locklog/"}, true
+		}
+		f.Close()
+	}
+	return Item{}, false
 }
 
 // metadataItem probes one cloud metadata credential path.

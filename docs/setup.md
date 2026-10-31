@@ -80,10 +80,27 @@ the `indices`, the keyword `trusted_fields`, `auth` and `user`. Give the
 console a read-only key (`read` and `view_index_metadata` on the indices,
 `monitor` on the cluster); at connection a production profile refuses a key
 with any write or manage privilege and a backend that answers without
-credentials. A `tls_ca` must be readable in the console: put it in the
-project's `.locklog/`. The console reaches the backend on a Docker network:
+credentials. The console reaches the backend on a Docker network:
 `LOCKLOG_NETWORK=<network> locklog console --profile <profile>-search`; the
 launcher refuses a remote source without one.
+
+### TLS files of a remote source
+
+The launcher mounts no file for a remote source: the console reads only the
+project's `.locklog/` (read-only, readable by agents too), its own home
+volume (`locklog-home`, at `/home/locklog`) and the image's `/etc/ssl`.
+`locklog mounts` checks the paths, so the launcher refuses a profile whose
+files the console could not read:
+
+- `tls_ca` (a public certificate): under `<project>/.locklog/`, under
+  `/home/locklog/`, or the image's `/etc/ssl/`;
+- `tls_cert` and `tls_key` (mTLS): only under `/home/locklog/`, which agents
+  never mount. A client key under the project would be readable by agents.
+  Copy them into the volume, owned by the console's account (10051) and
+  private to it.
+
+`locklog doctor` reports the same cases, and a `tls_ca` under `.locklog/`
+that cannot be read.
 
 ## `locklog doctor`
 
