@@ -76,6 +76,10 @@ type Options struct {
 	// profile with pseudonym_rotation = "session" starts a new epoch then
 	// (not when the console reconnects).
 	FirstOpen bool
+	// EpochsOpened, when set, is called once the epoch store is open (and
+	// rotated, on a first open): an open that fails after it has used up
+	// the first open's rotation, so the caller stops passing FirstOpen.
+	EpochsOpened func()
 	// Workers mask in parallel (default min(2, NumCPU): the launcher runs
 	// the console with --cpus min(2, nproc)).
 	Workers int
@@ -159,6 +163,9 @@ func Open(ctx context.Context, o Options) (_ *Session, err error) {
 	}
 	if s.epochs, err = openEpochs(filepath.Join(dir, "epochs"), fresh, pr, o.FirstOpen, o.Now()); err != nil {
 		return nil, err
+	}
+	if o.EpochsOpened != nil {
+		o.EpochsOpened()
 	}
 	rules, notes, err := loadRules(o.Project, filepath.Join(dir, "pii"))
 	if err != nil {

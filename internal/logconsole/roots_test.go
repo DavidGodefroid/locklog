@@ -295,7 +295,18 @@ func TestPolicyChangeFailedReopenIsAudited(t *testing.T) {
 	if resp.Error == nil || resp.Error.Code != ipc.CodeConnLost || len(env.records) != 1 {
 		t.Fatalf("failed reopen: %+v records=%d", resp.Error, len(env.records))
 	}
-	if r := env.records[0].(Record); r.Decision != "failed" || r.Method != MethodSearch {
+	// The audit gets a fixed text, never the open's error.
+	if r := env.records[0].(Record); r.Decision != "failed" || r.Method != MethodSearch || r.Error != errNoSessionText {
 		t.Errorf("record: %+v", r)
+	}
+
+	// No session at all (the first Session call fails): audited too.
+	env = &reconnectEnv{fakeEnv: &fakeEnv{policy: cur}, b: b}
+	resp = b.Methods()[MethodCount](context.Background(), ipc.Request{ID: 2, Method: MethodCount}, env)
+	if resp.Error == nil || resp.Error.Code != ipc.CodeConnLost || len(env.records) != 1 {
+		t.Fatalf("no session: %+v records=%d", resp.Error, len(env.records))
+	}
+	if r := env.records[0].(Record); r.Decision != "failed" || r.Method != MethodCount || r.Error != errNoSessionText {
+		t.Errorf("no-session record: %+v", r)
 	}
 }

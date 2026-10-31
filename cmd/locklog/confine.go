@@ -116,6 +116,7 @@ type opener struct {
 	status   landlock.Status
 	allowed  []string // the read-only roots of the ruleset
 	docker   bool     // the ruleset reads the docker map directory
+	vault    bool     // the ruleset executes the vault CLI
 	// opened is set by the first successful open: a failed first open
 	// (a missing key the human then fixes) leaves the next one first, so
 	// that a per-session pseudonym rotation still rotates.
@@ -126,10 +127,10 @@ func newOpener(inContainer bool) *opener {
 	return &opener{inContainer: inContainer, restrict: landlock.Restrict, openat2: docker.Openat2, lookPath: exec.LookPath}
 }
 
-// notConfined is the status outside the image.
 // dockerMapDir is the docker source's map directory in the image.
 const dockerMapDir = docker.DefaultMapDir
 
+// notConfined is the status outside the image.
 var notConfined = landlock.Status{State: landlock.Unsupported, Detail: "not applied: the console runs outside its image"}
 
 // confine applies the ruleset once per process: Landlock cannot be undone,
@@ -146,6 +147,9 @@ func (op *opener) confine(o logconsole.OpenOptions) (landlock.Status, error) {
 		if docker && !op.docker {
 			return landlock.Status{}, fmt.Errorf("%s is not readable by this console (it was confined at start, before this policy named a docker source): restart the console", dockerMapDir)
 		}
+		if vaultCLI(pr, op.lookPath) != "" && !op.vault {
+			return landlock.Status{}, fmt.Errorf("the vault CLI is not executable by this console (it was confined at start, before this policy read credentials from Vault): restart the console")
+		}
 		for _, r := range roots {
 			if !slices.Contains(op.allowed, r) {
 				return landlock.Status{}, fmt.Errorf("%s is not readable by this console (it was confined at start, before this policy named it): restart the console", r)
@@ -153,12 +157,13 @@ func (op *opener) confine(o logconsole.OpenOptions) (landlock.Status, error) {
 		}
 		return op.status, nil
 	}
-	rules := confineRules(confineInput{Roots: o.Roots, Docker: docker, Project: o.Project, StateDir: o.StateDir, Vault: vaultCLI(pr, op.lookPath)})
+	vault := vaultCLI(pr, op.lookPath)
+	rules := confineRules(confineInput{Roots: o.Roots, Docker: docker, Project: o.Project, StateDir: o.StateDir, Vault: vault})
 	st, err := op.restrict(rules)
 	if err != nil {
 		return landlock.Status{}, fmt.Errorf("the console could not confine itself (Landlock): %w", err)
 	}
-	op.confined, op.status, op.allowed, op.docker = true, st, roots, docker
+	op.confined, op.status, op.allowed, op.docker, op.vault = true, st, roots, docker, vault != ""
 	return st, nil
 }
 
@@ -179,7 +184,10 @@ func (op *opener) Open(ctx context.Context, o logconsole.OpenOptions) (logconsol
 		open = openSession
 	}
 	s, err := open(ctx, session.Options{OpenOptions: o, FirstOpen: !op.opened,
-		Confinement: session.Confinement{Landlock: st, Openat2: op.openat2()}})
+		// An open that fails after the epochs rotated has used up the
+		// first open: a retry does not rotate again.
+		EpochsOpened: func() { op.opened = true },
+		Confinement:  session.Confinement{Landlock: st, Openat2: op.openat2()}})
 	if err != nil {
 		return nil, err
 	}

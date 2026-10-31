@@ -153,7 +153,11 @@ func TestOpenSearchMasked(t *testing.T) {
 
 func TestStateRefusals(t *testing.T) {
 	f := newFixture(t, fileProfile, appLog)
-	s := open(t, f.options(nil))
+	opened := 0
+	s := open(t, f.options(func(o *Options) { o.EpochsOpened = func() { opened++ } }))
+	if opened != 1 {
+		t.Errorf("EpochsOpened called %d times, want 1", opened)
+	}
 	epoch := s.Status(context.Background()).(Status).Epoch
 	s.Close()
 	// Reopened (a reconnection): the same epoch.

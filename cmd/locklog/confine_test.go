@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	kconfig "github.com/DavidGodefroid/lockkit/config"
+
 	"github.com/DavidGodefroid/locklog/internal/config"
 	"github.com/DavidGodefroid/locklog/internal/engine/session"
 	"github.com/DavidGodefroid/locklog/internal/landlock"
@@ -133,6 +135,49 @@ func TestOpenerFirstOpenSurvivesAFailedOpen(t *testing.T) {
 	}
 	if !slices.Equal(firsts, []bool{true, true, false}) {
 		t.Errorf("FirstOpen per open: %v, want [true true false]", firsts)
+	}
+
+	// An open that fails after the epochs opened (and rotated) has used
+	// up the first open: the retry does not rotate again.
+	firsts = nil
+	op = &opener{openat2: func() bool { return false },
+		openSession: func(_ context.Context, o session.Options) (logconsole.Engine, error) {
+			firsts = append(firsts, o.FirstOpen)
+			o.EpochsOpened()
+			return nil, errors.New("index: permission denied")
+		}}
+	for range 2 {
+		if _, err := op.Open(context.Background(), logconsole.OpenOptions{Policy: pol}); err == nil {
+			t.Fatal("the failing open succeeded")
+		}
+	}
+	if !slices.Equal(firsts, []bool{true, false}) {
+		t.Errorf("FirstOpen after a late failure: %v, want [true false]", firsts)
+	}
+}
+
+// A reviewed policy that reads credentials from Vault, on a console
+// confined without the vault CLI's exec rule, is refused with a restart
+// message.
+func TestOpenerConfinedWithoutVaultRefusesVault(t *testing.T) {
+	vaultAt := ""
+	op := &opener{inContainer: true, lookPath: func(string) (string, error) {
+		if vaultAt == "" {
+			return "", errors.New("no")
+		}
+		return vaultAt, nil
+	}, restrict: func(landlock.Rules) (landlock.Status, error) {
+		return landlock.Status{State: landlock.Enforced, ABI: 6}, nil
+	}}
+	src := func(cred string) logconsole.OpenOptions {
+		return logconsole.OpenOptions{Policy: config.Policy{Profile: config.Profile{Name: "p", Sources: []config.Source{{Name: "r", Kind: config.KindLoki, Remote: &config.Remote{Base: kconfig.Base{Credentials: cred}}}}}}}
+	}
+	if _, err := op.confine(src("")); err != nil {
+		t.Fatal(err)
+	}
+	vaultAt = "/usr/local/bin/vault"
+	if _, err := op.confine(src(kconfig.CredentialsVault)); err == nil || !strings.Contains(err.Error(), "restart the console") {
+		t.Errorf("vault after a ruleset without it: %v", err)
 	}
 }
 

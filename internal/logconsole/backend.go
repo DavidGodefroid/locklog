@@ -384,11 +384,11 @@ func (b *Backend) handler(method string) console.Handler {
 		rec := newRecord(ctx, env, method, params)
 		sess, err := env.Session(ctx)
 		if err != nil {
-			return failed(req.ID, env, rec, ipc.CodeConnLost, env.Sanitizer().Error(err))
+			return failed(req.ID, env, rec, ipc.CodeConnLost, env.Sanitizer().Error(err), errNoSessionText)
 		}
 		ls, ok := console.Unwrap(sess).(*session)
 		if !ok {
-			return failed(req.ID, env, rec, ipc.CodeInternal, "no log engine")
+			return failed(req.ID, env, rec, ipc.CodeInternal, "no log engine", "no log engine")
 		}
 		// The engine serves the policy it was opened with: once the human
 		// approved another one (:review), the session is dropped and
@@ -396,10 +396,10 @@ func (b *Backend) handler(method string) console.Handler {
 		if p, ok := env.Policy().(Policy); ok && p.Fingerprint() != ls.policy.Fingerprint() {
 			env.Lost()
 			if sess, err = env.Session(ctx); err != nil {
-				return failed(req.ID, env, rec, ipc.CodeConnLost, env.Sanitizer().Error(err))
+				return failed(req.ID, env, rec, ipc.CodeConnLost, env.Sanitizer().Error(err), errNoSessionText)
 			}
 			if ls, ok = console.Unwrap(sess).(*session); !ok || ls.policy.Fingerprint() != p.Fingerprint() {
-				return failed(req.ID, env, rec, ipc.CodeInternal, "no log engine for the policy in force")
+				return failed(req.ID, env, rec, ipc.CodeInternal, "no log engine for the policy in force", "no log engine for the policy in force")
 			}
 		}
 		// The mounts are checked again on every call (a root swapped
@@ -471,10 +471,15 @@ func lost(id int64, env console.Env, rec Record) ipc.Response {
 	return console.ErrResp(id, ipc.CodeConnLost, errLostText)
 }
 
+// errNoSessionText is what the audit gets of a call refused for want of a
+// session: a fixed text (the cause is on the console, never in the audit).
+const errNoSessionText = "no log session: the console could not connect"
+
 // failed answers a call refused before the engine ran (no session, a
-// failed reopen) with code and msg, after auditing it as failed.
-func failed(id int64, env console.Env, rec Record, code int, msg string) ipc.Response {
-	rec.Decision, rec.Error = "failed", msg
+// failed reopen) with code and msg, after auditing it as failed with
+// audited, a fixed text.
+func failed(id int64, env console.Env, rec Record, code int, msg, audited string) ipc.Response {
+	rec.Decision, rec.Error = "failed", audited
 	if err := writeAudit(env, rec); err != nil {
 		return console.ErrResp(id, ipc.CodeInternal, "the call could not be audited: refused")
 	}
