@@ -222,6 +222,11 @@ func Open(ctx context.Context, o Options) (_ *Session, err error) {
 		// lookup = "approved" makes every lookup a read-pii approval.
 		LookupApproved: pr.Lookup == config.LookupApproved,
 		Production:     pr.Production,
+		// An approved scan paces its remote requests at the profile's
+		// remote rate (S3: 600/min, 240/min on production), its own and
+		// not drawn from the rolling budget (R6-P2); the source's
+		// in-flight cap (4) bounds its concurrency.
+		ScanRequestsPerMinute: pr.Limits.Remote.RequestsPerMinute,
 	})
 	if err != nil {
 		return nil, err

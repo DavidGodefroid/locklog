@@ -102,12 +102,22 @@ func TestApprovedScanLocal(t *testing.T) {
 	if first.Complete || first.Cursor == "" {
 		t.Fatal("want a continuation")
 	}
-	// Reissued without the cursor: the same approved plan, no new prompt.
+	// Reissued without the cursor: the same approved plan, no new
+	// prompt, resumed at its live position (the next part, not the start).
 	re, err := f.eng.Scan(c1, sq)
 	if err != nil || a.count() != 1 || !re.Scan.Reattached || re.Scan.ID != res.Scan.ID {
 		t.Fatalf("reissue: %v approvals %d %+v", err, a.count(), re.Scan)
 	}
+	if b1, b2 := rec(t, first.Records[0]), rec(t, re.Result.(SearchResult).Records[0]); b1["msg"] == b2["msg"] {
+		t.Fatal("the reissue restarted the scan")
+	}
 	cur := re.Result.(SearchResult).Cursor
+	// An older cursor does not continue it: one live position.
+	stale := errQ
+	stale.Cursor = first.Cursor
+	if _, err := f.eng.Scan(c1, scanQ(t, ScanSearch, stale)); code(err) != EStale {
+		t.Fatalf("older cursor: %v", err)
+	}
 	// Another peer uid cannot continue it.
 	other := errQ
 	other.Cursor = cur
@@ -131,7 +141,7 @@ func TestApprovedScanLocal(t *testing.T) {
 		t.Fatalf("other uid's own scan: %v %d", err, b.count())
 	}
 	// The scan runs to its end on the one approval.
-	n, calls := len(re.Result.(SearchResult).Records), 0
+	n, calls := len(first.Records)+len(re.Result.(SearchResult).Records), 0
 	for !re.Scan.Done {
 		next := errQ
 		next.Cursor = re.Result.(SearchResult).Cursor
@@ -241,6 +251,8 @@ func TestApprovedScanRemoteNoLevelLabel(t *testing.T) {
 		o.Limits.RemoteBytes = 64 << 10
 		o.Budgets = DefaultBudgets()
 		o.Budgets.RemoteRequestsPerMinute = 5
+		// The scan's own rate (the profile's remote rate in a session).
+		o.ScanRequestsPerMinute = 300
 	})
 	errQ := q(func(q *Query) {
 		q.From, q.To = t0, t0.Add(time.Hour)
@@ -248,8 +260,10 @@ func TestApprovedScanRemoteNoLevelLabel(t *testing.T) {
 		q.Where = []Pred{{Field: "level", Op: OpEq, Value: raw("error")}}
 		q.Limit = 200
 	})
-	if _, err := f.eng.Search(peerCtx(1, nil), errQ); code(err) != EOverBudget {
-		t.Fatalf("free: %v", err)
+	// Free, the rolling request budget stops it (refused, or a small
+	// part at the group boundary the pacing leaves room for).
+	if fr, err := f.eng.Search(peerCtx(1, nil), errQ); code(err) != EOverBudget && (err != nil || fr.Complete) {
+		t.Fatalf("free: %v complete %v", err, fr.Complete)
 	}
 	bl.mu.Lock()
 	freeBytes := bl.served
@@ -288,5 +302,56 @@ func TestApprovedScanRemoteNoLevelLabel(t *testing.T) {
 	// Far more requests than the rolling budget's 5 per minute.
 	if served < 10*freeBytes || scanned != served {
 		t.Fatalf("served %d (free call %d), scanned %d", served, freeBytes, scanned)
+	}
+}
+
+// TestApprovedScanReissuesBounded: however often a scan is reissued, it
+// processes at most its frozen plan, on its one approval, and never draws
+// on the rolling budget; past its plan it is refused.
+func TestApprovedScanReissuesBounded(t *testing.T) {
+	f := newFixture(t, genLog(t0, 30000, "c@example.org"), func(o *Options) {
+		oneGranulePerCall(o)
+		o.ScanDeadline = o.Limits.Deadline
+	})
+	a := &approver{}
+	c := peerCtx(1, a)
+	qq := q(func(q *Query) { q.Text = "timed out"; q.Limit = 10 })
+	sq := scanQ(t, ScanCount, CountQuery{Query: qq})
+	res, err := f.eng.Scan(c, sq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.eng.scans.mu.Lock()
+	s := f.eng.scans.m[res.Scan.ID]
+	f.eng.scans.mu.Unlock()
+	planBytes := s.plan.Bytes()
+	calls := 1
+	for !res.Scan.Done {
+		if res, err = f.eng.Scan(c, sq); err != nil { // reissued, never continued
+			t.Fatalf("reissue %d: %v", calls, err)
+		}
+		calls++
+		if calls > 50 {
+			t.Fatal("does not end")
+		}
+	}
+	f.eng.scans.mu.Lock()
+	processed := s.bytes
+	f.eng.scans.mu.Unlock()
+	if calls < 3 || a.count() != 1 || processed > planBytes || processed == 0 || used(f.eng) != 0 {
+		t.Fatalf("%d calls, %d approvals, processed %d of a %d-byte plan, rolling %d", calls, a.count(), processed, planBytes, used(f.eng))
+	}
+	// A scan that has processed its plan is refused before reading more.
+	res, err = f.eng.Scan(c, sq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.eng.scans.mu.Lock()
+	s = f.eng.scans.m[res.Scan.ID]
+	s.bytes = s.plan.Bytes()
+	f.eng.scans.mu.Unlock()
+	before := *f.scans
+	if _, err := f.eng.Scan(c, sq); code(err) != EOverBudget || *f.scans != before {
+		t.Fatalf("past its plan: %v", err)
 	}
 }

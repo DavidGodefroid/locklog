@@ -610,6 +610,13 @@ func (e *Engine) run(ctx context.Context, fp **frozen, chunk, gran int, needles 
 		}
 		defer func() { res.settle(per, e.remote) }()
 	} else {
+		// An approved scan processes at most its plan (remote: the scan
+		// budget), whatever the number of its calls and reissues: a call
+		// starts only while some of it is left (one call's granules at
+		// most past it, its planned bytes counted as planned).
+		if left := scan.bytesLeft(); left <= 0 && chunk < len(plan.Chunks) {
+			return chunk, gran, sc, 0, &Error{Code: EOverBudget, Message: "the approved scan has processed what its plan holds: run locklog_scan again for a new approval"}
+		}
 		defer func() { scan.charge(per) }()
 	}
 	account := func(src string, n int64) {
@@ -690,6 +697,14 @@ func (e *Engine) run(ctx context.Context, fp **frozen, chunk, gran int, needles 
 			if e.remote(c.Source) {
 				account(c.Source, fetched)
 			}
+		}
+		if errors.Is(err, errRequestBudget) && sc.Granules > 0 {
+			// The request pacing leaves this group no room before the
+			// deadline: stop at the group boundary; the next call goes
+			// on.
+			cancel()
+			dropped()
+			return chunk, gran, sc, failures, nil
 		}
 		if errors.Is(err, errFetchCap) {
 			cancel()

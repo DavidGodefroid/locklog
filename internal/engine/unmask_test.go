@@ -142,7 +142,11 @@ func TestUnmaskSecretSpan(t *testing.T) {
 		t.Fatalf("want one pseudonym in %s", b)
 	}
 	a := &approver{}
-	if _, err := f.eng.Unmask(peerCtx(1, a), UnmaskQuery{Ref: ref, Pseudonyms: toks, Reason: "x"}); code(err) != EBadQuery || a.count() != 0 {
+	// Refused after the approval (before it, the refusal would tell which
+	// pseudonym held a secret), naming none of them.
+	_, err := f.eng.Unmask(peerCtx(1, a), UnmaskQuery{Ref: ref, Pseudonyms: toks, Reason: "x"})
+	var e *Error
+	if code(err) != EBadQuery || a.count() != 1 || !errors.As(err, &e) || e.Span != "pseudonyms" {
 		t.Fatalf("a value that held a secret: %v (%d approvals)", err, a.count())
 	}
 }
@@ -325,9 +329,9 @@ func TestOracleScanUnmaskLookup(t *testing.T) {
 			res, err = f.eng.Scan(c, scanQ(t, ScanTrace, next))
 			add("scan page", res, err)
 		}
-		// A scan refused for another uid's cursor.
+		// The same scan asked by another uid: its own approval.
 		_, err = f.eng.Scan(peerCtx(2, a), scanQ(t, ScanTrace, sq))
-		add("scan other uid (new approval)", nil, err)
+		add("scan by another uid (its own approval)", nil, err)
 		// Unmask: another record's pseudonym (refused), a pseudonym of
 		// the record that is not the canary (revealed), never-mode.
 		ref, toks := recordWith(t, f, "(order 25)", "email")

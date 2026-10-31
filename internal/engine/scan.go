@@ -7,6 +7,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -85,6 +86,23 @@ type scanState struct {
 	expires time.Time
 	state   string
 	bytes   int64
+	// cursor is the scan's one live position: the cursor its last call
+	// returned ("" before the first answer). Only it continues the scan,
+	// and a reissued scan resumes there.
+	cursor string
+	// busy: a call of the scan runs (one at a time).
+	busy bool
+}
+
+// limit is what the scan may process in all: its frozen plan's bytes, or
+// for a plan with remote slices (of unknown bytes) the scan budget.
+func (s *scanState) limit(e *Engine) int64 {
+	for _, c := range s.plan.Chunks {
+		if e.remote(c.Source) {
+			return e.o.ScanBytes
+		}
+	}
+	return s.plan.Bytes()
 }
 
 type scanStore struct {
@@ -104,7 +122,56 @@ type scanCall struct {
 	// reattached: the first call found the plan approved already.
 	reattached bool
 	lim        source.Limiter
+	// claimed: this call holds the scan (scanState.busy).
+	claimed bool
 }
+
+// errScanBusy refuses a second call of a scan while one runs.
+var errScanBusy = &Error{Code: EStale, Span: "cursor", Message: "a call of this approved scan is in progress: wait for its answer and continue with its cursor"}
+
+// claim takes the scan for this call: refused while another call runs, and
+// for a continuation whose cursor is not the scan's live position.
+func (sc *scanCall) claim(s *scanState, cursor string, check bool) *Error {
+	st := &sc.e.scans
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if s.busy {
+		return errScanBusy
+	}
+	if check && subtle.ConstantTimeCompare([]byte(s.cursor), []byte(cursor)) != 1 {
+		return &Error{Code: EStale, Span: "cursor", Message: "only the last cursor of an approved scan continues it (or run locklog_scan again without a cursor to resume it)"}
+	}
+	s.busy, sc.s, sc.claimed = true, s, true
+	return nil
+}
+
+// release ends this call's hold on the scan, recording its live position
+// when the call succeeded.
+func (sc *scanCall) release(ok bool, cursor string) {
+	if !sc.claimed {
+		return
+	}
+	st := &sc.e.scans
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	sc.s.busy, sc.claimed = false, false
+	if ok {
+		sc.s.cursor = cursor
+	}
+}
+
+// bytesLeft is what the scan may still process.
+func (sc *scanCall) bytesLeft() int64 {
+	st := &sc.e.scans
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return sc.s.limit(sc.e) - sc.s.bytes
+}
+
+// errReattach asks Scan to resume a scan at its live position.
+type errReattach struct{ s *scanState }
+
+func (errReattach) Error() string { return "engine: resume the approved scan" }
 
 // deadline is the deadline of a call of the scan: the scan deadline, and
 // at most two thirds of what scanCallBudget leaves of the request (the
@@ -212,7 +279,19 @@ func (e *Engine) admitPlan(ctx context.Context, tool, digest string, plan source
 	fp := e.o.PolicyFP()
 	hash := e.planHash(tool, digest, fp)
 	if s := e.scans.reattach(sc.peer.UID, hash, e.o.Now()); s != nil {
-		sc.s, sc.reattached = s, true
+		e.scans.mu.Lock()
+		live := s.cursor
+		e.scans.mu.Unlock()
+		if live != "" {
+			// Resume at the scan's live position, never from the start.
+			return nil, "", errReattach{s}
+		}
+		// Approved, never answered (its first call failed): its plan
+		// from the start, the bytes processed still counted.
+		if err := sc.claim(s, "", false); err != nil {
+			return nil, "", err
+		}
+		sc.reattached = true
 		e.dropScanPlans(s.id)
 		f, _ := e.freezeReplacing(s.query, s.plan, s.desc, "", s.id)
 		return f, s.query, nil
@@ -234,7 +313,8 @@ func (e *Engine) admitPlan(ctx context.Context, tool, digest string, plan source
 	var b [12]byte
 	rand.Read(b[:])
 	s := &scanState{id: hex.EncodeToString(b[:]), uid: sc.peer.UID, hash: hash, policyFP: fp, tool: tool, plan: plan, desc: desc,
-		expires: e.o.Now().Add(e.o.ScanTTL), state: scanExecuting}
+		expires: e.o.Now().Add(e.o.ScanTTL), state: scanExecuting, busy: true}
+	sc.claimed = true
 	s.query = e.boundDigest(digest, s.id)
 	e.scans.mu.Lock()
 	e.scans.m[s.id] = s
@@ -408,7 +488,7 @@ func (e *Engine) Scan(ctx context.Context, q ScanQuery) (ScanResult, error) {
 		return nil
 	}
 	var cursor string
-	var run func(context.Context) (any, bool, Scanned, error)
+	var run func(context.Context, string) (any, bool, string, error)
 	switch q.Tool {
 	case ScanSearch:
 		var qq Query
@@ -416,9 +496,10 @@ func (e *Engine) Scan(ctx context.Context, q ScanQuery) (ScanResult, error) {
 			return ScanResult{}, r
 		}
 		cursor = qq.Cursor
-		run = func(ctx context.Context) (any, bool, Scanned, error) {
+		run = func(ctx context.Context, cur string) (any, bool, string, error) {
+			qq.Cursor = cur
 			res, err := e.Search(ctx, qq)
-			return res, res.Complete, res.Scanned, err
+			return res, res.Complete, res.Cursor, err
 		}
 	case ScanTrace:
 		var qq TraceQuery
@@ -426,9 +507,10 @@ func (e *Engine) Scan(ctx context.Context, q ScanQuery) (ScanResult, error) {
 			return ScanResult{}, r
 		}
 		cursor = qq.Cursor
-		run = func(ctx context.Context) (any, bool, Scanned, error) {
+		run = func(ctx context.Context, cur string) (any, bool, string, error) {
+			qq.Cursor = cur
 			res, err := e.Trace(ctx, qq)
-			return res, res.Complete, res.Scanned, err
+			return res, res.Complete, res.Cursor, err
 		}
 	case ScanCount:
 		var qq CountQuery
@@ -436,9 +518,10 @@ func (e *Engine) Scan(ctx context.Context, q ScanQuery) (ScanResult, error) {
 			return ScanResult{}, r
 		}
 		cursor = qq.Cursor
-		run = func(ctx context.Context) (any, bool, Scanned, error) {
+		run = func(ctx context.Context, cur string) (any, bool, string, error) {
+			qq.Cursor = cur
 			res, err := e.Count(ctx, qq)
-			return res, res.Complete, res.Scanned, err
+			return res, res.Complete, res.Cursor, err
 		}
 	case ScanPatterns:
 		var qq PatternsQuery
@@ -446,9 +529,10 @@ func (e *Engine) Scan(ctx context.Context, q ScanQuery) (ScanResult, error) {
 			return ScanResult{}, r
 		}
 		cursor = qq.Cursor
-		run = func(ctx context.Context) (any, bool, Scanned, error) {
+		run = func(ctx context.Context, cur string) (any, bool, string, error) {
+			qq.Cursor = cur
 			res, err := e.Patterns(ctx, qq)
-			return res, res.Complete, res.Scanned, err
+			return res, res.Complete, res.Cursor, err
 		}
 	default:
 		return ScanResult{}, refuse(EBadQuery, "tool", "want one of %s", strings.Join([]string{ScanSearch, ScanCount, ScanPatterns, ScanTrace}, ", "))
@@ -470,9 +554,26 @@ func (e *Engine) Scan(ctx context.Context, q ScanQuery) (ScanResult, error) {
 			}
 			return ScanResult{}, rerr
 		}
-		sc.s = s
+		if err := sc.claim(s, cursor, true); err != nil {
+			return ScanResult{}, err
+		}
 	}
-	res, complete, _, err := run(withScan(ctx, sc))
+	res, complete, next, err := run(withScan(ctx, sc), cursor)
+	var ra errReattach
+	if errors.As(err, &ra) {
+		// A reissue of a scan in progress: its next part, from its live
+		// position (the cursor its last call returned).
+		sc.s, sc.reattached = nil, true
+		s := ra.s
+		e.scans.mu.Lock()
+		cursor = s.cursor
+		e.scans.mu.Unlock()
+		if cerr := sc.claim(s, cursor, true); cerr != nil {
+			return ScanResult{}, cerr
+		}
+		res, complete, next, err = run(withScan(ctx, sc), cursor)
+	}
+	defer func() { sc.release(err == nil, next) }()
 	if err != nil {
 		return ScanResult{}, err
 	}

@@ -95,6 +95,10 @@ type unmaskPlan struct {
 	clear  map[string]string
 	hash   string
 	policy string
+	// secret: a named value held a secret span. It is refused only after
+	// the approval, never naming which: before it, the refusal would tell
+	// the agent which pseudonym held a secret.
+	secret bool
 }
 
 // errUnmaskNever refuses every unmask of a profile with unmask = "never".
@@ -155,6 +159,9 @@ func (e *Engine) Unmask(ctx context.Context, q UnmaskQuery) (UnmaskResult, error
 	}
 	if subtle.ConstantTimeCompare([]byte(again.hash), []byte(plan.hash)) != 1 || again.policy != plan.policy {
 		return UnmaskResult{}, &Error{Code: EStale, Span: "ref", Message: "the record or its pseudonyms changed since the unmask was approved: ask again"}
+	}
+	if again.secret {
+		return UnmaskResult{}, refuse(EBadQuery, "pseudonyms", "a value named held a secret: nothing is unmasked")
 	}
 	res := UnmaskResult{Epoch: e.o.Masker.Epoch(), Values: []UnmaskValue{}}
 	for _, p := range q.Pseudonyms {
@@ -221,7 +228,7 @@ func (e *Engine) planUnmask(ctx context.Context, q UnmaskQuery, rr source.RawRef
 		case strings.Contains(v, mask.Open) || strings.Contains(e.o.Masker.Text(v), mask.Secret):
 			// A value that held a secret span (redacted inside it), or
 			// reads as a secret on its own: never revealed.
-			return unmaskPlan{}, refuse(EBadQuery, fmt.Sprintf("pseudonyms[%d]", i), "this value held a secret: it is never unmasked")
+			p.secret = true
 		}
 	}
 	var b strings.Builder
