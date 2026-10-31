@@ -215,9 +215,6 @@ func percentAll(v string, times int) string {
 	return b.String()
 }
 
-func isAlnum(c byte) bool {
-	return c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
-}
 
 // Lines generates n lines: every kind, in every position (JSON value,
 // nested value, key, number, array item, logfmt value, free text) and
