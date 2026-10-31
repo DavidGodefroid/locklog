@@ -16,7 +16,7 @@ import (
 // with "--". PATH holds only the tools the launcher needs.
 type launcherFixture struct {
 	root, bin, project, logs, calls, script string
-	env                                      []string
+	env                                     []string
 }
 
 var launcherTools = []string{"sh", "dirname", "mkdir", "id", "cat", "printf", "awk", "sha256sum", "shasum", "tar",
