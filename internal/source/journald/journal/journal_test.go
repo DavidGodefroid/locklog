@@ -530,3 +530,37 @@ func TestEntryDecodeWorkBounded(t *testing.T) {
 		t.Fatalf("%d bytes allocated for one entry", a)
 	}
 }
+
+func TestNameDecodingChargedToTheEntry(t *testing.T) {
+	// Thousands of compressed fields the reader refuses: each name costs a
+	// block decode, so after the budget the rest are dropped undecoded.
+	var fields []string
+	for i := 0; i < 2000; i++ {
+		fields = append(fields, fmt.Sprintf("F_%d=%s", i, strings.Repeat("a", 128<<10)))
+	}
+	raw := build(true, "zstd", journaltest.Entry{Realtime: 1, Fields: fields})
+	f, _ := Open(bytes.NewReader(raw), int64(len(raw)))
+	f.EntryOffsets(func(_, off uint64) bool {
+		e, err := f.Entry(off, func(string) bool { return false })
+		if err != nil {
+			t.Fatal(err)
+		}
+		if decoded := 2000 - e.Dropped; decoded > maxEntryWork/nameCompressedCost+1 {
+			t.Fatalf("%d compressed names decoded", decoded)
+		}
+		return true
+	})
+}
+
+func TestXZSecondBlockDropped(t *testing.T) {
+	raw := journaltest.Build(journaltest.Options{Compact: true, Compress: "xz", XZBlockSize: 1024},
+		[]journaltest.Entry{{Realtime: 1, Fields: []string{"MESSAGE=" + strings.Repeat("x", 5000), "PRIORITY=3"}}})
+	f, _ := Open(bytes.NewReader(raw), int64(len(raw)))
+	f.EntryOffsets(func(_, off uint64) bool {
+		e, err := f.Entry(off, keepAll)
+		if err != nil || e.Dropped != 1 || len(e.Fields) != 1 || e.Fields[0].Name != "PRIORITY" {
+			t.Fatalf("entry %+v %v", e, err)
+		}
+		return true
+	})
+}

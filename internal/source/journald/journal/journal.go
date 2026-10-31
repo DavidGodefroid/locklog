@@ -335,10 +335,15 @@ func (f *File) Entry(off uint64, keep func(name string) bool) (*Entry, error) {
 			continue // journald never lists one object twice: a hostile file
 		}
 		seen[p] = true
-		name, err := f.name(p)
+		name, cost, err := f.nameCost(p, work > 0)
+		if errors.Is(err, errNoWork) {
+			e.Dropped++
+			continue
+		}
 		if err != nil {
 			return nil, err
 		}
+		work -= cost
 		if !keep(name) {
 			continue
 		}
@@ -377,57 +382,80 @@ func (f *File) payloadStart() uint64 {
 // name returns the field name of the DATA object at off, decoding at most
 // MaxNameBytes+1 bytes of its payload.
 func (f *File) name(off uint64) (string, error) {
+	n, _, err := f.nameCost(off, true)
+	return n, err
+}
+
+// errNoWork reports a compressed field name left undecoded: the entry's
+// decode budget is spent.
+var errNoWork = errors.New("journal: entry decode budget spent")
+
+// nameCompressedCost is what decoding one compressed field name is charged:
+// a ZSTD or XZ decoder may decode a whole block (up to 128 KiB) to yield
+// the first bytes.
+const nameCompressedCost = 128 << 10
+
+// nameCost returns the field name of the DATA object at off and the decode
+// work it cost. With compressed false, a compressed name not in the cache
+// is not decoded (errNoWork).
+func (f *File) nameCost(off uint64, compressed bool) (string, int, error) {
 	if n, ok := f.names[off]; ok {
-		return n, nil
+		return n, 0, nil
 	}
 	start := f.payloadStart()
 	flags, size, err := f.objectHeader(off, typeData, start+2, 1<<62)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
+	if flags&objCompressedMask != 0 && !compressed {
+		return "", 0, errNoWork
+	}
+	cost := 0
 	stored := size - start
 	var prefix []byte
 	switch flags & objCompressedMask {
 	case 0:
 		prefix = make([]byte, min(stored, MaxNameBytes+1))
 		if err := f.read(prefix, off+start); err != nil {
-			return "", err
+			return "", 0, err
 		}
 	case objCompressedZSTD, objCompressedXZ:
+		cost = nameCompressedCost
 		r, err := f.stream(flags, off+start, stored, true)
 		if err != nil {
-			return "", corrupt("compressed data", off)
+			return "", 0, corrupt("compressed data", off)
 		}
 		prefix = make([]byte, MaxNameBytes+1)
 		k, err := io.ReadFull(r, prefix)
 		if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
-			return "", corrupt("compressed data", off)
+			return "", 0, corrupt("compressed data", off)
 		}
 		prefix = prefix[:k]
 	case objCompressedLZ4:
 		// Only the first bytes of the block are decoded: an LZ4 match
 		// only points backwards, so a prefix stands on its own.
 		if stored < 8 {
-			return "", corrupt("lz4 data", off)
+			return "", 0, corrupt("lz4 data", off)
 		}
 		src := make([]byte, min(stored-8, lz4PrefixSource))
+		cost = len(src)
 		if err := f.read(src, off+start+8); err != nil {
-			return "", err
+			return "", 0, err
 		}
 		prefix = lz4Prefix(src, MaxNameBytes+1)
 	default:
-		return "", corrupt("data compression flags", off)
+		return "", 0, corrupt("data compression flags", off)
 	}
 	eq := bytes.IndexByte(prefix, '=')
 	if eq <= 0 || !validName(prefix[:eq]) {
-		return "", corrupt("data field name", off)
+		return "", 0, corrupt("data field name", off)
 	}
 	name := string(prefix[:eq])
 	if len(f.names) >= cacheMax {
 		clear(f.names)
 	}
 	f.names[off] = name
-	return name, nil
+	return name, cost, nil
 }
 
 // validName accepts journald's field names: A-Z, 0-9 and '_', not starting
@@ -491,6 +519,9 @@ func (f *File) value(off uint64, nameLen int) ([]byte, error) {
 			return nil, err
 		}
 		p, err = io.ReadAll(io.LimitReader(r, MaxData+1))
+		if errors.Is(err, errTooLarge) {
+			return nil, err
+		}
 		if err != nil {
 			return nil, corrupt("compressed data", off)
 		}

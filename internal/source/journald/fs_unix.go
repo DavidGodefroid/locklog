@@ -21,7 +21,9 @@ func validName(name string) error {
 }
 
 // listDir lists the entries of root/rel (rel "" or one component), without
-// following a symbolic link anywhere, as (name, isDir, isRegular).
+// following a symbolic link anywhere (roots are the launcher's canonical
+// mount points, so a symlinked /var/log/journal is resolved before here),
+// as (name, isDir, isRegular).
 func listDir(root, rel string) ([]dirEntry, error) {
 	fd, err := unix.Open(root, dirFlags, 0)
 	if err != nil {

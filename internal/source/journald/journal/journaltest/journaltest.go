@@ -28,6 +28,9 @@ type Options struct {
 	// PerArray is the number of entries per ENTRY_ARRAY object (0: one
 	// array for all), so a file can have a chain of arrays.
 	PerArray int
+	// XZBlockSize, when set, splits each XZ stream into blocks of that
+	// many bytes (journald writes one block).
+	XZBlockSize int64
 }
 
 const (
@@ -62,7 +65,7 @@ func (b *builder) item(dst []byte, off uint64) []byte {
 	return binary.LittleEndian.AppendUint64(dst, off)
 }
 
-func compress(kind string, p []byte) ([]byte, uint8) {
+func compress(kind string, p []byte, xzBlock int64) ([]byte, uint8) {
 	switch kind {
 	case "zstd":
 		enc, _ := zstd.NewWriter(nil)
@@ -78,7 +81,7 @@ func compress(kind string, p []byte) ([]byte, uint8) {
 		return out[:8+n], 2
 	case "xz":
 		var buf bytes.Buffer
-		w, _ := xz.WriterConfig{DictCap: 1 << 20}.NewWriter(&buf) // journald's dictionary
+		w, _ := xz.WriterConfig{DictCap: 1 << 20, BlockSize: xzBlock}.NewWriter(&buf) // journald's dictionary
 		w.Write(p)
 		w.Close()
 		return buf.Bytes(), 1
@@ -116,7 +119,7 @@ func (b *builder) dataObj(payload string) uint64 {
 	if b.o.Compact {
 		head += 8
 	}
-	p, flags := compress(b.o.Compress, []byte(payload))
+	p, flags := compress(b.o.Compress, []byte(payload), b.o.XZBlockSize)
 	off := b.obj(typeData, flags, append(make([]byte, head), p...))
 	b.data[payload] = off
 	return off
