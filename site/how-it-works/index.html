@@ -102,11 +102,11 @@
     <li><strong>Rules</strong>: field and label names in <code>.locklog/pii.toml</code>, and value lists and regexes in the console-held rule directory.</li>
     <li><strong>Personal field names</strong> → pseudonym.</li>
     <li><strong>Value detectors</strong> on a detection view (folded, NFKC, without zero-width characters, with percent, JSON <code>\u</code> and HTML entities decoded): email, phone, IBAN, card, Belgian/French/Dutch/US national ids, public IP; person names and loose phone numbers are opt-in (<code>detectors</code>) for their false positives.</li>
-    <li><strong>Structured mode</strong> (<code>redact-unknown</code>, the production default, or <code>detect</code>) or <strong>text mode</strong> (<code>detect</code>, or <code>template</code>).</li>
+    <li><strong>Structured mode</strong> (<code>redact-unknown</code>, the production default, or <code>detect</code>). The <code>text = "template"</code> setting is accepted but not applied yet.</li>
   </ol>
   <div class="prose">
     <p>A pseudonym is <code>⟦kind:ID⟧</code>: 12 Crockford base32 characters (60 bits) of an HMAC-SHA256 under a random per-epoch key. The key rotates every 7 days by default (<code>pseudonym_rotation</code>); a replaced key is deleted once it has been replaced for <code>pseudonym_max_age</code> (30 days by default), when the console opens the profile. There is no pseudonym-to-value store: an unmask re-reads the record by its sealed reference.</p>
-    <p>Agent rules (<code>locklog_pii_add</code>) only tighten: they add masking and never remove it or change its kind. They are stored in the console’s home volume, never in the project’s <code>.locklog/</code>.</p>
+    <p>Agent rules (<code>locklog_pii_add</code>) only tighten: they add masking and never remove it or change its kind. They will be stored in the console’s home volume, never in the project’s <code>.locklog/</code>, once the console serves them (<a href="https://github.com/DavidGodefroid/locklog/issues/64">#64</a>); until then the tools answer that there are no rules.</p>
   </div>
 </section>
 
@@ -124,13 +124,13 @@
   </tbody>
   </table>
   </div>
-  <p class="prose">The console opens Loki, Elasticsearch and OpenSearch sources from the profile once <a href="https://github.com/DavidGodefroid/locklog/pull/97">#97</a> is merged; until then the console cannot open them (<code>unsupported source kind</code>).</p>
+  <p class="prose">The console opens Loki, Elasticsearch and OpenSearch sources from the profile once <a href="https://github.com/DavidGodefroid/locklog/pull/97">#97</a> is merged; until then the console refuses a profile that holds one, before it opens anything.</p>
   <p class="prose"><code>docker compose up</code> deletes a recreated container’s <code>json-file</code> logs: use the journald driver or Loki for history across deploys.</p>
 </section>
 
 <section aria-labelledby="benchmark">
   <h2 id="benchmark">Masking benchmark</h2>
-  <p class="prose">The leak harness plants canaries of every detected kind, in every format and position and in encoded forms (percent, JSON <code>\u</code>, HTML entities, look-alikes, zero-width characters), and checks every byte that leaves the console: <strong>0 leaks</strong> is a release gate. <code>person_name</code> recall and false positives are reported per release.</p>
+  <p class="prose">The leak harness plants canaries of every detected kind, in every format and position and in encoded forms (percent, JSON <code>\u</code>, HTML entities, look-alikes, zero-width characters), and checks every byte that leaves the console: <strong>0 leaks</strong>, checked on every pull request (CI job <code>suites</code>, with the oracle and equivalence suites).</p>
 </section>
 
 <section aria-labelledby="roadmap">

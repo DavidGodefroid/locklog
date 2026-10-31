@@ -103,7 +103,7 @@
     <li><span class="icon" aria-hidden="true">⚖️</span><h3>Free within budgets, approved beyond</h3><p>Reads are bounded per call and per hour. A call over a budget is refused before it touches data, and <code>locklog_scan</code> asks you once for the whole plan.</p></li>
     <li><span class="icon" aria-hidden="true">📚</span><h3>Your sources</h3><p>Files (globs, rotation, gzip, zstd), journald (a pure-Go reader), Docker container logs, and Loki in v0.1.0; Elasticsearch and OpenSearch in v0.3.0.</p></li>
     <li><span class="icon" aria-hidden="true">🔒</span><h3>Read-only</h3><p>Read-only mounts, a read-only root filesystem, an allowlist of backend endpoints, no Docker socket in any locklog container, no write path to any backend.</p></li>
-    <li><span class="icon" aria-hidden="true">👤</span><h3>Clear values stay with you</h3><p>Reads are free. Seeing a value in clear is for you, at the console. Handing one to the agent waits for your approval and is off on production.</p></li>
+    <li><span class="icon" aria-hidden="true">👤</span><h3>Clear values stay with you</h3><p>Reads are free. Handing a clear value to the agent waits for your approval at the console and is off by default on production.</p></li>
   </ul>
 </section>
 
@@ -118,8 +118,9 @@ curl -fsSL https://locklog.dev/install.sh | sh
 #    and wires the detected agents (Claude Code, Codex, Gemini CLI)</span>
 locklog setup --agent host
 
-<span class="cmt"># 3. The console, in a terminal you keep in view</span>
-locklog console</code></pre>
+<span class="cmt"># 3. The console, in a terminal you keep in view (setup prints the line;</span>
+<span class="cmt">#    containers get a profile of their own, &lt;profile&gt;-docker)</span>
+locklog console --profile &lt;profile&gt;</code></pre>
   <p class="prose">Then, in another terminal, ask your agent: <em>“when did the 502s start?”</em>. It calls <code>locklog_count</code>, <code>locklog_patterns</code> and <code>locklog_trace</code>; the console shows each call and asks you only when the agent wants more than the free budgets or a value in clear.</p>
   <p><a href="install/">Prerequisites, production placement and install details</a></p>
 </section>

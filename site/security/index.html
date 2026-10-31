@@ -138,7 +138,7 @@
       <li>person names, unless the opt-in <code>person_name</code> detector is on (and names outside its heuristics when it is);</li>
       <li>usernames and logins in free text;</li>
       <li>postal addresses;</li>
-      <li>private and loopback IPs (infrastructure; configurable);</li>
+      <li>private and loopback IPs (infrastructure, never detected);</li>
       <li>user agents and other quasi-identifiers;</li>
       <li>business ids (order and customer ids, kept so <code>trace</code> works);</li>
       <li>base64 or hex-encoded content;</li>
@@ -151,7 +151,7 @@
       <li>how far a call got before its deadline reflects the content’s detector density, rounded to plan granules. Aggregate byte volume and record length are visible at granule level;</li>
       <li>with the opt-in <code>prefilter = true</code> (refused on production), latency reveals how many records contain a clear substring.</li>
     </ul>
-    <p>Pseudonymised data is personal data (GDPR recital 26). The model provider receives pseudonyms, timestamps, the fields locklog does not mask and the residuals above. Tighten with <code>redact-unknown</code> (the production default for structured logs), the <code>template</code> text mode, your own rules, and <code>lookup = "approved"</code>.</p>
+    <p>Pseudonymised data is personal data (GDPR recital 26). The model provider receives pseudonyms, timestamps, the fields locklog does not mask and the residuals above. Tighten with <code>redact-unknown</code> (the production default for structured logs), your own rules, and <code>lookup = "approved"</code>.</p>
   </div>
 </section>
 
@@ -174,7 +174,7 @@
   <table>
   <thead><tr><th scope="col">Data</th><th scope="col">Where</th><th scope="col">Kept</th></tr></thead>
   <tbody>
-  <tr><th scope="row">Audit (one chained line per call)</th><td>home volume</td><td>until you delete it. It holds pseudonyms, tool arguments and <strong>the predicates the agent typed</strong>: a personal value the agent typed in a form the detectors miss stays there</td></tr>
+  <tr><th scope="row">Audit (one chained line per call)</th><td>home volume</td><td>until you delete it. It holds the method, the source names, the time range, the decision, the peer and the pseudonyms an unmask or lookup named; not the predicates. The <strong>reason the agent typed</strong> for an approval is kept, masked by the detectors: a personal value in a form the detectors miss stays there</td></tr>
   <tr><th scope="row">Plans and approved scans</th><td>console memory</td><td>until used or expired (an approved scan: 30 minutes); gone when the session ends</td></tr>
   <tr><th scope="row">Result cache</th><td>console memory</td><td>≤ 64 MiB, gone when the session ends (a policy change, the console’s exit)</td></tr>
   <tr><th scope="row">Local index</th><td>home volume</td><td>per file identity, rebuilt when a file changes; trusted field values masked at answer time</td></tr>
