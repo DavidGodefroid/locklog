@@ -103,9 +103,13 @@ func (m *Masker) Mask(source string, ev parse.Event) (rec Record) {
 	w := &walk{m: m, source: source, kinds: map[string]bool{}}
 	rec = Record{ok: true, ts: ev.Time, hasTime: ev.HasTime, format: ev.Format, offset: ev.Offset, length: ev.Length}
 	rec.fields = w.members(ev.Fields, "", "", false, inherited{})
+	// Attrs come from the source's own frame (journald, docker), never
+	// from the line: only allowlisted ones reach here (LL-11 `attrs`,
+	// default none), so they skip the personal-name and redact-unknown
+	// steps; secrets and detectors still run.
 	rec.attrs = w.members(ev.Attrs, "", "", true, inherited{})
 	if ev.Message != "" || ev.Fields == nil {
-		rec.msg = w.text(ev.Message)
+		rec.msg = w.message(ev.Message, ev.MessageKey)
 	}
 	rec.kinds = sortedKeys(w.kinds)
 	rec.secretPaths = w.secretPaths
@@ -252,7 +256,9 @@ func (w *walk) leaf(v parse.Value, name, clearPath, shownPath string, trusted bo
 	}
 	// Steps 2-5 work on s, the string step 1 produced.
 	rule, hasRule := w.m.o.Rules.human(w.source, clearPath)
-	if !hasRule && inh.pseudo != nil {
+	// The strongest of the field's own rule and an inherited one wins
+	// (redact, then pseudonym, then allow).
+	if inh.pseudo != nil && (!hasRule || rule.Mode == ModeAllow) {
 		rule, hasRule = *inh.pseudo, true
 	}
 	var out Value
@@ -287,6 +293,44 @@ func (w *walk) leaf(v parse.Value, name, clearPath, shownPath string, trusted bo
 		return w.whole(s, "")
 	}
 	return out
+}
+
+// message masks the record's message, lifted from key (empty for a plain
+// line): the key's secret name, human rule and agent rule decide first, as
+// for a field; otherwise it is free text.
+func (w *walk) message(s, key string) string {
+	if key == "" {
+		return w.text(s)
+	}
+	w.m.noteClear(w.source, key)
+	if w.m.o.SecretName != nil && w.m.o.SecretName(key) {
+		w.kinds["secret"] = true
+		w.secretPaths = append(w.secretPaths, key)
+		return Secret
+	}
+	mode, kind := "", ""
+	if rule, ok := w.m.o.Rules.human(w.source, key); ok && rule.Mode != ModeAllow {
+		mode, kind = rule.Mode, rule.Kind
+	}
+	if am, ok := w.m.o.Rules.agent(w.source, key); ok && (mode == "" || am == ModeRedact) {
+		mode, kind = am, ""
+	}
+	switch mode {
+	case ModeRedact:
+		w.kinds["redacted"] = true
+		return Redacted
+	case ModePseudonym:
+		t := cleanSource(s)
+		if len(t) > pii.DetectLimit {
+			t = pii.CutAt(t, pii.DetectLimit)
+		}
+		if secrets := w.find(w.m.o.Secrets, t); len(secrets) > 0 {
+			w.kinds["secret"] = true
+			t = replace(t, secrets, func(string, pii.Match) string { return Secret })
+		}
+		return w.whole(t, kind).text
+	}
+	return w.text(s)
 }
 
 // detected masks the personal values the detectors find in s (step 4).

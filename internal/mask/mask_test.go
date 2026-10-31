@@ -590,3 +590,39 @@ func TestRedactTextNoPseudonymAndZeroLimits(t *testing.T) {
 		}
 	}
 }
+
+// A rule, a secret name or an agent rule on the key the message was
+// lifted from decides for the message; a child's allow never beats an
+// inherited pseudonym rule.
+func TestMessageKeyRulesAndInheritedStrength(t *testing.T) {
+	for _, tc := range []struct{ rules, line, clear string }{
+		{"[[mask]]\nfield = \"msg\"\n", `{"msg":"order for Bobby Smithers","x":1}`, "Bobby"},
+		{"[[mask]]\nfield = \"log\"\nmode = \"pseudonym\"\n", `{"log":"Bobby Smithers"}`, "Bobby"},
+		{"[[mask]]\nfield = \"user\"\nmode = \"pseudonym\"\n[[allow]]\nfield = \"*.first\"\n", `{"user":{"first":"Bobby"}}`, "Bobby"},
+	} {
+		rules, err := ParseProjectRules([]byte(tc.rules))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, mode := range []string{StructuredDetect, StructuredRedactUnknown} {
+			m := newMasker(t, Options{Structured: mode, Rules: &rules})
+			if out := encode(t, m.Mask("api", event(t, tc.line))); strings.Contains(out, tc.clear) {
+				t.Errorf("%s %q: %q survived: %s", mode, tc.rules, tc.clear, out)
+			}
+		}
+	}
+	ag, err := OpenAgentRules(filepath.Join(t.TempDir(), "pii"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rules := Rules{Agent: ag}
+	m := newMasker(t, Options{Structured: StructuredDetect, Rules: &rules, SecretName: func(n string) bool { return n == "password" }})
+	line := `{"msg":"order for Bobby Smithers","x":1}`
+	m.Mask("api", event(t, line))
+	if err := m.AgentAdd("api", "msg", ModeRedact, t0, AgentLimits{PerHour: 10, Total: 50}); err != nil {
+		t.Fatal(err)
+	}
+	if out := encode(t, m.Mask("api", event(t, line))); strings.Contains(out, "Bobby") {
+		t.Errorf("an agent rule on msg is ignored: %s", out)
+	}
+}
