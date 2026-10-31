@@ -121,7 +121,7 @@ jobs:
     timeout-minutes: 25
     env:
       CGO_ENABLED: "0"
-      OS_ADMIN_PW: "LockLog-CI_2026!os-Adm1n"
+      OS_ADMIN_PW: "Zq8#Vt3rLp!kW7xN-ci"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

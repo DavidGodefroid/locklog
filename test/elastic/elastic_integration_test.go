@@ -266,7 +266,7 @@ func TestElasticsearch(t *testing.T) {
 	start := time.Now().Add(-30 * time.Minute).Truncate(5 * time.Minute)
 	const n = 2400
 	load(t, base, au, ap, idx, start, n)
-	pw := "Reader-" + run + "-x9#Qz"
+	pw := "Tz4#mQ9!vXr2Lp8$wK"
 	user := func(name, role string) egress.Credentials {
 		admin(t, base, au, ap, "PUT", "/_security/role/"+name, "application/json", []byte(role))
 		admin(t, base, au, ap, "PUT", "/_security/user/"+name, "application/json", []byte(`{"password":"`+pw+`","roles":["`+name+`"]}`))
@@ -372,7 +372,7 @@ func TestOpenSearch(t *testing.T) {
 	if b, st := adminStatus(t, base, au, ap, "DELETE", "/_plugins/_security/api/rolesmapping/own_index", "application/json", nil); st/100 != 2 && st != 404 {
 		t.Fatalf("unmap own_index: %d %s", st, b)
 	}
-	pw := "Reader-" + run + "-x9#Qz!Lw"
+	pw := "Tz4#mQ9!vXr2Lp8$wK"
 	user := func(name, role string) egress.Credentials {
 		admin(t, base, au, ap, "PUT", "/_plugins/_security/api/roles/"+name, "application/json", []byte(role))
 		admin(t, base, au, ap, "PUT", "/_plugins/_security/api/internalusers/"+name, "application/json", []byte(`{"password":"`+pw+`"}`))
