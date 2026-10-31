@@ -25,3 +25,8 @@ uses [Semantic Versioning](https://semver.org/).
   read-only allowlist checked segment by segment, response caps, the tls
   modes, and the production check that refuses a backend answering a data
   read without credentials.
+- Parsing: the `syslog` (RFC 5424 with structured data, RFC 3164 with or
+  without PRI, rsyslog's RFC 3339 variant) and `combined` (NCSA
+  common/combined access logs) formats, detected by `auto` after JSON and
+  logfmt, and the `cri` and `docker-json` container frames (runtime time,
+  stream, split lines joined, payload decoded with `auto`).

@@ -223,3 +223,60 @@ func FuzzParseTime(f *testing.F) {
 		}
 	})
 }
+
+// formatSeeds are lines of the syslog, combined, CRI and docker-json
+// formats.
+var formatSeeds = []string{
+	`<165>1 2003-10-11T22:14:15.003Z h app 1 ID [a@1 k="v\"]"][b x="1"] m` + "\n<13>1 - - - - - -\n",
+	"<34>Oct 11 22:14:15 host su[1]: x\nFeb 29 12:00:00 h a: y\n2026-01-02T09:00:00+01:00 web s: z\n",
+	`1.2.3.4 - u [10/Oct/2000:13:55:36 -0700] "GET /\"q HTTP/1.0" 200 1 "r" "ua" extra` + "\n",
+	"2026-10-31T02:41:55Z stderr P {\"a\":\n2026-10-31T02:41:55Z stderr F 1}\n2026-10-31T02:41:56Z stdout F\n",
+	`{"log":"a","stream":"stdout","time":"2026-10-31T02:41:55Z"}` + "\n" + `{"log":"b\n","attrs":{"t":"x"}}` + "\n",
+}
+
+func fuzzFormat(f *testing.F, name string, framed bool) {
+	for _, s := range append(append([]string{}, fuzzSeeds...), formatSeeds...) {
+		f.Add(s)
+	}
+	p := mustParser(f, Options{Format: name})
+	f.Fuzz(func(t *testing.T, in string) {
+		evs := fuzzRead(t, p, in)
+		checkEventsGaps(t, in, evs, !framed)
+		for _, e := range evs {
+			if e.Format == name && !strings.Contains(in, e.Message) && name != "combined" && name != "syslog" {
+				t.Fatalf("message %q not in the input", e.Message)
+			}
+		}
+	})
+}
+
+func FuzzParseSyslog(f *testing.F)     { fuzzFormat(f, "syslog", false) }
+func FuzzParseCombined(f *testing.F)   { fuzzFormat(f, "combined", false) }
+func FuzzParseCRI(f *testing.F)        { fuzzFormat(f, "cri", true) }
+func FuzzParseDockerJSON(f *testing.F) { fuzzFormat(f, "docker-json", true) }
+
+// FuzzSyslogAndCombinedDecode checks that a decoded event's message is a
+// suffix of the text (syslog) or built from it (combined), and that the
+// structured data never panics on any header.
+func FuzzSyslogAndCombinedDecode(f *testing.F) {
+	for _, s := range formatSeeds {
+		f.Add(strings.SplitN(s, "\n", 2)[0])
+	}
+	f.Fuzz(func(t *testing.T, line string) {
+		if !utf8.ValidString(line) {
+			return // the reader replaces invalid UTF-8 before decoding
+		}
+		if ev, ok := (syslogFormat{}).Decode(line, nil); ok {
+			if !strings.HasSuffix(line, ev.Message) {
+				t.Fatalf("syslog message %q is not the end of %q", ev.Message, line)
+			}
+			walk(t, ev.Fields, 0)
+		}
+		if ev, ok := (combinedFormat{}).Decode(line, nil); ok {
+			walk(t, ev.Fields, 0)
+			if (combinedFormat{}).Detect(line) != ok {
+				t.Fatal("Detect and Decode disagree")
+			}
+		}
+	})
+}

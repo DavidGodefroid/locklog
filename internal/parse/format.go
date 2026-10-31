@@ -86,6 +86,10 @@ func Formats() []string {
 func init() {
 	Register(jsonFormat{}, 10)
 	Register(logfmtFormat{}, 20)
+	Register(combinedFormat{}, 30)
+	Register(syslogFormat{}, 40)
+	Register(criFormat{}, -1)
+	Register(dockerJSONFormat{}, -1)
 	Register(plainFormat{}, -1)
 }
 
