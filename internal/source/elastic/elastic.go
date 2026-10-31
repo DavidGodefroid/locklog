@@ -556,6 +556,10 @@ func (s *Source) fetchSlice(ctx context.Context, f Filter, from, to int64, m *me
 	var after []any
 	seen := map[string]bool{} // identities at the resume timestamp (no tiebreaker)
 	for {
+		// Before each page: a pushed term must still be server-side.
+		if err := s.stillServed(f, s.state()); err != nil {
+			return nil, fetched, err
+		}
 		body, err := searchJSON(SearchBody{Size: s.o.Size, Timeout: SearchTimeout, Fields: s.fieldList(), Query: q,
 			Sort: s.sortSpec(), SearchAfter: after})
 		if err != nil {
@@ -755,6 +759,10 @@ func (it *iter) Next() (source.RawRecord, error) {
 		}
 		r := <-it.results[it.cur]
 		it.results[it.cur] = nil
+		if r.err == nil {
+			// The state may have changed while the slice was buffered.
+			r.err = it.s.stillServed(it.f, it.s.state())
+		}
 		if r.err != nil {
 			it.err = fmt.Errorf("elasticsearch source: %w", r.err)
 			it.hits, it.pos = nil, 0

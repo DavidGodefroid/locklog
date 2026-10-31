@@ -755,6 +755,40 @@ func TestOverlappingChecks(t *testing.T) {
 	}
 }
 
+// TestLateCheckFailure: a Check that fails after a newer one succeeded
+// still leaves nothing server-side (its failure takes a generation).
+func TestLateCheckFailure(t *testing.T) {
+	lv := source.Term{Field: "level", Label: true, Op: "=", Values: []string{"error"}}
+	f := newFake(dataset(40))
+	s := newSource(t, f, nil)
+	hook, reached, release := holdAt("/_field_caps", 1)
+	f.mu.Lock()
+	f.hook = hook
+	f.mu.Unlock()
+	aDone := make(chan error, 1)
+	go func() { _, err := s.Check(ctx, true); aDone <- err }()
+	<-reached
+	if _, err := s.Check(ctx, true); err != nil {
+		t.Fatalf("check B: %v", err)
+	}
+	if !s.pushable(lv) {
+		t.Fatal("not pushable after B")
+	}
+	f.mu.Lock()
+	f.types["level"] = "text"
+	f.mu.Unlock()
+	close(release)
+	if err := <-aDone; err == nil {
+		t.Fatal("check A passed on a text field")
+	}
+	if s.pushable(lv) {
+		t.Fatal("pushable after a late failure")
+	}
+	if _, err := s.IndexCounts(ctx, source.CountQuery{Range: source.Range{From: t0, To: t0.Add(time.Hour)}}); !errors.Is(err, source.ErrNotIndexable) {
+		t.Fatalf("count served after a late failure: %v", err)
+	}
+}
+
 // TestScanRechecksEachSlice: a slice fetched after a re-Check that keeps a
 // pushed field local fails with ErrStale instead of being fetched.
 func TestScanRechecksEachSlice(t *testing.T) {

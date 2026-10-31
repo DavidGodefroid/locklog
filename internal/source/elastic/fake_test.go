@@ -142,11 +142,13 @@ func (f *fakeES) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == "GET" && r.URL.Path == pre+"/_field_caps":
 		want := strings.Split(r.URL.Query().Get("fields"), ",")
 		fields := map[string]any{"_id": map[string]any{"_id": map[string]any{"type": "_id"}}}
+		f.mu.Lock()
 		for name, t := range f.types {
 			if slices.Contains(want, "*") || slices.Contains(want, name) {
 				fields[name] = map[string]any{t: map[string]any{"type": t, "searchable": true, "aggregatable": t != "text"}}
 			}
 		}
+		f.mu.Unlock()
 		_ = json.NewEncoder(w).Encode(map[string]any{"indices": []string{"logs-a", "logs-b"}, "fields": fields})
 	case r.Method == "GET" && r.URL.Path == pre+"/_mapping":
 		if f.mapping != "" {

@@ -437,9 +437,19 @@ func (s *Source) fieldCaps(ctx context.Context, fields []string) (fieldCapsRespo
 // on a timer): while it runs, and after it fails, the source pushes no
 // trusted term and serves no count, and streams planned under an earlier
 // state that pushed a term now kept local are stale (source.ErrStale).
-func (s *Source) Check(ctx context.Context, production bool) (Info, error) {
-	var info Info
+func (s *Source) Check(ctx context.Context, production bool) (info Info, retErr error) {
 	var err error
+	// A failure, whenever it lands, leaves nothing server-side: it also
+	// takes a new generation, so that no Check still running stores a
+	// success read before it.
+	defer func() {
+		if retErr != nil {
+			s.mu.Lock()
+			s.gen++
+			s.checked = false
+			s.mu.Unlock()
+		}
+	}()
 	// Until this Check completes, no trusted term is pushed and no count
 	// is served on the server.
 	// Each Check takes a generation; only the newest one stores its
