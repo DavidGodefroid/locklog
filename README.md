@@ -10,8 +10,8 @@ locklog detects are masked before anything reaches the model.
 
 **Status:** in development, no release yet. Nothing here is ready to use.
 
-Loki 3 users: see [docs/loki.md](docs/loki.md) on the default `detected_level` field, which makes
-level questions cheap without a `level` label.
+Loki 3 users: see [docs/loki.md](docs/loki.md) on the default `detected_level` field: what Loki
+puts in it, and how locklog selects on it (locally, never as a Loki filter).
 
 ## License
 
