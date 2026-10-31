@@ -407,7 +407,7 @@ func normalize(t *testing.T, e *Engine, res any) string {
 		if err := e.o.Sealer.Open("Lc1", c, &st); err != nil {
 			t.Fatal(err)
 		}
-		m["cursor"] = fmt.Sprintf("chunk %d granule %d cached %v", st.Chunk, st.Granule, st.Cache != "")
+		m["cursor"] = fmt.Sprintf("chunk %d granule %d cached %v from %v to %v", st.Chunk, st.Granule, st.Cache != "", st.From, st.To)
 	}
 	if rs, ok := m["records"].([]any); ok {
 		for _, r := range rs {
@@ -836,5 +836,50 @@ func TestSourceErrorsAreContentFree(t *testing.T) {
 		if strings.Contains(string(b), "customer-acme") || strings.Contains(e.Error(), "/srv") {
 			t.Errorf("%s: path in the agent's error: %s", name, b)
 		}
+	}
+}
+
+// TestLastCursorsContinue: a query by last keeps the window resolved at its
+// first call; continuations made while the clock moves continue it.
+func TestLastCursorsContinue(t *testing.T) {
+	content := genLog(t0, 30000, "c@example.org") // 8h20m, 4 granules
+	f := newFixture(t, content, oneGranulePerCall)
+	now := t0.Add(3 * time.Hour)
+	f.eng.o.Now = func() time.Time { now = now.Add(time.Minute); return now }
+	// [t0+1h, t0+3h) once resolved: 7200 records.
+	qq := Query{Last: "2h", Limit: 200, Fields: []string{"level"}}
+	n, pages := 0, 0
+	for {
+		res, err := f.eng.Search(ctx, qq)
+		if err != nil {
+			t.Fatalf("search page %d: %v", pages, err)
+		}
+		n += len(res.Records)
+		pages++
+		if res.Complete {
+			break
+		}
+		qq.Cursor = res.Cursor
+	}
+	if want := 7200; n != want || pages < 3 {
+		t.Fatalf("search: %d records in %d pages, want %d", n, pages, want)
+	}
+	cq := CountQuery{Query: Query{Last: "2h", Text: "upstream"}, By: []string{"level"}}
+	var total int64
+	for pages = 0; ; pages++ {
+		res, err := f.eng.Count(ctx, cq)
+		if err != nil {
+			t.Fatalf("count page %d: %v", pages, err)
+		}
+		if res.Complete {
+			for _, g := range res.Groups {
+				total += g.N
+			}
+			break
+		}
+		cq.Cursor = res.Cursor
+	}
+	if pages < 1 || total != 7200 {
+		t.Fatalf("count: %d in %d continuations", total, pages)
 	}
 }

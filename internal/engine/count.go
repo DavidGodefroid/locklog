@@ -193,6 +193,14 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (CountResult, error) {
 			}
 		}
 	}
+	var st cursorState
+	if cursor != "" {
+		var err *Error
+		if st, err = e.openCursor(cursor); err != nil {
+			return CountResult{}, err
+		}
+		restoreWindow(&q.Query, st)
+	}
 	v := e.validator(maxRange)
 	if err := v.validate(&q.Query); err != nil {
 		return CountResult{}, err
@@ -222,9 +230,8 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (CountResult, error) {
 	chunk, gran := 0, 0
 	a := newAgg()
 	if cursor != "" {
-		var st cursorState
 		var err *Error
-		if f, st, err = e.resume(cursor, digest); err != nil {
+		if f, err = e.resume(st, digest); err != nil {
 			return CountResult{}, err
 		}
 		chunk, gran = st.Chunk, st.Granule
@@ -310,7 +317,8 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (CountResult, error) {
 	})
 	res.Complete = chunk >= len(f.plan.Chunks)
 	if !res.Complete {
-		st := cursorState{Plan: f.id, Query: digest, Chunk: chunk, Granule: gran, Epoch: e.o.Masker.Epoch(), PolicyFP: e.o.PolicyFP(), Cache: e.aggs.put(a)}
+		st := cursorState{Plan: f.id, Query: digest, Chunk: chunk, Granule: gran, Epoch: e.o.Masker.Epoch(), PolicyFP: e.o.PolicyFP(), Cache: e.aggs.put(a),
+			From: q.From, To: q.To}
 		res.Cursor = e.seal("Lc1", st)
 		if cu, ok := coveredUntil(f.plan, chunk, gran, q.Query); ok {
 			res.CoveredUntil = &cu

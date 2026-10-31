@@ -161,6 +161,10 @@ type cursorState struct {
 	Cache    string `json:"k,omitempty"`
 	Epoch    string `json:"e"`
 	PolicyFP string `json:"f"`
+	// From and To are the range resolved at the first call: a query by
+	// last is continued over that window, not over a new one.
+	From time.Time `json:"a"`
+	To   time.Time `json:"b"`
 }
 
 // refState is sealed into a record ref.
@@ -304,29 +308,43 @@ func (e *Engine) freeze(query string, plan source.Byteplan) *frozen {
 	return f
 }
 
-// resume opens a cursor of a query and returns its frozen plan.
-func (e *Engine) resume(cursor, query string) (*frozen, cursorState, *Error) {
+// openCursor opens a cursor, before the query is validated: a query by last
+// takes the window sealed in it (restoreWindow).
+func (e *Engine) openCursor(cursor string) (cursorState, *Error) {
 	var st cursorState
 	if err := e.o.Sealer.Open("Lc1", cursor, &st); err != nil {
-		return nil, st, &Error{Code: EStale, Span: "cursor", Message: "invalid or expired cursor: run the query again without it"}
+		return st, &Error{Code: EStale, Span: "cursor", Message: "invalid or expired cursor: run the query again without it"}
 	}
 	if st.PolicyFP != e.o.PolicyFP() {
-		return nil, st, &Error{Code: EPolicyChanged, Span: "cursor", Message: "the policy changed: run the query again"}
+		return st, &Error{Code: EPolicyChanged, Span: "cursor", Message: "the policy changed: run the query again"}
 	}
 	if st.Epoch != e.o.Masker.Epoch() {
-		return nil, st, &Error{Code: EStale, Span: "cursor", Message: "the pseudonym epoch changed: run the query again"}
+		return st, &Error{Code: EStale, Span: "cursor", Message: "the pseudonym epoch changed: run the query again"}
 	}
+	return st, nil
+}
+
+// restoreWindow resolves the last of a continued query to the window of its
+// first call; the query digest, over the resolved range, then matches.
+func restoreWindow(q *Query, st cursorState) {
+	if q.Last != "" && q.From.IsZero() && q.To.IsZero() && !st.From.IsZero() {
+		q.From, q.To, q.Last = st.From, st.To, ""
+	}
+}
+
+// resume returns the frozen plan of an opened cursor of a query.
+func (e *Engine) resume(st cursorState, query string) (*frozen, *Error) {
 	if st.Query != query {
-		return nil, st, &Error{Code: EStale, Span: "cursor", Message: "the cursor belongs to another query"}
+		return nil, &Error{Code: EStale, Span: "cursor", Message: "the cursor belongs to another query"}
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	f := e.plans[st.Plan]
 	if f == nil || f.query != query {
-		return nil, st, &Error{Code: EStale, Span: "cursor", Message: "the cursor expired: run the query again"}
+		return nil, &Error{Code: EStale, Span: "cursor", Message: "the cursor expired: run the query again"}
 	}
 	f.lastUse = e.o.Now()
-	return f, st, nil
+	return f, nil
 }
 
 // run executes a frozen plan from (chunk, granule) until the plan ends, the
@@ -584,6 +602,14 @@ func (e *Engine) Search(ctx context.Context, q Query) (SearchResult, error) {
 			}
 		}
 	}
+	var st cursorState
+	if cursor != "" {
+		var err *Error
+		if st, err = e.openCursor(cursor); err != nil {
+			return SearchResult{}, err
+		}
+		restoreWindow(&q, st)
+	}
 	if err := e.validator(maxRange).validate(&q); err != nil {
 		return SearchResult{}, err
 	}
@@ -594,9 +620,8 @@ func (e *Engine) Search(ctx context.Context, q Query) (SearchResult, error) {
 	chunk, gran := 0, 0
 	var pending []match
 	if cursor != "" {
-		var st cursorState
 		var err *Error
-		if f, st, err = e.resume(cursor, digest); err != nil {
+		if f, err = e.resume(st, digest); err != nil {
 			return SearchResult{}, err
 		}
 		chunk, gran = st.Chunk, st.Granule
@@ -677,7 +702,8 @@ func (e *Engine) Search(ctx context.Context, q Query) (SearchResult, error) {
 	done := chunk >= len(f.plan.Chunks)
 	res.Complete = done && len(rest) == 0
 	if !res.Complete {
-		st := cursorState{Plan: f.id, Query: digest, Chunk: chunk, Granule: gran, Epoch: e.o.Masker.Epoch(), PolicyFP: e.o.PolicyFP()}
+		st := cursorState{Plan: f.id, Query: digest, Chunk: chunk, Granule: gran, Epoch: e.o.Masker.Epoch(), PolicyFP: e.o.PolicyFP(),
+			From: q.From, To: q.To}
 		if len(rest) > 0 {
 			st.Cache = e.cache.put(rest)
 		}
