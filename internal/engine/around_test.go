@@ -3,6 +3,7 @@
 package engine
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
@@ -14,6 +15,8 @@ import (
 	"time"
 
 	"github.com/DavidGodefroid/locklog/internal/mask"
+	"github.com/DavidGodefroid/locklog/internal/parse"
+	"github.com/DavidGodefroid/locklog/internal/source"
 )
 
 // rec decodes one output record.
@@ -254,38 +257,38 @@ func TestTraceRefusals(t *testing.T) {
 }
 
 // TestTraceNoOracle: a clear id never matches a masked value, wherever it
-// sits (inside a placeholder or as a masked leaf).
+// sits (inside a placeholder of the message or as a masked leaf); clear
+// words match exactly.
 func TestTraceNoOracle(t *testing.T) {
-	content := `{"time":"2026-10-30T12:00:01Z","user":{"name":"zorglub"},"msg":"hello zorglub42"}` + "\n" +
-		`{"time":"2026-10-30T12:00:02Z","msg":"login from 10.1.2.3 ok"}` + "\n"
+	content := `{"time":"2026-10-30T12:00:01Z","user":{"email":"zorglub@example.org"},"msg":"hello zorglub42 from zorglub@example.org"}` + "\n" +
+		`{"time":"2026-10-30T12:00:02Z","msg":"login 10 ok"}` + "\n"
 	f := newFixture(t, content, nil)
-	for _, id := range []string{"zorglub", "10.1.2.3", "10", "ok"} {
+	tok := strings.TrimSpace(f.masker.Text("zorglub@example.org"))
+	for id, want := range map[string]int{
+		"zorglub": 0, "example.org": 0, "example": 0, "org": 0, "zorglub4": 0,
+		"10": 1, "ok": 1, "hello": 1, "zorglub42": 1, tok: 1,
+	} {
 		res, err := f.eng.Trace(ctx, TraceQuery{ID: id, From: day.From, To: day.To})
-		if err != nil && code(err) != EPIIInQuery {
-			t.Fatal(err)
+		if err != nil {
+			t.Fatalf("%q: %v", id, err)
 		}
-		if err == nil {
-			for _, r := range res.Records {
-				if containsWord(evalString(string(r)), id) {
-					continue // the id is shown in clear: no oracle
-				}
-				t.Fatalf("%q matched a masked value: %s", id, r)
+		if len(res.Records) != want {
+			t.Errorf("%q: %d records, want %d", id, len(res.Records), want)
+		}
+		for _, r := range res.Records {
+			if strings.Contains(string(r), "@example") {
+				t.Fatalf("clear value: %s", r)
 			}
 		}
 	}
 	// A word inside a placeholder never matches: the e-mail's local part
-	// and domain.
+	// and domain, over many records.
 	g := newFixture(t, genLog(t0, 100, "zorglub@example.org"), nil)
 	for _, id := range []string{"zorglub", "example", "org", "user1"} {
 		res, err := g.eng.Trace(ctx, TraceQuery{ID: id, From: day.From, To: day.To})
 		if err != nil || len(res.Records) != 0 {
 			t.Fatalf("%q: %v %d", id, err, len(res.Records))
 		}
-	}
-	// "ok" is shown in clear: it matches.
-	res, err := f.eng.Trace(ctx, TraceQuery{ID: "ok", From: day.From, To: day.To})
-	if err != nil || len(res.Records) != 1 {
-		t.Fatalf("%v %d", err, len(res.Records))
 	}
 }
 
@@ -353,6 +356,64 @@ func TestTailStopsAtMax(t *testing.T) {
 	}
 }
 
+// TestTailNewByPosition: on a local stream, new means written after the
+// start, whatever the timestamps say: records already there (even dated in
+// the future) are not returned; appended ones are, old-dated or untimed.
+func TestTailNewByPosition(t *testing.T) {
+	future := genLog(time.Now().Add(time.Minute), 5, "c@example.org")
+	f := newFixture(t, future, func(o *Options) { o.TailPoll = 50 * time.Millisecond })
+	path := filepath.Join(f.root, "logs", "app.log")
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		appendLines(t, path, `time=2020-01-01T00:00:00Z level=info msg="old dated"`, `no time at all here`)
+	}()
+	res, err := f.eng.Tail(ctx, TailQuery{Duration: "1s"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Records) != 2 || !res.Complete {
+		t.Fatalf("%d records, complete %v", len(res.Records), res.Complete)
+	}
+	if !strings.Contains(string(res.Records[0]), "old dated") || !strings.Contains(string(res.Records[1]), "no time at all") {
+		t.Fatalf("records %s", res.Records)
+	}
+}
+
+// TestTailWorkFollowsNewData: polls scan only what grew, not the stream.
+func TestTailWorkFollowsNewData(t *testing.T) {
+	content := genLog(time.Now().Add(-13*time.Hour), 80000, "c@example.org") // > 8 granules
+	f := newFixture(t, content, func(o *Options) { o.TailPoll = 50 * time.Millisecond })
+	path := filepath.Join(f.root, "logs", "app.log")
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		appendLines(t, path, liveLine(1, "x"))
+	}()
+	start := time.Now()
+	res, err := f.eng.Tail(ctx, TailQuery{Duration: "1s"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Records) != 1 || time.Since(start) > 4*time.Second {
+		t.Fatalf("%d records in %s", len(res.Records), time.Since(start))
+	}
+	if res.Scanned.Granules > 2 {
+		t.Fatalf("scanned %d granules for one appended line", res.Scanned.Granules)
+	}
+}
+
+func TestTailCancelled(t *testing.T) {
+	f := newFixture(t, "", func(o *Options) { o.TailPoll = 50 * time.Millisecond })
+	c, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if _, err := f.eng.Tail(c, TailQuery{Duration: "10s"}); code(err) != ESource {
+		t.Fatalf("%v", err)
+	}
+	if time.Since(start) > 2*time.Second {
+		t.Fatal("cancellation not honoured")
+	}
+}
+
 func TestTailRefusals(t *testing.T) {
 	f := newFixture(t, "", nil)
 	for _, tc := range []TailQuery{
@@ -398,14 +459,82 @@ func TestNoDigestInAroundResults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cres, _ := f.eng.Context(ctx, ContextQuery{Ref: ref, Before: 2, After: 2})
-	tres, _ := f.eng.Trace(ctx, TraceQuery{ID: "50", From: day.From, To: day.To})
-	for _, v := range []any{cres, tres} {
+	cres, err := f.eng.Context(ctx, ContextQuery{Ref: ref, Before: 2, After: 2})
+	if err != nil || len(cres.Records) != 5 {
+		t.Fatalf("context: %v", err)
+	}
+	tres, err := f.eng.Trace(ctx, TraceQuery{ID: "50", From: day.From, To: day.To})
+	if err != nil || len(tres.Records) != 1 {
+		t.Fatalf("trace: %v", err)
+	}
+	path := filepath.Join(f.root, "logs", "app.log")
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		appendLines(t, path, liveLine(1, "x"))
+	}()
+	lres, err := f.eng.Tail(ctx, TailQuery{Duration: "1s"})
+	if err != nil || len(lres.Records) != 1 {
+		t.Fatalf("tail: %v %d", err, len(lres.Records))
+	}
+	for _, v := range []any{cres, tres, lres} {
 		out, _ := json.Marshal(v)
 		for _, s := range []string{"POLICYFINGERPRINT", digest, "app.log"} {
 			if strings.Contains(string(out), s) {
 				t.Fatalf("%q on the socket", s)
 			}
 		}
+	}
+}
+
+// TestTraceAcrossSources: a trace merges the records of several sources
+// in time order, matching labels too.
+func TestTraceAcrossSources(t *testing.T) {
+	var b strings.Builder
+	for i := 0; i < 10; i++ {
+		fmt.Fprintf(&b, "time=%s level=info msg=\"req abc123 step %d\"\n", t0.Add(time.Duration(2*i)*time.Second).Format(time.RFC3339), 2*i)
+	}
+	f := newFixture(t, b.String(), nil)
+	p, _ := parse.New(parse.Options{})
+	var recs []source.RawRecord
+	for i := 0; i < 10; i++ {
+		ev := p.Line(fmt.Sprintf("time=%s msg=\"step %d\"", t0.Add(time.Duration(2*i+1)*time.Second).Format(time.RFC3339), 2*i+1))
+		ev.Attrs = []parse.Member{{Key: "trace_id", Value: parse.Value{Kind: parse.KindString, Str: "abc123"}}}
+		recs = append(recs, source.RawRecord{Ref: source.RawRef{Source: "loki", Stream: "s", Offset: int64(i), Length: 1}, Event: ev})
+	}
+	o := f.eng.o
+	o.Sources = map[string]source.Source{"app": f.eng.o.Sources["app"], "loki": labelSource{recs: recs, sels: new([]source.Selector)}}
+	eng, err := New(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := eng.Trace(ctx, TraceQuery{ID: "abc123", From: t0, To: t0.Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Records) != 20 || !res.Complete {
+		t.Fatalf("%d records, complete %v", len(res.Records), res.Complete)
+	}
+	for i, r := range res.Records {
+		if !strings.Contains(rec(t, r)["msg"].(string), fmt.Sprintf("step %d", i)) {
+			t.Fatalf("record %d: %s", i, r)
+		}
+	}
+}
+
+// TestContextEpochAndWork: a ref of another pseudonym epoch is refused; the
+// work of a context call counts the granules read back.
+func TestContextEpochAndWork(t *testing.T) {
+	f := newFixture(t, genLog(t0, 30000, "c@example.org"), nil)
+	old := f.eng.seal("Lr1", refState{Source: "app", Stream: "x", Offset: 0, Length: 10, Epoch: "older", PolicyFP: f.fp})
+	if _, err := f.eng.Context(ctx, ContextQuery{Ref: old}); code(err) != EStale {
+		t.Fatalf("old epoch: %v", err)
+	}
+	ref, _ := firstRef(t, f, func(q *Query) { q.Text = "(order 20000)" })
+	res, err := f.eng.Context(ctx, ContextQuery{Ref: ref, Before: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Scanned.Granules < 2 || res.Scanned.Bytes != int64(res.Scanned.Granules)<<20 {
+		t.Fatalf("scanned %+v: the read-back granule is not counted", res.Scanned)
 	}
 }

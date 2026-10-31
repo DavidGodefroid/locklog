@@ -232,6 +232,14 @@ type Source interface {
 	Around(ctx context.Context, ref RawRef, before, after int) ([]RawRecord, error)
 }
 
+// AroundMeter is implemented by a source whose Around may process more
+// than the records it returns (reading back granules, decompressing a
+// stream from its start): AroundMeasured also returns the bytes processed,
+// which the engine reports and charges.
+type AroundMeter interface {
+	AroundMeasured(ctx context.Context, ref RawRef, before, after int) ([]RawRecord, int64, error)
+}
+
 // Errors of sources. Their text never holds log content.
 var (
 	ErrStale    = errors.New("source: the stream changed since the plan or reference was made")

@@ -89,7 +89,15 @@ func (e *Engine) Context(ctx context.Context, cq ContextQuery) (ContextResult, e
 	}
 	cctx, cancel := context.WithTimeout(ctx, e.o.Limits.Deadline)
 	defer cancel()
-	raws, err := e.o.Sources[rr.Source].Around(cctx, rr, cq.Before, cq.After)
+	var raws []source.RawRecord
+	var processed int64
+	var err error
+	src := e.o.Sources[rr.Source]
+	if m, ok := src.(source.AroundMeter); ok {
+		raws, processed, err = m.AroundMeasured(cctx, rr, cq.Before, cq.After)
+	} else {
+		raws, err = src.Around(cctx, rr, cq.Before, cq.After)
+	}
 	if err != nil {
 		return ContextResult{}, sourceError(err)
 	}
@@ -120,9 +128,6 @@ func (e *Engine) Context(ctx context.Context, cq ContextQuery) (ContextResult, e
 		}
 		outs[i] = out
 		granules[raws[i].Granule] = true
-		if recs[i].Failed() {
-			res.MaskedFailures++
-		}
 	}
 	// Keep the records nearest the target within the output cap.
 	keepLo, keepHi := target, target+1
@@ -147,7 +152,16 @@ func (e *Engine) Context(ctx context.Context, cq ContextQuery) (ContextResult, e
 	res.Records = outs[keepLo:keepHi]
 	res.Target = target - keepLo
 	res.Masking.Kinds = kindsOf(recs[keepLo:keepHi])
-	res.Scanned = Scanned{Bytes: int64(len(granules)) * source.GranuleBytes, Records: int64(len(raws)), Granules: len(granules)}
+	for _, r := range recs[keepLo:keepHi] {
+		if r.Failed() {
+			res.MaskedFailures++
+		}
+	}
+	// The work is granule-rounded: what the source processed (reading
+	// back, decompressing) when it measures it, else the granules of the
+	// records.
+	n := max(int64(len(granules)), (processed+source.GranuleBytes-1)/source.GranuleBytes)
+	res.Scanned = Scanned{Bytes: n * source.GranuleBytes, Records: int64(len(raws)), Granules: int(n)}
 	return res, nil
 }
 
