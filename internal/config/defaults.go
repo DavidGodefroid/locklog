@@ -46,24 +46,24 @@ const (
 
 // Hard ceilings of the per-call budgets: no profile can go past them.
 const (
-	RangeCeiling      = 400 * Day
-	BytesCeiling      = 64 * GiB
-	RecordsCeiling    = 1000
-	OutputCeiling     = 1 * MiB
-	PIIRulesCeiling   = 500
+	RangeCeiling    = 400 * Day
+	BytesCeiling    = 64 * GiB
+	RecordsCeiling  = 1000
+	OutputCeiling   = 1 * MiB
+	PIIRulesCeiling = 500
 	// Rolling budgets: ceilings no profile can go past either.
 	BytesPerHourCeiling = 1 * TiB
 	RateCeiling         = 6000
 	LookupsCeiling      = 1000
 	PIIAddsCeiling      = 100
-	DefaultRotation   = 7 * Day
-	DefaultMaxAge     = 30 * Day
-	MinRotation       = time.Hour
-	MaxPseudonymAge   = 400 * Day
-	DefaultMaxSession = 12 * time.Hour
-	DefaultIdle       = time.Hour
-	MinIdleTimeout    = time.Minute
-	MaxMaxSession     = 7 * Day
+	DefaultRotation     = 7 * Day
+	DefaultMaxAge       = 30 * Day
+	MinRotation         = time.Hour
+	MaxPseudonymAge     = 400 * Day
+	DefaultMaxSession   = 12 * time.Hour
+	DefaultIdle         = time.Hour
+	MinIdleTimeout      = time.Minute
+	MaxMaxSession       = 7 * Day
 )
 
 // Budgets are the per-call and rolling budgets of one kind of source
