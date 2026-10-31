@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -33,20 +34,30 @@ const childEnv = "LOCKLOG_LANDLOCK_TEST_CHILD"
 // work; paths outside every rule are refused. The same writes are refused
 // beneath the exec root. Adding any one of these rights to the read-only
 // rule fails the test, except REFER, which allows nothing without a MAKE_*
-// right there; so does adding any write right to the exec rule, and
-// EXECUTE, MAKE_SYM, MAKE_FIFO, MAKE_CHAR, MAKE_BLOCK or IOCTL_DEV to the
-// read-write rule (its other rights are granted already).
+// right there; so does adding any write right except REFER to the exec
+// rule (IOCTL_DEV through the /dev/full exec rule), and EXECUTE, MAKE_SYM,
+// MAKE_FIFO, MAKE_CHAR, MAKE_BLOCK or IOCTL_DEV to the read-write rule (its
+// other rights are granted already).
 func TestRestrict(t *testing.T) {
 	if os.Getenv(childEnv) != "" {
 		return // the child runs TestRestrictChild only
 	}
-	if abi, why := ABI(); abi == 0 {
+	// CI sets LOCKLOG_REQUIRE_LANDLOCK_ABI: there, a missing or older
+	// Landlock fails instead of skipping the test or its ABI-gated checks.
+	abi, why := ABI()
+	if req := os.Getenv("LOCKLOG_REQUIRE_LANDLOCK_ABI"); req != "" {
+		n, err := strconv.Atoi(req)
+		if err != nil || abi < n {
+			t.Fatalf("LOCKLOG_REQUIRE_LANDLOCK_ABI=%s, the kernel has ABI %d (%s)", req, abi, why)
+		}
+	}
+	if abi == 0 {
 		t.Skip(why)
 	}
 	base := t.TempDir()
 	ro, rw, out := filepath.Join(base, "ro"), filepath.Join(base, "rw"), filepath.Join(base, "outside")
 	ex := filepath.Join(base, "ex")
-	for _, d := range []string{ro, rw, out, ex, filepath.Join(ro, "d"), filepath.Join(ro, "s"), filepath.Join(rw, "a"), filepath.Join(rw, "b"), filepath.Join(ex, "d")} {
+	for _, d := range []string{ro, rw, out, ex, filepath.Join(ro, "d"), filepath.Join(ro, "s"), filepath.Join(rw, "a"), filepath.Join(rw, "b"), filepath.Join(rw, "e"), filepath.Join(ex, "d")} {
 		if err := os.Mkdir(d, 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -57,6 +68,7 @@ func TestRestrict(t *testing.T) {
 	// Empty directories to remove.
 	os.Remove(filepath.Join(ro, "d", "f"))
 	os.Remove(filepath.Join(ex, "d", "f"))
+	os.Remove(filepath.Join(rw, "e", "f"))
 	// Copies of this test binary, to execute: refused beneath the
 	// read-only root, run beneath the exec root.
 	bin, err := os.ReadFile(os.Args[0])
@@ -72,6 +84,9 @@ func TestRestrict(t *testing.T) {
 	cmd.Env = append(os.Environ(), childEnv+"="+base)
 	b, err := cmd.CombinedOutput()
 	if strings.Contains(string(b), "SKIP-CHILD") {
+		if os.Getenv("LOCKLOG_REQUIRE_LANDLOCK_ABI") != "" {
+			t.Fatalf("the child skipped:\n%s", b)
+		}
 		t.Skip(strings.TrimSpace(string(b)))
 	}
 	if err != nil || !strings.Contains(string(b), "CHILD-OK") {
@@ -86,8 +101,9 @@ func TestRestrictChild(t *testing.T) {
 		t.Skip("run by TestRestrict")
 	}
 	ro, rw, out, ex := filepath.Join(base, "ro"), filepath.Join(base, "rw"), filepath.Join(base, "outside"), filepath.Join(base, "ex")
-	// Device file rules: /dev/null read-only, /dev/zero read-write.
-	st, err := Restrict(Rules{ReadOnly: []string{ro, "/dev/null"}, ReadWrite: []string{rw, "/dev/zero"}, Exec: []string{ex}})
+	// Device file rules: /dev/null read-only, /dev/zero read-write,
+	// /dev/full exec.
+	st, err := Restrict(Rules{ReadOnly: []string{ro, "/dev/null"}, ReadWrite: []string{rw, "/dev/zero"}, Exec: []string{ex, "/dev/full"}})
 	if errors.Is(err, syscall.ENOTSUP) {
 		fmt.Println("SKIP-CHILD: built with cgo: AllThreadsSyscall is unavailable")
 		return
@@ -157,7 +173,7 @@ func TestRestrictChild(t *testing.T) {
 	if st.ABI >= 5 {
 		// A device ioctl: EACCES from Landlock, not ENOTTY from the
 		// device, on a read-only and on a read-write device rule.
-		for where, dev := range map[string]string{"read-only": "/dev/null", "read-write": "/dev/zero"} {
+		for where, dev := range map[string]string{"read-only": "/dev/null", "read-write": "/dev/zero", "exec": "/dev/full"} {
 			fd, err := unix.Open(dev, unix.O_RDONLY|unix.O_CLOEXEC, 0)
 			if err != nil {
 				t.Errorf("open %s: %v", dev, err)
@@ -184,6 +200,12 @@ func TestRestrictChild(t *testing.T) {
 		if err := os.Rename(filepath.Join(rw, "a", "f"), filepath.Join(rw, "b", "g")); err != nil {
 			t.Errorf("cross-directory rename beneath the read-write root (REFER): %v", err)
 		}
+	}
+	if err := os.Truncate(filepath.Join(rw, "h"), 0); err != nil {
+		t.Errorf("truncate beneath the read-write root: %v", err)
+	}
+	if err := os.Remove(filepath.Join(rw, "e")); err != nil {
+		t.Errorf("rmdir beneath the read-write root: %v", err)
 	}
 	if err := bindUnix(filepath.Join(rw, "sock")); err != nil {
 		t.Errorf("unix socket beneath the read-write root: %v", err)
@@ -272,7 +294,10 @@ func static(t *testing.T, p string) bool {
 	defer f.Close()
 	for _, ph := range f.Progs {
 		if ph.Type == elf.PT_INTERP {
-			t.Log("exec checks skipped: the test binary is dynamically linked")
+			fmt.Println("EXEC-SKIPPED: the test binary is dynamically linked")
+			if os.Getenv("CGO_ENABLED") == "0" {
+				t.Error("CGO_ENABLED=0, yet the test binary has an interpreter")
+			}
 			return false
 		}
 	}
