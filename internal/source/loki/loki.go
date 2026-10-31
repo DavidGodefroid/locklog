@@ -110,15 +110,26 @@ func (s *Source) Kind() string { return Kind }
 func (s *Source) trustedLabel(n string) bool { return slices.Contains(s.o.TrustedLabels, n) }
 func (s *Source) trustedMeta(n string) bool  { return slices.Contains(s.o.TrustedMetadata, n) }
 
-// selector builds the server-side selector: the profile's, plus the terms
-// on trusted labels and metadata. Terms on other fields are ignored here
-// (the engine evaluates them after masking).
+// pushable reports whether a term means the same in Loki as locally: one
+// on a trusted label or metadata field, without an empty value (Loki's
+// x="" also matches an absent x, and x!="" means "present", where
+// source.Selector.Match needs x present and empty for = "").
+func (s *Source) pushable(t source.Term) bool {
+	return (s.trustedLabel(t.Field) || s.trustedMeta(t.Field)) && len(t.Values) > 0 && !slices.Contains(t.Values, "")
+}
+
+// selector builds the server-side selector: the profile's, plus the
+// pushable terms. Other terms are ignored here (the engine evaluates every
+// term after masking).
 func (s *Source) selector(sel source.Selector) Selector {
 	var out Selector
 	for k, v := range s.o.Selector {
 		out.Stream = append(out.Stream, Matcher{Name: k, Op: "=", Values: []string{v}})
 	}
 	for _, t := range sel.Terms {
+		if !s.pushable(t) {
+			continue
+		}
 		var m Matcher
 		switch t.Op {
 		case "=", "in":
@@ -634,7 +645,7 @@ func (s *Source) IndexCounts(ctx context.Context, q source.CountQuery) (source.C
 		}
 	}
 	for _, t := range q.Selector.Terms {
-		if !s.trustedLabel(t.Field) && !s.trustedMeta(t.Field) {
+		if !s.pushable(t) {
 			return source.CountResult{}, source.ErrNotIndexable
 		}
 	}

@@ -748,3 +748,30 @@ func TestParseSeconds(t *testing.T) {
 		}
 	}
 }
+
+func TestEmptyValuesNotPushedDown(t *testing.T) {
+	// In Loki, x="" also matches an absent x and x!="" means present;
+	// locally, = "" needs x present and empty. Such terms stay local.
+	for _, term := range []source.Term{
+		{Field: "level", Op: "=", Values: []string{""}},
+		{Field: "level", Op: "!=", Values: []string{""}},
+		{Field: "level", Op: "in", Values: []string{"error", ""}},
+		{Field: "trace_id", Op: "!=", Values: []string{"t1", ""}},
+	} {
+		f := &fakeLoki{entries: dataset(40)}
+		s := newSource(t, f, nil)
+		recs := scanAll(t, s, source.Range{From: t0, To: t0.Add(time.Hour)}, source.Selector{Terms: []source.Term{term}})
+		if len(recs) != 40 {
+			t.Fatalf("%+v: %d records, want all 40 (the engine filters)", term, len(recs))
+		}
+		for _, q := range f.queries {
+			if strings.Contains(q, term.Field) {
+				t.Fatalf("%+v pushed down: %s", term, q)
+			}
+		}
+		if _, err := s.IndexCounts(ctx, source.CountQuery{Range: source.Range{From: t0, To: t0.Add(20 * time.Minute)}, Bucket: 5 * time.Minute,
+			Selector: source.Selector{Terms: []source.Term{term}}}); !errors.Is(err, source.ErrNotIndexable) {
+			t.Fatalf("%+v counted server-side: %v", term, err)
+		}
+	}
+}
