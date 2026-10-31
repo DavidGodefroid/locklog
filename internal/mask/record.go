@@ -102,8 +102,9 @@ type Record struct {
 	// kinds masked in this record (sorted, distinct): detector kinds,
 	// "secret", "redacted", "key".
 	kinds []string
-	// secretPaths are the shown paths of leaves that held a secret span:
-	// lookup is refused on them.
+	// secretPaths are the shown paths of values that held a secret (or
+	// were masked whole for their secret name): HadSecret reports them,
+	// and callers refuse lookup on them.
 	secretPaths []string
 	// failed: the masker failed on this record and withheld all of it.
 	failed bool

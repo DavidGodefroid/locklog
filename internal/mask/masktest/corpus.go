@@ -218,6 +218,17 @@ func percentAll(v string, times int) string {
 // Lines generates n lines: every kind, in every position (JSON value,
 // nested value, key, number, array item, logfmt value, free text) and
 // every encoding, in turn.
+// Positions is the number of places Lines plants a canary in.
+const Positions = 11
+
+// RulesForCorpus is the project rule file the corpus's rule positions
+// assume.
+const RulesForCorpus = "[[mask]]\nfield = \"cust\"\nmode = \"pseudonym\"\n"
+
+// SecretNameForCorpus is the secret-name test the corpus's secret
+// positions assume.
+func SecretNameForCorpus(name string) bool { return name == "password" || name == "token" }
+
 func (g *Gen) Lines(n int) []Line {
 	out := make([]Line, 0, n)
 	for i := range n {
@@ -231,7 +242,7 @@ func (g *Gen) Lines(n int) []Line {
 		if enc == "json-u" {
 			jsonW = w
 		}
-		switch pos := (i / (len(Kinds) * len(Encodings))) % 8; pos {
+		switch pos := (i / (len(Kinds) * len(Encodings))) % Positions; pos {
 		case 0:
 			text, format = fmt.Sprintf(`{"ts":"%s","level":"error","detail":"%s","status":502}`, ts, jsonW), "json"
 		case 1:
@@ -252,6 +263,12 @@ func (g *Gen) Lines(n int) []Line {
 			text, format = fmt.Sprintf(`{"ts":"%s","msg":"login by %s from 203.0.113.9"}`, ts, jsonW), "json"
 		case 7:
 			text, format = fmt.Sprintf(`%s GET /api/orders?q=%s&page=2 HTTP/1.1 200`, ts, w), "plain"
+		case 8: // under an object a project rule pseudonymises (RulesForCorpus)
+			text, format = fmt.Sprintf(`{"ts":"%s","cust":{"id":"C-77 %s","tags":["%s"]}}`, ts, jsonW, jsonW), "json"
+		case 9: // under an object whose name is a secret's (SecretNameForCorpus)
+			text, format = fmt.Sprintf(`{"ts":"%s","password":{"value":"%s"},"token":["%s"]}`, ts, jsonW, jsonW), "json"
+		case 10: // under an object an agent rule names ("meta")
+			text, format = fmt.Sprintf(`{"ts":"%s","meta":{"note":"%s","deep":{"x":"%s"}}}`, ts, jsonW, jsonW), "json"
 		}
 		out = append(out, Line{Text: text, Format: format, Canaries: []Canary{{kind, v}}})
 	}

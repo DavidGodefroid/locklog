@@ -2,6 +2,7 @@ package mask
 
 import (
 	"fmt"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -101,8 +102,8 @@ func (m *Masker) Mask(source string, ev parse.Event) (rec Record) {
 	}()
 	w := &walk{m: m, source: source, kinds: map[string]bool{}}
 	rec = Record{ok: true, ts: ev.Time, hasTime: ev.HasTime, format: ev.Format, offset: ev.Offset, length: ev.Length}
-	rec.fields = w.members(ev.Fields, "", "", false)
-	rec.attrs = w.members(ev.Attrs, "", "", true)
+	rec.fields = w.members(ev.Fields, "", "", false, inherited{})
+	rec.attrs = w.members(ev.Attrs, "", "", true, inherited{})
 	if ev.Message != "" || ev.Fields == nil {
 		rec.msg = w.text(ev.Message)
 	}
@@ -111,12 +112,28 @@ func (m *Masker) Mask(source string, ev parse.Event) (rec Record) {
 	return rec
 }
 
-// Text masks a string that leaves the console other than as a record
-// (names in `sources`, bucket keys, refusal echoes, errors, audit
-// causes): secrets, then personal values.
+// Text masks a string read from the logs that leaves the console other
+// than as a record (names in `sources`, bucket keys, errors, audit
+// causes): secrets, then personal values as pseudonyms. Never pass it
+// text the agent wrote: the pseudonym of a guessed value would answer
+// whether that value is in the logs (design §4.4); use RedactText.
 func (m *Masker) Text(s string) string {
 	w := &walk{m: m, kinds: map[string]bool{}}
 	return w.text(s)
+}
+
+// RedactText masks text the agent wrote before it is echoed back (refusal
+// echoes): secrets as ⟦secret⟧, personal values as ⟦redacted⟧, never as a
+// pseudonym (no oracle, design §4.4).
+func (m *Masker) RedactText(s string) string {
+	w := &walk{m: m, kinds: map[string]bool{}}
+	s = cleanSource(s)
+	if len(s) > pii.DetectLimit {
+		s = pii.CutAt(s, pii.DetectLimit)
+	}
+	s = replace(s, w.find(m.o.Secrets, s), func(string, pii.Match) string { return Secret })
+	s = replace(s, w.values(s), func(string, pii.Match) string { return Redacted })
+	return outputSafe(s)
 }
 
 // walk masks one record.
@@ -127,7 +144,15 @@ type walk struct {
 	secretPaths []string
 }
 
-func (w *walk) members(ms []parse.Member, clearPath, shownPath string, trusted bool) []Field {
+// inherited is what a container's name and rules impose on everything
+// under it: a rule or a name on "user" covers "user.first".
+type inherited struct {
+	pseudo    *Rule  // a human pseudonym rule on an ancestor
+	personal  bool   // an ancestor's name looks personal or quasi-identifying
+	agentMode string // an agent rule on an ancestor ("" for none)
+}
+
+func (w *walk) members(ms []parse.Member, clearPath, shownPath string, trusted bool, inh inherited) []Field {
 	if ms == nil {
 		return nil
 	}
@@ -135,7 +160,7 @@ func (w *walk) members(ms []parse.Member, clearPath, shownPath string, trusted b
 	for _, mem := range ms {
 		name, shownName := w.key(mem.Key)
 		cp, sp := join(clearPath, name), join(shownPath, shownName)
-		out = append(out, Field{name: shownName, value: w.value(mem.Value, name, cp, sp, trusted)})
+		out = append(out, Field{name: shownName, value: w.value(mem.Value, name, cp, sp, trusted, inh)})
 	}
 	return out
 }
@@ -162,17 +187,41 @@ func (w *walk) key(k string) (string, string) {
 	return k, Token(KeyKind, id)
 }
 
-func (w *walk) value(v parse.Value, name, clearPath, shownPath string, trusted bool) Value {
+func (w *walk) value(v parse.Value, name, clearPath, shownPath string, trusted bool, inh inherited) Value {
 	trusted = trusted || w.m.trusted[clearPath]
-	switch v.Kind {
-	case parse.KindObject:
-		return Value{kind: Object, members: w.members(v.Members, clearPath, shownPath, trusted)}
-	case parse.KindArray:
+	if v.Kind == parse.KindObject || v.Kind == parse.KindArray {
+		// A container's name and rules decide for all it holds (design
+		// §4.2): secrets first and whole, then a human redact rule; a
+		// pseudonym rule, a personal name or an agent rule is handed down
+		// to every value under it.
+		if w.m.o.SecretName != nil && w.m.o.SecretName(name) {
+			w.kinds["secret"] = true
+			w.secretPaths = append(w.secretPaths, shownPath)
+			return Value{kind: String, text: Secret}
+		}
+		if rule, ok := w.m.o.Rules.human(w.source, clearPath); ok && rule.Mode != ModeAllow {
+			if rule.Mode == ModeRedact {
+				w.kinds["redacted"] = true
+				return Value{kind: String, text: Redacted}
+			}
+			inh.pseudo = &rule
+		}
+		if !trusted && (pii.LooksPersonal(name) || pii.LooksQuasi(name)) {
+			inh.personal = true
+		}
+		if mode, ok := w.m.o.Rules.agent(w.source, clearPath); ok && (inh.agentMode == "" || mode == ModeRedact) {
+			inh.agentMode = mode
+		}
+		if v.Kind == parse.KindObject {
+			return Value{kind: Object, members: w.members(v.Members, clearPath, shownPath, trusted, inh)}
+		}
 		items := make([]Value, len(v.Items))
 		for i, it := range v.Items {
-			items[i] = w.value(it, name, clearPath, shownPath, trusted)
+			items[i] = w.value(it, name, clearPath, shownPath, trusted, inh)
 		}
 		return Value{kind: Array, items: items}
+	}
+	switch v.Kind {
 	case parse.KindNull:
 		if !trusted && w.m.o.Structured == StructuredRedactUnknown && !w.m.o.Rules.allowed(w.source, clearPath) {
 			w.kinds["redacted"] = true
@@ -180,11 +229,11 @@ func (w *walk) value(v parse.Value, name, clearPath, shownPath string, trusted b
 		}
 		return Value{kind: Null}
 	}
-	return w.leaf(v, name, clearPath, shownPath, trusted)
+	return w.leaf(v, name, clearPath, shownPath, trusted, inh)
 }
 
 // leaf masks a scalar in the fixed order (design §4.2).
-func (w *walk) leaf(v parse.Value, name, clearPath, shownPath string, trusted bool) Value {
+func (w *walk) leaf(v parse.Value, name, clearPath, shownPath string, trusted bool, inh inherited) Value {
 	s := cleanSource(v.Str)
 	if len(s) > pii.DetectLimit {
 		s = pii.CutAt(s, pii.DetectLimit)
@@ -203,28 +252,38 @@ func (w *walk) leaf(v parse.Value, name, clearPath, shownPath string, trusted bo
 	}
 	// Steps 2-5 work on s, the string step 1 produced.
 	rule, hasRule := w.m.o.Rules.human(w.source, clearPath)
+	if !hasRule && inh.pseudo != nil {
+		rule, hasRule = *inh.pseudo, true
+	}
+	var out Value
 	switch {
 	case hasRule && rule.Mode == ModeAllow:
-		return w.detected(v.Kind, s, len(secrets) > 0)
+		out = w.detected(v.Kind, s, len(secrets) > 0)
 	case hasRule && rule.Mode == ModeRedact:
 		w.kinds["redacted"] = true
 		return Value{kind: String, text: Redacted}
 	case hasRule && rule.Mode == ModePseudonym:
-		return w.whole(s, rule.Kind)
-	case !trusted && (pii.LooksPersonal(name) || pii.LooksQuasi(name)):
-		return w.whole(s, "")
-	}
-	out := w.detected(v.Kind, s, len(secrets) > 0)
-	if !trusted && w.m.o.Structured == StructuredRedactUnknown && !w.m.o.Rules.allowed(w.source, clearPath) {
-		w.kinds["redacted"] = true
-		return Value{kind: String, text: Redacted}
-	}
-	// An agent rule only tightens: it masks a value nothing masked whole.
-	if mode, ok := w.m.o.Rules.agent(w.source, clearPath); ok && !wholeMasked(out.text) {
-		if mode == ModeRedact {
+		out = w.whole(s, rule.Kind)
+	case !trusted && (inh.personal || pii.LooksPersonal(name) || pii.LooksQuasi(name)):
+		out = w.whole(s, "")
+	default:
+		out = w.detected(v.Kind, s, len(secrets) > 0)
+		if !trusted && w.m.o.Structured == StructuredRedactUnknown && !w.m.o.Rules.allowed(w.source, clearPath) {
 			w.kinds["redacted"] = true
 			return Value{kind: String, text: Redacted}
 		}
+	}
+	// An agent rule only tightens: redact always wins; a pseudonym masks a
+	// value nothing masked whole.
+	mode, ok := w.m.o.Rules.agent(w.source, clearPath)
+	if inh.agentMode != "" && (!ok || inh.agentMode == ModeRedact) {
+		mode, ok = inh.agentMode, true
+	}
+	switch {
+	case ok && mode == ModeRedact:
+		w.kinds["redacted"] = true
+		return Value{kind: String, text: Redacted}
+	case ok && !wholeMasked(out.text):
 		return w.whole(s, "")
 	}
 	return out
@@ -435,16 +494,11 @@ func validLiteral(k parse.Kind, s string) bool {
 	if k == parse.KindBool {
 		return s == "true" || s == "false"
 	}
-	if s == "" {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		if !strings.ContainsRune("0123456789+-.eE", rune(s[i])) {
-			return false
-		}
-	}
-	return true
+	return jsonNumber.MatchString(s)
 }
+
+// jsonNumber is a JSON number literal (RFC 8259 §6).
+var jsonNumber = regexp.MustCompile(`^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?$`)
 
 // cleanSource prepares source text for masking: the placeholder brackets
 // become U+FFFD (design §4.4 rule 6: only the masker writes them), and

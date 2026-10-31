@@ -417,7 +417,8 @@ func TestLeakHarnessFindsLeaks(t *testing.T) {
 			leaked++
 		}
 	}
-	if leaked < len(lines)*95/100 {
+	// Some positions are masked by their names alone (personal names).
+	if leaked < len(lines)*85/100 {
 		t.Errorf("the harness found %d leaks in %d unmasked lines", leaked, len(lines))
 	}
 }
@@ -429,13 +430,30 @@ func FuzzMaskNoLeak(f *testing.F) {
 		f.Add(l.Text)
 	}
 	f.Add(`{"a":"x jean@example.com y","b":4111111111111111}`)
-	m := newMasker(f, Options{Structured: StructuredDetect})
+	f.Add(`{"cust":{"id":"jean@example.com"},"password":{"v":["x"]},"meta":{"n":"BE68539007547034"}}`)
+	rules, err := ParseProjectRules([]byte(masktest.RulesForCorpus))
+	if err != nil {
+		f.Fatal(err)
+	}
+	ms := []*Masker{
+		newMasker(f, Options{Structured: StructuredDetect}),
+		newMasker(f, Options{Structured: StructuredRedactUnknown, Rules: &rules, SecretName: masktest.SecretNameForCorpus}),
+		newMasker(f, Options{Structured: StructuredDetect, Rules: &rules, SecretName: masktest.SecretNameForCorpus}),
+	}
 	p, _ := parse.New(parse.Options{})
 	values := Detectors(pii.AllDetectors())
 	f.Fuzz(func(t *testing.T, line string) {
 		if len(line) > 4096 {
 			return
 		}
+		for _, m := range ms {
+			fuzzOneNoLeak(t, m, p, values, line)
+		}
+	})
+}
+
+func fuzzOneNoLeak(t *testing.T, m *Masker, p *parse.Parser, values Detectors, line string) {
+	{
 		r := m.Mask("api", p.Line(line))
 		out, err := json.Marshal(r)
 		if err != nil {
@@ -475,12 +493,100 @@ func FuzzMaskNoLeak(f *testing.F) {
 				t.Fatalf("%s %q survived in %q (record %s)", mt.Kind, plain[mt.Start:mt.End], s, out)
 			}
 		}
-	})
+	}
 }
 
 // The masker's modes are the profile's.
 func TestModesMatchConfig(t *testing.T) {
 	if StructuredRedactUnknown != config.StructuredRedactUnknown || StructuredDetect != config.StructuredDetect {
 		t.Error("structured modes differ from internal/config")
+	}
+}
+
+// A secret name, a human rule or an agent rule on an object or an array
+// decides for everything under it (design §4.2: secrets first and final).
+func TestContainerNamesAndRulesCoverChildren(t *testing.T) {
+	rules, err := ParseProjectRules([]byte("[[mask]]\nfield = \"user\"\n[[mask]]\nfield = \"cust\"\nmode = \"pseudonym\"\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ag, err := OpenAgentRules(filepath.Join(t.TempDir(), "pii"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rules.Agent = ag
+	for _, mode := range []string{StructuredDetect, StructuredRedactUnknown} {
+		m := newMasker(t, Options{Structured: mode, Rules: &rules, SecretName: func(n string) bool { return n == "password" }})
+		line := `{"user":{"first":"Bobby"},"cust":{"id":"C-77 Bobbie","more":[{"n":"Bobbo"}]},"password":{"value":"hunter2xyz"},"pw":1,"user_name":{"given":"Robert"},"meta":{"note":"Robertine","deep":{"x":"Robertina"}},"arr":[{"password":["hunter3xyz"]}]}`
+		m.Mask("api", event(t, line)) // shows "meta" to the agent
+		if err := m.AgentAdd("api", "meta", ModeRedact, t0, AgentLimits{PerHour: 10, Total: 50}); err != nil && !errors.Is(err, ErrRuleExists) {
+			t.Fatal(err)
+		}
+		out := encode(t, m.Mask("api", event(t, line)))
+		for _, clear := range []string{"Bobby", "Bobbie", "Bobbo", "C-77", "hunter2xyz", "hunter3xyz", "Robert", "Robertine", "Robertina"} {
+			if strings.Contains(out, clear) {
+				t.Errorf("%s: %q survived: %s", mode, clear, out)
+			}
+		}
+		if !strings.Contains(out, `"password":"`+Secret+`"`) {
+			t.Errorf("%s: a secret-named object is not masked whole: %s", mode, out)
+		}
+	}
+}
+
+// The corpus positions under a rule, a secret name or an agent rule are
+// masked by those alone: no detector runs.
+func TestLeakHarnessRulePositions(t *testing.T) {
+	rules, err := ParseProjectRules([]byte(masktest.RulesForCorpus))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ag, err := OpenAgentRules(filepath.Join(t.TempDir(), "pii"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rules.Agent = ag
+	p, _ := parse.New(parse.Options{})
+	per := len(masktest.Kinds) * len(masktest.Encodings)
+	lines := masktest.New(7).Lines(per * masktest.Positions * 3)
+	for _, mode := range []string{StructuredDetect, StructuredRedactUnknown} {
+		m := newMasker(t, Options{Structured: mode, Rules: &rules, Values: noFinder{}, Secrets: noFinder{}, SecretName: masktest.SecretNameForCorpus, Trusted: []string{"ts"}})
+		m.Mask("api", p.Line(`{"meta":{"note":"x"}}`))
+		if err := m.AgentAdd("api", "meta", ModePseudonym, t0, AgentLimits{PerHour: 10, Total: 50}); err != nil && !errors.Is(err, ErrRuleExists) {
+			t.Fatal(err)
+		}
+		var hits []masktest.Hit
+		for i, l := range lines {
+			if pos := (i / per) % masktest.Positions; pos < 8 {
+				continue
+			}
+			out, err := json.Marshal(m.Mask("api", p.Line(l.Text)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			hits = append(hits, masktest.Scan(l.Text, out, l.Canaries)...)
+		}
+		for i, h := range hits {
+			if i < 10 {
+				t.Errorf("%s: %s %q leaked as %q in %q", mode, h.Canary.Kind, h.Canary.Value, h.Form, h.Where)
+			}
+		}
+	}
+}
+
+func TestRedactTextNoPseudonymAndZeroLimits(t *testing.T) {
+	m := newMasker(t, Options{Structured: StructuredDetect})
+	got := m.RedactText("is jean@example.com there? key AKIAIOSFODNN7EXAMPLE")
+	if strings.Contains(got, "jean") || strings.Contains(got, Open+"email") || !strings.Contains(got, Redacted) {
+		t.Errorf("RedactText = %q", got)
+	}
+	ag, err := OpenAgentRules(filepath.Join(t.TempDir(), "pii"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, lim := range []AgentLimits{{}, {PerHour: 1}, {Total: 1}} {
+		if err := ag.add("api", "x", ModeRedact, t0, lim); !errors.Is(err, ErrRuleCap) {
+			t.Errorf("limits %+v: add = %v, want ErrRuleCap", lim, err)
+		}
 	}
 }

@@ -27,7 +27,8 @@ var (
 	ErrRuleMode     = errors.New("mask: an agent rule is redact or pseudonym")
 )
 
-// AgentLimits cap the agent's rules: per hour and in total.
+// AgentLimits cap the agent's rules: per hour and in total. Both must be
+// positive: a zero limit refuses every rule (it never means unlimited).
 type AgentLimits struct {
 	PerHour int
 	Total   int
@@ -152,7 +153,7 @@ func (a *AgentRules) add(source, clearPath, mode string, now time.Time, lim Agen
 			recent++
 		}
 	}
-	if lim.Total > 0 && len(a.entries) >= lim.Total || lim.PerHour > 0 && recent >= lim.PerHour {
+	if lim.Total <= 0 || lim.PerHour <= 0 || len(a.entries) >= lim.Total || recent >= lim.PerHour {
 		return ErrRuleCap
 	}
 	entries := append(slices.Clone(a.entries), agentEntry{Digest: d, Mode: mode, Added: now.UTC()})
