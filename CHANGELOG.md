@@ -14,3 +14,9 @@ uses [Semantic Versioning](https://semver.org/).
   journald, docker and Loki sources, masking modes, budgets and their
   ceilings, production rules, and the policy diff that marks every
   loosening for the console's review.
+- The image (`ghcr.io/davidgodefroid/locklog`, accounts 10050-10052, `-vault`
+  variant), the host launcher `scripts/locklog` (the console's confinement
+  and read-only, non-recursive mount plan checked on the host; `mcp` as the
+  agent account; `update`, `version`), `scripts/install.sh` (cosign-verified
+  archive and image, root-owned launcher, snapshot release bases), and the
+  release workflow (draft, signed images, anonymous pull, publish, pages).

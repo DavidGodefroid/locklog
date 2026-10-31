@@ -1,0 +1,520 @@
+#!/bin/sh
+# locklog: the launcher. locklog runs in Docker; this script, installed as
+# `locklog` on the host by scripts/install.sh, runs every command in the
+# image, each with the account, the mounts and the network it needs:
+#
+#   console    as the console account (locklog, uid 10051), in a container
+#              of its own per project (locklog-console-<n>): no capability,
+#              read-only root, bounded CPU, memory and processes, no log
+#              driver, no network unless LOCKLOG_NETWORK names one; the log
+#              directories of the profile's mount plan bound read-only and
+#              non-recursive; the socket and home volumes
+#   mcp        as the image's agent account (uid 10052): the MCP server of
+#              a host agent (the non-production trial; the server refuses
+#              production profiles), with the socket volume only
+#   update     replace this launcher with a release's, then pull its image
+#   version    this launcher's and the image's versions
+#   anything else  as the agent account, with the socket volume
+#
+# The project (the nearest directory up from here that holds .locklog/, or
+# this directory) is mounted read-only at its own path.
+#
+# Environment:
+#   LOCKLOG_IMAGE        image to run (default: the release image of this
+#                        launcher's version; `locklog` for a launcher run
+#                        from a clone, the tag of `docker build -t locklog .`)
+#   LOCKLOG_VAULT=1      the image with the vault CLI (credentials = "vault")
+#   LOCKLOG_NETWORK      a Docker network the console joins to reach a
+#                        backend (default: none). Agents must not join it.
+#   LOCKLOG_EXTRA_ROOTS  log directories beyond the built-in allowlist
+#                        (/var/log, /run/log/journal), separated by spaces
+#   VAULT_ADDR, VAULT_NAMESPACE  passed to the console
+set -eu
+
+# scripts/install.sh and locklog update write the release version here,
+# and the digests of its images once their cosign signatures verify: the
+# launcher then runs the image by digest, never by a tag that could move.
+launcher_version=dev
+image_digest=
+vault_image_digest=
+
+repo="DavidGodefroid/locklog"
+registry="ghcr.io/davidgodefroid/locklog"
+
+say() { printf 'locklog: %s\n' "$*" >&2; }
+die() {
+	say "$*"
+	exit 1
+}
+
+image="${LOCKLOG_IMAGE:-}"
+if [ -z "$image" ]; then
+	if [ "$launcher_version" = dev ]; then
+		image=locklog
+	else
+		image="$registry:$launcher_version"
+	fi
+	if [ "$launcher_version" != dev ] && [ -n "$image_digest" ]; then
+		image="$registry@$image_digest"
+		[ "${LOCKLOG_VAULT:-0}" = 1 ] && image="$registry@$vault_image_digest"
+	elif [ "${LOCKLOG_VAULT:-0}" = 1 ]; then
+		case "$image" in
+		*:*) image="$image-vault" ;;
+		*) image="$image:vault" ;;
+		esac
+	fi
+fi
+
+# The project root: the nearest directory up from here that holds .locklog/.
+here="$(pwd -P)"
+project="$here"
+d="$here"
+while :; do
+	if [ -d "$d/.locklog" ]; then
+		project="$d"
+		break
+	fi
+	[ "$d" = / ] && break
+	d="$(dirname "$d")"
+done
+case "$here" in
+"$project" | "$project"/*) workdir=$here ;;
+*) workdir=$project ;;
+esac
+
+tty=-i
+if [ -t 0 ] && [ -t 1 ]; then tty=-it; fi
+
+need_docker() {
+	command -v docker >/dev/null 2>&1 || die "docker is required: locklog runs in Docker"
+}
+
+# safe PATH: PATH holds none of the characters a docker -v or --mount spec,
+# the LOCKLOG_EXPECT_ROOTS list (entries "dev:inode path;") or the mount
+# plan cannot carry.
+safe() {
+	case "$1" in
+	*[,=:\;\"\'\`\\]* | *"
+"*) return 1 ;;
+	esac
+	printf '%s' "$1" | LC_ALL=C grep -q '[[:cntrl:]]' && return 1
+	return 0
+}
+
+# physical DIR: DIR is an existing directory whose physical path is itself
+# (no symbolic link on its path, no "..").
+physical() {
+	[ -d "$1" ] && [ ! -L "$1" ] && [ "$(cd "$1" 2>/dev/null && pwd -P)" = "$1" ]
+}
+
+# Portable stat: the device:inode, the numeric group, the group name and
+# the octal mode of PATH.
+if [ "$(uname -s)" = Darwin ]; then
+	devino() { stat -f '%d:%i' "$1"; }
+	fgid() { stat -f '%g' "$1"; }
+	fgroup() { stat -f '%Sg' "$1"; }
+	fmode() { stat -f '%Lp' "$1"; }
+else
+	devino() { stat -c '%d:%i' "$1"; }
+	fgid() { stat -c '%g' "$1"; }
+	fgroup() { stat -c '%G' "$1"; }
+	fmode() { stat -c '%a' "$1"; }
+fi
+
+# bits PATH WHO WANT: whether the mode of PATH grants WANT (r, x or rx) to
+# WHO (g or o).
+bits() {
+	m=$(fmode "$1")
+	m=${m#"${m%???}"} # the last three octal digits
+	case "$2" in
+	g) v=$(printf '%s' "$m" | cut -c2) ;;
+	o) v=$(printf '%s' "$m" | cut -c3) ;;
+	esac
+	case "$3" in
+	r) [ $((v & 4)) -ne 0 ] ;;
+	x) [ $((v & 1)) -ne 0 ] ;;
+	rx) [ $((v & 5)) -eq 5 ] ;;
+	esac
+}
+
+# The groups the console may join to read logs: never a group outside this
+# list (gid 0 is not on it: no root-owned log is read through it here).
+group_allowed() {
+	case "$1" in
+	adm | systemd-journal) return 0 ;;
+	esac
+	return 1
+}
+
+# The roots log directories may be bound from.
+roots="/var/log /run/log/journal"
+for r in ${LOCKLOG_EXTRA_ROOTS:-}; do
+	case "$r" in
+	/) die "LOCKLOG_EXTRA_ROOTS: / cannot be a log root" ;;
+	/*) ;;
+	*) die "LOCKLOG_EXTRA_ROOTS: $r is not an absolute path" ;;
+	esac
+	safe "$r" || die "LOCKLOG_EXTRA_ROOTS: $r holds a character a mount cannot carry"
+	physical "$r" || die "LOCKLOG_EXTRA_ROOTS: $r is not a directory with no symbolic link on its path"
+	roots="$roots $r"
+done
+
+under_root() {
+	for r in $roots; do
+		case "$1" in
+		"$r" | "$r"/*) return 0 ;;
+		esac
+	done
+	return 1
+}
+
+# The mount plan, filled by plan_line: the --mount and --group-add
+# arguments, the dev:inode of each root, and the plan text printed before
+# docker run.
+mount_args=
+gids=
+expect=
+plan_text=
+seen_dirs=
+
+add_gid() {
+	case " $gids " in
+	*" $1 "*) ;;
+	*) gids="$gids $1" ;;
+	esac
+}
+
+# bind DIR: bind DIR read-only and non-recursive at its own path, once.
+bind() {
+	case " $seen_dirs " in
+	*" $1 "*) return 0 ;;
+	esac
+	seen_dirs="$seen_dirs $1"
+	mount_args="$mount_args --mount type=bind,src=$1,dst=$1,readonly,$nonrecursive"
+	expect="$expect$(devino "$1") $1;"
+	plan_text="$plan_text  bind $1 (read-only, non-recursive)
+"
+}
+
+# reach DIR [FILE]: the gid the console needs to search DIR and read FILE
+# (and to list DIR), added when it is an allowed group; nothing when the
+# others' bits suffice; a warning otherwise.
+reach() {
+	dir=$1
+	file=${2:-}
+	if bits "$dir" o rx && { [ -z "$file" ] || bits "$file" o r; }; then
+		return 0
+	fi
+	target=${file:-$dir}
+	g=$(fgid "$target")
+	gn=$(fgroup "$target")
+	if group_allowed "$gn" && bits "$dir" g rx && { [ -z "$file" ] || bits "$file" g r; }; then
+		add_gid "$g"
+		return 0
+	fi
+	say "warning: the console cannot read $target (group $gn is not one it may join: adm, systemd-journal)"
+}
+
+# plan_line LINE: one line of `locklog mounts`.
+plan_line() {
+	set -f
+	# shellcheck disable=SC2086 # split on purpose
+	set -- $1
+	set +f
+	case "${1:-}" in
+	file)
+		[ $# -eq 3 ] || die "mount plan: malformed line: file $*"
+		dir=$2
+		glob=$3
+		safe "$dir" && safe "$glob" || die "mount plan: $dir holds a character a mount cannot carry"
+		case "$dir" in /) die "mount plan: / cannot be bound" ;; /*) ;; *) die "mount plan: $dir is not absolute" ;; esac
+		case "$glob" in "$dir"/*) ;; *) die "mount plan: $glob is not under $dir" ;; esac
+		physical "$dir" || die "mount plan: $dir is not a directory with no symbolic link on its path"
+		under_root "$dir" || die "mount plan: $dir is not under an allowed log root ($roots); a human can add one with LOCKLOG_EXTRA_ROOTS"
+		bind "$dir"
+		reach "$dir"
+		# The files the glob names today (not ** globs, which sh does not
+		# expand): each one readable through an allowed group.
+		case "$glob" in
+		*'**'*) ;;
+		*)
+			for f in $glob; do
+				[ -f "$f" ] && [ ! -L "$f" ] || continue
+				fd=$(dirname "$f")
+				reach "$fd" "$f"
+			done
+			;;
+		esac
+		;;
+	journald)
+		[ $# -eq 1 ] || die "mount plan: malformed line: $*"
+		found=
+		for j in /var/log/journal /run/log/journal; do
+			physical "$j" || continue
+			found=1
+			bind "$j"
+			reach "$j"
+		done
+		[ -n "$found" ] || say "warning: no journal directory (/var/log/journal, /run/log/journal) on this host"
+		;;
+	*)
+		die "mount plan: unknown line: $*"
+		;;
+	esac
+}
+
+# ensure_volume NAME DIR OWNER: the named volume NAME exists, created from
+# the image (Docker gives an empty volume the owner and mode of DIR in the
+# image on first use), and DIR in it has OWNER (uid:gid:mode). A volume
+# someone else created with another owner is refused.
+ensure_volume() {
+	docker volume inspect "$1" >/dev/null 2>&1 || docker volume create "$1" >/dev/null
+	got=$(docker run --rm --network none --user 0 --entrypoint stat -v "$1:$2" "$image" -c '%u:%g:%a' "$2") ||
+		die "could not check the owner of the $1 volume"
+	[ "$got" = "$3" ] ||
+		die "the $1 volume has owner and mode $got, not $3: it was not created by locklog; remove it (docker volume rm $1) and start again"
+}
+
+# check_tag TAG: TAG is a release tag (it goes into URLs and into the
+# launcher's text).
+check_tag() {
+	printf '%s\n' "$1" | grep -Eqx 'v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?' ||
+		die "invalid version $1: a release tag, vX.Y.Z"
+}
+
+# verified_digest TAG: the digest of the release image registry:TAG, once
+# cosign verifies its signature by the release workflow; empty when it does
+# not verify.
+verified_digest() {
+	cosign verify --certificate-identity "$identity" \
+		--certificate-oidc-issuer https://token.actions.githubusercontent.com \
+		"$registry:$1" 2>/dev/null |
+		sed -n 's/.*"docker-manifest-digest":"\(sha256:[0-9a-f]\{64\}\)".*/\1/p' | sed -n 1p
+}
+
+# update [vX.Y.Z]: replace this launcher with a release's (the cosign
+# signature of checksums.txt and the archive's checksum checked, as
+# scripts/install.sh does), then pull that release's image.
+update() {
+	if [ -n "${1:-}" ]; then
+		case "$1" in v*) check_tag "$1" ;; *) check_tag "v$1" ;; esac
+	fi
+	if command -v curl >/dev/null 2>&1; then
+		fetch() { curl -fsSL --proto '=https' -o "$2" "$1"; }
+		latest() { curl -fsSLI --proto '=https' -o /dev/null -w '%{url_effective}' "https://github.com/$repo/releases/latest"; }
+	elif command -v wget >/dev/null 2>&1; then
+		fetch() { wget -q -O "$2" "$1"; }
+		latest() { wget -q -S --spider "https://github.com/$repo/releases/latest" 2>&1 | sed -n 's/^ *[Ll]ocation: *//p' | tail -n 1 | tr -d '\r'; }
+	else
+		die "curl or wget is required"
+	fi
+	case "$(uname -s)" in
+	Linux) os=linux ;;
+	Darwin) os=darwin ;;
+	*) die "unsupported OS $(uname -s): Linux and macOS only" ;;
+	esac
+	case "$(uname -m)" in
+	x86_64 | amd64) arch=amd64 ;;
+	aarch64 | arm64) arch=arm64 ;;
+	*) die "unsupported architecture $(uname -m): amd64 and arm64 only" ;;
+	esac
+
+	tag="${1:-${LOCKLOG_VERSION:-}}"
+	if [ -z "$tag" ]; then
+		tag="$(latest)" || tag=""
+		tag="${tag##*/}"
+		case "$tag" in
+		v[0-9]*) ;;
+		*) die "no published release found; name one: locklog update vX.Y.Z" ;;
+		esac
+	fi
+	case "$tag" in v*) ;; *) tag="v$tag" ;; esac
+	check_tag "$tag"
+	version="${tag#v}"
+	identity="https://github.com/$repo/.github/workflows/release.yml@refs/tags/$tag"
+	if [ "$version" = "$launcher_version" ]; then
+		say "the launcher is already $tag"
+	else
+		self="$(command -v "$0" 2>/dev/null || printf '%s' "$0")"
+		archive="locklog_${version}_${os}_${arch}.tar.gz"
+		base="https://github.com/$repo/releases/download/$tag"
+		tmp="$(mktemp -d)"
+		trap 'rm -rf "$tmp"' EXIT INT TERM
+		say "downloading $archive ($tag)"
+		fetch "$base/$archive" "$tmp/$archive" || die "download failed: $base/$archive"
+		fetch "$base/checksums.txt" "$tmp/checksums.txt" || die "download failed: checksums.txt"
+		command -v cosign >/dev/null 2>&1 ||
+			die "cosign is required to check the release's signature (https://docs.sigstore.dev/cosign/system_config/installation/)"
+		fetch "$base/checksums.txt.sigstore.json" "$tmp/checksums.txt.sigstore.json" ||
+			die "download failed: checksums.txt.sigstore.json"
+		cosign verify-blob --bundle "$tmp/checksums.txt.sigstore.json" \
+			--certificate-identity "$identity" \
+			--certificate-oidc-issuer https://token.actions.githubusercontent.com \
+			"$tmp/checksums.txt" >/dev/null 2>&1 || die "cosign: signature of checksums.txt does not verify"
+		say "cosign: checksums.txt signature verified"
+		want="$(awk -v f="$archive" '$2 == f { print $1 }' "$tmp/checksums.txt")"
+		[ -n "$want" ] || die "$archive is not listed in checksums.txt"
+		if command -v sha256sum >/dev/null 2>&1; then
+			got="$(sha256sum "$tmp/$archive" | awk '{ print $1 }')"
+		else
+			got="$(shasum -a 256 "$tmp/$archive" | awk '{ print $1 }')"
+		fi
+		[ "$want" = "$got" ] || die "checksum mismatch for $archive"
+		tar -xzf "$tmp/$archive" -C "$tmp" scripts/locklog 2>/dev/null ||
+			die "$archive holds no launcher (scripts/locklog)"
+		digest="$(verified_digest "$version")"
+		vdigest="$(verified_digest "$version-vault")"
+		[ -n "$digest" ] && [ -n "$vdigest" ] && [ "$digest" != "$vdigest" ] ||
+			die "cosign: the signature of $registry:$version (and -vault) does not verify, or the image is not published yet"
+		say "cosign: image $registry:$version verified ($digest)"
+		sed -e "s/^launcher_version=dev\$/launcher_version=$version/" \
+			-e "s/^image_digest=\$/image_digest=$digest/" \
+			-e "s/^vault_image_digest=\$/vault_image_digest=$vdigest/" \
+			"$tmp/scripts/locklog" >"$tmp/launcher"
+		grep -qx "launcher_version=$version" "$tmp/launcher" || die "the launcher of $tag does not take its version"
+		if [ -w "$self" ]; then
+			install -m 0755 "$tmp/launcher" "$self"
+		else
+			command -v sudo >/dev/null 2>&1 || die "$self is not writable and sudo is missing"
+			say "replacing $self with sudo"
+			sudo install -o root -m 0755 "$tmp/launcher" "$self"
+		fi
+		say "launcher updated to $tag ($self)"
+		image="$registry@$digest"
+		[ "${LOCKLOG_VAULT:-0}" = 1 ] && image="$registry@$vdigest"
+		[ -n "${LOCKLOG_IMAGE:-}" ] && say "LOCKLOG_IMAGE is set ($LOCKLOG_IMAGE): it still overrides $image"
+	fi
+	need_docker
+	say "pulling $image"
+	exec docker pull "$image"
+}
+
+# The project is mounted read-only at its own path in every container.
+project_mount() {
+	safe "$project" || die "$project holds a character a docker mount cannot carry: move or rename it"
+	safe "$workdir" || die "$workdir holds a character a docker mount cannot carry: move or rename it"
+}
+
+# The confinement every locklog container runs with.
+confined="--cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /tmp:rw,nosuid,nodev,noexec,size=64m"
+
+console() {
+	need_docker
+	project_mount
+	[ -d "$project/.locklog" ] && [ ! -L "$project/.locklog" ] ||
+		die "no .locklog/ directory here or above: run locklog setup first"
+	ll_dir="$project/.locklog"
+	physical "$ll_dir" || die "$ll_dir is not a directory with no symbolic link on its path"
+
+	# Docker >= 19.03, rootful: rootless engines keep logs the console
+	# cannot reach.
+	sv=$(docker version --format '{{.Server.Version}}' 2>/dev/null) || die "the Docker engine does not answer"
+	major=${sv%%.*}
+	rest=${sv#*.}
+	minor=${rest%%.*}
+	case "$major$minor" in *[!0-9]* | '') die "unknown Docker engine version $sv" ;; esac
+	if [ "$major" -lt 19 ] || { [ "$major" -eq 19 ] && [ "$minor" -lt 3 ]; }; then
+		die "Docker $sv is too old: locklog needs Docker 19.03 or later"
+	fi
+	if [ "$major" -ge 25 ]; then
+		nonrecursive=bind-recursive=disabled
+	else
+		nonrecursive=bind-nonrecursive=true
+	fi
+	case "$(docker info --format '{{.SecurityOptions}}' 2>/dev/null)" in
+	*rootless*) die "rootless Docker is not supported: its containers' logs and the host's journal are out of the console's reach" ;;
+	esac
+
+	# The profile's mount plan, derived in the image from .locklog/ (as the
+	# agent account, no network) and checked here, on the host.
+	planned=$(docker run --rm --network none --user agent $confined \
+		-v "$ll_dir:$ll_dir:ro" -w "$project" "$image" mounts "$@") ||
+		die "could not read the mount plan of the profile (locklog mounts)"
+	header=$(printf '%s\n' "$planned" | sed -n 1p)
+	case "$header" in
+	"profile "*" true" | "profile "*" false") ;;
+	*) die "mount plan: malformed header: $header" ;;
+	esac
+	if [ "$(uname -s)" = Darwin ] && [ "$(printf '%s\n' "$planned" | sed -n '2,$p' | grep -c .)" -gt 0 ]; then
+		die "local log sources are not supported with Docker Desktop on macOS (the containers' logs live in its VM); use a remote source"
+	fi
+	lines=$(printf '%s\n' "$planned" | sed -n '2,$p')
+	# Read in this shell (no pipe), so that plan_line fills the plan.
+	while IFS= read -r l; do
+		[ -z "$l" ] || plan_line "$l"
+	done <<EOF
+$lines
+EOF
+
+	net=none
+	if [ -n "${LOCKLOG_NETWORK:-}" ]; then
+		printf '%s\n' "$LOCKLOG_NETWORK" | grep -Eqx '[A-Za-z0-9][A-Za-z0-9_.-]{0,127}' ||
+			die "LOCKLOG_NETWORK: invalid network name $LOCKLOG_NETWORK"
+		case "$LOCKLOG_NETWORK" in host | none | bridge) die "LOCKLOG_NETWORK: name a network of your own, not $LOCKLOG_NETWORK" ;; esac
+		net=$LOCKLOG_NETWORK
+	fi
+	n=$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 1)
+	case "$n" in '' | *[!0-9]*) n=1 ;; esac
+	cpus=2
+	[ "$n" -lt 2 ] && cpus=$n
+
+	ensure_volume locklog-run /run/locklog 10051:10050:2750
+	ensure_volume locklog-home /home/locklog 10051:10051:700
+
+	name="locklog-console-$(printf '%s' "$project" | cksum | awk '{ print $1 }')"
+	if [ "$(docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null)" = false ]; then
+		docker rm "$name" >/dev/null
+	fi
+	group_args=
+	for g in $gids; do group_args="$group_args --group-add $g"; done
+
+	{
+		printf 'locklog: console %s, %s\n' "$name" "$header"
+		printf '  network %s, cpus %s, memory 1g, pids 256, no log driver\n' "$net" "$cpus"
+		printf '%s' "$plan_text"
+		[ -z "$gids" ] || printf '  groups%s\n' "$gids"
+	} >&2
+
+	set -f
+	# shellcheck disable=SC2086 # the plan's arguments are split on purpose
+	exec docker run --rm "$tty" --name "$name" --user locklog --log-driver none $confined \
+		--pids-limit 256 --memory 1g --cpus "$cpus" --network "$net" \
+		-e VAULT_ADDR -e VAULT_NAMESPACE \
+		-e "LOCKLOG_NETWORK=${LOCKLOG_NETWORK:-}" -e "LOCKLOG_EXTRA_ROOTS=${LOCKLOG_EXTRA_ROOTS:-}" \
+		-e "LOCKLOG_EXPECT_DIR=$(devino "$ll_dir")" -e "LOCKLOG_EXPECT_ROOTS=$expect" \
+		-v locklog-run:/run/locklog -v locklog-home:/home/locklog -v "$ll_dir:$ll_dir:ro" \
+		$group_args $mount_args -w "$project" "$image" console "$@"
+}
+
+cmd="${1:-}"
+case "$cmd" in
+update)
+	shift
+	update "$@"
+	;;
+version | --version)
+	printf 'locklog launcher %s (image %s)\n' "$launcher_version" "$image"
+	need_docker
+	exec docker run --rm --network none --user agent $confined "$image" version
+	;;
+console)
+	shift
+	console "$@"
+	;;
+mcp)
+	# The agent speaks MCP on stdin and stdout: no terminal. The server
+	# refuses a production profile when LOCKLOG_HOST_AGENT is set: a host
+	# agent is the non-production trial.
+	need_docker
+	project_mount
+	exec docker run --rm -i --user agent --log-driver none --network none $confined \
+		--pids-limit 64 --memory 256m -e LOCKLOG_HOST_AGENT=1 \
+		-v locklog-run:/run/locklog -v "$project:$project:ro" -w "$workdir" "$image" "$@"
+	;;
+*)
+	need_docker
+	project_mount
+	exec docker run --rm "$tty" --user agent --network none $confined \
+		-v locklog-run:/run/locklog -v "$project:$project:ro" -w "$workdir" "$image" "$@"
+	;;
+esac

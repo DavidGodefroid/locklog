@@ -365,8 +365,8 @@ func buildSource(name string, r rawSource, production bool) (Source, error) {
 // the launcher's mount plan refuses, a valid pattern, and ** only as a
 // whole component, once, when recursive.
 func checkPathGlob(p string, recursive bool) error {
-	if strings.ContainsAny(p, ",=\"'`\\") || strings.IndexFunc(p, kconfig.UnsafeRune) >= 0 || strings.ContainsAny(p, "\n\r\t") {
-		return fmt.Errorf("%q holds a character the mount plan refuses (comma, '=', quote, backslash or control)", p)
+	if strings.ContainsAny(p, ",;:= \"'`\\") || strings.IndexFunc(p, kconfig.UnsafeRune) >= 0 || strings.ContainsAny(p, "\n\r\t") {
+		return fmt.Errorf("%q holds a character the mount plan refuses (space, comma, ';', ':', '=', quote, backslash or control)", p)
 	}
 	if !path.IsAbs(p) || path.Clean(p) != p {
 		return fmt.Errorf("%q: want an absolute, clean path (no '..', '.', '//' or trailing '/')", p)
