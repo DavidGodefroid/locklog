@@ -19,8 +19,8 @@ Data: 2 GiB of lines in one dense hour (15.6 M lines, 12 streams sharded to
 
 Ingest overrides needed for a test corpus with past timestamps (to document
 in `TestLokiIncident`): `reject_old_samples: false`, `unordered_writes: true`,
-high `ingestion_rate_mb` / `per_stream_rate_limit`, and a wide out-of-order
-window. Loki accepts an entry only up to `max_chunk_age / 2` behind the
+and high `ingestion_rate_mb` / `per_stream_rate_limit`. The out-of-order
+window is not a separate setting: Loki accepts an entry only up to `max_chunk_age / 2` behind the
 newest entry of its stream, so either push in time order or raise
 `max_chunk_age` (24 h used here). The push itself ran at about 22 MiB/s
 (JSON + gzip, 4 writers).
@@ -30,7 +30,7 @@ newest entry of its stream, so either push in time order or raise
 | `index/stats` latency | 0-20 ms |
 | **`index/stats` accuracy** vs exact `bytes_over_time` | **not usable as a size**: same 1 h query, two runs a few minutes apart: 1.93× over, then 0.15× (6.7× under); 7 d: 4.3× and 11.5× over. It counts whole chunks and depends on what the ingesters have flushed |
 | `index/volume` by `level`, 1 h | 3 ms |
-| instant `sum(count_over_time({sel}[1h]))` over the dense hour | 7-14 s; 3.2 GiB "processed" by Loki's own count (1.5× the line bytes) |
+| instant `sum(count_over_time({sel}[1h]))` over the dense hour | 7-14 s; 3.2 GiB "processed" by Loki's own count (1.6× the line bytes) |
 | range `sum by (level)(count_over_time({sel}[1m]))`, 1 h / step 60 s | 14-15 s, 3.2 GiB processed |
 | same, 24 h / step 300 s | 15-17 s, 3.4 GiB processed |
 | same, 7 d / step 3600 s | 16-21 s, 4.6 GiB processed |
@@ -109,34 +109,39 @@ run in `alpine` under a cgroup limit: `--cpus 2`, CV 6.2 %; `--cpus 1`, CV
 The pipeline is bound by masking, not I/O. 2 cores × about 1 MB/s/core
 gives about **60 MB per 30 s call**. A remote call is bound by masking too,
 because Loki's 20 MiB/s is 10× faster. The plan's "4 GiB local / 2 GiB
-remote per call" targets cannot be met at today's detector speed. They stay
-as **ceilings** (the call admits up to that many bytes), and the deadline
-does the stopping (`complete:false` + cursor, continued free).
+remote per call" targets cannot be met at today's detector speed. The
+admission default below is 512 MiB for both. The code ceiling stays at the
+plan's 64 GiB for both: it is the most a profile may configure. Within the
+admitted bytes, the deadline does the stopping (`complete:false` + cursor,
+continued free).
 
 | Setting | Default | From |
 |---|---|---|
-| per-call bytes, local (admission) | **512 MiB** (ceiling 64 GiB unchanged) | at 60 MB per call, about 9 free continuations. Narrowed hour at 1 GiB/day (42 MiB): 1 call. At 7 GiB/day (300 MiB): about 5 calls, about 2.5 min, inside the 5-minute gate |
-| per-call bytes, remote (admission, fetched) | **512 MiB** | masking-bound, as local |
-| plan chunk (local) | **2 MiB** (≥ the 64 KiB / 256-record granule) | worst-case cost ≈ 1 µs/B (256 KiB event = 268 ms), with a chunk's worst case ≤ 1/4 of the deadline per core |
-| calibration corpus | **1 MiB fixed mixed corpus**, about 2-4 s at start, hourly | CV ≤ 6 %. Recalibrate when a chunk takes > 1.5× its prediction |
-| worst-case cost per byte (engine constant, before calibration) | **1.1 µs/B per core** (all detectors) | 256 KiB-event measurement |
+| per-call bytes, local (admission) | **512 MiB** (ceiling 64 GiB) | at 60 MB per call, about 9 calls (8 free continuations). Narrowed hour at 1 GiB/day (42 MiB): 1 call. At 7 GiB/day (300 MiB): about 5 calls, about 2.5 min, inside the 5-minute gate |
+| per-call bytes, remote (admission, fetched) | **512 MiB** (ceiling 64 GiB) | masking-bound, as local |
+| plan chunk (local) | **1 MiB** (one granule, `source.GranuleBytes`) | worst-case cost ≈ 5 µs/B (the encoded corpus, 0.2 MB/s/core): 1 MiB then takes ≈ 5.2 s per core, within the rule "a chunk's worst case ≤ 1/4 of the 30 s deadline" (7.5 s) |
+| calibration corpus | **1 MiB fixed mixed corpus**, 3 passes (≈ 1.5-2.5 s on 2 workers at ≈ 1-2 MB/s) at start, hourly | measured CV 3.5-6.2 %, so a deviation under 10 % is noise. Recalibrate when a chunk takes > 1.5× its prediction |
+| worst-case cost per byte (engine constant, before calibration) | **5 µs/B per core** (all detectors) | the slowest corpus (encoded, 0.2 MB/s/core). The 256 KiB event (268 ms) is 4.1 µs per *scanned* byte, since Find scans its first 64 KiB |
 | Loki in-flight per source | **4** | knee of the curve |
 | Loki `limit` | **5000** (Loki's default max) | 1.75 MiB pages at about 350 B/line |
-| Loki rolling requests/min | **600 non-prod / 240 prod** (plan had 240 / 60) | at 4 in flight, Loki serves about 690/min. 240/min would cut the fetch to about 7 MiB/s, which is still above masking speed. The prod value keeps the plan's 4:1 ratio over the default |
+| Loki rolling requests/min | **600 non-prod / 150 prod** (plan had 240 / 60) | at 4 in flight, Loki serves about 690/min; 600/min does not throttle it. Production keeps the plan's 4:1 ratio: 150/min ≈ 4.4 MiB/s, still above masking speed (≈ 2 MB/s on 2 cores) |
 | Loki byte plans | **time slices + bytes actually fetched**, not `index/stats` | `index/stats` was off by −85 %…+1050 %. Use it only as an advisory estimate in `E_OVER_BUDGET` messages. Budgets charge fetched bytes, which depend only on time + trusted selector, never on predicates |
 | Loki structured metadata | always send `X-Loki-Response-Encoding-Flags: categorize-labels` | without it, untrusted metadata is merged into labels |
-| Loki metric counts | per query about 15-20 s for 1 h-7 d on 2-4.6 GiB processed. The 200 GiB/h prod / 1 TiB/h non-prod "server-processed" budget allows about 40 / 200 such queries per hour | — |
+| Loki metric counts | per query 7-21 s for 1 h-7 d on 3.2-4.6 GiB processed. The 200 GiB/h prod / 1 TiB/h non-prod "server-processed" budget allows about 40 / 200 such queries per hour | — |
 | ES/OpenSearch in-flight | **4**, `size` 1000 | 28-51 MiB/s |
 | ES/OpenSearch plans | `_count` (exact) | — |
 | approved-scan request rate | 4 in flight, no per-minute cap beyond the backend's own (R6-P2) | — |
 | local index build budget | 20 GiB/h idle-only unchanged. Cold backfill newest-first at full speed: 7 GiB in about 45 s (JSON, 2 cores) | parse-only speed |
-| nightly perf thresholds | fail on a 20 % drop vs the table above, per corpus | — |
+| nightly perf thresholds | fail on a 20 % drop per corpus vs the CI baseline recorded by the first nightly run (the spike table is only the initial reference: CI runners differ from the spike host) | — |
 
 **Gate arithmetic** (R6-P2, `TestLokiIncident` without a `level` label):
-one approved scan over the 7-day background (≤ 8 GiB) at today's
-2 MB/s for 2 cores takes about 70 min. That is over the 30-minute TTL. The
-gate needs the whole pipeline at ≥ 2.3 MB/s/core, which means the `secret`
-detector must reach roughly ≥ 5 MB/s/core. A scan of only the dense incident
-hour (213 MiB at 5 GiB/day) takes about 2 min today. Until lockkit#97 (or a
+the design's corpus for that test is a dense incident hour written at
+5 GiB/day (213 MiB in the hour) on top of a sparse 7-day background of at
+most 8 GiB (8,192 MiB; the background is sparse, not 5 GiB/day). One
+approved scan over the 7-day range at today's ≈ 1.9 MiB/s for 2 cores
+(≈ 0.95 MiB/s/core) takes about 72 min, over the 30-minute TTL. Finishing in
+1,800 s needs 4.6 MiB/s, so ≥ 2.3 MiB/s/core for the whole pipeline, which
+means the `secret` detector must reach roughly ≥ 5 MiB/s/core. A scan of only
+the dense incident hour (213 MiB) takes about 2 min today. Until lockkit#97 (or a
 follow-up) reaches that speed, LL-16b's variant must scan the narrowed
 range, not 7 days.

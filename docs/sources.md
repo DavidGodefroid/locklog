@@ -46,7 +46,7 @@ journalctl's output for the same entry.
 | Ubuntu 24.04, 16 flag variants | 255.4 | LZ4 / XZ / ZSTD / none × compact × keyed hash | 16 × 2,000 / 0 | — |
 | Ubuntu 24.04 host, 10 real files | 255.4 | ZSTD, KEYED-HASH, COMPACT | 551,290 entries / 0 | — |
 
-**Result: exit criterion met.** The four distributions field-identical, plus all flag variants.
+**Result: exit criterion met.** The four distributions are field-identical, plus all flag variants.
 LL-10 uses the pure-Go reader; the `-journal` fallback variant is not needed.
 
 Notes for LL-10:
@@ -117,7 +117,7 @@ opens, nothing else opened. This is in-process, like the egress pin.
 | Option | Engine 29 / CLI 29 | Result |
 |---|---|---|
 | `--mount type=bind,…,readonly,bind-recursive=disabled` | accepted | submounts that exist when the console starts are not visible |
-| `--mount …,bind-nonrecursive=true` | **refused by CLI 29** before anything reaches the engine: "bind-nonrecursive is deprecated, use bind-recursive=disabled instead" | the CLI parses the option, so the launcher must choose it by the **client** version: `bind-recursive=disabled` needs CLI ≥ 25 *and* Engine ≥ 25 (API 1.44); `bind-nonrecursive=true` works only with CLI 19.03-24. A CLI ≥ 25 against an Engine < 25 has no non-recursive form and must be refused. The 19.03-24 side was not run here; it relies on Docker's docs |
+| `--mount …,bind-nonrecursive=true` | **refused by CLI 29** before anything reaches the engine: "bind-nonrecursive is deprecated, use bind-recursive=disabled instead" | the CLI parses the option, so the launcher must choose it by the **client** version: `bind-recursive=disabled` needs CLI ≥ 25 *and* Engine ≥ 25 (API 1.44); `bind-nonrecursive=true` is known to work with CLI 19.03-24 (Docker's docs; not run here). CLI 25-28 were not run either: they may accept it with a deprecation warning [NV]. Until checked, the safe rule is to use `bind-recursive=disabled` when both are ≥ 25, `bind-nonrecursive=true` with a CLI < 25, and refuse a CLI ≥ 25 against an Engine < 25 unless CLI 25-28 are shown to accept the old form |
 | `-v …:ro` (default, recursive) | accepted | an existing `mounts/shm` tmpfs of an `--ipc=shareable` container is visible |
 | Compose: `volumes: [{type: bind, source, target, read_only: true, bind: {recursive: disabled}}]` | Compose v5.4.0, accepted | non-recursive, as with `--mount` |
 
@@ -133,7 +133,9 @@ Check: we started a reader with a non-recursive read-only bind, then started
 an `--ipc=shareable` container. Its `mounts/shm` tmpfs propagated into the
 reader **read-write** (`rw,nosuid,nodev,noexec`, mode 1777). The reader,
 uid 10051 with gid 0, could create a file in the other container's
-`/dev/shm` (the file was removed after the check). Swarm secrets
+`/dev/shm` (the file was removed after the check). The tmpfs is mode 1777,
+so any uid that can reach it can write; gid 0 matters only for traversing
+the 0710 `<id>/` and `mounts/` directories on the way. Swarm secrets
 (`mounts/secrets`) would propagate the same way. That was not checked here:
 the host is not a swarm manager.
 
@@ -162,9 +164,11 @@ Consequences, for LL-11 and LL-09a:
 `docker events --filter type=container --format …` on create → start → die
 → rename → destroy gives one line per action. `Actor.Attributes.name` is the
 name at the event (the new name on `rename`, which also carries `oldName`).
-The loop needs `create`, `rename` and `destroy`. After a reconnect, it
-re-resolves everything with `docker ps -a --no-trunc` rather than replaying
-with `--since`, which is simpler and cannot miss an event.
+The loop needs `create`, `rename` and `destroy`. At start and after a
+reconnect, it first subscribes to the events stream, then takes a full
+`docker ps -a --no-trunc` snapshot, then applies the events buffered since
+the subscription. In that order nothing between the snapshot and the
+subscription is lost, and no `--since` replay is needed.
 
 `docker compose up --force-recreate` gives a new id and **deletes the old
 container directory with its logs**, checked. History across deploys needs
@@ -199,6 +203,6 @@ and locklog takes no `CAP_DAC_READ_SEARCH`. Supported Podman paths in v1:
 - `/var/log/pods` (kubelet). No cluster on the spike host. The plan's
   root:root 0640 stays [NV] until LL-11's integration run; kind or k3s in CI
   can check it.
-- `bind-nonrecursive=true` on Engine and CLI 19.03-24.
+- `bind-nonrecursive=true` on Engine and CLI 19.03-24, and with CLI 25-28.
 - Swarm secrets propagation.
 - Rootless Docker (unsupported in v1, named by `doctor`).
