@@ -206,6 +206,16 @@ uses [Semantic Versioning](https://semver.org/).
   modes keep terms local. Until the newest `Check` has succeeded, no
   trusted term is pushed and no count is served on the server, and a
   stream whose pushed term is no longer server-side is stale.
+- Tests (LL-16b): the leak, oracle, equivalence and injection suites run
+  over a Loki source too (a fake Loki in unit runs, a real one in the CI
+  `suites` job), and over the approval tools (approved scans and their
+  continuations, unmask, lookup, change requests): no canary in any
+  answer, refusal or approval screen, and an unmask reveals only the span
+  approved. `TestLokiIncident` (CI job `loki-incident`) runs job 1 against
+  a real Loki with a dense incident hour over a 7-day background, with and
+  without a `level` label, behind a latency proxy and on a slowed host;
+  the ingest overrides it needs are in `docs/loki.md`. The approved-scan
+  test (CI job `scan-volume`) scans 20 GiB of local files on one approval.
 
 ### Fixed
 

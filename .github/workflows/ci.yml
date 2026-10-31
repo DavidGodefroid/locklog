@@ -248,6 +248,8 @@ jobs:
 
   # The heavy LL-16 suites, on every pull request: the leak suite with every
   # canary kind in every encoding written into every query position, the
+  # approval tools' suites (scan, unmask, lookup, change requests), every
+  # source including Loki (a real one here), the
   # oracle, the equivalence suites, and the latency cases of the oracle
   # (repeated, interleaved runs on production and non-production defaults,
   # idle and under a CPU hog, compared statistically). The test job runs
@@ -266,13 +268,31 @@ jobs:
         with:
           go-version: "1.26.x"
           check-latest: true
+      # The suites' Loki source reads a real Loki here (the test job's
+      # runs use the fake Loki of suite_loki_test.go).
+      - name: start Loki
+        run: |
+          docker run -d --name loki -p 127.0.0.1:3100:3100 \
+            -v "$PWD/test/loki/incident-config.yaml:/etc/loki/incident.yaml:ro" \
+            grafana/loki:3.5.7 -config.file=/etc/loki/incident.yaml
+          for i in $(seq 1 90); do
+            if curl -fsS http://127.0.0.1:3100/ready >/dev/null 2>&1; then exit 0; fi
+            sleep 2
+          done
+          docker logs loki | tail -50
+          exit 1
       - name: suites
         shell: bash
+        env:
+          LOCKLOG_SUITE_LOKI_URL: http://127.0.0.1:3100
         run: |
           set -o pipefail
           GOMAXPROCS=2 LOCKLOG_SUITES=1 LOCKLOG_SUITE_FULL=1 LOCKLOG_SUITE_TIMING=1 go test -count=1 -timeout 60m -v \
             -run '^(TestSuite|TestLeakScanner)' ./internal/engine/ 2>&1 |
             grep -v -E '^=== (RUN|PAUSE|CONT)|: [0-9]+ pages in |: scanned in ' | tee suites.log
+      - name: Loki logs on failure
+        if: failure()
+        run: docker logs loki 2>&1 | tail -100
 
   # Local incident (b) at realistic volume (R6-P1): 7 days x 1 GiB/day of
   # nginx and journald (a quarter of that: the journal history imported by
@@ -308,6 +328,84 @@ jobs:
             LOCKLOG_JOURNAL_REMOTE=/usr/lib/systemd/systemd-journal-remote \
             go test -count=1 -timeout 85m -v -run '^(TestIncidentOrder4812|TestIncidentVolume)$' ./internal/engine/ 2>&1 |
             grep -v -E '^=== (RUN|PAUSE|CONT)' | tee incidents.log
+
+  # TestLokiIncident (design §9.1, R6-P2) against a real Loki started with
+  # the documented ingest overrides (test/loki/incident-config.yaml,
+  # docs/loki.md) and a Toxiproxy for the latency variant: two containers.
+  # A dense hour at 5 GiB/day over a sparse 7-day background, pushed with
+  # and without a level label (about 1.5 GiB of lines, ingested within
+  # 10 min); job 1 by the scripted agent in every variant: <= 3 prompts,
+  # the answer within 5 min.
+  loki-incident:
+    name: Loki incident (TestLokiIncident)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.x"
+          check-latest: true
+      - name: start Loki and Toxiproxy
+        run: |
+          docker run -d --name loki --network host \
+            -v "$PWD/test/loki/incident-config.yaml:/etc/loki/incident.yaml:ro" \
+            grafana/loki:3.5.7 -config.file=/etc/loki/incident.yaml
+          docker run -d --name toxiproxy --network host ghcr.io/shopify/toxiproxy:2.9.0
+          for i in $(seq 1 90); do
+            if curl -fsS http://127.0.0.1:3100/ready >/dev/null 2>&1 && curl -fsS http://127.0.0.1:8474/version >/dev/null 2>&1; then exit 0; fi
+            sleep 2
+          done
+          docker logs loki | tail -50
+          docker logs toxiproxy | tail -20
+          exit 1
+      - name: TestLokiIncident
+        shell: bash
+        env:
+          LOCKLOG_LOKI_INCIDENT_URL: http://127.0.0.1:3100
+          LOCKLOG_TOXIPROXY_URL: http://127.0.0.1:8474
+        run: |
+          set -o pipefail
+          df -h /
+          GOMAXPROCS=2 go test -count=1 -timeout 55m -v -run '^TestLokiIncident$' ./internal/engine/ 2>&1 |
+            grep -v -E '^=== (RUN|PAUSE|CONT)' | tee loki-incident.log
+      - name: backend logs on failure
+        if: failure()
+        run: |
+          docker logs loki 2>&1 | tail -100
+          docker logs toxiproxy 2>&1 | tail -30
+
+  # The approved-scan test (design §9.1, R5-P3): a 20 GiB approved scan on
+  # local files, generated on the runner's larger temporary disk, completes
+  # across continuations on one approval within its 30-minute TTL.
+  scan-volume:
+    name: approved scan (20 GiB)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.x"
+          check-latest: true
+      - name: approved scan
+        shell: bash
+        run: |
+          set -o pipefail
+          dir="${RUNNER_TEMP}"
+          if [ -d /mnt ] && sudo mkdir -p /mnt/scan && sudo chown "$(id -u):$(id -g)" /mnt/scan; then dir=/mnt/scan; fi
+          df -h / "$dir"
+          LOCKLOG_SCAN_DIR="$dir" LOCKLOG_SCAN_VOLUME=20GiB GOMAXPROCS=2 \
+            go test -count=1 -timeout 55m -v -run '^TestApprovedScanVolume$' ./internal/engine/ 2>&1 |
+            grep -v -E '^=== (RUN|PAUSE|CONT)' | tee scan-volume.log
 
   # One required check name ("lint") for every static check; later pull
   # requests add steps here (goreleaser check, install.sh rules, ...).
