@@ -118,7 +118,7 @@ func xzValue(b []byte) ([]byte, error) {
 		return nil, errTooLarge
 	}
 	// Walk the LZMA2 chunk headers: they are plain, with their sizes.
-	i, chunks := h.dataStart, 0
+	i, chunks, unpacked := h.dataStart, 0, 0
 	for {
 		if i >= len(b) {
 			return nil, errXZ
@@ -136,11 +136,14 @@ func xzValue(b []byte) ([]byte, error) {
 			if i+3 > len(b) {
 				return nil, errXZ
 			}
-			i += 3 + (int(b[i+1])<<8 | int(b[i+2])) + 1
+			size := (int(b[i+1])<<8 | int(b[i+2])) + 1
+			i += 3 + size
+			unpacked += size
 		case c >= 0x80: // LZMA chunk
 			if i+5 > len(b) {
 				return nil, errXZ
 			}
+			unpacked += (int(c&0x1F)<<16 | int(b[i+1])<<8 | int(b[i+2])) + 1
 			hdr := 5
 			if c >= 0xC0 {
 				hdr = 6 // with a properties byte
@@ -152,10 +155,19 @@ func xzValue(b []byte) ([]byte, error) {
 	}
 	lzmaEnd := i
 	i += (4-(i-12)%4)%4 + h.check // block padding, then its check
-	if i >= len(b) || b[i] != 0 {
+	if i >= len(b) {
+		return nil, errXZ // truncated
+	}
+	if b[i] != 0 {
 		return nil, errTooLarge // a second block follows
 	}
-	r, err := lzma.Reader2Config{DictCap: max(int(h.dict), lzma.MinDictCap)}.NewReader2(bytes.NewReader(b[h.dataStart:lzmaEnd]))
+	if unpacked > MaxData {
+		return nil, errTooLarge
+	}
+	// The dictionary never needs to exceed the output: a small value
+	// does not pay for the declared 1 MiB.
+	dict := min(int(h.dict), max(unpacked, lzma.MinDictCap))
+	r, err := lzma.Reader2Config{DictCap: max(dict, lzma.MinDictCap)}.NewReader2(bytes.NewReader(b[h.dataStart:lzmaEnd]))
 	if err != nil {
 		return nil, errXZ
 	}
