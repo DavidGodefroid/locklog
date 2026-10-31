@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"strconv"
@@ -74,6 +75,27 @@ func push(t *testing.T, base string, run string, start time.Time, n int) {
 	}
 }
 
+// pushEdges writes one entry at each of ats (app=api, level=edge), in a
+// stream of their own.
+func pushEdges(t *testing.T, base, run string, ats []time.Time) {
+	t.Helper()
+	var vals [][]any
+	for i, at := range ats {
+		vals = append(vals, []any{strconv.FormatInt(at.UnixNano(), 10), fmt.Sprintf(`{"msg":"edge %d"}`, i), map[string]string{"trace_id": "edge"}})
+	}
+	b, _ := json.Marshal(map[string]any{"streams": []any{map[string]any{
+		"stream": map[string]string{"run": run, "app": "api", "level": "edge", "pod": "p0"}, "values": vals}}})
+	resp, err := http.Post(base+"/loki/api/v1/push", "application/json", bytes.NewReader(b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		msg, _ := io.ReadAll(resp.Body)
+		t.Fatalf("push: %d %s", resp.StatusCode, msg)
+	}
+}
+
 func newSource(t *testing.T, base, run string) *loki.Source {
 	t.Helper()
 	cl, err := egress.New(&config.Remote{URL: base, Auth: config.AuthNone}, egress.LokiRoutes, egress.Credentials{},
@@ -123,17 +145,23 @@ func TestLokiSourceAgainstLoki(t *testing.T) {
 	start := time.Now().Add(-20 * time.Minute).Truncate(5 * time.Minute) // on Loki's step grid
 	const n = 2400
 	push(t, base, run, start, n)
-	s := newSource(t, base, run)
 	r := source.Range{From: start, To: start.Add(10 * time.Minute)}
+	// The bucket edges: the last nanosecond of the first 5 m bucket, the
+	// first of the second, the last of the range, and To (outside it).
+	// The first pushed entry is exactly on From.
+	edges := []time.Time{start.Add(5*time.Minute - 1), start.Add(5 * time.Minute), r.To.Add(-1), r.To}
+	pushEdges(t, base, run, edges)
+	const inRange = n + 3
+	s := newSource(t, base, run)
 	var recs []source.RawRecord
 	for i := 0; i < 60; i++ {
-		if recs = scan(t, s, r, source.Selector{}); len(recs) >= n {
+		if recs = scan(t, s, r, source.Selector{}); len(recs) >= inRange {
 			break
 		}
 		time.Sleep(time.Second)
 	}
-	if len(recs) != n {
-		t.Fatalf("%d records, want %d", len(recs), n)
+	if len(recs) != inRange {
+		t.Fatalf("%d records, want %d", len(recs), inRange)
 	}
 	seen := map[string]bool{}
 	for i, rec := range recs {
@@ -155,17 +183,39 @@ func TestLokiSourceAgainstLoki(t *testing.T) {
 	if got := scan(t, s, r, sel); len(got) != 2 { // entries 35 and 39
 		t.Fatalf("selected %d records, want 2", len(got))
 	}
-	// Metric counts equal the scan.
+	// Metric counts are exactly the engine's buckets, [b, b+5m) from From:
+	// From in, To out, an edge entry in the bucket it starts.
+	want := map[string]int64{}
+	levels := []string{"info", "info", "warn", "error"}
+	bucketOf := func(at time.Time) string {
+		return r.From.Add(at.Sub(r.From) / (5 * time.Minute) * (5 * time.Minute)).Format(time.RFC3339Nano)
+	}
+	for i := 0; i < n; i++ {
+		want[bucketOf(start.Add(time.Duration(i)*100*time.Millisecond))+" "+levels[i%4]]++
+	}
+	for _, at := range edges {
+		if at.Before(r.To) {
+			want[bucketOf(at)+" edge"]++
+		}
+	}
 	res, err := s.IndexCounts(context.Background(), source.CountQuery{Range: r, By: []string{"level"}, Bucket: 5 * time.Minute})
 	if err != nil {
 		t.Fatal(err)
 	}
-	var total int64
+	gotN := map[string]int64{}
 	for _, row := range res.Rows {
-		total += row.N
+		gotN[row.Bucket.Format(time.RFC3339Nano)+" "+row.Vals[0]] += row.N
 	}
-	if total != n-1 && total != n { // an entry exactly on the range start falls in Loki's previous window
-		t.Fatalf("metric total %d, want %d", total, n)
+	if !maps.Equal(gotN, want) {
+		t.Fatalf("metric counts\n got %v\nwant %v", gotN, want)
+	}
+	// One bucket: the instant query counts [From, To).
+	one, err := s.IndexCounts(context.Background(), source.CountQuery{Range: r})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(one.Rows) != 1 || one.Rows[0].N != inRange || !one.Rows[0].Bucket.Equal(r.From) {
+		t.Fatalf("instant count %+v, want %d at %v", one.Rows, inRange, r.From)
 	}
 	// Reread.
 	got, err := s.Reread(context.Background(), recs[100].Ref)

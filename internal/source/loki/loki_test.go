@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -45,6 +46,9 @@ type fakeLoki struct {
 	inflight int32
 	maxIn    int32
 	delay    time.Duration
+	// ignoreOffset evaluates metric queries without their offset (a
+	// backend whose grid is not the one asked for).
+	ignoreOffset bool
 }
 
 func matches(ms [][3]string, l map[string]string) bool {
@@ -69,7 +73,7 @@ func matches(ms [][3]string, l map[string]string) bool {
 	return true
 }
 
-var metricRe = regexp.MustCompile(`^sum by \(([^)]*)\) \(count_over_time\((.*) \[(\d+)s\]\)\)$`)
+var metricRe = regexp.MustCompile(`^sum by \(([^)]*)\) \(count_over_time\((.*) \[(\d+)s\]( offset ([0-9a-z]+))?\)\)$`)
 
 func (f *fakeLoki) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	n := atomic.AddInt32(&f.inflight, 1)
@@ -123,7 +127,7 @@ func (f *fakeLoki) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		rec := httptest.NewRecorder()
-		f.metric(rec, m, at, at, "1")
+		f.metric(rec, m, at, at, "")
 		var mr map[string]any
 		json.Unmarshal(rec.Body.Bytes(), &mr)
 		var result []any
@@ -194,20 +198,46 @@ func (f *fakeLoki) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// metric evaluates a metric query as Loki 3.5 does: the query frontend
+// rounds a range query's start down and its end up to the step
+// (pkg/querier/queryrange/splitters.go, alignStartEnd); at each step t,
+// count_over_time counts (t-offset-range, t-offset] in nanoseconds; the
+// point's time is (t-offset)/1e6 + offset/1e6 in integer milliseconds
+// (pkg/logql/range_vector.go), written as seconds with a millisecond
+// fraction (model.Time.String).
 func (f *fakeLoki) metric(w http.ResponseWriter, m []string, start, end int64, stepS string) {
 	by := []string{}
 	if m[1] != "" {
 		by = strings.Split(m[1], ", ")
 	}
 	sel, _ := parseQuery(m[2])
-	b, _ := strconv.ParseInt(m[3], 10, 64)
+	rng, _ := strconv.ParseInt(m[3], 10, 64)
+	rng *= 1e9
+	var off int64
+	if m[5] != "" && !f.ignoreOffset {
+		d, err := time.ParseDuration(m[5])
+		if err != nil {
+			http.Error(w, "bad offset", 400)
+			return
+		}
+		off = int64(d)
+	}
 	step, _ := strconv.ParseInt(stepS, 10, 64)
+	step *= 1e9
+	if stepS != "" {
+		start -= start % step
+		if r := end % step; r != 0 {
+			end += step - r
+		}
+	} else {
+		step = 1
+	}
 	series := map[string]map[string]any{}
-	for t := start; t <= end; t += step * 1e9 {
+	for t := start; t <= end; t += step {
 		counts := map[string]int{}
 		metrics := map[string]map[string]string{}
 		for _, e := range f.entries {
-			if e.ts > t-b*1e9 && e.ts <= t && matches(sel.stream, e.labels) && matches(sel.meta, e.meta) {
+			if e.ts > t-off-rng && e.ts <= t-off && matches(sel.stream, e.labels) && matches(sel.meta, e.meta) {
 				mm := map[string]string{}
 				for _, l := range by {
 					if v, ok := e.labels[l]; ok {
@@ -219,11 +249,12 @@ func (f *fakeLoki) metric(w http.ResponseWriter, m []string, start, end int64, s
 				metrics[k] = mm
 			}
 		}
+		ms := (t-off)/1e6 + off/1e6
 		for k, c := range counts {
 			if series[k] == nil {
 				series[k] = map[string]any{"metric": metrics[k], "values": [][]any{}}
 			}
-			series[k]["values"] = append(series[k]["values"].([][]any), []any{float64(t) / 1e9, strconv.Itoa(c)})
+			series[k]["values"] = append(series[k]["values"].([][]any), []any{json.RawMessage(strconv.FormatFloat(float64(ms)/1000, 'f', -1, 64)), strconv.Itoa(c)})
 		}
 	}
 	var result []any
@@ -504,58 +535,58 @@ func TestRereadAndAround(t *testing.T) {
 	}
 }
 
-func TestMetricCounts(t *testing.T) {
-	f := &fakeLoki{entries: dataset(600)}
-	s := newSource(t, f, nil)
-	r := source.Range{From: t0, To: t0.Add(20 * time.Minute)}
-	res, err := s.IndexCounts(ctx, source.CountQuery{Range: r, By: []string{"level"}, Bucket: 5 * time.Minute,
-		Selector: source.Selector{Terms: []source.Term{{Field: "app", Op: "=", Values: []string{"api"}}}}})
-	if err != nil {
-		t.Fatal(err)
-	}
+// wantCounts counts the entries of f by [bucket, bucket+width) from r.From
+// (the engine's buckets), for app=api, by level.
+func wantCounts(f *fakeLoki, r source.Range, width time.Duration) map[string]int64 {
 	want := map[string]int64{}
 	for _, e := range f.entries {
 		ts := time.Unix(0, e.ts).UTC()
 		if e.labels["app"] != "api" || ts.Before(r.From) || !ts.Before(r.To) {
 			continue
 		}
-		// Loki's windows are (b, b+5m]: an entry exactly on a bucket
-		// start belongs to the bucket before.
-		b := r.From.Add((ts.Sub(r.From) - 1) / (5 * time.Minute) * (5 * time.Minute))
-		if ts.Equal(r.From) {
-			continue
-		}
+		b := r.From.Add(ts.Sub(r.From) / width * width)
 		want[b.Format(time.RFC3339)+" "+e.labels["level"]]++
 	}
+	return want
+}
+
+func gotCounts(res source.CountResult) map[string]int64 {
 	got := map[string]int64{}
 	for _, row := range res.Rows {
 		got[row.Bucket.Format(time.RFC3339)+" "+row.Vals[0]] += row.N
 	}
-	for k, v := range want {
-		if got[k] != v {
-			t.Fatalf("%s: %d, want %d (got %v)", k, got[k], v, got)
-		}
+	return got
+}
+
+func TestMetricCounts(t *testing.T) {
+	r := source.Range{From: t0, To: t0.Add(20 * time.Minute)}
+	f := &fakeLoki{entries: dataset(700)} // past To, and an entry exactly on From and on each bucket boundary
+	// The edges: the last nanosecond of a bucket, and exactly To.
+	for _, at := range []time.Time{t0.Add(5*time.Minute - 1), t0.Add(10*time.Minute - 1), r.To, r.To.Add(-1)} {
+		f.entries = append(f.entries, fakeEntry{ts: at.UnixNano(), labels: map[string]string{"env": "prod", "app": "api", "level": "edge"}, line: "edge"})
+	}
+	s := newSource(t, f, nil)
+	sel := source.Selector{Terms: []source.Term{{Field: "app", Op: "=", Values: []string{"api"}}}}
+	res, err := s.IndexCounts(ctx, source.CountQuery{Range: r, By: []string{"level"}, Bucket: 5 * time.Minute, Selector: sel})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, got := wantCounts(f, r, 5*time.Minute), gotCounts(res)
+	if !maps.Equal(got, want) {
+		t.Fatalf("got %v\nwant %v", got, want)
 	}
 	for _, q := range f.queries {
 		if !strings.HasPrefix(q, "sum by (level) (count_over_time({") {
 			t.Fatalf("query %s", q)
 		}
 	}
-	// One bucket for the range: an instant query.
-	one, err := s.IndexCounts(ctx, source.CountQuery{Range: r, By: []string{"level"},
-		Selector: source.Selector{Terms: []source.Term{{Field: "app", Op: "=", Values: []string{"api"}}}}})
+	// One bucket for the range: an instant query, [From, To).
+	one, err := s.IndexCounts(ctx, source.CountQuery{Range: r, By: []string{"level"}, Selector: sel})
 	if err != nil {
 		t.Fatal(err)
 	}
-	var sum1, sum2 int64
-	for _, row := range one.Rows {
-		sum1 += row.N
-	}
-	for _, row := range res.Rows {
-		sum2 += row.N
-	}
-	if sum1 != sum2 || sum1 == 0 {
-		t.Fatalf("instant %d, range %d", sum1, sum2)
+	if want, got := wantCounts(f, r, r.To.Sub(r.From)), gotCounts(one); !maps.Equal(got, want) {
+		t.Fatalf("instant: got %v\nwant %v", got, want)
 	}
 	// Buckets off Loki's step grid are not served.
 	if _, err := s.IndexCounts(ctx, source.CountQuery{Range: source.Range{From: r.From.Add(time.Minute), To: r.To.Add(time.Minute)}, Bucket: 5 * time.Minute}); !errors.Is(err, source.ErrNotIndexable) {
@@ -565,6 +596,13 @@ func TestMetricCounts(t *testing.T) {
 	for _, by := range []string{"trace_id", "pod"} {
 		if _, err := s.IndexCounts(ctx, source.CountQuery{Range: r, By: []string{by}, Bucket: time.Minute}); !errors.Is(err, source.ErrNotIndexable) {
 			t.Fatalf("by %s: %v", by, err)
+		}
+	}
+	// A backend whose points are not on the grid asked for: not served.
+	f.ignoreOffset = true
+	for _, b := range []time.Duration{5 * time.Minute, 0} {
+		if _, err := s.IndexCounts(ctx, source.CountQuery{Range: r, By: []string{"level"}, Bucket: b, Selector: sel}); !errors.Is(err, source.ErrNotIndexable) {
+			t.Fatalf("bucket %v off the grid: %v", b, err)
 		}
 	}
 }
@@ -659,6 +697,19 @@ func TestPagingNeverTruncatesSilently(t *testing.T) {
 			labels: map[string]string{"env": "prod"}, line: "first"}, fakeEntry{ts: t0.Add(2 * time.Second).UnixNano(), labels: map[string]string{"env": "prod"}, line: "second"})}, nil)
 		if recs := scanAll(t, s, source.Range{From: t0, To: t0.Add(time.Hour)}, source.Selector{}); len(recs) != tc.tie+tc.later+2 {
 			t.Fatalf("2 + %d ties + %d: %d records", tc.tie, tc.later, len(recs))
+		}
+	}
+}
+
+func TestParseSeconds(t *testing.T) {
+	for in, want := range map[string]int64{"1730289899.999": 1730289899999000000, "1730289900": 1730289900000000000, "1.000000001": 1000000001} {
+		if got, ok := parseSeconds(json.RawMessage(in)); !ok || got != want {
+			t.Errorf("%s: %d %t", in, got, ok)
+		}
+	}
+	for _, bad := range []string{"", "-1", "1e9", "1.2.3", `"1"`, "1.0000000001"} {
+		if _, ok := parseSeconds(json.RawMessage(bad)); ok {
+			t.Errorf("%q accepted", bad)
 		}
 	}
 }

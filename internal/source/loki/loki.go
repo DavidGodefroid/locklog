@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/url"
 	"slices"
 	"sort"
@@ -599,13 +600,29 @@ type vectorResponse struct {
 }
 
 // IndexCounts answers a trusted-label count with a server-side metric query
-// (`sum by (labels) (count_over_time({selector}[bucket]))`): no line leaves
-// Loki. Loki's points count (t-bucket, t]; bucket b holds the point at
-// b+bucket. Counts by or on structured metadata, or without a bucket of
-// whole seconds, are not served (source.ErrNotIndexable).
+// (`sum by (labels) (count_over_time({selector}[bucket] offset 1ns))`): no
+// line leaves Loki.
+//
+// The engine's buckets are [b, b+bucket); Loki's count_over_time at t counts
+// (t-bucket, t]. The query is shifted by `offset 1ns`, so that the point at
+// t = b+bucket counts [b, b+bucket). The shift is an offset rather than a
+// start moved by 1 ns because Loki's query frontend rounds a range query's
+// start down to a multiple of the step (pkg/querier/queryrange/splitters.go,
+// alignStartEnd): a moved start would be moved back. Range queries ask the
+// points From+bucket .. To, step bucket; one bucket for the range is an
+// instant query at To. Loki writes a point's time as (t-1ns) in whole
+// milliseconds, so a point maps to bucket b when its time is in
+// [b+bucket-1ms, b+bucket); a point anywhere else (a grid that is not the
+// one asked for) makes the count not served (source.ErrNotIndexable).
+//
+// Also not served: a count by an untrusted label or by structured metadata,
+// a term on an untrusted field or with an empty value, a bucket that is
+// not whole seconds or that cuts the range into more than 11000 points, and
+// a bucketed range whose ends are not multiples of the bucket since the
+// epoch.
 func (s *Source) IndexCounts(ctx context.Context, q source.CountQuery) (source.CountResult, error) {
 	for _, b := range q.By {
-		if !s.trustedLabel(b) {
+		if !s.trustedLabel(b) || !nameRe.MatchString(b) {
 			return source.CountResult{}, source.ErrNotIndexable
 		}
 	}
@@ -614,12 +631,13 @@ func (s *Source) IndexCounts(ctx context.Context, q source.CountQuery) (source.C
 			return source.CountResult{}, source.ErrNotIndexable
 		}
 	}
+	span := q.Range.To.Sub(q.Range.From)
 	bucket := q.Bucket
 	instant := bucket == 0
 	if instant {
-		bucket = q.Range.To.Sub(q.Range.From)
+		bucket = span
 	}
-	if bucket < time.Second || bucket%time.Second != 0 || q.Range.To.Sub(q.Range.From)/bucket > 11000 {
+	if bucket < time.Second || bucket%time.Second != 0 || span <= 0 || span%bucket != 0 || span/bucket > 11000 {
 		return source.CountResult{}, source.ErrNotIndexable
 	}
 	// Loki evaluates range queries at multiples of the step since the
@@ -632,17 +650,11 @@ func (s *Source) IndexCounts(ctx context.Context, q source.CountQuery) (source.C
 		return source.CountResult{}, err
 	}
 	by := slices.Clone(q.By)
-	for _, b := range by {
-		if !nameRe.MatchString(b) {
-			return source.CountResult{}, source.ErrNotIndexable
-		}
-	}
-	expr := fmt.Sprintf("sum by (%s) (count_over_time(%s [%ds]))", strings.Join(by, ", "), sel, int64(bucket/time.Second))
+	expr := fmt.Sprintf("sum by (%s) (count_over_time(%s [%ds] offset 1ns))", strings.Join(by, ", "), sel, int64(bucket/time.Second))
 	v := url.Values{}
 	v.Set("query", expr)
 	path := "/loki/api/v1/query_range"
 	if instant {
-		// One bucket for the range: an instant query at its end.
 		path = "/loki/api/v1/query"
 		v.Set("time", strconv.FormatInt(q.Range.To.UnixNano(), 10))
 	} else {
@@ -670,6 +682,8 @@ func (s *Source) IndexCounts(ctx context.Context, q source.CountQuery) (source.C
 	} else if json.Unmarshal(body, &mr) != nil || mr.Status != "success" || mr.Data.ResultType != "matrix" {
 		return source.CountResult{}, errResponse
 	}
+	from := q.Range.From.UnixNano()
+	n := int64(span / bucket)
 	var res source.CountResult
 	for _, series := range mr.Data.Result {
 		vals := make([]string, len(by))
@@ -677,21 +691,24 @@ func (s *Source) IndexCounts(ctx context.Context, q source.CountQuery) (source.C
 			vals[i] = series.Metric[b] // "" (absent) when the label is missing
 		}
 		for _, p := range series.Values {
-			var t float64
-			var n string
-			if json.Unmarshal(p[0], &t) != nil || json.Unmarshal(p[1], &n) != nil {
+			at, ok := parseSeconds(p[0])
+			var c string
+			if !ok || json.Unmarshal(p[1], &c) != nil {
 				return source.CountResult{}, errResponse
 			}
-			cnt, err := strconv.ParseFloat(n, 64)
-			if err != nil {
+			f, err := strconv.ParseFloat(c, 64)
+			if err != nil || f < 0 || f != math.Trunc(f) || f > 1<<53 {
 				return source.CountResult{}, errResponse
 			}
-			at := time.Unix(0, int64(t*1e9)).UTC().Round(time.Second)
-			b := at.Add(-bucket)
-			if b.Before(q.Range.From) || !b.Before(q.Range.To) {
-				continue
+			cnt := int64(f)
+			// The point of bucket k ends it: From+(k+1)*bucket, written
+			// 1 ns earlier in whole milliseconds.
+			k := (at - from) / int64(bucket)
+			end := from + (k+1)*int64(bucket)
+			if at < from || k >= n || at < end-int64(time.Millisecond) || at >= end {
+				return source.CountResult{}, source.ErrNotIndexable
 			}
-			res.Rows = append(res.Rows, source.CountRow{Bucket: b, Vals: slices.Clone(vals), N: int64(cnt)})
+			res.Rows = append(res.Rows, source.CountRow{Bucket: time.Unix(0, from+k*int64(bucket)).UTC(), Vals: slices.Clone(vals), N: cnt})
 		}
 	}
 	sort.Slice(res.Rows, func(i, j int) bool {
@@ -702,4 +719,17 @@ func (s *Source) IndexCounts(ctx context.Context, q source.CountQuery) (source.C
 	})
 	res.IndexedFrom = q.Range.From
 	return res, nil
+}
+
+// parseSeconds reads a metric point's time, a JSON number of seconds with
+// a decimal fraction ("1730289899.999"), exactly, as nanoseconds.
+func parseSeconds(raw json.RawMessage) (int64, bool) {
+	t := string(raw)
+	sec, frac, _ := strings.Cut(t, ".")
+	if sec == "" || len(frac) > 9 || strings.Trim(sec, "0123456789") != "" || strings.Trim(frac, "0123456789") != "" || len(sec) > 11 {
+		return 0, false
+	}
+	s, _ := strconv.ParseInt(sec, 10, 64)
+	f, _ := strconv.ParseInt((frac + "000000000")[:9], 10, 64)
+	return s*1e9 + f, true
 }
