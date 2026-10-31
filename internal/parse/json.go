@@ -7,6 +7,9 @@ import (
 	"strings"
 )
 
+// jsonSpace is the whitespace JSON allows around a value.
+const jsonSpace = " \t\r\n"
+
 var errStructure = errors.New("parse: structure over limits")
 
 // DecodeJSON decodes text as exactly one JSON value (surrounding whitespace
@@ -106,12 +109,12 @@ func (jsonFormat) Starts(string) bool { return true }
 
 // Detect reports whether a line looks like a JSON object (used by "auto").
 func (jsonFormat) Detect(line string) bool {
-	s := strings.TrimSpace(line)
+	s := strings.Trim(line, jsonSpace)
 	return len(s) >= 2 && s[0] == '{' && s[len(s)-1] == '}'
 }
 
 func (jsonFormat) Decode(text string, o *Options) (Event, bool) {
-	s := strings.TrimSpace(text)
+	s := strings.Trim(text, jsonSpace)
 	if !strings.HasPrefix(s, "{") {
 		return Event{}, false
 	}
