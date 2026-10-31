@@ -422,7 +422,7 @@ func TestPlanSlicesAlignedAndQueryIndependent(t *testing.T) {
 			t.Fatal("a remote slice has a planned size")
 		}
 	}
-	if w := width(source.Range{From: t0, To: t0.Add(7 * 24 * time.Hour)}); w != time.Hour {
+	if w, err := width(source.Range{From: t0, To: t0.Add(7 * 24 * time.Hour)}); err != nil || w != time.Hour {
 		t.Fatalf("7 d width %v", w)
 	}
 }
@@ -890,5 +890,31 @@ func TestResponseAndLineCaps(t *testing.T) {
 	recs := scanAll(t, newSource(t, f, nil), source.Range{From: t0, To: t0.Add(time.Minute)}, source.Selector{})
 	if len(recs) != 1 || len(recs[0].Event.Raw) != parse.MaxLineBytes || !recs[0].Event.Truncated {
 		t.Fatalf("long line: %d records, %d bytes kept", len(recs), len(recs[0].Event.Raw))
+	}
+}
+
+func TestPlanEnforcesMaxSlices(t *testing.T) {
+	s := newSource(t, &fakeLoki{}, nil)
+	day := 24 * time.Hour
+	// 512 aligned days: 512 slices, the most.
+	p, err := s.Plan(ctx, source.Range{From: t0.Truncate(day), To: t0.Truncate(day).Add(MaxSlices * day)}, source.Selector{})
+	if err != nil || len(p.Chunks[0].Granules) != MaxSlices {
+		t.Fatalf("512 days: %v", err)
+	}
+	// One more slice (here from a start off the day): refused.
+	for _, r := range []source.Range{
+		{From: t0, To: t0.Add(MaxSlices * day)},
+		{From: t0, To: t0.Add(600 * day)},
+	} {
+		if p, err := s.Plan(ctx, r, source.Selector{}); err == nil {
+			t.Fatalf("%v: %d slices planned", r.To.Sub(r.From), len(p.Chunks[0].Granules))
+		}
+	}
+	// Every plan stays within MaxSlices.
+	for _, d := range []time.Duration{time.Minute, 511 * time.Minute, 512 * time.Minute, 513 * time.Minute, 7 * day, 100 * day} {
+		p, err := s.Plan(ctx, source.Range{From: t0.Add(17 * time.Second), To: t0.Add(17*time.Second + d)}, source.Selector{})
+		if err != nil || len(p.Chunks[0].Granules) > MaxSlices {
+			t.Fatalf("%v: %v", d, err)
+		}
 	}
 }

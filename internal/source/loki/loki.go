@@ -189,15 +189,22 @@ func (s *Source) do(ctx context.Context, path string, q url.Values) ([]byte, err
 	return resp.Body, nil
 }
 
-// width returns the slice width of a range.
-func width(r source.Range) time.Duration {
-	d := r.To.Sub(r.From)
+// sliceCount returns the number of epoch-aligned slices of width w covering r.
+func sliceCount(r source.Range, w time.Duration) int64 {
+	start := r.From.Truncate(w)
+	return int64((r.To.Sub(start) + w - 1) / w)
+}
+
+// width returns the slice width of a range: the smallest of sliceWidths
+// that covers it in at most MaxSlices aligned slices. A range that needs
+// more slices even at the widest is an error.
+func width(r source.Range) (time.Duration, error) {
 	for _, w := range sliceWidths {
-		if d/w < MaxSlices {
-			return w
+		if sliceCount(r, w) <= MaxSlices {
+			return w, nil
 		}
 	}
-	return sliceWidths[len(sliceWidths)-1]
+	return 0, fmt.Errorf("loki source: the range needs more than %d slices of %v: narrow it", MaxSlices, sliceWidths[len(sliceWidths)-1])
 }
 
 // Plan returns one chunk of epoch-aligned time slices covering r, for the
@@ -208,14 +215,17 @@ func (s *Source) Plan(ctx context.Context, r source.Range, sel source.Selector) 
 	if err != nil {
 		return source.Byteplan{}, err
 	}
-	w := width(r)
+	if !r.From.Before(r.To) {
+		return source.Byteplan{}, nil
+	}
+	w, err := width(r)
+	if err != nil {
+		return source.Byteplan{}, err
+	}
 	start := r.From.Truncate(w)
 	var gs []source.Granule
 	for t := start; t.Before(r.To); t = t.Add(w) {
 		gs = append(gs, source.Granule{Start: t.UnixNano(), End: t.Add(w).UnixNano(), From: t, To: t.Add(w)})
-	}
-	if len(gs) == 0 {
-		return source.Byteplan{}, nil
 	}
 	return source.Byteplan{Chunks: []source.Chunk{{Source: s.o.Name, Stream: q, Granules: gs}}}, nil
 }
