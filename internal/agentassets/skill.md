@@ -12,14 +12,15 @@ Agents read logs only through locklog. The human's `locklog console`, in a separ
 3. Find when it started: `locklog_count` on trusted fields (level, status class, unit, container) with a `bucket`, over the widest range you need. It is cheap.
 4. See what changed: `locklog_patterns` over that range with a `baseline` (e.g. `24h`) lists the message patterns that are new, gone or more frequent.
 5. Narrow to the hour where it changed. Then use `locklog_search` (or `locklog_count` with `text`/`regex`) on that hour only. A result with `complete: false` continues for free with its `cursor`.
-6. Follow a user or a request by its pseudonym: `⟦email:…⟧` means the same value in every record of the epoch. Search or count by it, never by a clear value. `locklog_trace` with a request id or a pseudonym gives its timeline across sources; `locklog_context` with a record's `ref` shows the records around it.
+6. Follow a user or a request by its pseudonym: `⟦email:…⟧` means the same value in every record of the epoch. Search or count by it, never by a clear value. For a clear value the user gave you (an e-mail, an IP), `locklog_lookup` gives its pseudonym (rate-limited; never a secret). `locklog_trace` with a request id or a pseudonym gives its timeline across sources; `locklog_context` with a record's `ref` shows the records around it.
 7. To watch it happen again, `locklog_tail` follows the new records for up to 50 s while the user reproduces the problem.
 8. Report what you found. Masked values stay masked.
 
 Rules:
 
 - Never ask the user to paste log lines or personal values.
-- An answer `E_OVER_BUDGET` means the call would read too much: narrow the range or the sources. Do not split one call into many to get around it.
+- An answer `E_OVER_BUDGET` means the call would read too much (per call, or the rolling budgets `locklog_status` shows): narrow the range or the sources. Do not split one call into many to get around it. When the call really needs its whole range, `locklog_scan` runs it as an approved scan: the human approves it once at the console, and its `cursor` then continues free until the plan ends or 30 minutes pass. Give it an absolute `from`/`to`; asking again for the same scan re-attaches to it.
+- `locklog_unmask` asks the human to reveal exact pseudonyms of one record (by `ref`), once, with your reason. Use it only when the clear value is needed to act (it is off on production by default); never to satisfy curiosity.
 - A refusal: follow its `retry` (`rewrite` once, `ask_user`: tell the user, `stop`: report).
 - A source, a budget or unmask in the way: `locklog_request_change` only queues a proposal for the human. Never edit `.locklog/` to loosen it yourself.
 - If a field that holds personal data comes back in clear, mask it with `locklog_pii_add` once the console serves PII rules; until then it answers that locklog has none, so tell the user which field it is.
