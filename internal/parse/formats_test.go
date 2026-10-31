@@ -71,6 +71,9 @@ func TestSyslog3164(t *testing.T) {
 		// Tomorrow is still this year; two days ahead is last year.
 		{"Jan  3 08:00:00 web cron[1]: x", "x", "facility=<none> level=<none> host=web app=cron pid=1", time.Date(2026, 1, 3, 8, 0, 0, 0, time.UTC)},
 		{"Jan  4 08:00:00 web cron[1]: x", "x", "facility=<none> level=<none> host=web app=cron pid=1", time.Date(2025, 1, 4, 8, 0, 0, 0, time.UTC)},
+		{"<34>Oct 11 22:14:15 host message without a tag", "message without a tag", "facility=auth level=critical host=host app=<none> pid=<none>", time.Date(2025, 10, 11, 22, 14, 15, 0, time.UTC)},
+		{"<189>Oct 11 22:14:15 router %SYS-5-CONFIG_I: Configured", "%SYS-5-CONFIG_I: Configured", "facility=local7 level=notice host=router app=<none> pid=<none>", time.Date(2025, 10, 11, 22, 14, 15, 0, time.UTC)},
+		{"<14>2026-01-02T09:00:00Z web app: pri makes it syslog", "pri makes it syslog", "facility=user level=info host=web app=app pid=<none>", time.Date(2026, 1, 2, 9, 0, 0, 0, time.UTC)},
 		{"2026-01-02T09:00:00.123456+01:00 web systemd[1]: Started x.service.", "Started x.service.", "facility=<none> level=<none> host=web app=systemd pid=1", time.Date(2026, 1, 2, 8, 0, 0, 123456000, time.UTC)},
 		{"<14>Dec 31 23:59:59 host kernel: [ 1.0] usb 1-1: new device", "[ 1.0] usb 1-1: new device", "facility=user level=info host=host app=kernel pid=<none>", time.Date(2025, 12, 31, 23, 59, 59, 0, time.UTC)},
 		// A Feb 29 lands in the last leap year that is not in the future.
@@ -280,5 +283,13 @@ func TestCombinedBytesNumber(t *testing.T) {
 	e, ok := (combinedFormat{}).Decode(`1.2.3.4 - - [10/Oct/2000:13:55:36 -0700] "GET / HTTP/1.1" 200 0042`, nil)
 	if v, _ := Get(e.Fields, "bytes"); !ok || v.Kind != KindNumber || v.Str != "42" {
 		t.Fatalf("%+v", e.Fields)
+	}
+}
+
+func TestAutoKeepsTimestampedStackTraces(t *testing.T) {
+	in := "2026-10-31T02:41:55Z Unhandled exception: java.lang.NullPointerException\n\tat Foo.bar(Foo.java:1)\n\tat Main.main(Main.java:2)\n"
+	evs := readAll(t, mustParser(t, Options{}), in)
+	if len(evs) != 1 || evs[0].Format != "plain" || evs[0].Lines != 3 {
+		t.Fatalf("%+v", evs)
 	}
 }

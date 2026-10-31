@@ -45,7 +45,7 @@ func (syslogFormat) Detect(line string) bool {
 	if _, ok := decode5424(line); ok {
 		return true
 	}
-	_, tagged, ok := decode3164(line, nil)
+	_, ok, tagged := decode3164(line, nil)
 	return ok && tagged
 }
 
@@ -53,7 +53,7 @@ func (f syslogFormat) Decode(text string, o *Options) (Event, bool) {
 	if ev, ok := decode5424(text); ok {
 		return ev, true
 	}
-	ev, _, ok := decode3164(text, o)
+	ev, ok, _ := decode3164(text, o)
 	return ev, ok
 }
 
@@ -168,7 +168,14 @@ func structuredData(s string) ([]Member, int, bool) {
 	return out, i, true
 }
 
-// decode3164 also reports whether the header has a tag.
+// rsyslogTime is the timestamp of rsyslog's RSYSLOG_FileFormat:
+// fractional seconds and a numeric offset (2026-10-31T02:41:55.123456+01:00).
+func rsyslogTime(ts string) bool {
+	return strings.Contains(ts, ".") && !strings.HasSuffix(ts, "Z")
+}
+
+// decode3164 reports the event, whether the text is a 3164 header, and
+// whether that header has a tag.
 // sdNameByte is a byte of an SD-NAME: PRINTUSASCII except "=", " ", "]"
 // and '"'.
 func sdNameByte(c byte) bool {
@@ -178,6 +185,12 @@ func sdNameByte(c byte) bool {
 func decode3164(text string, o *Options) (Event, bool, bool) {
 	m := syslog3164Re.FindStringSubmatchIndex(text)
 	if m == nil {
+		return Event{}, false, false
+	}
+	if m[2] < 0 && m[6] >= 0 && !rsyslogTime(text[m[6]:m[7]]) {
+		// "<RFC 3339 time> Starting server: x" is an application line
+		// (docker logs -t): without a PRI, only rsyslog's own shape
+		// (fractional seconds and a numeric offset) is syslog.
 		return Event{}, false, false
 	}
 	host := text[m[8]:m[9]]
@@ -211,6 +224,9 @@ func decode3164(text string, o *Options) (Event, bool, bool) {
 		t = nil // "crate::module:": a path, not a tag
 	}
 	if t != nil {
+		if _, isLevel := levels[strings.ToLower(rest[t[2]:t[3]])]; isLevel {
+			return Event{}, false, false // "<time> api WARN: slow"
+		}
 		fields = append(fields, strMember("app", rest[t[2]:t[3]]))
 		if t[4] >= 0 {
 			fields = append(fields, strMember("pid", rest[t[4]:t[5]]))
