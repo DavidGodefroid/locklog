@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"slices"
 	"sort"
 	"sync"
@@ -305,20 +306,20 @@ func orderPlan(plan source.Byteplan, order string) source.Byteplan {
 
 // descGranules splits a chunk into single-granule chunks, last first.
 func descGranules(c source.Chunk) []source.Chunk {
-	if len(c.Granules) < 2 || estimated(c.Granules) {
-		return []source.Chunk{c}
+	if len(c.Granules) < 2 || c.Bytes == 0 || c.End() == math.MaxInt64 {
+		return []source.Chunk{c} // unknown bytes: as planned
 	}
 	var sum int64
 	for _, g := range c.Granules {
-		sum += g.Bytes
+		sum += granuleBytes(g, c)
 	}
-	prefix := c.Bytes - sum // a compressed stream's bytes read and discarded
+	prefix := max(c.Bytes-sum, 0) // a compressed stream's bytes read and discarded
 	out := make([]source.Chunk, 0, len(c.Granules))
 	for i := len(c.Granules) - 1; i >= 0; i-- {
 		g := c.Granules[i]
 		one := c
 		one.Granules = []source.Granule{g}
-		one.Bytes = g.Bytes
+		one.Bytes = granuleBytes(g, c)
 		if prefix > 0 {
 			one.Bytes += prefix + g.Start - c.Start()
 		}
@@ -463,7 +464,7 @@ func (e *Engine) run(ctx context.Context, plan source.Byteplan, chunk, gran int,
 		sub.Granules = c.Granules[g[0]:g[1]]
 		var planned int64
 		for _, gr := range sub.Granules {
-			planned += granuleBytes(gr, c.Bytes)
+			planned += granuleBytes(gr, c)
 		}
 		// Stop before a group that would not fit (but always make
 		// progress on the first group of a call).

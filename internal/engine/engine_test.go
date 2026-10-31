@@ -1898,3 +1898,42 @@ func TestOrderAcrossCalls(t *testing.T) {
 		checkOrder(t, recordTimes(t, recs), 30000, true)
 	})
 }
+
+// unknownGranules is a local source whose granules carry no bytes (only
+// their chunk's), as journald planned them before.
+type unknownGranules struct{ source.Source }
+
+func (u unknownGranules) Plan(ctx context.Context, r source.Range, sel source.Selector) (source.Byteplan, error) {
+	p, err := u.Source.Plan(ctx, r, sel)
+	for i := range p.Chunks {
+		gs := slices.Clone(p.Chunks[i].Granules)
+		for j := range gs {
+			gs[j].Bytes = 0
+		}
+		p.Chunks[i].Granules = gs
+	}
+	return p, err
+}
+
+// TestUnknownGranuleBytesStillGrouped: granules of unknown bytes in a chunk
+// of known bytes are sized by their share of it: a call takes the groups
+// that fit, never the whole chunk, and order holds across calls.
+func TestUnknownGranuleBytesStillGrouped(t *testing.T) {
+	f := newFixture(t, genLog(t0, 30000, "c@example.org"), func(o *Options) {
+		oneGranulePerCall(o)
+		o.Sources["app"] = unknownGranules{o.Sources["app"]}
+	})
+	for _, order := range []string{"asc", "desc"} {
+		qq := q(func(q *Query) {
+			q.Where = []Pred{{Field: "level", Op: OpEq, Value: raw("error")}}
+			q.Limit = 200
+			q.Order = order
+		})
+		res, err := f.eng.Search(ctx, qq)
+		if err != nil || res.Complete || res.Scanned.Granules != 1 {
+			t.Fatalf("%s: first call %+v, %v", order, res.Scanned, err)
+		}
+		recs, _ := allRecords(t, f.eng, qq)
+		checkOrder(t, recordTimes(t, recs), 6000, order == "desc")
+	}
+}

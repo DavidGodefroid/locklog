@@ -403,16 +403,21 @@ func (s *Source) Plan(ctx context.Context, r source.Range, _ source.Selector) (s
 			}
 			// A granule costs the bytes from its first entry to the next
 			// granule's (entries and the data objects written with
-			// them): a function of the file, not of any query.
+			// them): a function of the file, not of any query. Known
+			// before the fetch, so the engine sizes groups by it.
+			end := uint64(size)
 			if i+1 < len(fg.gs) {
-				runEnd = fg.gs[i+1].first
-			} else {
-				runEnd = uint64(size)
+				end = fg.gs[i+1].first
 			}
-			if runEnd < runStart { // offsets going backwards: a corrupt file
+			gb := int64(1) // never 0 (unknown): offsets going backwards, a corrupt file
+			if end > g.first {
+				gb = int64(end - g.first)
+			}
+			runEnd = end
+			if runEnd < runStart {
 				runEnd = runStart
 			}
-			run = append(run, source.Granule{Start: g.index * GranuleEntries, End: g.index*GranuleEntries + g.n})
+			run = append(run, source.Granule{Start: g.index * GranuleEntries, End: g.index*GranuleEntries + g.n, Bytes: gb})
 		}
 		flush()
 	}
