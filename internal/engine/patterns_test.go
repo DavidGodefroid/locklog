@@ -428,6 +428,9 @@ func TestPatternsBaselineOwnCap(t *testing.T) {
 	if !res.Truncated {
 		t.Errorf("not truncated with %d distinct patterns", res.Distinct)
 	}
+	if len(res.Gone) != 0 {
+		t.Errorf("gone %v from a truncated window", res.Gone)
+	}
 }
 
 // growingSource appends a record after its first plan: the window's and
@@ -436,6 +439,7 @@ type growingSource struct {
 	countingSource
 	path  string
 	calls *int
+	late  string
 }
 
 func (g growingSource) Plan(ctx context.Context, r source.Range, sel source.Selector) (source.Byteplan, error) {
@@ -443,7 +447,11 @@ func (g growingSource) Plan(ctx context.Context, r source.Range, sel source.Sele
 	*g.calls++
 	if *g.calls == 1 {
 		fh, _ := os.OpenFile(g.path, os.O_APPEND|os.O_WRONLY, 0)
-		fmt.Fprintf(fh, "time=%s level=info status=200 msg=\"late line\"\n", t0.Add(3*time.Hour).Format(time.RFC3339))
+		late := g.late
+		if late == "" {
+			late = fmt.Sprintf("time=%s level=info status=200 msg=\"late line\"\n", t0.Add(3*time.Hour).Format(time.RFC3339))
+		}
+		fh.WriteString(late)
 		fh.Close()
 	}
 	return p, err
@@ -456,7 +464,7 @@ func TestPatternsGrowingFileCountedOnce(t *testing.T) {
 	var f *fixture
 	f = newFixture(t, content, func(o *Options) {
 		cs := o.Sources["app"].(countingSource)
-		o.Sources["app"] = growingSource{cs, "", &calls}
+		o.Sources["app"] = growingSource{cs, "", &calls, ""}
 	})
 	gs := f.eng.o.Sources["app"].(growingSource)
 	gs.path = filepath.Join(f.root, "logs", "app.log")
@@ -467,5 +475,35 @@ func TestPatternsGrowingFileCountedOnce(t *testing.T) {
 	}
 	if res.Records != 100 {
 		t.Errorf("window records = %d, want 100 (patterns %v, scanned %+v)", res.Records, res.Patterns, res.Scanned)
+	}
+}
+
+// TestPatternsGrowingAcrossGranules: a file grows past a granule boundary
+// between the window's plan and the baseline's: the new granule, unindexed,
+// is in the baseline's plan only, and the window counts from its own plan
+// alone (one snapshot), not from part of the growth.
+func TestPatternsGrowingAcrossGranules(t *testing.T) {
+	w := t0.Add(time.Hour)
+	content := patternLog(t0, 50, "base %d") + patternLog(w, 100, "alpha %d")
+	pad := source.GranuleBytes - int64(len(content)) - 150
+	content += fmt.Sprintf("time=%s level=info status=200 msg=\"filler %s\"\n", w.Add(time.Minute).Format(time.RFC3339), strings.Repeat("z", int(pad)-70))
+	var late strings.Builder
+	for i := 0; i < 6; i++ {
+		fmt.Fprintf(&late, "time=%s level=info status=200 msg=\"late line\"\n", w.Add(40*time.Minute).Format(time.RFC3339))
+	}
+	calls := 0
+	f := newFixture(t, content, func(o *Options) {
+		cs := o.Sources["app"].(countingSource)
+		o.Sources["app"] = growingSource{cs, "", &calls, late.String()}
+	})
+	gs := f.eng.o.Sources["app"].(growingSource)
+	gs.path = filepath.Join(f.root, "logs", "app.log")
+	f.eng.o.Sources["app"] = gs
+	res, err := f.eng.Patterns(ctx, PatternsQuery{Query: q(func(q *Query) { q.From, q.To = w, w.Add(time.Hour) }), Baseline: "1h"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Records != 101 || strings.Contains(fmt.Sprint(res.Patterns), "late line") {
+		t.Fatalf("window records %d, patterns %v: the window mixes two snapshots", res.Records, res.Patterns)
 	}
 }

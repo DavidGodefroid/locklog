@@ -145,7 +145,8 @@ type PatternsResult struct {
 	Untimed int64 `json:"untimed,omitempty"`
 	// Truncated is set when the window or the baseline had more distinct
 	// patterns than MaxGroups (or MaxGroupBytes): the rest count under
-	// Other, in their own group.
+	// Other, in their own group (counted in Distinct). New is then left
+	// empty when the baseline is truncated, Gone when the window is.
 	Truncated bool `json:"truncated,omitempty"`
 	// With a baseline: New are the top patterns absent from it, Gone the
 	// top patterns of the baseline absent from the window.
@@ -288,7 +289,10 @@ func (e *Engine) Patterns(ctx context.Context, q PatternsQuery) (_ PatternsResul
 		var bucket time.Time
 		switch {
 		case !timed:
-		case q.Query.rangeContains(t, false):
+		case q.Query.rangeContains(t, false) && b.chunk < a.winChunks:
+			// The window counts from its own plan only: the
+			// baseline's, made by a second call, may hold a newer
+			// part of a growing stream.
 			bucket = windowBucket
 		case q.offset > 0 && base.rangeContains(t, false):
 			bucket = baselineBucket
@@ -369,14 +373,16 @@ func (e *Engine) Patterns(ctx context.Context, q PatternsQuery) (_ PatternsResul
 		bf, bt := base.From, base.To
 		res.BaselineFrom, res.BaselineTo = &bf, &bt
 		res.New, res.Gone = []PatternGroup{}, []PatternGroup{}
+		// A side past its cap holds some patterns under Other: the
+		// other side's patterns cannot be said absent from it.
 		for k, g := range win {
-			if bl[k] == nil {
+			if bl[k] == nil && k != Other && !a.base.truncated {
 				res.New = append(res.New, group(k, g, true))
 			}
 		}
 		res.New = topOf(res.New, func(g PatternGroup) int64 { return g.N })
 		for k, bg := range bl {
-			if win[k] == nil {
+			if win[k] == nil && k != Other && !a.truncated {
 				z := bg.N
 				res.Gone = append(res.Gone, PatternGroup{Pattern: k, BaselineN: &z, First: bg.First, Last: bg.Last})
 			}
@@ -392,7 +398,10 @@ func (e *Engine) Patterns(ctx context.Context, q PatternsQuery) (_ PatternsResul
 		// is read, coverage is the window's.
 		asc := q.Query
 		asc.Order = "asc" // the plan is read in time order
-		if cu, ok := coveredUntil(f.plan, chunk, gran, asc); ok {
+		if chunk >= a.winChunks {
+			to := q.To
+			res.CoveredUntil = &to
+		} else if cu, ok := coveredUntil(f.plan, chunk, gran, asc); ok {
 			res.CoveredUntil = &cu
 		}
 	} else {
