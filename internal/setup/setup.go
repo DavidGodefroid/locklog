@@ -42,6 +42,9 @@ type Options struct {
 	Agent string
 	// Agents overrides the detected agents (host placement).
 	Agents []string
+	// Only limits detection to the log files under these directories: no
+	// journal, no container (scripted runs that know their logs).
+	Only []string
 	// Profile is the main profile's name ("" : prod or staging).
 	Profile string
 	// LokiProxy is the Compose Loki service (or container) to put behind
@@ -141,7 +144,11 @@ func Run(o Options) (Result, error) {
 		return res, fmt.Errorf("setup: unknown agent placement %q (want host, container or lea)", res.Agent)
 	}
 
-	det := Detect(o.Facts)
+	facts := o.Facts
+	if len(o.Only) > 0 {
+		facts = OnlyUnder(facts, o.Only)
+	}
+	det := Detect(facts)
 	plan := Plan{Profile: res.Profile, Production: res.Production, Detected: det}
 
 	// The Compose Loki's proxy.
@@ -430,4 +437,21 @@ func choose(in *bufio.Reader, out io.Writer, q, def string, opts []string) strin
 		}
 	}
 	return def
+}
+
+// OnlyUnder keeps the log files of f under dirs, and no journal or
+// container.
+func OnlyUnder(f hostfacts.Facts, dirs []string) hostfacts.Facts {
+	var logs []string
+	for _, p := range f.Logs {
+		for _, d := range dirs {
+			d = strings.TrimSuffix(filepath.ToSlash(filepath.Clean(d)), "/")
+			if strings.HasPrefix(p, d+"/") {
+				logs = append(logs, p)
+				break
+			}
+		}
+	}
+	f.Logs, f.Journals, f.Containers = logs, nil, nil
+	return f
 }

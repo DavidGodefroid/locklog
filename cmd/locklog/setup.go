@@ -16,7 +16,7 @@ import (
 )
 
 const setupUsage = `usage: locklog setup [--yes] [--production|--no-production] [--agent host|container|lea]
-                     [--agents claude,codex,...] [--profile P]
+                     [--agents claude,codex,...] [--profile P] [--only DIR,...]
                      [--loki-proxy SERVICE [--loki-selector label=value] [--vault-path P]]
                      [--image REF] [--agent-uid UID]`
 
@@ -50,6 +50,7 @@ func setupCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	agent := fs.String("agent", "", "host, container or lea")
 	agents := fs.String("agents", "", "the agents to wire (host): default the detected ones")
 	profile := fs.String("profile", "", "the main profile's name")
+	only := fs.String("only", "", "detect only the log files under these directories (comma-separated; no journal, no container)")
 	facts := fs.String("facts", "", "the host's facts (written by the launcher)")
 	lokiProxy := fs.String("loki-proxy", "", "the Compose Loki service to put behind an authenticating proxy")
 	lokiSel := fs.String("loki-selector", "", "the Loki source's label=value")
@@ -76,6 +77,15 @@ func setupCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case *noProd:
 		f := false
 		o.Production = &f
+	}
+	if *only != "" {
+		for _, d := range strings.Split(*only, ",") {
+			if !filepath.IsAbs(d) {
+				fmt.Fprintln(stderr, "locklog setup: --only: want absolute directories")
+				return 2
+			}
+			o.Only = append(o.Only, d)
+		}
 	}
 	if *agents != "" {
 		o.Agents = strings.Split(*agents, ",")

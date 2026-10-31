@@ -182,3 +182,11 @@ func TestSourceNames(t *testing.T) {
 		}
 	}
 }
+
+func TestOnlyUnder(t *testing.T) {
+	f := OnlyUnder(hostfacts.Facts{Logs: []string{"/var/log/syslog", "/srv/app/logs/app.log", "/srv/app/logs2/x.log"},
+		Journals: []string{"/var/log/journal"}, Containers: []hostfacts.Container{{Name: "web"}}}, []string{"/srv/app/logs/"})
+	if !slices.Equal(f.Logs, []string{"/srv/app/logs/app.log"}) || f.Journals != nil || f.Containers != nil {
+		t.Errorf("OnlyUnder = %+v", f)
+	}
+}
