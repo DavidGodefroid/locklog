@@ -88,7 +88,10 @@ type held struct {
 // original are not returned again. A stream that existed at the start or
 // at a poll and is gone at a later one (renamed out of the paths, deleted,
 // truncated) and that no copy holds makes the tail incomplete: it may have
-// grown after its last read. Which streams exist and their ends come from a
+// grown after its last read. A stream linked as a copy of one that still
+// exists is not read (a copy is a snapshot of its original): one that grows
+// longer than it is a stream of its own and is read whole; one that does not
+// makes the tail incomplete. Which streams exist and their ends come from a
 // plan of every stream whole, unfiltered, at each poll. The duration ends with a poll planned after it.
 //
 // Work follows the new data: a plan of every local stream at the start (no
@@ -206,6 +209,7 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 	}
 	anchor := map[streamKey][]anchorRec{}
 	link := map[streamKey]streamKey{}
+	var lastPresent map[streamKey]bool // the streams of the last completed poll
 	type rkey struct {
 		k streamKey
 		p pos
@@ -287,6 +291,18 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 		present := map[streamKey]bool{} // the local streams that exist
 		for k := range ends {
 			present[k] = true
+		}
+		// A copy is a snapshot of its original: one longer than its
+		// original, while that still exists, is a stream of its own
+		// that happened to share its first records. It is read whole.
+		for c, o := range link {
+			if present[o] && ends[c] != math.MaxInt64 && ends[o] != math.MaxInt64 && ends[c] > ends[o] {
+				delete(link, c)
+				delete(frontier, c)
+				delete(heldAll, c)
+				delete(anchor, c)
+				delete(done, c)
+			}
 		}
 		for k, end := range ends {
 			if d, ok := done[k]; ok && end != math.MaxInt64 && end < d {
@@ -508,6 +524,7 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 		for k := range present {
 			known[k] = true
 		}
+		lastPresent = present
 		// The held record of an original that is no longer planned
 		// is its copy's to evaluate.
 		for _, sk := range link {
@@ -554,6 +571,13 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 			t.Stop()
 			return TailResult{}, cancelled
 		case <-t.C:
+		}
+	}
+	// A stream linked as a copy of one that still exists was not read: it
+	// may be a stream of its own sharing the original's first records.
+	for _, o := range link {
+		if lastPresent[o] {
+			covered = false
 		}
 	}
 	// At the end of the duration, the held records are what the streams

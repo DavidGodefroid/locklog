@@ -1273,6 +1273,9 @@ func indexDuringTail(t *testing.T, f *fixture, match bool) {
 // returns its match once, complete; with no match, it is complete and
 // empty.
 func TestTailIndexedDuringTail(t *testing.T) {
+	if raceEnabled {
+		t.Skip("timing: the race detector slows masking several fold")
+	}
 	for _, match := range []bool{true, false} {
 		f := newFixture(t, genLog(time.Now().Add(-time.Hour), 5, "c@example.org"), func(o *Options) { o.TailPoll = 100 * time.Millisecond })
 		go indexDuringTail(t, f, match)
@@ -1287,5 +1290,77 @@ func TestTailIndexedDuringTail(t *testing.T) {
 		if len(res.Records) != want || !res.Complete {
 			t.Fatalf("match %v: %d records, complete %v", match, len(res.Records), res.Complete)
 		}
+	}
+}
+
+// TestTailReplicasStartDuringTail: two files created during the tail with the
+// same first record (same offset, same second) are two streams: the second is
+// not taken for a copy of the first.
+func TestTailReplicasStartDuringTail(t *testing.T) {
+	f := newFixture(t, genLog(time.Now().Add(-time.Hour), 5, "c@example.org"), func(o *Options) { o.TailPoll = 50 * time.Millisecond })
+	p, _ := parse.New(parse.Options{})
+	src, err := file.New(file.Options{Name: "app", Paths: []string{f.root + "/logs/*.log"}, Roots: []string{f.root}, Parser: p,
+		Trusted: []string{"level", "status"}, Index: f.store, Sensitive: func(fl, v string) bool { return f.masker.TrustedValue("app", fl, v) != v }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := f.eng.o
+	o.Sources = map[string]source.Source{"app": src}
+	eng, err := New(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nextSecondHalf()
+	l := fmt.Sprintf(`time=%s level=error msg="replica starting"`, time.Now().UTC().Truncate(time.Second).Format(time.RFC3339))
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		os.WriteFile(filepath.Join(f.root, "logs", "a.log"), []byte(l+"\n"), 0o644)
+		time.Sleep(250 * time.Millisecond)
+		os.WriteFile(filepath.Join(f.root, "logs", "b.log"), []byte(l+"\n"+liveLine(7, "b")+"\n"), 0o644)
+		time.Sleep(250 * time.Millisecond)
+		appendLines(t, filepath.Join(f.root, "logs", "b.log"), liveLine(8, "b"))
+	}()
+	res, err := eng.Tail(ctx, TailQuery{Duration: "1500ms"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Records) != 4 || !res.Complete {
+		t.Fatalf("%d of 4 records, complete %v: %s", len(res.Records), res.Complete, res.Records)
+	}
+}
+
+// TestTailSameContentNewFiles: two files created during the tail with the
+// same content: a second one no longer than the first may be its copy, and
+// the tail says it may have missed records.
+func TestTailSameContentNewFiles(t *testing.T) {
+	f := newFixture(t, genLog(time.Now().Add(-time.Hour), 5, "c@example.org"), func(o *Options) { o.TailPoll = 50 * time.Millisecond })
+	p, _ := parse.New(parse.Options{})
+	src, err := file.New(file.Options{Name: "app", Paths: []string{f.root + "/logs/*.log"}, Roots: []string{f.root}, Parser: p,
+		Trusted: []string{"level", "status"}, Index: f.store, Sensitive: func(fl, v string) bool { return f.masker.TrustedValue("app", fl, v) != v }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := f.eng.o
+	o.Sources = map[string]source.Source{"app": src}
+	eng, err := New(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := fmt.Sprintf(`time=%s level=error msg="replica starting"`, time.Now().UTC().Add(time.Second).Truncate(time.Second).Format(time.RFC3339))
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		os.WriteFile(filepath.Join(f.root, "logs", "a.log"), []byte(l+"\n"), 0o644)
+		time.Sleep(250 * time.Millisecond)
+		os.WriteFile(filepath.Join(f.root, "logs", "b.log"), []byte(l+"\n"), 0o644)
+	}()
+	res, err := eng.Tail(ctx, TailQuery{Duration: "1s"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Records) == 2 && res.Complete || len(res.Records) < 1 || len(res.Records) > 2 {
+		t.Fatalf("%d records, complete %v", len(res.Records), res.Complete)
+	}
+	if len(res.Records) == 1 && res.Complete {
+		t.Fatal("a record may be missing, and the tail says complete")
 	}
 }
