@@ -1066,7 +1066,7 @@ console() {
 
 	# The hub flags: their files bound into the console, the rest passed
 	# as they are (the console checks them).
-	hub_on= hub_mounts= hub_seen=
+	hub_on='' hub_mounts='' hub_seen=''
 	n=$#
 	while [ "$n" -gt 0 ]; do
 		a=$1
