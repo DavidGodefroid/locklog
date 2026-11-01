@@ -204,3 +204,41 @@ results are on also shows its record in clear. lockkit refuses Ctrl-O at
 desktop levels 1 and 2 and warns on a production profile. On a production
 profile, where `unmask = "never"`, this is how you read a record the agent
 points you to.
+
+## Hub mode
+
+With lockhub, `lock up` starts the console with the hub flags, and you
+decide on lockhub (its terminal, the deck or a paired phone) instead of
+this terminal. By hand, through the launcher:
+
+```sh
+locklog hub-key --instance logs     # once: prints the key lockhub pins for this console
+LOCKLOG_NETWORK=lockfamily locklog console --profile staging \
+  --hub http://lockhub:8443 --hub-plain-http --hub-key-file ./hub.pub --instance logs \
+  [--devices-file ./devices.json [--require-device read-pii] [--seal-clear]] [--facade-keys-file ./facades.json]
+```
+
+The launcher binds the files read-only into the console and passes the
+hub flags to the console only. `--hub`, `--hub-key-file` and `--instance`
+go together; there is no hub discovery. With `--devices-file` and no
+`--require-device`, a `read-pii` approval (an unmask, an approved lookup)
+must be signed by a pinned device.
+
+- A scan, an unmask or an approved lookup becomes a ticket on lockhub:
+  the hub shows its screen masked; with `--seal-clear` the clear screen
+  (the record in clear, secrets still redacted) goes sealed to your pinned
+  devices only. The agent hears `pending` with the ticket id, nothing
+  else, and calls the same tool again with the ticket once you decided.
+- The run plans the call again: another record, other pseudonyms or spans,
+  another scan or a changed policy is refused (`E_STALE`), and asking
+  again is a new ticket. A ticket runs once; a scan's ticket covers its
+  whole plan, and its continuations need none.
+- A `read-pii` decision taken on a chat facade is refused by the console:
+  only the terminal, the deck or a phone approve an unmask or an approved
+  lookup.
+- A ticket waits 24 hours; its run after that asks again (a renewal, which
+  says the record could not be checked before the run).
+- With the hub down, free reads go on; approvals stay pending and go out
+  when it answers. `locklog_status` shows the hub mode and the instance.
+- Decisions (who, on which facade, the hub's signature), renewals and
+  reveals are audited.
