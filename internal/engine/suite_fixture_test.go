@@ -603,6 +603,16 @@ func normalizePages(t testing.TB, e *Engine, pages []json.RawMessage) ([]string,
 			t.Fatal(err)
 		}
 		delete(m, "epoch")
+		var noisy string
+		if realLoki() {
+			// A real Loki's answers carry its timing stats, which the
+			// source counts among the bytes fetched (#111): compared to
+			// within 0.1 % by firstDiff.
+			if sc, ok := m["scanned"].(map[string]any); ok {
+				noisy = fmt.Sprintf("%s%v", noisyMark, sc["bytes"])
+				sc["bytes"] = 0
+			}
+		}
 		if c, ok := m["cursor"].(string); ok {
 			var st cursorState
 			if err := e.o.Sealer.Open("Lc1", c, &st); err != nil {
@@ -643,7 +653,7 @@ func normalizePages(t testing.TB, e *Engine, pages []json.RawMessage) ([]string,
 			b, _ := json.Marshal(mm)
 			s = string(b)
 		}
-		out = append(out, s)
+		out = append(out, s+noisy)
 	}
 	n := map[string]int{}
 	for k, v := range ids {
@@ -652,14 +662,29 @@ func normalizePages(t testing.TB, e *Engine, pages []json.RawMessage) ([]string,
 	return out, n
 }
 
-// firstDiff reports the first differing pair of two page lists.
+// noisyMark separates a page from its scanned bytes on a real Loki.
+const noisyMark = " #scanned.bytes="
+
+// realLoki reports suites run against a real Loki (LOCKLOG_SUITE_LOKI_URL).
+func realLoki() bool { return os.Getenv("LOCKLOG_SUITE_LOKI_URL") != "" }
+
+// firstDiff reports the first differing pair of two page lists. A page's
+// scanned bytes on a real Loki (#111) are compared to within 0.1 %.
 func firstDiff(a, b []string) string {
 	if len(a) != len(b) {
 		return fmt.Sprintf("%d pages vs %d", len(a), len(b))
 	}
 	for i := range a {
-		if a[i] != b[i] {
-			x, y := a[i], b[i]
+		x, xb, _ := strings.Cut(a[i], noisyMark)
+		y, yb, _ := strings.Cut(b[i], noisyMark)
+		if xb != yb {
+			p, _ := strconv.ParseFloat(xb, 64)
+			q, _ := strconv.ParseFloat(yb, 64)
+			if d := p - q; d > p/1000 || -d > p/1000 {
+				return fmt.Sprintf("page %d: scanned bytes %s vs %s", i, xb, yb)
+			}
+		}
+		if x != y {
 			j := 0
 			for j < len(x) && j < len(y) && x[j] == y[j] {
 				j++

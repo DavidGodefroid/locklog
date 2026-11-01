@@ -466,17 +466,21 @@ func unmaskLeak(t *testing.T, s *suite, l *leakScanner, con *screens, recs map[s
 // ownValue reports whether v, an unmasked value, is its record's: a form
 // of one of its canaries, or text its corpus line holds (raw or decoded).
 func ownValue(v string, own []masktest.Canary, line string) bool {
-	lv := strings.ToLower(v)
-	for _, c := range own {
-		for _, f := range masktest.Forms(c) {
-			if strings.EqualFold(f, v) || strings.Contains(lv, strings.ToLower(f)) {
-				return true
+	// The value as the record holds it, or decoded (a real Loki keeps the
+	// escapes of a structured-metadata value as pushed).
+	lines := views(line)
+	for _, lv := range views(v) {
+		for _, c := range own {
+			for _, f := range masktest.Forms(c) {
+				if strings.EqualFold(f, lv) || strings.Contains(lv, strings.ToLower(f)) {
+					return true
+				}
 			}
 		}
-	}
-	for _, view := range views(line) {
-		if strings.Contains(view, lv) {
-			return true
+		for _, view := range lines {
+			if lv != "" && strings.Contains(view, lv) {
+				return true
+			}
 		}
 	}
 	return false

@@ -128,7 +128,11 @@ func lokiPush(base string, streams []*pushStream) error {
 	}
 	var buf bytes.Buffer
 	zw, _ := gzip.NewWriterLevel(&buf, gzip.BestSpeed)
-	if err := json.NewEncoder(zw).Encode(body); err != nil {
+	enc := json.NewEncoder(zw)
+	// No \u0026 for '&' and the like: in the CI runs, Loki 3.5 answered
+	// structured-metadata values with the escapes they were pushed with.
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(body); err != nil {
 		return err
 	}
 	zw.Close()
