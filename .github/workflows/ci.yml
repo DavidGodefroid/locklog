@@ -294,17 +294,6 @@ jobs:
           done
           docker logs loki | tail -50
           exit 1
-      # Debug (LL-16b): how the real Loki answers pushes and reads of the
-      # suites' entries; its effective limits.
-      - name: Loki debug
-        env:
-          LOCKLOG_SUITE_LOKI_URL: http://127.0.0.1:3100
-          LOCKLOG_SUITE_LOKI_DEBUG: "1"
-        run: |
-          curl -fsS http://127.0.0.1:3100/config | grep -E 'reject_old|out_of_order|unordered|query_ingesters_within|max_chunk_age|chunk_idle|creation_grace|max_label|structured_metadata|streams_per_user|ingestion_rate|per_stream' || true
-          curl -fsS http://127.0.0.1:3100/config | grep -n -A25 '^querier:' || true
-          curl -fsS http://127.0.0.1:3100/config | grep -n -E 'ingesters_within|query_store|lookback|look_back' || true
-          GOMAXPROCS=2 go test -count=1 -v -run '^TestSuiteLokiDebug$' ./internal/engine/ | cut -c1-2000
       - name: suites
         shell: bash
         env:
@@ -312,11 +301,38 @@ jobs:
         run: |
           set -o pipefail
           GOMAXPROCS=2 LOCKLOG_SUITES=1 LOCKLOG_SUITE_FULL=1 LOCKLOG_SUITE_TIMING=1 go test -count=1 -timeout 60m -v \
-            -run '^(TestSuite|TestLeakScanner)' ./internal/engine/ 2>&1 |
+            -run '^(TestSuite|TestLeakScanner)' -skip '^TestSuiteOracleLatency$' ./internal/engine/ 2>&1 |
             grep -v -E '^=== (RUN|PAUSE|CONT)|: [0-9]+ pages in |: scanned in ' | tee suites.log
       - name: Loki logs on failure
         if: failure()
         run: docker logs loki 2>&1 | tail -100
+
+  # The oracle's latency cases (repeated, interleaved runs, idle and under a
+  # CPU hog, compared statistically) over every source, Loki's being the
+  # suites' fake Loki on loopback: against the real Loki the 25 x 2 runs
+  # per case take over 40 minutes, and the network adds noise the oracle
+  # does not measure (what the engine's work reveals).
+  suites-latency:
+    name: suites (latency)
+    runs-on: ubuntu-latest
+    timeout-minutes: 65
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.x"
+          check-latest: true
+      - name: latency
+        shell: bash
+        run: |
+          set -o pipefail
+          GOMAXPROCS=2 LOCKLOG_SUITES=1 LOCKLOG_SUITE_TIMING=1 go test -count=1 -timeout 60m -v \
+            -run '^TestSuiteOracleLatency$' ./internal/engine/ 2>&1 |
+            grep -v -E '^=== (RUN|PAUSE|CONT)' | tee latency.log
 
   # Local incident (b) at realistic volume (R6-P1): 7 days x 1 GiB/day of
   # nginx and journald (a quarter of that: the journal history imported by

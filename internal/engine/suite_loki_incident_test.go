@@ -110,9 +110,6 @@ var (
 	pushedPerStream = map[string]int64{}
 )
 
-// lokiPushLog, when set (TestSuiteLokiDebug), sees every push answer.
-var lokiPushLog func(status int, h http.Header, body []byte)
-
 // lokiPush posts streams (gzip JSON) to Loki's push API.
 func lokiPush(base string, streams []*pushStream) error {
 	var body struct {
@@ -146,9 +143,6 @@ func lokiPush(base string, streams []*pushStream) error {
 		}
 		msg, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		if lokiPushLog != nil {
-			lokiPushLog(resp.StatusCode, resp.Header, msg)
-		}
 		switch {
 		case resp.StatusCode/100 == 2:
 			return nil

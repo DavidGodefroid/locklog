@@ -177,7 +177,7 @@ func TestSuiteOracle(t *testing.T) {
 // mask-all (the default everywhere: no pre-filter), every record of the
 // plan is masked whatever the predicates, so a needle found only in the
 // clear form of one set of values costs the same on both. Timing cases run
-// with LOCKLOG_SUITE_TIMING=1 (the CI suites job) and never with -short.
+// with LOCKLOG_SUITE_TIMING=1 (the CI suites-latency job) and never with -short.
 
 func timingCase(t *testing.T) {
 	t.Helper()
@@ -185,7 +185,7 @@ func timingCase(t *testing.T) {
 		t.Skip("timing case: skipped with -short")
 	}
 	if os.Getenv("LOCKLOG_SUITE_TIMING") != "1" {
-		t.Skip("timing case: set LOCKLOG_SUITE_TIMING=1 (run by the CI suites job)")
+		t.Skip("timing case: set LOCKLOG_SUITE_TIMING=1 (run by the CI suites-latency job)")
 	}
 }
 
