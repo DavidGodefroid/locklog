@@ -72,6 +72,36 @@ a selector (`--loki-selector app=api`). The console reaches the proxy on the
 Compose network: `LOCKLOG_NETWORK=<network> locklog console --profile
 <profile>-loki`.
 
+### Elasticsearch and OpenSearch
+
+setup detects no Elasticsearch or OpenSearch backend. It writes a commented
+`<profile>-search` entry to fill in: `kind = "elastic"` or `"opensearch"`,
+the `indices`, the keyword `trusted_fields`, `auth` and `user`. Give the
+console a read-only key (`read` and `view_index_metadata` on the indices,
+`monitor` on the cluster); at connection a production profile refuses a key
+with any write or manage privilege and a backend that answers without
+credentials. The console reaches the backend on a Docker network:
+`LOCKLOG_NETWORK=<network> locklog console --profile <profile>-search`; the
+launcher refuses a remote source without one.
+
+### TLS files of a remote source
+
+The launcher mounts no file for a remote source: the console reads only the
+project's `.locklog/` (read-only, readable by agents too), its own home
+volume (`locklog-home`, at `/home/locklog`) and the image's `/etc/ssl`.
+`locklog mounts` checks the paths, so the launcher refuses a profile whose
+files the console could not read:
+
+- `tls_ca` (a public certificate): under `<project>/.locklog/`, under
+  `/home/locklog/`, or the image's `/etc/ssl/`;
+- `tls_cert` and `tls_key` (mTLS): only under `/home/locklog/`, which agents
+  never mount. A client key under the project would be readable by agents.
+  Copy them into the volume, owned by the console's account (10051) and
+  private to it.
+
+`locklog doctor` reports the same cases, and a `tls_ca` under `.locklog/`
+that cannot be read.
+
 ## `locklog doctor`
 
     locklog doctor [--profile P]
@@ -80,7 +110,8 @@ An advisory check of what the agent's account can reach where it runs. It is
 not a boundary. Findings: the Docker engine (socket or `DOCKER_HOST`), the
 groups `docker`, `adm` and `systemd-journal`, `sudo -n`, euid 0, a readable
 `/var/log/journal` or `/var/lib/docker`, cloud credential files, a configured
-backend that answers a read without credentials, and the clouds' metadata
+backend that answers a read without credentials (Loki's label list, the
+mappings of an Elasticsearch or OpenSearch source's indices), and the clouds' metadata
 credential paths. Probes report a status code and whether the API was
 recognised, never a response body. Residuals: Landlock, containers with
 `IpcMode` shareable, swarm mode.

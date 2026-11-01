@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/DavidGodefroid/locklog/internal/config"
@@ -188,5 +189,23 @@ func TestOnlyUnder(t *testing.T) {
 		Journals: []string{"/var/log/journal"}, Containers: []hostfacts.Container{{Name: "web"}}}, []string{"/srv/app/logs/"})
 	if !slices.Equal(f.Logs, []string{"/srv/app/logs/app.log"}) || f.Journals != nil || f.Containers != nil {
 		t.Errorf("OnlyUnder = %+v", f)
+	}
+}
+
+// The commented Elasticsearch / OpenSearch entry loads once uncommented,
+// on a production profile too, for both kinds.
+func TestSearchExampleLoads(t *testing.T) {
+	for _, prod := range []string{"false", "true"} {
+		for _, kind := range []string{"elastic", "opensearch"} {
+			text := "version = 1\n" + strings.Replace(searchExample("prod", prod), `kind = "elastic"`, `kind = "`+kind+`"`, 1)
+			ps, err := config.ParseProfiles([]byte(text), "x")
+			if err != nil {
+				t.Fatalf("%s %s: %v\n%s", kind, prod, err, text)
+			}
+			s, ok := ps["prod-search"].Source("search")
+			if !ok || s.Kind != kind || s.Remote.Credentials != "ask" || len(s.Remote.TrustedFields) != 2 {
+				t.Errorf("%s: %+v", kind, s)
+			}
+		}
 	}
 }
