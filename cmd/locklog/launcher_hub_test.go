@@ -16,10 +16,15 @@ import (
 func TestLauncherConsoleHub(t *testing.T) {
 	consoleHost(t)
 	f := newLauncherFixture(t)
+	// No directory on a hub file's path may be writable by your group or
+	// the others (the test's umask may leave the root group-writable).
+	if err := os.Chmod(f.root, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	hubKey := filepath.Join(f.root, "hub.pub")
 	devices := filepath.Join(f.project, "devices.json")
 	for _, p := range []string{hubKey, devices} {
-		if err := os.WriteFile(p, []byte("x\n"), 0o644); err != nil {
+		if err := os.WriteFile(p, []byte(filepath.Base(p)+"\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -35,10 +40,34 @@ func TestLauncherConsoleHub(t *testing.T) {
 		}
 	}
 	run := lastRun(t, calls)
+	// The console mounts private copies (a 0700 directory of yours), not
+	// the files given: what it reads is what the launcher checked.
+	name := run[slices.Index(run, "--name")+1]
+	home, err := filepath.EvalSymlinks(filepath.Join(f.root, "home"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hubDir := filepath.Join(home, ".local", "state", "locklog", "hub", name)
+	if st, err := os.Stat(hubDir); err != nil || st.Mode().Perm() != 0o700 {
+		t.Fatalf("hub dir %s: %v %v", hubDir, st, err)
+	}
+	for _, p := range []string{hubKey, devices} {
+		got, err := os.ReadFile(filepath.Join(hubDir, filepath.Base(p)))
+		if err != nil || string(got) != filepath.Base(p)+"\n" {
+			t.Errorf("copy of %s: %q %v", p, got, err)
+		}
+	}
+	// A later change of the original does not reach the mounted copy.
+	if err := os.WriteFile(hubKey, []byte("swapped\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(hubDir, "hub.pub")); string(got) != "hub.pub\n" {
+		t.Errorf("the mounted copy follows the original: %q", got)
+	}
 	for _, seq := range [][]string{
 		{"--network", "lockfamily"},
-		{"--mount", "type=bind,src=" + hubKey + ",dst=/run/locklog-hub/hub.pub,readonly"},
-		{"--mount", "type=bind,src=" + devices + ",dst=/run/locklog-hub/devices.json,readonly"},
+		{"--mount", "type=bind,src=" + filepath.Join(hubDir, "hub.pub") + ",dst=/run/locklog-hub/hub.pub,readonly"},
+		{"--mount", "type=bind,src=" + filepath.Join(hubDir, "devices.json") + ",dst=/run/locklog-hub/devices.json,readonly"},
 		{"locklog", "console", "--profile", "staging", "--hub", "http://lockhub:8443", "--hub-plain-http", "--hub-key-file", "/run/locklog-hub/hub.pub",
 			"--instance", "logs", "--devices-file=/run/locklog-hub/devices.json", "--seal-clear"},
 	} {
@@ -72,15 +101,41 @@ func TestLauncherConsoleHub(t *testing.T) {
 	if err := os.Chmod(shared, 0o666); err != nil {
 		t.Fatal(err)
 	}
+	// A link on the file's path, or a directory above it others can
+	// write: the file could be swapped between the check and the copy.
+	realDir := filepath.Join(f.root, "keys")
+	if err := os.Mkdir(realDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(realDir, "hub.pub"), []byte("k"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	linkDir := filepath.Join(f.root, "keys-link")
+	if err := os.Symlink(realDir, linkDir); err != nil {
+		t.Fatal(err)
+	}
+	openDir := filepath.Join(f.root, "open")
+	if err := os.MkdirAll(filepath.Join(openDir, "sub"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(openDir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	inOpen := filepath.Join(openDir, "sub", "hub.pub")
+	if err := os.WriteFile(inOpen, []byte("k"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	for name, bad := range map[string][]string{
-		"space":       {"console", "--hub", "http://lockhub:8443", "--hub-key-file", spaced, "--instance", "logs"},
-		"space=":      {"console", "--hub", "http://lockhub:8443", "--devices-file=" + spaced, "--instance", "logs"},
-		"writable":    {"console", "--hub", "http://lockhub:8443", "--facade-keys-file", shared, "--instance", "logs"},
-		"single dash": {"console", "-hub", "http://lockhub:8443", "-hub-key-file", hubKey, "--instance", "logs"},
-		"missing":     {"console", "--hub", "http://lockhub:8443", "--hub-key-file", filepath.Join(f.root, "nope"), "--instance", "logs"},
-		"link":        {"console", "--hub", "http://lockhub:8443", "--hub-key-file", link, "--instance", "logs"},
-		"twice":       {"console", "--hub", "http://lockhub:8443", "--hub-key-file", hubKey, "--hub-key-file=" + hubKey, "--instance", "logs"},
-		"no file":     {"console", "--hub", "http://lockhub:8443", "--instance", "logs", "--hub-key-file"},
+		"linked parent": {"console", "--hub", "http://lockhub:8443", "--hub-key-file", filepath.Join(linkDir, "hub.pub"), "--instance", "logs"},
+		"open parent":   {"console", "--hub", "http://lockhub:8443", "--hub-key-file", inOpen, "--instance", "logs"},
+		"space":         {"console", "--hub", "http://lockhub:8443", "--hub-key-file", spaced, "--instance", "logs"},
+		"space=":        {"console", "--hub", "http://lockhub:8443", "--devices-file=" + spaced, "--instance", "logs"},
+		"writable":      {"console", "--hub", "http://lockhub:8443", "--facade-keys-file", shared, "--instance", "logs"},
+		"single dash":   {"console", "-hub", "http://lockhub:8443", "-hub-key-file", hubKey, "--instance", "logs"},
+		"missing":       {"console", "--hub", "http://lockhub:8443", "--hub-key-file", filepath.Join(f.root, "nope"), "--instance", "logs"},
+		"link":          {"console", "--hub", "http://lockhub:8443", "--hub-key-file", link, "--instance", "logs"},
+		"twice":         {"console", "--hub", "http://lockhub:8443", "--hub-key-file", hubKey, "--hub-key-file=" + hubKey, "--instance", "logs"},
+		"no file":       {"console", "--hub", "http://lockhub:8443", "--instance", "logs", "--hub-key-file"},
 	} {
 		out, calls, err := f.run(t, f.project, []string{plan(f), "LOCKLOG_NETWORK=lockfamily"}, bad...)
 		if err == nil {

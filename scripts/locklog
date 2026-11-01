@@ -1041,31 +1041,86 @@ read_plan() {
 	lines=$(printf '%s\n' "$planned" | sed -n '2,$p')
 }
 
-# hub_file FLAG FILE: FILE, a regular file of yours (no link), bound
-# read-only into the console under a fixed name: hub_dst is its path there.
+# hub_dir: the private directory (yours, 0700, no link) that holds the
+# copies of this console's hub files, created when missing; sets hub_dir.
+ensure_hub_dir() {
+	base=$(map_base)
+	base=${base%/map}/hub
+	(umask 077 && mkdir -p "$base/$name") || die "could not create $base/$name"
+	hub_dir=$(cd "$base/$name" && pwd -P) || die "could not enter $base/$name"
+	physical "$hub_dir" || die "$hub_dir is not a directory with no symbolic link on its path"
+	chmod 0700 "$hub_dir" || die "could not make $hub_dir private"
+	case "$hub_dir" in *[*?[]* | *[[:space:]]*) die "$hub_dir holds a space or a glob character" ;; esac
+	safe "$hub_dir" || die "$hub_dir holds a character a mount cannot carry"
+	trusted "$hub_dir" || die "$hub_dir is a link, has an ACL, or is owned or writable by someone else than you"
+}
+
+# trusted_chain DIR: DIR and every directory above it up to / are yours
+# or root's, with no ACL, and writable by no one else (unless sticky, as
+# /tmp, where no one else can rename or remove what is yours).
+trusted_chain() {
+	tc=$1
+	while :; do
+		[ -d "$tc" ] && [ ! -L "$tc" ] || return 1
+		mine "$tc" || return 1
+		has_acl "$tc" && return 1
+		perm "$tc"
+		if [ $((special & 1)) -eq 0 ]; then
+			[ $((g & 2)) -eq 0 ] && [ $((o & 2)) -eq 0 ] || return 1
+		fi
+		[ "$tc" = / ] && return 0
+		tc=${tc%/*}
+		[ -n "$tc" ] || tc=/
+	done
+}
+
+# hub_file FLAG FILE: FILE, a regular file of yours (no link, on a path
+# with no link and no directory someone else can write), copied into the
+# console's private hub directory and bound read-only from there into the
+# console under a fixed name: the console reads the bytes checked here.
+# hub_dst is its path in the console.
 hub_file() {
 	case "$2" in
 	'') die "$1 needs a file" ;;
 	/*) hf=$2 ;;
-	*) hf=$(pwd)/$2 ;;
+	*) hf=$(pwd -P)/$2 ;;
 	esac
-	case "$hf" in *,*) die "$1: a path with a comma cannot be bound into the console" ;; esac
 	# hub_mounts is word-split into docker run's arguments: no space nor
-	# glob character, nor anything a mount cannot carry.
-	case "$hf" in *[*?[]* | *[[:space:]]*) die "$1: $hf holds a space or a glob character" ;; esac
-	safe "$hf" || die "$1: $hf holds a character a mount cannot carry"
+	# glob character, nor anything a mount cannot carry (the copy's path
+	# is fixed; the original's is refused too, for a plain message).
+	case "$hf" in *,*) die "$1: a path with a comma cannot be bound into the console" ;; esac
+	case "$hf" in *[*?[]* | *[[:space:]]*) die "$1: the path holds a space or a glob character" ;; esac
+	safe "$hf" || die "$1: the path holds a character a mount cannot carry"
+	# The real path: no symbolic link on it (".." taken as written).
+	hd=${hf%/*}
+	[ -n "$hd" ] || hd=/
+	hl=$(cd -L "$hd" 2>/dev/null && pwd -L) && hp=$(cd -P "$hd" 2>/dev/null && pwd -P) ||
+		die "$1: $hd is not a directory"
+	[ "$hl" = "$hp" ] || die "$1: $hd has a symbolic link on its path"
+	hd=$hp
+	hf=${hd%/}/${hf##*/}
+	trusted_chain "$hd" || die "$1: a directory on the path of $hf is owned or writable by someone else than you or root, or has an ACL"
 	[ -f "$hf" ] && [ ! -L "$hf" ] || die "$1: $hf is not a regular file"
 	# A trust anchor (who approves, who gets the clear screen): yours or
 	# root's, no ACL, writable by its owner only.
 	trusted "$hf" || die "$1: $hf must be owned by you or root, with no ACL, and writable by its owner only"
 	case "$1" in
-	--hub-key-file) hub_dst=/run/locklog-hub/hub.pub ;;
-	--devices-file) hub_dst=/run/locklog-hub/devices.json ;;
-	*) hub_dst=/run/locklog-hub/facades.json ;;
+	--hub-key-file) hub_base=hub.pub ;;
+	--devices-file) hub_base=devices.json ;;
+	*) hub_base=facades.json ;;
 	esac
+	hub_dst=/run/locklog-hub/$hub_base
 	case " $hub_seen " in *" $1 "*) die "$1 given twice" ;; esac
 	hub_seen="$hub_seen $1"
-	hub_mounts="$hub_mounts --mount type=bind,src=$hf,dst=$hub_dst,readonly"
+	[ -n "${hub_dir:-}" ] || ensure_hub_dir
+	# The copy: a new file in the private directory, then renamed over the
+	# last one; readable by the console's account (the directory is not).
+	hc=$(mktemp "$hub_dir/.$hub_base.XXXXXX") || die "$1: could not copy $hf"
+	cat "$hf" >"$hc" && chmod 0644 "$hc" && mv -f "$hc" "$hub_dir/$hub_base" || {
+		rm -f "$hc"
+		die "$1: could not copy $hf"
+	}
+	hub_mounts="$hub_mounts --mount type=bind,src=$hub_dir/$hub_base,dst=$hub_dst,readonly"
 }
 
 console() {
@@ -1073,7 +1128,7 @@ console() {
 
 	# The hub flags: their files bound into the console, the rest passed
 	# as they are (the console checks them).
-	hub_on='' hub_mounts='' hub_seen=''
+	hub_on='' hub_mounts='' hub_seen='' hub_dir=''
 	n=$#
 	while [ "$n" -gt 0 ]; do
 		a=$1

@@ -23,8 +23,10 @@ uses [Semantic Versioning](https://semver.org/).
   A `read-pii` decision from a facade other than `tty`, `deck` or `mobile`
   is refused by the console. Expired tickets are renewed; decisions,
   renewals and reveals are audited; with the hub down, free reads go on.
-  The launcher binds the hub files into the console and passes the hub
-  flags to it only; `locklog_status` shows the hub mode and instance.
+  The launcher checks the hub files (yours or root's, writable by no one
+  else, on a path with no link and no directory others can write), binds
+  private copies of them into the console and passes the hub flags to it
+  only; `locklog_status` shows the hub mode and instance.
   The requester the hub shows is the kernel-verified peer uid, never a name
   the agent declares; an approved method without peer credentials is
   refused in hub mode. In hub mode a console reading only local logs
