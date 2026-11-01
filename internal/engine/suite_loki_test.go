@@ -284,6 +284,10 @@ func (f *suiteLoki) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.push(w, r)
 		return
 	}
+	if r.URL.Path == "/flush" && r.Method == "POST" {
+		w.WriteHeader(204) // nothing held back: every entry is read at once
+		return
+	}
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 	if r.URL.Path == "/loki/api/v1/query" && r.Header.Get("X-Loki-Response-Encoding-Flags") == "" {
@@ -487,6 +491,8 @@ func pushSuiteLoki(t testing.TB, base string, es []lokiEntry) {
 	if len(es) == 0 {
 		return
 	}
+	// Old entries are read only once flushed from the ingester's memory.
+	lokiFlush(t, base)
 	run := es[0].labels["run"]
 	lo, hi := es[0].ts, es[0].ts
 	for _, e := range es {
@@ -494,11 +500,12 @@ func pushSuiteLoki(t testing.TB, base string, es []lokiEntry) {
 	}
 	from, to := time.Unix(0, lo).Truncate(time.Second), time.Unix(0, hi).Truncate(time.Second).Add(2*time.Second)
 	for i := 0; ; i++ {
-		n := lokiCount(t, base, `{run="`+run+`"}`, from, to)
+		// A new instant each time: a cached answer is never reused.
+		n := lokiCount(t, base, `{run="`+run+`"}`, from, to.Add(time.Duration(i)*time.Millisecond))
 		if n == int64(len(es)) {
 			return
 		}
-		if i > 100 {
+		if i > 300 {
 			t.Fatalf("Loki serves %d of the %d entries pushed", n, len(es))
 		}
 		time.Sleep(100 * time.Millisecond)

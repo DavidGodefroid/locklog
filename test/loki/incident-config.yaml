@@ -32,11 +32,9 @@ schema_config:
         prefix: index_
         period: 24h
 
-# Entries pushed now with timestamps up to 7 days old sit in the ingester
-# until flushed: the queriers must ask the ingesters for the whole range,
-# not only its last 3 hours (the default).
-querier:
-  query_ingesters_within: 0
+# Entries pushed now with old timestamps are not read while they sit in
+# the ingester's memory: the tests flush the ingester (POST /flush) after
+# their push and wait until Loki counts every entry (docs/loki.md).
 
 limits_config:
   # Ingestion rate: the default 4 MB/s (burst 6 MB) per tenant and 3 MB/s

@@ -286,6 +286,20 @@ func lokiCount(t testing.TB, base, sel string, from, to time.Time) int64 {
 	return n
 }
 
+// lokiFlush asks Loki's ingester to flush its chunks to the store (the
+// test's own write; the console never calls it).
+func lokiFlush(t testing.TB, base string) {
+	t.Helper()
+	resp, err := http.Post(base+"/flush", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		t.Fatalf("flush: %d", resp.StatusCode)
+	}
+}
+
 // lokiMetric runs a metric range query and returns its series' points.
 func lokiMetric(t testing.TB, base, q string, from, to time.Time, step time.Duration) []struct {
 	Metric map[string]string    `json:"metric"`
@@ -672,7 +686,9 @@ func TestLokiIncident(t *testing.T) {
 	if pushed > lokiDataCap {
 		t.Fatalf("%d bytes pushed, over the %d cap", pushed, int64(lokiDataCap))
 	}
-	// Everything pushed is readable before the clock runs.
+	// Everything pushed is readable before the clock runs: entries with old
+	// timestamps are read only once flushed from the ingester's memory.
+	lokiFlush(t, base)
 	for _, run := range []string{"lvl", "nolvl"} {
 		sel := `{run="` + run + `"}`
 		from := p.T.Add(-7*24*time.Hour - time.Minute)

@@ -54,9 +54,13 @@ Loki with `test/loki/incident-config.yaml`, which overrides:
 | `discover_log_levels` | true | false | the "no level label" streams must not gain a `detected_level` either |
 | `max_global_streams_per_user`, `max_streams_per_user` | 5000, 0 | 0, 0 | the suites give each entry a stream of its own (an untrusted label per entry) |
 
-It also sets `querier.query_ingesters_within: 0`. Entries pushed now with old timestamps stay
-in the ingester until they are flushed. By default the queriers ask the ingesters only for the
-last 3 hours of a query's range, so the older part of the data would read as empty.
+Old entries are not readable at once. An entry pushed now with an old timestamp is accepted
+(`204`, nothing discarded) and held in the ingester's memory, but Loki 3.5.7 serves only the
+recent part of a query's range from the ingesters: in the CI runs, suite entries 34 hours old
+answered no query (count, `query_range`, `series`), and 0.4 to 0.6 % of the incident's 7-day background
+was missing for minutes, all in chunks still in memory. Both were complete within 10 s of
+`POST /flush` (the ingester's flush endpoint). The tests therefore flush after each push and wait
+until Loki's count equals the entries pushed.
 
 None of these settings matter to locklog on a real deployment: locklog only reads. They are what
 a test, or a backfill of old logs, needs to write the data at all.
