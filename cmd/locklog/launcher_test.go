@@ -396,6 +396,39 @@ func TestLauncherConsoleNetwork(t *testing.T) {
 	}
 }
 
+// A remote source needs LOCKLOG_NETWORK: without it the console would have
+// no network to reach the backend. It mounts nothing, so it runs on macOS
+// too.
+func TestLauncherConsoleRemote(t *testing.T) {
+	f := newLauncherFixture(t)
+	remote := "PLAN=profile staging true\\nremote\\n"
+	out, calls, err := f.run(t, f.project, []string{remote}, "console")
+	if err == nil || !strings.Contains(out, "reads a remote source") || !strings.Contains(out, "LOCKLOG_NETWORK") {
+		t.Errorf("remote without a network: %v\n%s", err, out)
+	}
+	for _, c := range calls {
+		if slices.Contains(c, "console") {
+			t.Errorf("the console started: %q", c)
+		}
+	}
+	out, calls, err = f.run(t, f.project, []string{remote, "LOCKLOG_NETWORK=search_net"}, "console")
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	run := lastRun(t, calls)
+	if !hasSeq(run, "--network", "search_net") || !hasSeq(run, "-e", "LOCKLOG_NETWORK=search_net") {
+		t.Errorf("network: %q", run)
+	}
+	if !strings.Contains(out, "remote sources reached on network search_net") {
+		t.Errorf("plan:\n%s", out)
+	}
+	for _, a := range run {
+		if strings.HasPrefix(a, "type=bind") {
+			t.Errorf("a remote source bound %s", a)
+		}
+	}
+}
+
 func TestLauncherConsoleJournald(t *testing.T) {
 	consoleHost(t)
 	journals := []string{}

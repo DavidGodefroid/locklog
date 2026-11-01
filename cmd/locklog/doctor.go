@@ -36,7 +36,7 @@ func doctorCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "locklog doctor:", err)
 		return 1
 	}
-	ps, _, err := config.Load(cwd)
+	ps, root, err := config.Load(cwd)
 	if err != nil {
 		// A broken config is the console's to report; doctor still checks
 		// the account, and treats it as production (fail safe).
@@ -48,7 +48,7 @@ func doctorCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	r, err := doctor.Run(ctx, doctor.Options{Facts: f, Profiles: ps, Profile: *profile, Landlock: landlock.ABI})
+	r, err := doctor.Run(ctx, doctor.Options{Facts: f, Profiles: ps, Profile: *profile, Landlock: landlock.ABI, Project: root})
 	if err != nil {
 		fmt.Fprintln(stderr, "locklog", err)
 		return 2

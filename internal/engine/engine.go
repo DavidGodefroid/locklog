@@ -47,8 +47,9 @@ type Masker interface {
 type Limits struct {
 	// Range of a query with text, regex or masked-field predicates.
 	LocalRange, RemoteRange time.Duration
-	// CountRange of a trusted-field-only count.
-	CountRange time.Duration
+	// CountRange of a trusted-field-only count, RemoteCountRange of one a
+	// remote source answers with its own counts (0: CountRange).
+	CountRange, RemoteCountRange time.Duration
 	// Bytes a call's plan may cost (admission).
 	LocalBytes, RemoteBytes int64
 	// Records per page (ceiling of limit) and output bytes per page.

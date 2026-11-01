@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 
@@ -66,7 +67,7 @@ func mounts(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "locklog mounts: %v\n", err)
 		return 1
 	}
-	ps, _, err := config.Load(cwd)
+	ps, root, err := config.Load(cwd)
 	if err != nil {
 		fmt.Fprintf(stderr, "locklog mounts: %v\n", err)
 		return 1
@@ -81,10 +82,19 @@ func mounts(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "locklog mounts: profile %s: %v\n", p.Name, err)
 		return 1
 	}
+	if err := mountplan.TLSFiles(p, root); err != nil {
+		fmt.Fprintf(stderr, "locklog mounts: profile %s: %v\n", p.Name, err)
+		return 1
+	}
 	// The profile name and whether it is production head the plan.
 	fmt.Fprintf(stdout, "profile %s %t\n", p.Name, p.Production)
 	for _, l := range lines {
 		fmt.Fprintln(stdout, l.String())
+	}
+	// A remote source mounts nothing; the launcher needs LOCKLOG_NETWORK
+	// to reach it.
+	if slices.ContainsFunc(p.Sources, func(s config.Source) bool { return s.Remote != nil }) {
+		fmt.Fprintln(stdout, mountplan.RemoteLine)
 	}
 	return 0
 }

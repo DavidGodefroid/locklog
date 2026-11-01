@@ -68,7 +68,7 @@ func (e *Engine) limits(ctx context.Context) Limits {
 	l := e.o.Limits
 	if sc := scanFrom(ctx); sc != nil {
 		r := e.o.ScanRange
-		l.LocalRange, l.RemoteRange, l.CountRange = r, r, r
+		l.LocalRange, l.RemoteRange, l.CountRange, l.RemoteCountRange = r, r, r, r
 		l.LocalBytes, l.RemoteBytes = e.o.ScanBytes, e.o.ScanBytes
 		l.Deadline = sc.deadline()
 	}
