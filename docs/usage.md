@@ -236,6 +236,9 @@ must be signed by a pinned device.
 - A `read-pii` decision taken on a chat facade is refused by the console:
   only the terminal, the deck or a phone approve an unmask or an approved
   lookup.
+- The hub shows the requester as the console's peer credentials name it
+  (`uid N`, or `agent` for the image's agent account), never a name the
+  agent declares; the agent's lea token only binds the ticket to it.
 - A ticket waits 24 hours; its run after that asks again (a renewal, which
   says the record could not be checked before the run).
 - With the hub down, free reads go on; approvals stay pending and go out

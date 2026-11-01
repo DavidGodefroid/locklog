@@ -25,7 +25,9 @@ uses [Semantic Versioning](https://semver.org/).
   renewals and reveals are audited; with the hub down, free reads go on.
   The launcher binds the hub files into the console and passes the hub
   flags to it only; `locklog_status` shows the hub mode and instance.
-  Built on lockkit v0.8.1.
+  The requester the hub shows is the kernel-verified peer uid, never a name
+  the agent declares; an approved method without peer credentials is
+  refused in hub mode. Built on lockkit v0.8.1.
 
 - The console's clear view: with clear results on (Ctrl-O, lockkit's
   switch), the records an agent call returned are printed on the console's

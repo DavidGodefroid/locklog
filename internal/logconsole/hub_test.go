@@ -103,3 +103,9 @@ func TestStatusWithHub(t *testing.T) {
 		t.Errorf("status %s", raw)
 	}
 }
+
+func TestPeerName(t *testing.T) {
+	if peerName(10052) != "agent (uid 10052)" || peerName(1000) != "uid 1000" {
+		t.Errorf("%q %q", peerName(10052), peerName(1000))
+	}
+}

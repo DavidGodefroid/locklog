@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/DavidGodefroid/lockkit/console"
+	"github.com/DavidGodefroid/lockkit/ipc"
 	"github.com/DavidGodefroid/lockkit/ticket"
 	"github.com/DavidGodefroid/lockkit/ticket/devicetest"
 
@@ -381,5 +382,55 @@ func TestHubAnswersNoOracle(t *testing.T) {
 		if a[i] != b[i] {
 			t.Errorf("answer %d differs:\n%s\n%s", i, a[i], b[i])
 		}
+	}
+}
+
+// The requester on the ticket, its screens and the audit is the peer the
+// kernel names, never the agent name the params declare; in hub mode an
+// approved method without peer credentials is refused.
+func TestHubRequesterIsThePeer(t *testing.T) {
+	r := newRig(t, rigOpts{})
+	ref, toks := r.record()
+	// The rig's MCP server declares agent "dev-1"; add a spoofed one in
+	// the params too.
+	args := unmaskArgs(ref, toks[:1], "")
+	tk := r.mustPending(r.call(mcptools.ToolUnmask, args))
+	signed, err := ticket.VerifyTicket(r.pub, r.hub.Ticket(tk))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if signed.Requester.Agent != "uid 1000" || !slices.Contains(signed.Screen.Body, "requested by uid 1000 (peer credentials)") {
+		t.Fatalf("requester %+v, screen %q", signed.Requester, signed.Screen.Body)
+	}
+	spoof := func(s string) bool { return strings.Contains(s, "dev-1") || strings.Contains(s, "lea-admin") }
+	raw, _ := json.Marshal(signed)
+	if spoof(string(raw)) {
+		t.Fatalf("a declared agent name on the ticket: %s", raw)
+	}
+	// A spoofed requester sent straight to the console.
+	conn := &srvConn{r: r, uid: 1000}
+	var res json.RawMessage
+	p := map[string]any{"ref": ref, "pseudonyms": toks[1:], "reason": "x", "requester": map[string]string{"agent": "lea-admin", "token": "t"}}
+	if err := conn.Call(t.Context(), "log.unmask", p, &res); err != nil {
+		t.Fatal(err)
+	}
+	var pd struct{ Ticket string }
+	_ = json.Unmarshal(res, &pd)
+	s2, err := ticket.VerifyTicket(r.pub, r.hub.Ticket(pd.Ticket))
+	if err != nil || s2.Requester.Agent != "uid 1000" {
+		t.Fatalf("spoofed: %+v %v", s2, err)
+	}
+	if b, _ := json.Marshal(s2); spoof(string(b)) {
+		t.Fatalf("spoofed name on the ticket: %s", b)
+	}
+	if spoof(r.auditLog()) || !strings.Contains(r.auditLog(), `"peer_uid":1000`) {
+		t.Fatalf("audit:\n%s", r.auditLog())
+	}
+	// No peer credentials: refused, nothing pushed.
+	pushed := r.hub.Pushed()
+	raw2, _ := json.Marshal(map[string]any{"ref": ref, "pseudonyms": toks[:1], "reason": "x"})
+	resp := r.srv.Handle(t.Context(), ipc.Request{JSONRPC: "2.0", ID: 99, Method: "log.unmask", Params: raw2})
+	if resp.Error == nil || !strings.Contains(resp.Error.Message, "peer credentials") || r.hub.Pushed() != pushed {
+		t.Fatalf("no peer: %+v (pushed %d → %d)", resp, pushed, r.hub.Pushed())
 	}
 }

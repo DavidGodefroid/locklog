@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"sync"
 	"time"
 
@@ -83,9 +84,11 @@ type HubCall struct {
 	method string
 	ticket string
 	caller plans.Caller
-	agent  string
-	fp     string
-	rec    *Record
+	// agent is the authenticated requester (peerName), never the
+	// requester the params declare.
+	agent string
+	fp    string
+	rec   *Record
 
 	mu sync.Mutex
 	// run is the plan begun for this call (Finish after the run).
@@ -111,7 +114,10 @@ func HubCallFrom(ctx context.Context) *HubCall {
 
 // envelope are the fields of an approved method's params that are the
 // console's, not the engine's: the hub ticket to run and the requester
-// (lea's agent and the hash of its token, mcpkit.RequesterFromEnv).
+// (lea's agent and the hash of its token, mcpkit.RequesterFromEnv). Both
+// are the agent's own claims: the token only binds the plan (compared at
+// the run, as plans.Caller.Token); the agent name is never shown nor
+// audited as an identity (peerName is).
 type envelope struct {
 	Ticket    string
 	Requester ipc.Requester
@@ -231,7 +237,11 @@ func (h *HubCall) submit(ctx context.Context, r HubRequest, hash string) error {
 	if hb == nil {
 		hb = r.Body
 	}
-	lines := make([]render.Line, 0, len(hb))
+	// The requester as the kernel names it (peerName), first on both
+	// screens.
+	who := "requested by " + h.agent + " (peer credentials)"
+	lines := make([]render.Line, 0, len(hb)+1)
+	lines = append(lines, render.Structure(who))
 	for _, l := range hb {
 		lines = append(lines, render.Structure(l))
 	}
@@ -241,7 +251,7 @@ func (h *HubCall) submit(ctx context.Context, r HubRequest, hash string) error {
 	// The clear screen: the console's own, with the record in clear
 	// (secrets redacted). Sealed to the pinned devices only, and kept in
 	// the plan for a reveal to a pinned facade key.
-	clearBody := slices.Clone(r.Body)
+	clearBody := append([]string{who}, r.Body...)
 	if len(r.Clear) > 0 {
 		clearBody = append(clearBody, "in clear (sealed to your device; the agent does not get it):")
 		clearBody = append(clearBody, r.Clear...)
@@ -491,5 +501,15 @@ func (b *Backend) newHubCall(h *console.Hub, env console.Env, id int64, method s
 		now = time.Now
 	}
 	return &HubCall{hub: h, env: env, now: now, id: id, method: method, ticket: e.Ticket, caller: plans.Caller{UID: uid, Token: e.Requester.Token},
-		agent: e.Requester.Agent, fp: policyFP(p), rec: rec}, nil
+		agent: peerName(uid), fp: policyFP(p), rec: rec}, nil
+}
+
+// peerName is who the hub shows as the requester: the kernel-verified
+// peer uid (SO_PEERCRED), named where locklog knows the account (the
+// image's agent), never a name the caller declared.
+func peerName(uid int) string {
+	if uid == product.AgentUID {
+		return "agent (uid " + strconv.Itoa(uid) + ")"
+	}
+	return "uid " + strconv.Itoa(uid)
 }

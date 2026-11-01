@@ -474,7 +474,8 @@ func (b *Backend) handler(method string) console.Handler {
 		start := time.Now()
 		defer env.Level(ctx, start)
 		var c Caller
-		if cred, ok := console.PeerFrom(ctx); ok {
+		cred, peerKnown := console.PeerFrom(ctx)
+		if peerKnown {
 			c = Caller{UID: cred.UID, PID: cred.PID}
 		}
 		params := req.Params
@@ -527,7 +528,12 @@ func (b *Backend) handler(method string) console.Handler {
 		var hc *HubCall
 		if h := console.HubOf(env); h != nil && approved {
 			// Hub mode: the approval is a ticket on lockhub, never a
-			// prompt here.
+			// prompt here. It is bound to, and shown as, the peer the
+			// kernel names: without peer credentials, refused.
+			if !peerKnown {
+				cancel()
+				return failed(req.ID, env, rec, ipc.CodeInternal, errNoPeerText, errNoPeerText)
+			}
 			if hc, err = b.newHubCall(h, env, req.ID, method, ev, c.UID, &rec); err != nil {
 				cancel()
 				return failed(req.ID, env, rec, ipc.CodeInternal, "no log engine for the policy in force", "no log engine for the policy in force")
@@ -622,6 +628,10 @@ func (b *Backend) handler(method string) console.Handler {
 		return resp
 	}
 }
+
+// errNoPeerText refuses an approved method in hub mode from a caller the
+// kernel did not name: the ticket is bound to, and shown as, the peer uid.
+const errNoPeerText = "the console could not identify the caller (no peer credentials): an approval on the hub is refused"
 
 // errEngineText is what the agent and the audit get of an engine failure.
 const errEngineText = "the log engine failed; the request did not complete"
