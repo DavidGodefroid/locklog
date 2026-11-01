@@ -43,6 +43,8 @@ func TestSuiteLokiDebug(t *testing.T) {
 	defer func() { lokiPushLog = nil }()
 	recs := leakCorpus(16)[srcLoki][:20]
 	now := time.Now().UTC().Truncate(time.Second)
+	var runs []string
+	runsFrom, runsTo := map[string]time.Time{}, map[string]time.Time{}
 	for _, tc := range []struct {
 		name          string
 		recent, plain bool
@@ -88,6 +90,8 @@ func TestSuiteLokiDebug(t *testing.T) {
 		}
 		time.Sleep(2 * time.Second)
 		from, to := time.Unix(0, es[0].ts).Add(-time.Minute), time.Unix(0, es[len(es)-1].ts).Add(time.Minute)
+		runs = append(runs, run)
+		runsFrom[run], runsTo[run] = from, to
 		sel := urlEscape(`{run="` + run + `"}`)
 		for i := range 3 {
 			at := to.Add(time.Duration(i) * time.Millisecond)
@@ -98,8 +102,51 @@ func TestSuiteLokiDebug(t *testing.T) {
 		q := urlEscape(fmt.Sprintf("sum by () (count_over_time({run=%q} [60s]))", run))
 		t.Logf("%s: range count (step 60): %s", tc.name, lokiGet(t, base, fmt.Sprintf("/loki/api/v1/query_range?query=%s&start=%d&end=%d&step=60", q, from.UnixNano(), to.UnixNano())))
 		t.Logf("%s: series: %s", tc.name, lokiGet(t, base, fmt.Sprintf("/loki/api/v1/series?match[]=%s&start=%d&end=%d", sel, from.UnixNano(), to.UnixNano())))
+		t.Logf("%s: metrics: %s", tc.name, lokiMetrics(base))
+	}
+	// Flushed to the store: are the suite-dated entries read then?
+	resp, err := http.Post(base+"/flush", "", nil)
+	if err == nil {
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Logf("flush: %d %q", resp.StatusCode, b)
+	}
+	for i := range 12 {
+		time.Sleep(10 * time.Second)
+		var counts []string
+		for _, run := range runs {
+			from, to := runsFrom[run], runsTo[run]
+			q := urlEscape(fmt.Sprintf("sum by () (count_over_time({run=%q} [%ds]))", run, int64(to.Sub(from)/time.Second)))
+			r := lokiGet(t, base, "/loki/api/v1/query?query="+q+"&time="+strconv.FormatInt(to.UnixNano()+int64(i), 10))
+			if j := strings.Index(r, `"result":`); j >= 0 {
+				r = r[j : j+min(60, len(r)-j)]
+			}
+			counts = append(counts, run+": "+r)
+		}
+		t.Logf("after flush +%ds: %s; %s", (i+1)*10, strings.Join(counts, " | "), lokiMetrics(base))
 	}
 	t.Logf("labels: %s", lokiGet(t, base, "/loki/api/v1/labels"))
 	t.Logf("run values: %s", lokiGet(t, base, "/loki/api/v1/label/run/values"))
 	t.Logf("config limits: %s", lokiGet(t, base, "/config"))
+}
+
+// lokiMetrics is Loki's own counters of what it received, discarded,
+// created and flushed.
+func lokiMetrics(base string) string {
+	resp, err := http.Get(base + "/metrics")
+	if err != nil {
+		return err.Error()
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	var out []string
+	for _, l := range strings.Split(string(b), "\n") {
+		for _, p := range []string{"loki_discarded_samples_total", "loki_distributor_lines_received_total", "loki_ingester_streams_created_total",
+			"loki_ingester_chunks_flushed_total", "loki_ingester_memory_chunks ", "loki_ingester_flush_queue_length"} {
+			if strings.HasPrefix(l, p) {
+				out = append(out, l)
+			}
+		}
+	}
+	return strings.Join(out, "; ")
 }

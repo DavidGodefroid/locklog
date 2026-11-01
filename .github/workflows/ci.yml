@@ -302,6 +302,8 @@ jobs:
           LOCKLOG_SUITE_LOKI_DEBUG: "1"
         run: |
           curl -fsS http://127.0.0.1:3100/config | grep -E 'reject_old|out_of_order|unordered|query_ingesters_within|max_chunk_age|chunk_idle|creation_grace|max_label|structured_metadata|streams_per_user|ingestion_rate|per_stream' || true
+          curl -fsS http://127.0.0.1:3100/config | grep -n -A25 '^querier:' || true
+          curl -fsS http://127.0.0.1:3100/config | grep -n -E 'ingesters_within|query_store|lookback|look_back' || true
           GOMAXPROCS=2 go test -count=1 -v -run '^TestSuiteLokiDebug$' ./internal/engine/ | cut -c1-2000
       - name: suites
         shell: bash
