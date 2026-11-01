@@ -36,8 +36,7 @@ containers = ["shop-api-*"]
 format = "json"
 ```
 
-A Loki source, once the console opens remote sources
-([#97](https://github.com/DavidGodefroid/locklog/pull/97)):
+A Loki source:
 
 ```toml
 [profiles.staging.sources.loki]
@@ -76,11 +75,7 @@ countable), plus per kind:
 | `journald` | `units` (globs on `_SYSTEMD_UNIT`), `allow` (extra fields, reviewed; core dumps, command lines, executables, audit and `OBJECT_` fields can never be allowed) |
 | `docker` | `containers` (name globs; a glob matching a locklog console is refused), `attrs` (json-file log-opt attributes to keep) |
 | `loki` | `url`, `selector`, `trusted_labels`, `trusted_metadata`, `auth` (`none` refused on production, `basic`, `bearer`, `mtls`), `org_id`, `user` (basic), `credentials` (`ask` or `vault`, with `vault_path`), `tls`, `tls_ca`, `tls_cert` and `tls_key` (mtls) |
-
-The console opens `loki`, `elastic` and `opensearch` sources from the
-profile once [#97](https://github.com/DavidGodefroid/locklog/pull/97) is
-merged; until then the console refuses a profile that holds one (this build
-"does not read yet" that kind) before it opens anything.
+| `elastic`, `opensearch` (preview) | `url`, `selector`, `indices`, `trusted_fields`, `time_field`, `message_field`, `tiebreaker`, `read_only_roles` (OpenSearch only), `auth` (as `loki`, plus `api_key` for `elastic`), `user`, `credentials`, `vault_path`, `tls`, `tls_ca`, `tls_cert`, `tls_key` |
 
 ## Wiring an agent
 

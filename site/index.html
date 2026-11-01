@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>locklog — Your AI reads the logs, not the people in them.</title>
+  <meta name="description" content="locklog lets an AI agent investigate your logs over MCP while a console held by a human masks the personal data and secrets it detects before anything reaches the model.">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0b1120" media="(prefers-color-scheme: dark)">
+  <link rel="canonical" href="https://locklog.dev/">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="locklog">
+  <meta property="og:title" content="locklog — Your AI reads the logs, not the people in them.">
+  <meta property="og:description" content="locklog lets an AI agent investigate your logs over MCP while a console held by a human masks the personal data and secrets it detects before anything reaches the model.">
+  <meta property="og:url" content="https://locklog.dev/">
+  <meta property="og:locale" content="en_US">
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="locklog — Your AI reads the logs, not the people in them.">
+  <meta name="twitter:description" content="locklog lets an AI agent investigate your logs over MCP while a console held by a human masks the personal data and secrets it detects before anything reaches the model.">
+  <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/style.css">
+  <script src="assets/anchors.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header">
+    <div class="wrap">
+      <a class="brand" href="./"><img src="assets/logo.svg" alt="" width="32" height="32"><span class="wordmark">lock<span>log</span></span></a>
+      <nav class="site-nav" aria-label="Main">
+        <ul>
+          <li><a href="./" aria-current="page">Home</a></li>
+          <li><a href="install/">Install</a></li>
+          <li><a href="how-it-works/">How it works</a></li>
+          <li><a href="security/">Security</a></li>
+          <li><a href="faq/">FAQ</a></li>
+          <li><a href="https://github.com/DavidGodefroid/locklog">GitHub</a></li>
+        </ul>
+      </nav>
+    </div>
+  </header>
+  <main id="main" tabindex="-1">
+    <div class="wrap">
+<section class="hero" aria-labelledby="hero-title">
+  <p class="eyebrow"><a href="https://github.com/DavidGodefroid/locklog"><span class="badge">v0.1.0</span> Early release · open source, Apache 2.0</a></p>
+  <h1 id="hero-title">Your AI reads the logs, <br><span class="key">not the people in them.</span></h1>
+  <p class="lead">Let Claude Code, Codex, Cursor or Gemini CLI investigate your production logs. The personal data and secrets locklog detects never reach the model without your approval.</p>
+  <p class="intro">locklog lets an AI agent find <strong>when</strong> and <strong>where</strong> something broke in your logs without reading them in clear. A console held by a human, in its own account and container, reads the logs. The agent asks over MCP and gets masked, bounded, typed answers: counts, patterns, traces, lines around a hit. Emails, IPs, card numbers, national ids and the other values locklog detects become <strong>pseudonyms</strong> (<code>⟦email:7F3KQ2M9ZD4X⟧</code>), and secrets become <code>⟦secret⟧</code>, before anything leaves the console.</p>
+  <div class="actions">
+    <a class="button primary" href="install/">Install</a>
+    <a class="button" href="how-it-works/">How it works</a>
+    <a class="button" href="https://github.com/DavidGodefroid/locklog">View on GitHub</a>
+  </div>
+  <ul class="facts" aria-label="At a glance">
+    <li>Linux host, Docker ≥ 19.03</li>
+    <li>Any agent that speaks MCP</li>
+    <li>Files, journald, Docker, Loki</li>
+    <li>Read-only</li>
+    <li>Built on lockkit</li>
+    <li>Apache 2.0</li>
+  </ul>
+</section>
+
+<div class="notice" role="note"><p><strong>Early release.</strong> v0.1.0 is the first release of locklog (see the <a href="https://github.com/DavidGodefroid/locklog/blob/main/CHANGELOG.md">CHANGELOG</a>). It is built on <a href="https://github.com/DavidGodefroid/lockkit">lockkit</a>, and its design is public in <a href="https://github.com/DavidGodefroid/locklog/blob/main/docs/security-model.md">docs/security-model.md</a>.</p></div>
+
+<section class="demo-section" aria-labelledby="demo">
+  <h2 id="demo" class="visually-hidden">See it run</h2>
+  <figure class="demo">
+    <div class="demo-frame" role="region" aria-label="Animated demo" tabindex="0">
+      <img src="assets/demo.svg" alt="Claude Code asks when the PDF errors started on a staging profile. locklog_count shows the step at 14:02, locklog_patterns finds the new pattern with the email and the IP masked, and locklog_trace follows order 4812: all free and masked. The agent then asks locklog_unmask for the email. The locklog console, in its own account and container, shows the read-pii approval screen with the masked record and the span marked; the human answers n. The agent gets denied and carries on without the address; the audit records every call with pseudonyms only." width="1200" height="620" aria-describedby="demo-caption">
+    </div>
+    <p class="demo-hint">Swipe sideways to see both terminals.</p>
+    <figcaption id="demo-caption">Claude Code (left) finds when the PDF errors started with <code>locklog_count</code>, <code>locklog_patterns</code> and <code>locklog_trace</code>: free, and already masked. Its <code>locklog_unmask</code> for an email waits in the locklog console (right, its own account and container). You see the masked record with the span marked and answer <code>n</code>: the agent carries on without the address, and the audit keeps every call with pseudonyms only.</figcaption>
+  </figure>
+</section>
+
+<section aria-labelledby="why">
+  <h2 id="why">Why locklog?</h2>
+  <div class="prose">
+    <p>Logs are where personal data hides in free text: an email in an error message, a client IP in an access log, a token in a header someone logged. An agent that runs <code>journalctl</code>, <code>docker logs</code> or <code>grep</code>, or queries Loki with its own credentials, sends all of it to the model provider.</p>
+  </div>
+<div class="table-wrap" role="region" aria-label="Ways to let an agent read logs, compared" tabindex="0">
+<table class="compare">
+<caption>Ways to let an agent read logs, compared</caption>
+<thead><tr><th scope="col"><span class="visually-hidden">Property</span></th><th scope="col">Agent reads logs directly</th><th scope="col">Agent with a log backend’s own AI</th><th scope="col">locklog</th></tr></thead>
+<tbody>
+<tr><th scope="row">The agent can answer “when did it start?”</th><td class="yes">Yes</td><td class="yes">Yes</td><td class="yes">Yes</td></tr>
+<tr><th scope="row">Personal values and secrets masked before the model</th><td class="no">No</td><td class="partial">Rarely</td><td class="yes">Yes</td></tr>
+<tr><th scope="row">The agent never holds the log backend’s credentials</th><td class="no">No</td><td class="yes">Yes</td><td class="yes">Yes</td></tr>
+<tr><th scope="row">Self-hosted, any agent that speaks MCP</th><td class="yes">Yes</td><td class="no">No</td><td class="yes">Yes</td></tr>
+<tr><th scope="row">A clear value reaches the agent only with your approval</th><td class="no">No</td><td class="no">No</td><td class="yes">Yes</td></tr>
+<tr><th scope="row">Every call audited, without clear values</th><td class="no">No</td><td class="partial">Varies</td><td class="yes">Yes</td></tr>
+</tbody>
+</table>
+</div>
+</section>
+
+<section aria-labelledby="highlights">
+  <h2 id="highlights">Highlights</h2>
+  <ul class="cards cols-3">
+    <li><span class="icon" aria-hidden="true">🕶️</span><h3>Masked by construction</h3><p>Every record is masked inside the console before any predicate runs, and a predicate holding a clear email is refused (<code>E_PII_IN_QUERY</code>): the agent only ever works on the masked view. Equality on a pseudonym works, so “every record of this user” still does. (The opt-in <code>prefilter</code>, refused on production, is the documented exception.)</p></li>
+    <li><span class="icon" aria-hidden="true">🔎</span><h3>Investigation tools, not a query language</h3><p><code>locklog_count</code> (with buckets and <code>first_last</code>), <code>locklog_patterns</code> (new templates against a baseline), <code>locklog_trace</code> (one request across sources), <code>locklog_context</code>, <code>locklog_search</code>, <code>locklog_tail</code>. Text never goes to a backend.</p></li>
+    <li><span class="icon" aria-hidden="true">⚖️</span><h3>Free within budgets, approved beyond</h3><p>Reads are bounded per call and per hour. A call over a budget is refused before it touches data, and <code>locklog_scan</code> asks you once for the whole plan.</p></li>
+    <li><span class="icon" aria-hidden="true">📚</span><h3>Your sources</h3><p>Files (globs, rotation, gzip, zstd), journald (a pure-Go reader), Docker container logs and Loki; Elasticsearch and OpenSearch as a preview (their incident gates come with v0.3.0).</p></li>
+    <li><span class="icon" aria-hidden="true">🔒</span><h3>Read-only</h3><p>Read-only mounts, a read-only root filesystem, an allowlist of backend endpoints, no Docker socket in any locklog container, no write path to any backend.</p></li>
+    <li><span class="icon" aria-hidden="true">👤</span><h3>Clear values stay with you</h3><p>Reads are free. Handing a clear value to the agent waits for your approval at the console and is off by default on production.</p></li>
+  </ul>
+</section>
+
+<section aria-labelledby="quick-start">
+  <h2 id="quick-start">Quick start</h2>
+  <p class="prose">The trial takes about five minutes. Run it on a <strong>non-production</strong> profile: your agent runs on your own account, where it could still read the logs directly.</p>
+  <pre tabindex="0" class="term"><code><span class="cmt"># 1. Install the launcher (it verifies the release and the image with cosign)</span>
+curl -fsSL https://locklog.dev/install.sh | sh
+
+<span class="cmt"># 2. Describe your logs: setup detects files, journald and containers,
+#    asks whether the profile is production (answer "no" for the trial),
+#    and wires the detected agents (Claude Code, Codex, Cursor, Gemini CLI)</span>
+locklog setup --agent host
+
+<span class="cmt"># 3. The console, in a terminal you keep in view (setup prints the line;</span>
+<span class="cmt">#    containers get a profile of their own, &lt;profile&gt;-docker)</span>
+locklog console --profile &lt;profile&gt;</code></pre>
+  <p class="prose">Then, in another terminal, ask your agent: <em>“when did the 502s start?”</em>. It calls <code>locklog_count</code>, <code>locklog_patterns</code> and <code>locklog_trace</code>; the console audits every call and asks you only when the agent wants more than the free budgets or a value in clear.</p>
+  <p><a href="install/">Prerequisites, production placement and install details</a></p>
+</section>
+
+<section aria-labelledby="family">
+  <h2 id="family">The Lock family</h2>
+  <p class="prose">locklog is one of the Locks, on the shared engine <a href="https://github.com/DavidGodefroid/lockkit">lockkit</a>, with <a href="https://github.com/DavidGodefroid/lockhub">lockhub</a> to run them together and <a href="https://github.com/DavidGodefroid/lea">lea</a> to run the agents.</p>
+  <ul class="cards family">
+    <li><h3><a href="https://locksql.com/">locksql</a></h3><p>Your AI writes the query. You hold the key. SQL databases.</p></li>
+    <li><h3><a href="https://lockmq.com/">lockmq</a></h3><p>Your AI reads the queue. You hold the key. RabbitMQ brokers.</p></li>
+    <li><h3><a href="https://lockfile.pro/">lockfile</a></h3><p>Your AI asks about the file. It never reads it.</p></li>
+    <li><h3><a href="https://lockhttp.com/">lockhttp</a></h3><p>Your AI browses. You hold the key. Outbound HTTP(S).</p></li>
+    <li><h3>locklog</h3><p>Your AI reads the logs, not the people in them. Logs.</p></li>
+  </ul>
+  <p><a href="https://lockfamily.dev/">lockfamily.dev</a></p>
+</section>
+
+<section class="limits" aria-labelledby="limits">
+  <h2 id="limits">Know the limits</h2>
+  <div class="prose">
+    <p>locklog masks the values it <strong>detects</strong>. It does not detect person names unless you enable the opt-in <code>person_name</code> detector, usernames and logins in free text, postal addresses, private and loopback IPs, user agents and other quasi-identifiers, business ids, base64 or hex-encoded content, or secrets without a known shape.</p>
+    <p>Pseudonymised data is still personal data under the GDPR: the model provider receives pseudonyms, timestamps and the fields locklog does not mask. And locklog protects the logs only from an agent that cannot reach them by another path: on production, that is your own container’s job (lea support is planned).</p>
+    <p><a href="security/">Read the security model</a></p>
+  </div>
+</section>
+    </div>
+  </main>
+  <footer class="site-footer">
+    <div class="wrap">
+      <ul>
+        <li><a href="https://github.com/DavidGodefroid/locklog">Source on GitHub</a></li>
+        <li><a href="https://github.com/DavidGodefroid/locklog/blob/main/README.md">README</a></li>
+        <li><a href="https://github.com/DavidGodefroid/locklog/blob/main/docs/security-model.md">Security model</a></li>
+        <li><a href="https://github.com/DavidGodefroid/locklog/blob/main/CHANGELOG.md">Changelog</a></li>
+        <li><a href="https://lockfamily.dev/">The Lock family</a></li>
+      </ul>
+      <p>v0.1.0, in active development. locklog is licensed under the <a href="https://github.com/DavidGodefroid/locklog/blob/main/LICENSE">Apache License 2.0</a>.</p>
+    </div>
+  </footer>
+</body>
+</html>
