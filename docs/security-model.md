@@ -24,7 +24,7 @@ how, what it relies on, and what it does not do.
    locklog launcher (root-owned /usr/local/bin/locklog)
      ├─ console  locklog-console-<n>  uid 10051, no capability, read-only root,
      │    --cpus min(2,nproc) --memory 1g --pids-limit 256 --log-driver none,
-     │    --allowed-uids … (not passed by the launcher yet: #102); read-only
+     │    --allowed-uids …; read-only
      │    non-recursive binds of the approved roots
      │    volume locklog-home  keys, index, audit, PII rules          (console only)
      │    volume locklog-run   socket dir 2750 locklog:locklog-clients (10051:10050), socket 0660
@@ -58,7 +58,7 @@ the pseudonym keys and decides what leaves.
 | 13 | No egress except the configured backends; production backends authenticated over TLS | network none or a dedicated network; a dialer pinned to host:port; no proxy environment, no redirects off-host; an unauthenticated-read check |
 | 14 | Read-only by construction | read-only binds and root; `O_RDONLY` beneath-root opens; HTTP method and path allowlists |
 | 15 | Pseudonym keys never leave the home volume; old epoch keys are deleted | files 0600, rotation |
-| 16 | Only the clients group, the image's `agent`, the console's own uid and `--allowed-uids` reach the socket (never root or 65534); the launcher does not pass `--allowed-uids` yet ([#102](https://github.com/DavidGodefroid/locklog/issues/102)) | kernel peer credentials, lockkit peer check |
+| 16 | Only the clients group, the image's `agent`, the console's own uid and `--allowed-uids` reach the socket (never root or 65534) | kernel peer credentials, lockkit peer check |
 
 ## Preconditions (not enforced by locklog)
 

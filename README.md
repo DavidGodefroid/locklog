@@ -193,8 +193,7 @@ locklog enforces what it owns:
 
 - the console's **peer check**: only the clients group (10050), the image's
   `agent` (10052) and the uids you list in `--allowed-uids` reach the
-  socket, never root or `nobody` (the launcher does not pass
-  `--allowed-uids` yet: [#102](https://github.com/DavidGodefroid/locklog/issues/102));
+  socket, never root or `nobody`;
 - its mounts (read-only, non-recursive), its network, and its image
   hardening; **no Docker socket** in any locklog container;
 - on production, backends with **authentication over TLS**, and a refusal

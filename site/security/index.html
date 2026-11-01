@@ -64,7 +64,7 @@
    locklog launcher (root-owned /usr/local/bin/locklog)
      ├─ console  locklog-console-&lt;n&gt;  uid 10051, no capability, read-only root,
      │    --cpus min(2,nproc) --memory 1g --pids-limit 256 --log-driver none,
-     │    --allowed-uids … (not passed by the launcher yet: #102); read-only
+     │    --allowed-uids …; read-only
      │    non-recursive binds of the approved roots
      │    volume locklog-home  keys, index, audit, PII rules          (console only)
      │    volume locklog-run   socket dir 2750 locklog:locklog-clients (10051:10050), socket 0660
@@ -121,11 +121,11 @@
   <tr><th scope="row">9</th><td>Only approved sources are opened; the policy is the approved copy; <code>.locklog/</code> is read-only for lea agents (lea placement planned)</td><td>approved store, mount plan, dev/inode checks</td></tr>
   <tr><th scope="row">10</th><td>Log content is untrusted text everywhere</td><td>JSON-escaped under an “untrusted” header, controls replaced; injection corpus</td></tr>
   <tr><th scope="row">11</th><td>Resources are bounded</td><td>plans, rolling budgets, a queue, container limits, decompression, response and journal DATA caps, a 64 MiB result cache</td></tr>
-  <tr><th scope="row">12</th><td>Every call is audited, chained, without clear values</td><td>lockkit audit</td></tr>
+  <tr><th scope="row">12</th><td>Every call is audited, chained, without clear values (the console’s clear view, Ctrl-O, is counted as <code>shown_clear</code>, never recorded)</td><td>lockkit audit</td></tr>
   <tr><th scope="row">13</th><td>No egress except the configured backends; production backends authenticated over TLS</td><td>network none or a dedicated network; a dialer pinned to host:port; no proxy environment, no redirects off-host; an unauthenticated-read check</td></tr>
   <tr><th scope="row">14</th><td>Read-only by construction</td><td>read-only binds and root; <code>O_RDONLY</code> beneath-root opens; HTTP method and path allowlists</td></tr>
   <tr><th scope="row">15</th><td>Pseudonym keys never leave the home volume; old epoch keys are deleted</td><td>files 0600, rotation</td></tr>
-  <tr><th scope="row">16</th><td>Only the clients group, the image’s <code>agent</code>, the console’s own uid and <code>--allowed-uids</code> reach the socket (never root or 65534); the launcher does not pass <code>--allowed-uids</code> yet (<a href="https://github.com/DavidGodefroid/locklog/issues/102">#102</a>)</td><td>kernel peer credentials, lockkit peer check</td></tr>
+  <tr><th scope="row">16</th><td>Only the clients group, the image’s <code>agent</code>, the console’s own uid and <code>--allowed-uids</code> reach the socket (never root or 65534)</td><td>kernel peer credentials, lockkit peer check</td></tr>
   </tbody>
   </table>
   </div>

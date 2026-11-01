@@ -54,7 +54,7 @@
 <p>It can try, but the console refuses it (<code>E_PII_IN_QUERY</code>) and points it to <code>locklog_lookup</code>. Every record is masked inside the console before any predicate runs, so the agent only ever works on the masked view. Equality on a pseudonym works, so “every record of this user” still does.</p>
 
 <h2 id="see-clear">Can I see a value in clear?</h2>
-<p>The console shows records masked, including on its approval screens. Handing a clear value to the agent (<code>locklog_unmask</code>) waits for your approval at the console, is never auto-approved, and is off by default on production. Secrets are never unmasked or pseudonymised.</p>
+<p>Yes, on the console only: turn clear results on with Ctrl-O, and the records the agent’s calls return are printed in clear on the console’s terminal (secrets kept redacted; the agent still gets the masked result; the audit counts them as <code>shown_clear</code>), and an unmask screen shows its record in clear too. This is the way to read a record on production, where unmask is off. Handing a clear value to the agent (<code>locklog_unmask</code>) waits for your approval at the console, is never auto-approved, and is off by default on production. Secrets are never unmasked or pseudonymised.</p>
 
 <h2 id="write">Can locklog change my logs or my backends?</h2>
 <p>No. It reads, never writes: read-only mounts, a read-only root filesystem, an allowlist of backend endpoints, no Docker socket in any locklog container, and no write, delete or admin operation at all.</p>

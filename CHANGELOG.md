@@ -15,10 +15,22 @@ the site locklog.dev.
 
 Still open in this release:
 - The Loki and approval suites and `TestLokiIncident` (LL-16b,
-  [#101](https://github.com/DavidGodefroid/locklog/pull/101)) are pending.
-- A cold start (no local index yet) answers a 7-day count only once the
-  backfill holds it; with the host slowed it takes longer than its gate
-  ([#94](https://github.com/DavidGodefroid/locklog/issues/94)).
+  [#101](https://github.com/DavidGodefroid/locklog/pull/101)) are not
+  merged; their runs so far found:
+  - without a `level` label, the Loki incident's job 1 answers in 5m22s
+    against its 5-minute gate
+    ([#110](https://github.com/DavidGodefroid/locklog/issues/110));
+  - one 7-day trusted Loki count uses 98 of the 120 hourly metric queries,
+    so job 1's next count is refused over budget with the default budgets
+    ([#112](https://github.com/DavidGodefroid/locklog/issues/112));
+  - a 20 GiB approved scan does not finish within the 30-minute approval
+    (about 4 MiB/s measured;
+    [#104](https://github.com/DavidGodefroid/locklog/issues/104));
+  - a Loki call's `scanned.bytes` varies between identical runs
+    ([#111](https://github.com/DavidGodefroid/locklog/issues/111)).
+- On a cold start (no local index yet) a trusted count scans the
+  not-yet-indexed rest with full masking, which misses its gate on a loaded
+  host ([#94](https://github.com/DavidGodefroid/locklog/issues/94)).
 - The leak harness checks every agent method's output; the bytes of the
   console socket, the audit and the MCP outputs are not scanned by it yet
   ([#86](https://github.com/DavidGodefroid/locklog/issues/86)).
