@@ -9,8 +9,19 @@ uses [Semantic Versioning](https://semver.org/).
 ## [0.1.0] - 2026-11-01
 
 The first release: the console, the engine and the MCP server over files,
-journald and Docker logs (and Loki), with the masking pipeline, the local
-index, budgets and scan approvals, and the site locklog.dev.
+journald, Docker and Loki logs (Elasticsearch and OpenSearch as a preview),
+with the masking pipeline, the local index, budgets and scan approvals, and
+the site locklog.dev.
+
+Still open in this release:
+- The Loki and approval suites and `TestLokiIncident` (LL-16b,
+  [#101](https://github.com/DavidGodefroid/locklog/pull/101)) are pending.
+- A cold start (no local index yet) answers a 7-day count only once the
+  backfill holds it; with the host slowed it takes longer than its gate
+  ([#94](https://github.com/DavidGodefroid/locklog/issues/94)).
+- The leak harness checks every agent method's output; the bytes of the
+  console socket, the audit and the MCP outputs are not scanned by it yet
+  ([#86](https://github.com/DavidGodefroid/locklog/issues/86)).
 
 ### Added
 

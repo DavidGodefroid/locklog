@@ -45,8 +45,8 @@ clear value to the agent waits for your approval at the console and is off
 by default on production.
 
 > [!NOTE]
-> **Pre-release.** No release is published yet, so `install.sh` has nothing
-> to install and the Quick start below works from v0.1.0 on.
+> **Early release.** v0.1.0 is the first release: see the
+> [CHANGELOG](CHANGELOG.md) for what it holds and what is still open.
 > Built on [lockkit](https://github.com/DavidGodefroid/lockkit).
 > The design is public in [docs/security-model.md](docs/security-model.md);
 > what the spikes measured is in [docs/sources.md](docs/sources.md) and
@@ -84,9 +84,8 @@ with its own credentials, sends all of it to the model provider.
   per hour. A call over a budget is refused before it touches data, and
   `locklog_scan` asks you once for the whole plan.
 - **Your sources.** Files (globs, rotation, gzip, zstd), journald (a pure-Go
-  reader), Docker container logs, and Loki in v0.1.0 (Loki once
-  [#97](https://github.com/DavidGodefroid/locklog/pull/97) lands);
-  Elasticsearch and OpenSearch in v0.3.0.
+  reader), Docker container logs and Loki; Elasticsearch and OpenSearch as a
+  preview (their incident gates come with v0.3.0).
 - **Read-only.** Read-only mounts, a read-only root filesystem, an allowlist
   of backend endpoints, no Docker socket in any locklog container, no write
   path to any backend.
@@ -195,8 +194,7 @@ locklog enforces what it owns:
 - its mounts (read-only, non-recursive), its network, and its image
   hardening; **no Docker socket** in any locklog container;
 - on production, backends with **authentication over TLS**, and a refusal
-  when an endpoint answers a read without credentials (with remote
-  sources, [#97](https://github.com/DavidGodefroid/locklog/pull/97));
+  when an endpoint answers a read without credentials;
 - the masking pipeline, the budgets, and approvals bound to the exact plan
   (single use; an unmask re-reads the record and is refused if anything
   moved since you approved it).
@@ -250,12 +248,7 @@ logs), your own rules, and `lookup = "approved"`.
 | journald | v0.1.0 | pure-Go reader, field allowlist; core dumps, command lines and audit fields are never served |
 | Docker containers | v0.1.0 | `json-file` logs by container name glob; the `journald` driver through journald. Podman through journald |
 | Loki | v0.1.0 | trusted labels and structured metadata, server-side metric counts; text never sent to Loki |
-| Elasticsearch, OpenSearch | v0.3.0 | trusted keyword fields, `search_after`, a read-only privilege check |
-
-The console opens Loki, Elasticsearch and OpenSearch sources from the
-profile once [#97](https://github.com/DavidGodefroid/locklog/pull/97) is
-merged; until then the console refuses a profile that holds one (this build
-"does not read yet" that kind) before it opens anything.
+| Elasticsearch, OpenSearch | v0.1.0 (preview) | trusted keyword fields, `search_after`, a read-only privilege check; their incident gates come with v0.3.0 |
 
 `docker compose up` deletes a recreated container's `json-file` logs: use
 the journald driver or Loki for history across deploys.
@@ -294,11 +287,11 @@ launcher's and the image's versions.
 
 ## Status
 
-Pre-release, in active development: see the [CHANGELOG](CHANGELOG.md).
-v0.1.0 is planned to ship files, journald, Docker and Loki (with #97) with
-the standalone console.
-v0.2.0 adds the hub (`lock up`, `lock approve`), and v0.3.0 adds
-Elasticsearch, OpenSearch and the masked export.
+v0.1.0, in active development: see the [CHANGELOG](CHANGELOG.md). It ships
+files, journald, Docker and Loki with the standalone console, and
+Elasticsearch and OpenSearch as a preview.
+v0.2.0 adds the hub (`lock up`, `lock approve`), and v0.3.0 the
+Elasticsearch and OpenSearch incident gates and the masked export.
 
 ## The Lock family
 

@@ -47,7 +47,7 @@
   <p>The console is the only component that reads logs, holds credentials, keeps the pseudonym keys and decides what leaves. The agent reaches it only through its Unix socket, with the MCP server <code>locklog mcp</code>, and nothing unmasked leaves the console except an unmask you approve.</p>
 </div>
 
-<div class="notice" role="note"><p><strong>Pre-release, in development.</strong> No release of locklog is published yet. It is built on <a href="https://github.com/DavidGodefroid/lockkit">lockkit</a>, and its design is public in <a href="https://github.com/DavidGodefroid/locklog/blob/main/docs/security-model.md">docs/security-model.md</a>.</p></div>
+<div class="notice" role="note"><p><strong>Early release.</strong> v0.1.0 is the first release of locklog (see the <a href="https://github.com/DavidGodefroid/locklog/blob/main/CHANGELOG.md">CHANGELOG</a>). It is built on <a href="https://github.com/DavidGodefroid/lockkit">lockkit</a>, and its design is public in <a href="https://github.com/DavidGodefroid/locklog/blob/main/docs/security-model.md">docs/security-model.md</a>.</p></div>
 
 <section aria-labelledby="layout">
   <h2 id="layout">Where each piece runs</h2>
@@ -121,11 +121,10 @@
   <tr><th scope="row">journald</th><td>v0.1.0</td><td>pure-Go reader, field allowlist; core dumps, command lines and audit fields are never served</td></tr>
   <tr><th scope="row">Docker containers</th><td>v0.1.0</td><td><code>json-file</code> logs by container name glob; the <code>journald</code> driver through journald. Podman through journald</td></tr>
   <tr><th scope="row">Loki</th><td>v0.1.0</td><td>trusted labels and structured metadata, server-side metric counts; text never sent to Loki</td></tr>
-  <tr><th scope="row">Elasticsearch, OpenSearch</th><td>v0.3.0</td><td>trusted keyword fields, <code>search_after</code>, a read-only privilege check</td></tr>
+  <tr><th scope="row">Elasticsearch, OpenSearch</th><td>v0.1.0 (preview)</td><td>trusted keyword fields, <code>search_after</code>, a read-only privilege check; their incident gates come with v0.3.0</td></tr>
   </tbody>
   </table>
   </div>
-  <p class="prose">The console opens Loki, Elasticsearch and OpenSearch sources from the profile once <a href="https://github.com/DavidGodefroid/locklog/pull/97">#97</a> is merged; until then the console refuses a profile that holds one, before it opens anything.</p>
   <p class="prose"><code>docker compose up</code> deletes a recreated container’s <code>json-file</code> logs: use the journald driver or Loki for history across deploys.</p>
 </section>
 
@@ -136,7 +135,7 @@
 
 <section aria-labelledby="roadmap">
   <h2 id="roadmap">Status and roadmap</h2>
-  <p class="prose">Pre-release, in active development. v0.1.0 is planned to ship files, journald, Docker and Loki (with <a href="https://github.com/DavidGodefroid/locklog/pull/97">#97</a>) with the standalone console. v0.2.0 adds the hub (<code>lock up</code>, <code>lock approve</code>), and v0.3.0 adds Elasticsearch, OpenSearch and the masked export.</p>
+  <p class="prose">v0.1.0, in active development: files, journald, Docker and Loki with the standalone console, Elasticsearch and OpenSearch as a preview. v0.2.0 adds the hub (<code>lock up</code>, <code>lock approve</code>), and v0.3.0 the Elasticsearch and OpenSearch incident gates and the masked export.</p>
   <p><a href="../security/">What locklog relies on, and what it does not mask</a></p>
 </section>
     </div>
@@ -150,7 +149,7 @@
         <li><a href="https://github.com/DavidGodefroid/locklog/blob/main/CHANGELOG.md">Changelog</a></li>
         <li><a href="https://lockfamily.dev/">The Lock family</a></li>
       </ul>
-      <p>Pre-release, in development: no release is published yet. locklog is licensed under the <a href="https://github.com/DavidGodefroid/locklog/blob/main/LICENSE">Apache License 2.0</a>.</p>
+      <p>v0.1.0, in active development. locklog is licensed under the <a href="https://github.com/DavidGodefroid/locklog/blob/main/LICENSE">Apache License 2.0</a>.</p>
     </div>
   </footer>
 </body>
