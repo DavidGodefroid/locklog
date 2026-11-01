@@ -15,6 +15,7 @@ import (
 	kconfig "github.com/DavidGodefroid/lockkit/config"
 	"github.com/DavidGodefroid/lockkit/console"
 	"github.com/DavidGodefroid/lockkit/kit"
+	"github.com/DavidGodefroid/lockkit/ticket"
 	"golang.org/x/term"
 
 	"github.com/DavidGodefroid/locklog/internal/config"
@@ -27,7 +28,17 @@ import (
 // is opened.
 func openEngine(inContainer bool) logconsole.Opener { return newOpener(inContainer).Open }
 
-const consoleUsage = "usage: locklog console [--profile P] [--allowed-uids UID,...]"
+const consoleUsage = "usage: locklog console [--profile P] [--allowed-uids UID,...] [--hub URL --hub-key-file FILE --instance NAME [--hub-plain-http] [--devices-file FILE [--require-device CLASSES] [--seal-clear]] [--facade-keys-file FILE]]"
+
+// hubDefaults completes the hub flags: with pinned devices and no
+// --require-device, a read-pii approval (an unmask, an approved lookup)
+// must be signed by one of them.
+func hubDefaults(h console.HubOptions) console.HubOptions {
+	if h.DevicesFile != "" && h.RequireDevice == "" {
+		h.RequireDevice = string(ticket.RiskReadPII)
+	}
+	return h
+}
 
 // consoleCmd is `locklog console`: the console of one profile, in the
 // human's terminal, in the launcher's container.
@@ -37,6 +48,8 @@ func consoleCmd(args []string, stdout, stderr io.Writer) int {
 	profile := fs.String("profile", "", "profile to serve")
 	var allowed onceFlag
 	fs.Var(&allowed, "allowed-uids", "uids that may connect besides locklog-clients' members (an agent in a container of its own)")
+	var hub console.HubOptions
+	hub.Register(fs)
 	if err := fs.Parse(args); err != nil || fs.NArg() > 0 {
 		fmt.Fprintln(stderr, consoleUsage)
 		return 2
@@ -106,6 +119,11 @@ func consoleCmd(args []string, stdout, stderr io.Writer) int {
 	kp.Version = strings.TrimPrefix(version, "v")
 	o.Profile = p.Name
 	be := logconsole.New(o)
+	hub = hubDefaults(hub)
+	var onHub func(*console.Hub)
+	if hub.Enabled() {
+		onHub = be.OnHub
+	}
 	var iso *console.IsolationEnv
 	if len(uids) > 0 {
 		// Set by whoever starts the console (the human, the launcher, lock
@@ -116,7 +134,7 @@ func consoleCmd(args []string, stdout, stderr io.Writer) int {
 	}
 	err = console.Run(ctx, kp, be, console.Options{
 		Profile: p.Name, ProjectRoot: root, IO: t, TTY: os.Stdin, Isolation: iso, StateDir: stateBase,
-		Sanitizer: logconsole.Sanitizer(),
+		Sanitizer: logconsole.Sanitizer(), Hub: hub, OnHub: onHub,
 	})
 	if err != nil {
 		fmt.Fprintln(stderr, "locklog console:", err)

@@ -44,6 +44,10 @@ type Options struct {
 	// console's own status reports it. A host agent is the non-production
 	// trial; a guard against mistakes, not a boundary.
 	HostAgent bool
+	// Requester is the agent behind the server (mcpkit.RequesterFromEnv:
+	// lea's agent name and the hash of its token), sent with the approved
+	// tools: a hub ticket runs only for the agent that asked it.
+	Requester ipc.Requester
 }
 
 // DialClient dials the console of the project of cwd.
@@ -206,6 +210,7 @@ type ScanIn struct {
 	Tool    string         `json:"tool" jsonschema:"the tool to run over its whole plan: search, count, patterns or trace"`
 	Query   map[string]any `json:"query" jsonschema:"that tool's parameters (as for locklog_search, locklog_count, locklog_patterns or locklog_trace, without profile); give an absolute from/to so that the same scan can be asked again; with the cursor a result returned, it continues the approved scan, free"`
 	Reason  string         `json:"reason,omitempty" jsonschema:"why, for the human (one line)"`
+	Ticket  string         `json:"ticket,omitempty" jsonschema:"in hub mode: the ticket a pending answer gave, once the human decided it; run the same scan with it"`
 }
 
 // UnmaskIn asks for the clear values of exact pseudonyms of one record.
@@ -214,6 +219,7 @@ type UnmaskIn struct {
 	Ref        string   `json:"ref" jsonschema:"the ref of the record a result returned"`
 	Pseudonyms []string `json:"pseudonyms" jsonschema:"the pseudonyms ⟦kind:ID⟧ of that record to reveal, exactly as it shows them"`
 	Reason     string   `json:"reason" jsonschema:"why you need the clear values, for the human (one line)"`
+	Ticket     string   `json:"ticket,omitempty" jsonschema:"in hub mode: the ticket a pending answer gave, once the human decided it; ask again for the same pseudonyms of the same ref with it"`
 }
 
 // LookupIn asks for the pseudonyms of clear values.
@@ -222,6 +228,7 @@ type LookupIn struct {
 	Kind    string   `json:"kind" jsonschema:"the detector kind of the values, e.g. email, ip, iban, phone"`
 	Values  []string `json:"values" jsonschema:"clear values of that kind (from the user or the task, never from guessing), at most 10"`
 	Reason  string   `json:"reason,omitempty" jsonschema:"why, for the human when the profile asks for approval"`
+	Ticket  string   `json:"ticket,omitempty" jsonschema:"in hub mode, with lookup approved: the ticket a pending answer gave, once the human decided it; ask again for the same values with it"`
 }
 
 // PIIAddIn proposes a mask rule.
@@ -378,6 +385,49 @@ func answer(what string, data any, err error) (*mcp.CallToolResult, Out, error) 
 func (t *tools) forward(ctx context.Context, profile, method string, params any) (*mcp.CallToolResult, Out, error) {
 	var data json.RawMessage
 	err := t.with(ctx, profile, func(_ string, c Conn) error { return c.Call(ctx, method, params, &data) })
+	var v any
+	if err == nil && len(data) > 0 {
+		v, err = decodeExact(data)
+	}
+	return answer("log lines", v, err)
+}
+
+// pendingOf reads a console answer that waits for the human on the hub
+// (console.PendingResp): status, ticket, lock and instance only.
+func pendingOf(raw json.RawMessage) (mcpkit.PendingResult, bool) {
+	var p mcpkit.PendingResult
+	if json.Unmarshal(raw, &p) != nil || p.Status != mcpkit.StatusPending || p.Ticket == "" {
+		return mcpkit.PendingResult{}, false
+	}
+	return mcpkit.PendingResult{Status: p.Status, Ticket: p.Ticket, Lock: p.Lock, Instance: p.Instance}, true
+}
+
+// approvedParams are an approved tool's params as the console reads them:
+// the engine's, the hub ticket the agent runs and the requester.
+type approvedParams struct {
+	Ticket    string         `json:"ticket,omitempty"`
+	Requester *ipc.Requester `json:"requester,omitempty"`
+}
+
+func (t *tools) requester() *ipc.Requester {
+	if t.o.Requester == (ipc.Requester{}) {
+		return nil
+	}
+	r := t.o.Requester
+	return &r
+}
+
+// forwardApproved is forward for an approved tool: in hub mode the console
+// answers pending, with the ticket the agent runs once it is decided.
+func (t *tools) forwardApproved(ctx context.Context, profile, method string, params any) (*mcp.CallToolResult, Out, error) {
+	var data json.RawMessage
+	err := t.with(ctx, profile, func(_ string, c Conn) error { return c.Call(ctx, method, params, &data) })
+	if err == nil {
+		if p, ok := pendingOf(data); ok {
+			res, _ := mcpkit.PendingOn(p.Lock, p.Instance, p.Ticket)
+			return res, Out{Data: p}, nil
+		}
+	}
 	var v any
 	if err == nil && len(data) > 0 {
 		v, err = decodeExact(data)
@@ -579,8 +629,9 @@ func (t *tools) scan(ctx context.Context, _ *mcp.CallToolRequest, in ScanIn) (*m
 		Tool   string         `json:"tool"`
 		Query  map[string]any `json:"query"`
 		Reason string         `json:"reason,omitempty"`
-	}{in.Tool, in.Query, in.Reason}
-	return t.forward(ctx, in.Profile, logconsole.MethodScan, p)
+		approvedParams
+	}{in.Tool, in.Query, in.Reason, approvedParams{in.Ticket, t.requester()}}
+	return t.forwardApproved(ctx, in.Profile, logconsole.MethodScan, p)
 }
 
 func (t *tools) unmask(ctx context.Context, _ *mcp.CallToolRequest, in UnmaskIn) (*mcp.CallToolResult, Out, error) {
@@ -588,8 +639,9 @@ func (t *tools) unmask(ctx context.Context, _ *mcp.CallToolRequest, in UnmaskIn)
 		Ref        string   `json:"ref"`
 		Pseudonyms []string `json:"pseudonyms"`
 		Reason     string   `json:"reason"`
-	}{in.Ref, in.Pseudonyms, in.Reason}
-	return t.forward(ctx, in.Profile, logconsole.MethodUnmask, p)
+		approvedParams
+	}{in.Ref, in.Pseudonyms, in.Reason, approvedParams{in.Ticket, t.requester()}}
+	return t.forwardApproved(ctx, in.Profile, logconsole.MethodUnmask, p)
 }
 
 func (t *tools) lookup(ctx context.Context, _ *mcp.CallToolRequest, in LookupIn) (*mcp.CallToolResult, Out, error) {
@@ -597,8 +649,9 @@ func (t *tools) lookup(ctx context.Context, _ *mcp.CallToolRequest, in LookupIn)
 		Kind   string   `json:"kind"`
 		Values []string `json:"values"`
 		Reason string   `json:"reason,omitempty"`
-	}{in.Kind, in.Values, in.Reason}
-	return t.forward(ctx, in.Profile, logconsole.MethodLookup, p)
+		approvedParams
+	}{in.Kind, in.Values, in.Reason, approvedParams{in.Ticket, t.requester()}}
+	return t.forwardApproved(ctx, in.Profile, logconsole.MethodLookup, p)
 }
 
 func (t *tools) change(ctx context.Context, _ *mcp.CallToolRequest, in ChangeIn) (*mcp.CallToolResult, Out, error) {
