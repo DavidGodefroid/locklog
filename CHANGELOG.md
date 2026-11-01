@@ -35,8 +35,10 @@ Still open in this release:
   backend ([#64](https://github.com/DavidGodefroid/locklog/issues/64)).
 - Remote sources (Loki, Elasticsearch, OpenSearch) have open review
   follow-ups: off production a failed Elasticsearch check still pushes the
-  configured selector, remote connections are not closed, and refusals can
-  quote strings the server sent
+  configured selector, remote connections are not closed, refusals can
+  quote strings the server sent, the connection checks are outside the
+  request pacing and budgets, and relative or `~` TLS paths pass the config
+  check when the console runs without the launcher
   ([#106](https://github.com/DavidGodefroid/locklog/issues/106)); the
   Elasticsearch check and scan liveness follow-ups of
   [#93](https://github.com/DavidGodefroid/locklog/issues/93).

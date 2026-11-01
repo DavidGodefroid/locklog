@@ -50,7 +50,7 @@ Issues of interest include, among others:
 - log content that can spoof the console's approval screen or make locklog
   act beyond the agent's call.
 
-What locklog does not detect is listed in the README ("Know the limits")
+What locklog does not detect is listed in the README ("What is not masked")
 and is not a vulnerability by itself. Attacks that require running code as the console's
 OS account, or an agent that can already read the logs, the Docker socket or
 the backends directly (a deployment precondition), are out of scope.

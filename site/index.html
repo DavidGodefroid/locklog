@@ -142,7 +142,7 @@ locklog console --profile &lt;profile&gt;</code></pre>
   <h2 id="limits">Know the limits</h2>
   <div class="prose">
     <p>locklog masks the values it <strong>detects</strong>. It does not detect person names unless you enable the opt-in <code>person_name</code> detector, usernames and logins in free text, postal addresses, private and loopback IPs, user agents and other quasi-identifiers, business ids, base64 or hex-encoded content, or secrets without a known shape.</p>
-    <p>Pseudonymised data is still personal data under the GDPR: the model provider receives pseudonyms, timestamps and the fields locklog does not mask. And locklog protects the logs only from an agent that cannot reach them by another path: on production, that is lea’s job or your own container’s.</p>
+    <p>Pseudonymised data is still personal data under the GDPR: the model provider receives pseudonyms, timestamps and the fields locklog does not mask. And locklog protects the logs only from an agent that cannot reach them by another path: on production, that is your own container’s job (lea support is planned).</p>
     <p><a href="security/">Read the security model</a></p>
   </div>
 </section>
