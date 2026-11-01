@@ -22,6 +22,7 @@ Commands:
   doctor [--profile P]    check what the agent's account can reach (advisory)
   init <agent>            wire an agent (claude, codex, cursor, gemini) to locklog in this project
   mounts [--profile P]    print the mount plan of a profile (read by the launcher)
+  hub-key --instance NAME print the console's instance key for lockhub to pin (lock up)
 `
 
 func main() {
@@ -55,6 +56,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return consoleCmd(args[1:], stdout, stderr)
 	case "mounts":
 		return mounts(args[1:], stdout, stderr)
+	case "hub-key":
+		return hubKeyCmd(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		if len(args) > 1 {
 			fmt.Fprint(stderr, usage)

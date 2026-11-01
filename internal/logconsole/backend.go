@@ -202,11 +202,21 @@ type Options struct {
 	// SysClassNet is /sys/class/net (tests replace it).
 	SysClassNet string
 	Open        Opener
+	// Now is the clock of hub tickets: the console's (console.Options.Now;
+	// nil is time.Now).
+	Now func() time.Time
 }
 
 // Backend implements console.Backend.
 type Backend struct {
 	o Options
+
+	mu sync.Mutex
+	// hub is the console's hub mode (OnHub), nil standalone.
+	hub *console.Hub
+	// fp is the policy in force (the last session's), in a ticket's form:
+	// what a renewal is checked against.
+	fp string
 }
 
 var _ console.Backend = (*Backend)(nil)
@@ -403,6 +413,9 @@ func (b *Backend) Connect(ctx context.Context, c console.Credentials) (console.S
 	if err != nil {
 		return nil, err
 	}
+	b.mu.Lock()
+	b.fp = policyFP(pol)
+	b.mu.Unlock()
 	return newSession(e, pol), nil
 }
 
@@ -428,13 +441,21 @@ func (b *Backend) Checks(ctx context.Context, s console.Session) []console.Findi
 	return nil
 }
 
-// Status implements console.Backend.
+// Status implements console.Backend: the engine's status, and in hub
+// mode the instance the console is known by.
 func (b *Backend) Status(s console.Session) any {
 	ls, ok := console.Unwrap(s).(*session)
 	if !ok {
 		return nil
 	}
-	return ls.engine.Status(context.Background())
+	st := ls.engine.Status(context.Background())
+	b.mu.Lock()
+	h := b.hub
+	b.mu.Unlock()
+	if h != nil {
+		return withHub(st, h)
+	}
+	return st
 }
 
 // Methods implements console.Backend.
@@ -463,6 +484,16 @@ func (b *Backend) handler(method string) console.Handler {
 		// Recorded first: a call refused before the engine runs (no
 		// session, a failed reopen) is audited too.
 		rec := newRecord(ctx, env, method, params)
+		// An approved method's ticket and requester are the console's:
+		// the engine gets the rest.
+		var ev envelope
+		approved := slices.Contains(hubApproved, method)
+		if approved {
+			var ok bool
+			if params, ev, ok = splitEnvelope(params); !ok {
+				return failed(req.ID, env, rec, ipc.CodeInvalidParams, "invalid ticket or requester", "invalid ticket or requester")
+			}
+		}
 		sess, err := env.Session(ctx)
 		if err != nil {
 			return failed(req.ID, env, rec, ipc.CodeConnLost, env.Sanitizer().Error(err), errNoSessionText)
@@ -493,7 +524,28 @@ func (b *Backend) handler(method string) console.Handler {
 		cctx, cancel := ls.callContext(ctx)
 		cctx = WithApprove(cctx, func(ctx context.Context, s console.Screen) console.Approval { return env.Approve(ctx, req.ID, s) })
 		cctx = WithShowResults(cctx, env.ShowResults())
+		var hc *HubCall
+		if h := console.HubOf(env); h != nil && approved {
+			// Hub mode: the approval is a ticket on lockhub, never a
+			// prompt here.
+			if hc, err = b.newHubCall(h, env, req.ID, method, ev, c.UID, &rec); err != nil {
+				cancel()
+				return failed(req.ID, env, rec, ipc.CodeInternal, "no log engine for the policy in force", "no log engine for the policy in force")
+			}
+			cctx = WithHubCall(cctx, hc)
+		}
 		result, refused, err := ls.engine.Handle(cctx, method, params, c)
+		if hc != nil {
+			// The plan a decided ticket began ends here, run or refused.
+			reason := ""
+			switch {
+			case refused != nil:
+				reason = "refused: " + string(refused.Info.Code)
+			case err != nil:
+				reason = "failed"
+			}
+			hc.finish(context.WithoutCancel(ctx), err == nil && refused == nil, reason)
+		}
 		// The clear view: with results on (Ctrl-O), the records the
 		// agent gets masked are shown here in clear, on this terminal
 		// only, and the audit counts them.
@@ -524,8 +576,13 @@ func (b *Backend) handler(method string) console.Handler {
 			// Not approved: the console recorded the decision; the agent
 			// gets its answer (a refusal, or a pending ticket).
 			rec.Decision = "denied"
-			if declined.Resp.Error == nil {
+			switch e := declined.Resp.Error; {
+			case e == nil:
 				rec.Decision = "pending"
+			case e.Data != nil:
+				// The lock's own refusal of a ticket's run (stale, a
+				// facade that cannot approve it).
+				rec.Decision, rec.Code = "refused", string(e.Data.Code)
 			}
 			resp = declined.Resp
 			resp.ID = req.ID
@@ -554,8 +611,12 @@ func (b *Backend) handler(method string) console.Handler {
 			resp = console.OKResp(req.ID, result)
 		}
 		// Every call is audited before its answer leaves; one that cannot
-		// be recorded is refused (fail closed).
+		// be recorded is refused (fail closed), and its ticket, pending
+		// unrecorded, is withdrawn.
 		if err := writeAudit(env, rec); err != nil {
+			if hc != nil {
+				hc.withdraw(context.WithoutCancel(ctx))
+			}
 			return console.ErrResp(req.ID, ipc.CodeInternal, "the call could not be audited: refused")
 		}
 		return resp

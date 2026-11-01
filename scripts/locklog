@@ -15,7 +15,15 @@
 #              events` loop for the console's lifetime. gid 0 applies to the
 #              whole console, not to one mount: a docker source therefore
 #              runs in a console of its own, with no file or journald
-#              source beside it (remote sources are fine)
+#              source beside it (remote sources are fine). In hub mode
+#              (--hub URL --hub-key-file FILE --instance NAME, and
+#              --devices-file, --facade-keys-file), those files are bound
+#              read-only under /run/locklog-hub and the console joins
+#              LOCKLOG_NETWORK, the network lockhub is on; the hub flags
+#              go to the console only, never to `locklog mounts`
+#   hub-key    as the console account, with the home volume only and no
+#              network: the instance key for lockhub to pin
+#              (hub-key --instance NAME prints its public key)
 #   refresh    rewrite the containers map of this project's console once
 #   setup      as you, in the image: the trusted .locklog/ and its
 #              config.toml from this host's facts (log files, journal,
@@ -1033,8 +1041,56 @@ read_plan() {
 	lines=$(printf '%s\n' "$planned" | sed -n '2,$p')
 }
 
+# hub_file FLAG FILE: FILE, a regular file of yours (no link), bound
+# read-only into the console under a fixed name: hub_dst is its path there.
+hub_file() {
+	case "$2" in
+	'') die "$1 needs a file" ;;
+	/*) hf=$2 ;;
+	*) hf=$(pwd)/$2 ;;
+	esac
+	case "$hf" in *,*) die "$1: a path with a comma cannot be bound into the console" ;; esac
+	[ -f "$hf" ] && [ ! -L "$hf" ] || die "$1: $hf is not a regular file"
+	case "$1" in
+	--hub-key-file) hub_dst=/run/locklog-hub/hub.pub ;;
+	--devices-file) hub_dst=/run/locklog-hub/devices.json ;;
+	*) hub_dst=/run/locklog-hub/facades.json ;;
+	esac
+	case " $hub_seen " in *" $1 "*) die "$1 given twice" ;; esac
+	hub_seen="$hub_seen $1"
+	hub_mounts="$hub_mounts --mount type=bind,src=$hf,dst=$hub_dst,readonly"
+}
+
 console() {
 	check_project
+
+	# The hub flags: their files bound into the console, the rest passed
+	# as they are (the console checks them).
+	hub_on= hub_mounts= hub_seen=
+	n=$#
+	while [ "$n" -gt 0 ]; do
+		a=$1
+		shift
+		n=$((n - 1))
+		case "$a" in
+		--hub-key-file | --devices-file | --facade-keys-file)
+			[ "$n" -gt 0 ] || die "$a needs a file"
+			hub_file "$a" "$1"
+			shift
+			n=$((n - 1))
+			set -- "$@" "$a" "$hub_dst"
+			;;
+		--hub-key-file=* | --devices-file=* | --facade-keys-file=*)
+			hub_file "${a%%=*}" "${a#*=}"
+			set -- "$@" "${a%%=*}=$hub_dst"
+			;;
+		--hub | --hub=*)
+			hub_on=1
+			set -- "$@" "$a"
+			;;
+		*) set -- "$@" "$a" ;;
+		esac
+	done
 
 	# Docker >= 19.03, rootful: rootless engines keep logs the console
 	# cannot reach. The non-recursive bind option is parsed by the CLI, so
@@ -1088,6 +1144,9 @@ EOF
 		case "$LOCKLOG_NETWORK" in host | none | bridge) die "LOCKLOG_NETWORK: name a network of your own, not $LOCKLOG_NETWORK" ;; esac
 		net=$LOCKLOG_NETWORK
 	fi
+	if [ -n "$hub_on" ] && [ "$net" = none ]; then
+		die "hub mode: name the Docker network the console reaches lockhub on with LOCKLOG_NETWORK (agents must not join it)"
+	fi
 	if [ -n "$remote_lines" ] && [ "$net" = none ]; then
 		die "the profile reads a remote source (Loki, Elasticsearch, OpenSearch): name the Docker network the console reaches it on with LOCKLOG_NETWORK (a Compose network, or one of yours for a backend outside Docker: docker network create locklog-egress)"
 	fi
@@ -1114,6 +1173,7 @@ EOF
 		printf '  network %s, cpus %s, memory 1g, pids 256, no log driver\n' "$net" "$cpus"
 		printf '%s' "$plan_text"
 		[ -z "$gids" ] || printf '  groups%s\n' "$gids"
+		[ -z "$hub_on" ] || printf '  hub mode: requests are decided on lockhub (network %s)\n' "$net"
 	} >&2
 
 	set -f
@@ -1124,7 +1184,7 @@ EOF
 		-e "LOCKLOG_NETWORK=${LOCKLOG_NETWORK:-}" -e "LOCKLOG_EXTRA_ROOTS=${LOCKLOG_EXTRA_ROOTS:-}" \
 		-e "LOCKLOG_EXPECT_DIR=$(devino "$ll_dir")" -e "LOCKLOG_EXPECT_ROOTS=$expect" $docker_args \
 		-v locklog-run:/run/locklog -v locklog-home:/home/locklog -v "$ll_dir:$ll_dir:ro" \
-		$group_args $mount_args -w "$project" "$image" console "$@"
+		$group_args $mount_args $hub_mounts -w "$project" "$image" console "$@"
 	set +f
 	[ -n "$docker_globs" ] || exec docker "$@"
 
@@ -1298,6 +1358,15 @@ console)
 refresh)
 	shift
 	refresh "$@"
+	;;
+hub-key)
+	# The instance key lives in the console's home volume: made and read
+	# as the console account, with no network and nothing else mounted.
+	shift
+	need_docker
+	ensure_volume locklog-home /home/locklog 10051:10051:700
+	exec docker run --rm --user locklog --log-driver none --network none $confined \
+		-v locklog-home:/home/locklog "$image" hub-key "$@"
 	;;
 setup)
 	shift
