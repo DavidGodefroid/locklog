@@ -43,8 +43,7 @@ index, budgets and scan approvals, and the site locklog.dev.
   the start), the file, journald and docker sources given only the mount
   roots the launcher checked (every planned root must be in
   `LOCKLOG_EXPECT_ROOTS`, the containers root may be the launcher's "not
-  checked from the host" case; a Loki source is refused until it is
-  supported), the calibrated cost model, the profile's per-call budgets, and
+  checked from the host" case), the calibrated cost model, the profile's per-call budgets, and
   `log.status`/`log.sources`. In its image the console confines itself with
   Landlock before it opens any source, and a docker source on a production
   profile needs Landlock or openat2; `:status` shows the Landlock state.
@@ -212,6 +211,23 @@ index, budgets and scan approvals, and the site locklog.dev.
   modes keep terms local. Until the newest `Check` has succeeded, no
   trusted term is pushed and no count is served on the server, and a
   stream whose pushed term is no longer server-side is stale.
+
+- The console opens Loki, Elasticsearch and OpenSearch sources (#96): the
+  egress client of each (its allowlist, the credentials the console asked
+  for or read from Vault, its tls mode), with the source's selector,
+  trusted labels, metadata and fields, indices and time, message and
+  tiebreaker fields. At connection the unauthenticated-read probe and, for
+  Elasticsearch / OpenSearch, the privilege and mapping check run; a
+  production profile is refused on either (an open endpoint, a
+  write-capable key), with an error that quotes no credential or response
+  body. Off production a failed check is noted on `:status` and the source
+  matches its terms locally until the console reconnects. Remote sources
+  use the remote budgets: their range, `limits.remote.count_range` for
+  counts the server answers, and `limits.remote.requests_per_minute` for
+  every call, `log.sources` included. The launcher refuses a profile with a
+  remote source without `LOCKLOG_NETWORK`; `locklog doctor` probes
+  Elasticsearch and OpenSearch mappings without credentials; `locklog
+  setup` writes a commented Elasticsearch / OpenSearch profile entry.
 
 ### Fixed
 

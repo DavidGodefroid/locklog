@@ -31,9 +31,41 @@ type LokiSource struct {
 	Network string
 }
 
-// DockerProfile and LokiProfile name the side profiles of p.
+// DockerProfile, LokiProfile and SearchProfile name the side profiles of
+// p.
 func DockerProfile(p string) string { return p + "-docker" }
 func LokiProfile(p string) string   { return p + "-loki" }
+func SearchProfile(p string) string { return p + "-search" }
+
+// searchExample is the profile entry of an Elasticsearch / OpenSearch
+// source, as setup writes it commented out: setup detects no such
+// backend, the human fills it in.
+func searchExample(profile, prod string) string {
+	sp := SearchProfile(profile)
+	var s strings.Builder
+	sw := func(format string, a ...any) { fmt.Fprintf(&s, format, a...) }
+	sw("[profiles.%s]\nproduction = %s\n\n", sp, prod)
+	sw("[profiles.%s.sources.search]\n", sp)
+	sw("kind = \"elastic\"\n")
+	sw("url = \"https://search.example.com:9200\"\n")
+	sw("indices = [\"logs-app-*\"]\n")
+	sw("trusted_fields = [\"service.name\", \"log.level\"]\n")
+	sw("auth = \"basic\"\n")
+	sw("user = \"locklog_reader\"\n")
+	sw("credentials = \"ask\"\n")
+	return s.String()
+}
+
+// commented writes text as TOML comments.
+func commented(w func(string, ...any), text string) {
+	for _, line := range strings.Split(strings.TrimSuffix(text, "\n"), "\n") {
+		if line == "" {
+			w("#\n")
+		} else {
+			w("# %s\n", line)
+		}
+	}
+}
 
 // tomlString quotes s as a TOML basic string.
 func tomlString(s string) string {
@@ -116,17 +148,20 @@ func Render(p Plan) ([]byte, error) {
 		w("# network: LOCKLOG_NETWORK=%s locklog console --profile %s\n", l.Network, lp)
 		if l.Selector == "" {
 			w("# Uncomment it once it names the streams to serve: selector = { app = \"api\" }.\n")
-			for _, line := range strings.Split(strings.TrimSuffix(s.String(), "\n"), "\n") {
-				if line == "" {
-					w("#\n")
-				} else {
-					w("# %s\n", line)
-				}
-			}
+			commented(w, s.String())
 		} else {
 			w("%s", s.String())
 		}
 	}
+	w("\n# An Elasticsearch (kind = \"elastic\") or OpenSearch (kind = \"opensearch\")\n")
+	w("# source: uncomment and fill in. The console asks for the secret (or reads\n")
+	w("# it from Vault: credentials = \"vault\", vault_path); it is never written\n")
+	w("# here. Give it a read-only key: read and view_index_metadata on the indices\n")
+	w("# (monitor on the cluster); a production profile refuses any write or manage\n")
+	w("# privilege, and a backend that answers without credentials. Trusted fields\n")
+	w("# are keyword fields. The console reaches it on a Docker network:\n")
+	w("# LOCKLOG_NETWORK=<network> locklog console --profile %s\n", SearchProfile(p.Profile))
+	commented(w, searchExample(p.Profile, prod))
 	out := []byte(b.String())
 	if _, err := config.ParseProfiles(out, ".locklog/config.toml"); err != nil {
 		return nil, fmt.Errorf("setup: the config written would not load: %w", err)

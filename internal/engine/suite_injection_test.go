@@ -158,7 +158,10 @@ func TestSuiteInjection(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			s := newSuite(t, recs, suiteConfig{Structured: mode, NoAgentMeta: true})
 			matched := 0
-			for _, c := range suiteCalls() {
+			var all []json.RawMessage
+			calls := suiteCalls()
+			for k := 0; k < len(calls); k++ {
+				c := calls[k]
 				r := s.run(c)
 				if r.refusal != nil {
 					t.Fatalf("%s: %v", c.name, r.refusal)
@@ -169,7 +172,12 @@ func TestSuiteInjection(t *testing.T) {
 						var res SearchResult
 						json.Unmarshal(p, &res)
 						matched += len(res.Records)
+						all = append(all, p)
 					}
+				}
+				if c.name == "search all" {
+					// LL-14's calls from what the agent read.
+					calls = append(calls, refCalls(t, all, "4812")...)
 				}
 			}
 			if want := len(recs["json"]) * len(recs); matched != want {

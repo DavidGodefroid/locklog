@@ -165,6 +165,10 @@ func TestSuiteOracle(t *testing.T) {
 					t.Errorf("%s: %d pages: no stopping point compared", c.name, len(x))
 				}
 			}
+			// LL-14: context around the same records, trace by the
+			// pseudonym the first record shows (a planted value) and
+			// by a clear id, tail.
+			comparePairedRefCalls(t, sa, sb, agentCall{"search", MethodSearch, suiteQuery(func(q *Query) { q.Limit = 60 })}, "1203", "the planted values")
 		})
 	}
 }
