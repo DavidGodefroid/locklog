@@ -498,15 +498,21 @@ func pushSuiteLoki(t testing.TB, base string, es []lokiEntry) {
 	for _, e := range es {
 		lo, hi = min(lo, e.ts), max(hi, e.ts)
 	}
-	from, to := time.Unix(0, lo).Truncate(time.Second), time.Unix(0, hi).Truncate(time.Second).Add(2*time.Second)
+	// count_over_time counts (t-range, t]: the window starts a second
+	// before the first entry.
+	from, to := time.Unix(0, lo).Truncate(time.Second).Add(-time.Second), time.Unix(0, hi).Truncate(time.Second).Add(2*time.Second)
+	var n int64
 	for i := 0; ; i++ {
 		// A new instant each time: a cached answer is never reused.
-		n := lokiCount(t, base, `{run="`+run+`"}`, from, to.Add(time.Duration(i)*time.Millisecond))
+		n = lokiCount(t, base, `{run="`+run+`"}`, from, to.Add(time.Duration(i)*time.Millisecond))
 		if n == int64(len(es)) {
 			return
 		}
-		if i > 300 {
+		if i > 1200 {
 			t.Fatalf("Loki serves %d of the %d entries pushed", n, len(es))
+		}
+		if i%100 == 99 {
+			lokiFlush(t, base) // a flush still in its queue: once more
 		}
 		time.Sleep(100 * time.Millisecond)
 	}

@@ -408,7 +408,8 @@ func (a *lokiAgent) free(c agentCall, max int) ([]json.RawMessage, *Error) {
 	start := time.Now()
 	r := a.s.runPagesCtx(a.ctx, c, max)
 	a.calls += len(r.pages) + 1
-	a.log = append(a.log, fmt.Sprintf("%s: %d pages in %v", c.name, len(r.pages), time.Since(start).Round(time.Millisecond)))
+	b, _ := json.Marshal(a.s.eng.BudgetStatus())
+	a.log = append(a.log, fmt.Sprintf("%s: %d pages in %v; budgets %s", c.name, len(r.pages), time.Since(start).Round(time.Millisecond), b))
 	return r.pages, r.refusal
 }
 
@@ -420,6 +421,8 @@ func (a *lokiAgent) mustFree(c agentCall, max int) []json.RawMessage {
 		for _, l := range a.log {
 			a.t.Log(l)
 		}
+		b, _ := json.Marshal(a.s.eng.BudgetStatus())
+		a.t.Logf("budgets after the refusal: %s", b)
 		a.t.Fatalf("%s: refused: %v", c.name, r)
 	}
 	return pages
