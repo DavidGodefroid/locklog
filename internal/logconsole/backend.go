@@ -435,8 +435,22 @@ func (b *Backend) Checks(ctx context.Context, s console.Session) []console.Findi
 	if err != nil {
 		return []console.Finding{{Refuse: true, Text: "cannot list the network interfaces: " + Sanitizer().Error(err)}}
 	}
+	b.mu.Lock()
+	hub := b.hub != nil
+	b.mu.Unlock()
+	// In hub mode the console is on the network it reaches lockhub on
+	// (lox up's internal network): that one interface, and no other. The
+	// engine of a local-only profile dials nothing; the hub client dials
+	// the pinned hub only.
+	if hub && len(ifs) == 1 {
+		return nil
+	}
 	if len(ifs) > 0 {
-		return []console.Finding{{Refuse: true, Text: "the console has a network (" + strings.Join(ifs, ", ") + ") but its profile reads only local logs: start it with the launcher (no network)"}}
+		what := "but its profile reads only local logs: start it with the launcher (no network)"
+		if hub {
+			what = "but in hub mode a profile that reads only local logs has the hub's network only: one interface"
+		}
+		return []console.Finding{{Refuse: true, Text: "the console has a network (" + strings.Join(ifs, ", ") + ") " + what}}
 	}
 	return nil
 }

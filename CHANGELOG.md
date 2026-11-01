@@ -27,7 +27,9 @@ uses [Semantic Versioning](https://semver.org/).
   flags to it only; `locklog_status` shows the hub mode and instance.
   The requester the hub shows is the kernel-verified peer uid, never a name
   the agent declares; an approved method without peer credentials is
-  refused in hub mode. Built on lockkit v0.8.1.
+  refused in hub mode. In hub mode a console reading only local logs
+  accepts one network interface, the one it reaches lockhub on (`lox up`'s
+  internal network), and still refuses any other. Built on lockkit v0.8.1.
 
 - The console's clear view: with clear results on (Ctrl-O, lockkit's
   switch), the records an agent call returned are printed on the console's

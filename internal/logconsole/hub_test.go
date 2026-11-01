@@ -5,6 +5,8 @@ package logconsole
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -107,5 +109,43 @@ func TestStatusWithHub(t *testing.T) {
 func TestPeerName(t *testing.T) {
 	if peerName(10052) != "agent (uid 10052)" || peerName(1000) != "uid 1000" {
 		t.Errorf("%q %q", peerName(10052), peerName(1000))
+	}
+}
+
+// In hub mode a local-only console may be on one network, the hub's;
+// standalone it has none, and in hub mode never two.
+func TestChecksNetworkHubMode(t *testing.T) {
+	eng := &fakeEngine{}
+	open := func(context.Context, OpenOptions) (Engine, error) { return eng, nil }
+	for _, tt := range []struct {
+		name   string
+		ifs    []string
+		hub    bool
+		refuse bool
+	}{
+		{"standalone, one interface", []string{"eth0"}, false, true},
+		{"hub, the hub's network", []string{"eth0"}, true, false},
+		{"hub, two networks", []string{"eth0", "eth1"}, true, true},
+		{"hub, no network", nil, true, false},
+	} {
+		net := t.TempDir()
+		for _, n := range append([]string{"lo"}, tt.ifs...) {
+			if err := os.Mkdir(filepath.Join(net, n), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		b := New(Options{Profile: "staging", Root: project(t, localCfg), SysClassNet: net, Open: open})
+		pol, err := b.LoadPolicy()
+		if err != nil {
+			t.Fatal(err)
+		}
+		b.o.InContainer = true
+		if tt.hub {
+			b.hub = &console.Hub{Instance: "logs"}
+		}
+		f := b.Checks(context.Background(), &session{engine: eng, policy: pol.(Policy)})
+		if (len(f) > 0 && f[0].Refuse) != tt.refuse {
+			t.Errorf("%s: findings %+v", tt.name, f)
+		}
 	}
 }
