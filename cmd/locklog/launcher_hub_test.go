@@ -125,6 +125,25 @@ func TestLauncherConsoleHub(t *testing.T) {
 	if err := os.WriteFile(inOpen, []byte("k"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// The private copies' directory meets the same standard: under an
+	// XDG_RUNTIME_DIR of yours that others can write, refused.
+	openRun := filepath.Join(f.root, "run-open")
+	if err := os.Mkdir(openRun, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(openRun, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	out, calls, err = f.run(t, f.project, []string{plan(f), "LOCKLOG_NETWORK=lockfamily", "XDG_RUNTIME_DIR=" + openRun}, "console", "--hub", "http://lockhub:8443",
+		"--hub-key-file", hubKey, "--instance", "logs")
+	if err == nil || !strings.Contains(out, "is owned or writable by someone else") {
+		t.Errorf("hub dir under an open XDG_RUNTIME_DIR: %v\n%s", err, out)
+	}
+	for _, c := range calls {
+		if slices.Contains(c, "console") {
+			t.Errorf("open XDG_RUNTIME_DIR: the console ran: %q", c)
+		}
+	}
 	for name, bad := range map[string][]string{
 		"linked parent": {"console", "--hub", "http://lockhub:8443", "--hub-key-file", filepath.Join(linkDir, "hub.pub"), "--instance", "logs"},
 		"open parent":   {"console", "--hub", "http://lockhub:8443", "--hub-key-file", inOpen, "--instance", "logs"},

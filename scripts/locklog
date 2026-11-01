@@ -1053,6 +1053,9 @@ ensure_hub_dir() {
 	case "$hub_dir" in *[*?[]* | *[[:space:]]*) die "$hub_dir holds a space or a glob character" ;; esac
 	safe "$hub_dir" || die "$hub_dir holds a character a mount cannot carry"
 	trusted "$hub_dir" || die "$hub_dir is a link, has an ACL, or is owned or writable by someone else than you"
+	# As for the original: no one else may rename the copy's directory, or
+	# one above it, between the copy and docker run.
+	trusted_chain "$hub_dir" || die "a directory on the path of $hub_dir is owned or writable by someone else than you or root, or has an ACL"
 }
 
 # trusted_chain DIR: DIR and every directory above it up to / are yours
