@@ -564,6 +564,13 @@ func (s *Session) Handle(ctx context.Context, method string, params json.RawMess
 	// The caller: its kernel-verified uid (an approved scan and the
 	// lookup limits are bound to it) and the console's approval screen.
 	ctx = engine.WithPeer(ctx, engine.Peer{UID: c.UID, Known: c.PID != 0 || c.UID != 0, Approve: s.approver(ctx)})
+	// The clear view (Ctrl-O): the engine keeps the call's own records,
+	// so that Reveal reads nothing again from a backend.
+	if cv := logconsole.ClearViewFrom(ctx); cv != nil && cv.On {
+		sink := engine.NewClearSink()
+		cv.Kept = sink
+		ctx = engine.WithClearSink(ctx, sink)
+	}
 	switch method {
 	case logconsole.MethodStatus:
 		if r := noParams(params); r != nil {
@@ -599,7 +606,7 @@ func (s *Session) approver(ctx context.Context) engine.Approver {
 				body = append(slices.Clone(body), "in clear (results on, Ctrl-O; shown here only, the agent does not get it):")
 				body = append(body, a.Clear...)
 			} else {
-				body = append(slices.Clone(body), "turn clear results on (Ctrl-O) to see this record in clear here (never sent to the agent)")
+				body = append(slices.Clone(body), "with clear results on (Ctrl-O), the next such screen shows its record in clear here (never sent to the agent)")
 			}
 		}
 		r := ap(ctx, console.Screen{Header: a.Header, Note: a.Note, Body: body, Warnings: a.Warnings, Production: s.prod,
@@ -775,7 +782,11 @@ func (s *Session) Reveal(ctx context.Context, result any) []string {
 	if len(refs) == 0 {
 		return nil
 	}
-	return s.eng.ClearRecords(ctx, refs)
+	var sink *engine.ClearSink
+	if cv := logconsole.ClearViewFrom(ctx); cv != nil {
+		sink, _ = cv.Kept.(*engine.ClearSink)
+	}
+	return s.eng.ClearRecords(ctx, sink, refs)
 }
 
 // collectRefs appends the ref of every record under a "records" array.

@@ -77,16 +77,30 @@ func WithApprove(ctx context.Context, a Approve) context.Context {
 
 type showResultsKey struct{}
 
+// ClearView is a call's clear-view state: the console's clear-results
+// switch (Ctrl-O) and what the engine keeps for it (its own records).
+type ClearView struct {
+	On   bool
+	Kept any
+}
+
 // WithShowResults attaches the console's clear-results switch (Ctrl-O) to
-// ctx: an approval screen then shows its record in clear, on the console.
+// ctx: an approval screen then shows its record in clear, on the console,
+// and the engine keeps the call's records for Reveal.
 func WithShowResults(ctx context.Context, on bool) context.Context {
-	return context.WithValue(ctx, showResultsKey{}, on)
+	return context.WithValue(ctx, showResultsKey{}, &ClearView{On: on})
+}
+
+// ClearViewFrom returns the call's clear-view state, or nil.
+func ClearViewFrom(ctx context.Context) *ClearView {
+	v, _ := ctx.Value(showResultsKey{}).(*ClearView)
+	return v
 }
 
 // ShowResultsFrom reports the clear-results switch of the call.
 func ShowResultsFrom(ctx context.Context) bool {
-	on, _ := ctx.Value(showResultsKey{}).(bool)
-	return on
+	v := ClearViewFrom(ctx)
+	return v != nil && v.On
 }
 
 // Revealer is implemented by an engine that can show the records of a

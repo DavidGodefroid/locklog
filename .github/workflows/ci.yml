@@ -614,7 +614,7 @@ jobs:
   e2e-own-container:
     name: own-container recipe (e2e)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
     env:
       CGO_ENABLED: "0"
       LOCKLOG_E2E_AGENT_BASE: alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f
@@ -637,8 +637,9 @@ jobs:
           d="$RUNNER_TEMP/e2e-$(od -An -N4 -tx4 /dev/urandom | tr -d ' ')"
           mkdir -m 0755 "$d"
           cd test/e2e
-          LOCKLOG_E2E_DIR="$d" "$RUNNER_TEMP/e2e.test" -test.count=1 -test.v -test.timeout 15m -test.run '^TestOwnContainer$' 2>&1 | tee "$RUNNER_TEMP/e2e.log"
-          grep -q -- '--- PASS: TestOwnContainer' "$RUNNER_TEMP/e2e.log"
+          LOCKLOG_E2E_DIR="$d" "$RUNNER_TEMP/e2e.test" -test.count=1 -test.v -test.timeout 30m -test.run '^TestOwnContainer(UID)?$' 2>&1 | tee "$RUNNER_TEMP/e2e.log"
+          grep -q -- '--- PASS: TestOwnContainer ' "$RUNNER_TEMP/e2e.log"
+          grep -q -- '--- PASS: TestOwnContainerUID ' "$RUNNER_TEMP/e2e.log"
       - name: remove the consoles and the volumes
         if: always()
         run: |

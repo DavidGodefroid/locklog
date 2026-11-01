@@ -261,7 +261,7 @@ func (e *Engine) unmaskScreen(q UnmaskQuery, p unmaskPlan) Approval {
 	body := []string{"source: " + p.src, "record: " + when, "reveal: " + strings.Join(q.Pseudonyms, ", "),
 		fmt.Sprintf("spans: %d in this record (marked » «)", len(p.spans)), string(marked)}
 	return Approval{Class: "read-pii", Header: "unmask · read-pii", Note: e.o.Masker.Text(q.Reason), Body: body, NeverAuto: true,
-		Clear: []string{clearView(p)},
+		Clear: []string{e.clearView(p)},
 		Warnings: []string{"the agent receives these clear values, once",
 			"the agent can link this value to every record with this pseudonym (in this epoch)"}}
 }

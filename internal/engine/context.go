@@ -134,7 +134,7 @@ func (e *Engine) Context(ctx context.Context, cq ContextQuery) (ContextResult, e
 	outs := make([]json.RawMessage, len(raws))
 	granules := map[int]bool{}
 	for i := range raws {
-		out, oerr := e.outRecord(raws[i], recs[i], cq.Fields)
+		out, oerr := e.outRecord(ctx, raws[i], recs[i], cq.Fields)
 		if oerr != nil {
 			return ContextResult{}, &Error{Code: ESource, Message: "a record could not be rendered; try again"}
 		}
