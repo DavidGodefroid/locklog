@@ -211,6 +211,16 @@ uses [Semantic Versioning](https://semver.org/).
   modes keep terms local. Until the newest `Check` has succeeded, no
   trusted term is pushed and no count is served on the server, and a
   stream whose pushed term is no longer server-side is stale.
+- Tests (LL-16b): the leak, oracle, equivalence and injection suites run
+  over a Loki source too (a fake Loki in unit runs, a real one in the CI
+  `suites` job), and over the approval tools (approved scans and their
+  continuations, unmask, lookup, change requests): no canary in any
+  answer, refusal or approval screen, and an unmask reveals only the span
+  approved. `TestLokiIncident` (CI job `loki-incident`) runs job 1 against
+  a real Loki with a dense incident hour over a 7-day background, with and
+  without a `level` label, behind a latency proxy and on a slowed host;
+  the ingest overrides it needs are in `docs/loki.md`. The approved-scan
+  test (CI job `scan-volume`) scans 20 GiB of local files on one approval.
 
 - The console opens Loki, Elasticsearch and OpenSearch sources (#96): the
   egress client of each (its allowlist, the credentials the console asked
@@ -251,3 +261,12 @@ uses [Semantic Versioning](https://semver.org/).
 - The launcher chooses the non-recursive bind option from the Docker CLI
   version, which parses it (`bind-recursive=disabled` from CLI 25), not from
   the engine's.
+
+### Known limitations
+
+- An approved scan of 20 GiB of local files does not complete within its
+  30-minute TTL on a 2-core CI runner: one approval, a steady 4.03 MiB/s,
+  7.10 GiB scanned when the TTL expired (11.38 MiB/s needed). Masking is
+  the bottleneck, mostly the `secret` detector (lockkit#97). The
+  approved-scan test records it as a known gap (#104); its size and TTL
+  are unchanged.

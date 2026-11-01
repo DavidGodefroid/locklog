@@ -133,7 +133,7 @@ func TestSuiteOracle(t *testing.T) {
 		// length: different lengths are compared on the sources whose
 		// records carry the padding in a secret-named field.
 		{"same length", true, suiteSources()},
-		{"different length", false, []string{"json", "logfmt", "cri", "docker-json", srcJournal, srcDocker}},
+		{"different length", false, []string{"json", "logfmt", "cri", "docker-json", srcJournal, srcDocker, srcLoki}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a, b := oraclePair(t, tc.sameLen)
@@ -177,7 +177,7 @@ func TestSuiteOracle(t *testing.T) {
 // mask-all (the default everywhere: no pre-filter), every record of the
 // plan is masked whatever the predicates, so a needle found only in the
 // clear form of one set of values costs the same on both. Timing cases run
-// with LOCKLOG_SUITE_TIMING=1 (the CI suites job) and never with -short.
+// with LOCKLOG_SUITE_TIMING=1 (the CI suites-latency job) and never with -short.
 
 func timingCase(t *testing.T) {
 	t.Helper()
@@ -185,7 +185,7 @@ func timingCase(t *testing.T) {
 		t.Skip("timing case: skipped with -short")
 	}
 	if os.Getenv("LOCKLOG_SUITE_TIMING") != "1" {
-		t.Skip("timing case: set LOCKLOG_SUITE_TIMING=1 (run by the CI suites job)")
+		t.Skip("timing case: set LOCKLOG_SUITE_TIMING=1 (run by the CI suites-latency job)")
 	}
 }
 
@@ -284,7 +284,7 @@ func TestSuiteOracleLatency(t *testing.T) {
 	}
 	corpus := func(v string) map[string][]suiteRecord {
 		out := map[string][]suiteRecord{}
-		for _, src := range []string{"json", srcJournal, srcDocker} {
+		for _, src := range []string{"json", srcJournal, srcDocker, srcLoki} {
 			for j := range 6000 {
 				msg := fmt.Sprintf("render pdf for %s failed: upstream timed out (order %d)", v, j)
 				out[src] = append(out[src], suiteRecord{TS: suiteBase.Add(time.Duration(j) * time.Second), Kind: "json",
