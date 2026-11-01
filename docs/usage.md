@@ -207,7 +207,7 @@ points you to.
 
 ## Hub mode
 
-With lockhub, `lock up` starts the console with the hub flags, and you
+With lockhub, `lox up` starts the console with the hub flags, and you
 decide on lockhub (its terminal, the deck or a paired phone) instead of
 this terminal. By hand, through the launcher:
 
@@ -219,7 +219,9 @@ LOCKLOG_NETWORK=lockfamily locklog console --profile staging \
 ```
 
 The launcher binds the files read-only into the console and passes the
-hub flags to the console only. `--hub`, `--hub-key-file` and `--instance`
+hub flags to the console only. Each file must be a regular file (no link)
+owned by you or root, with no ACL, writable by its owner only, and its
+path must hold no space, glob or comma; the hub flags take two dashes. `--hub`, `--hub-key-file` and `--instance`
 go together; there is no hub discovery. With `--devices-file` and no
 `--require-device`, a `read-pii` approval (an unmask, an approved lookup)
 must be signed by a pinned device.

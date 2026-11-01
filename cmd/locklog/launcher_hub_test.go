@@ -59,11 +59,28 @@ func TestLauncherConsoleHub(t *testing.T) {
 	if err := os.Symlink(hubKey, link); err != nil {
 		t.Fatal(err)
 	}
+	// A path with a space would be word-split into docker run's
+	// arguments; a trust anchor others can write is refused.
+	spaced := filepath.Join(f.root, "a b --privileged")
+	if err := os.WriteFile(spaced, []byte("k"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	shared := filepath.Join(f.root, "shared.pub")
+	if err := os.WriteFile(shared, []byte("k"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(shared, 0o666); err != nil {
+		t.Fatal(err)
+	}
 	for name, bad := range map[string][]string{
-		"missing": {"console", "--hub", "http://lockhub:8443", "--hub-key-file", filepath.Join(f.root, "nope"), "--instance", "logs"},
-		"link":    {"console", "--hub", "http://lockhub:8443", "--hub-key-file", link, "--instance", "logs"},
-		"twice":   {"console", "--hub", "http://lockhub:8443", "--hub-key-file", hubKey, "--hub-key-file=" + hubKey, "--instance", "logs"},
-		"no file": {"console", "--hub", "http://lockhub:8443", "--instance", "logs", "--hub-key-file"},
+		"space":       {"console", "--hub", "http://lockhub:8443", "--hub-key-file", spaced, "--instance", "logs"},
+		"space=":      {"console", "--hub", "http://lockhub:8443", "--devices-file=" + spaced, "--instance", "logs"},
+		"writable":    {"console", "--hub", "http://lockhub:8443", "--facade-keys-file", shared, "--instance", "logs"},
+		"single dash": {"console", "-hub", "http://lockhub:8443", "-hub-key-file", hubKey, "--instance", "logs"},
+		"missing":     {"console", "--hub", "http://lockhub:8443", "--hub-key-file", filepath.Join(f.root, "nope"), "--instance", "logs"},
+		"link":        {"console", "--hub", "http://lockhub:8443", "--hub-key-file", link, "--instance", "logs"},
+		"twice":       {"console", "--hub", "http://lockhub:8443", "--hub-key-file", hubKey, "--hub-key-file=" + hubKey, "--instance", "logs"},
+		"no file":     {"console", "--hub", "http://lockhub:8443", "--instance", "logs", "--hub-key-file"},
 	} {
 		out, calls, err := f.run(t, f.project, []string{plan(f), "LOCKLOG_NETWORK=lockfamily"}, bad...)
 		if err == nil {

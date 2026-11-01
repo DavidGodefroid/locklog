@@ -44,7 +44,7 @@ the pseudonym keys and decides what leaves.
 | # | Invariant | Mechanism |
 |---|---|---|
 | 1 | No locklog container has an engine socket | launcher; goldens |
-| 2 | The console shares only `locklog-run` with agents; the home volume, the map directory and the hub network never | launcher; with the hub (v0.2.0) `lock up`; with lea (planned) its label check |
+| 2 | The console shares only `locklog-run` with agents; the home volume, the map directory and the hub network never | launcher; with the hub (v0.2.0) `lox up`; with lea (planned) its label check |
 | 3 | Nothing unmasked leaves the console except an approved unmask; secrets never | masking pipeline, typed masked responses; canary harness |
 | 4 | Agent predicates see only the masked view; every record is masked before any predicate; no text is sent to a backend; plans, charges and stopping points depend on the plan, never on matches; agent rules only tighten | engine, oracle and equivalence suites |
 | 5 | Approved operations run only on a decision bound to the plan hash (exact spans for an unmask, the whole plan for a scan) and the policy fingerprint, once; never auto-approved for `read-pii`. With the hub (v0.2.0), `read-pii` only from `tty`, `deck` or `mobile` | lockkit plans and tickets; the facade check in the console |

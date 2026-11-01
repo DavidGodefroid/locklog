@@ -1050,7 +1050,14 @@ hub_file() {
 	*) hf=$(pwd)/$2 ;;
 	esac
 	case "$hf" in *,*) die "$1: a path with a comma cannot be bound into the console" ;; esac
+	# hub_mounts is word-split into docker run's arguments: no space nor
+	# glob character, nor anything a mount cannot carry.
+	case "$hf" in *[*?[]* | *[[:space:]]*) die "$1: $hf holds a space or a glob character" ;; esac
+	safe "$hf" || die "$1: $hf holds a character a mount cannot carry"
 	[ -f "$hf" ] && [ ! -L "$hf" ] || die "$1: $hf is not a regular file"
+	# A trust anchor (who approves, who gets the clear screen): yours or
+	# root's, no ACL, writable by its owner only.
+	trusted "$hf" || die "$1: $hf must be owned by you or root, with no ACL, and writable by its owner only"
 	case "$1" in
 	--hub-key-file) hub_dst=/run/locklog-hub/hub.pub ;;
 	--devices-file) hub_dst=/run/locklog-hub/devices.json ;;
@@ -1087,6 +1094,9 @@ console() {
 		--hub | --hub=*)
 			hub_on=1
 			set -- "$@" "$a"
+			;;
+		-hub | -hub=* | -hub-key-file | -hub-key-file=* | -devices-file | -devices-file=* | -facade-keys-file | -facade-keys-file=*)
+			die "${a%%=*}: give the hub flags with two dashes (-${a%%=*})"
 			;;
 		*) set -- "$@" "$a" ;;
 		esac

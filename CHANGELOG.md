@@ -12,7 +12,7 @@ uses [Semantic Versioning](https://semver.org/).
   `--hub-key-file`, `--instance`, `--hub-plain-http`, `--devices-file`,
   `--require-device`, `--seal-clear`, `--facade-keys-file`; with a devices
   file, `read-pii` requires a device by default), and `locklog hub-key
-  --instance NAME` prints the instance key for `lock up`. A scan, an
+  --instance NAME` prints the instance key for `lox up`. A scan, an
   unmask or an approved lookup becomes a plan bound to the peer, the
   agent's token, the policy and the engine's keyed plan hash, pushed to
   lockhub with a masked screen; the clear screen, secrets redacted, goes
