@@ -22,7 +22,7 @@ Commands:
   doctor [--profile P]    check what the agent's account can reach (advisory)
   init <agent>            wire an agent (claude, codex, cursor, gemini) to locklog in this project
   mounts [--profile P]    print the mount plan of a profile (read by the launcher)
-  hub-key --instance NAME print the console's instance key for lockhub to pin (lock up)
+  hub-key --instance NAME print the console's instance key for lockhub to pin (lox up)
 `
 
 func main() {

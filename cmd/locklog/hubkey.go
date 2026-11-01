@@ -11,7 +11,7 @@ import (
 
 // hubKeyCmd is `locklog hub-key --instance NAME`: the instance's public
 // key, made on the first call in the console account's home (the home
-// volume in the image), for `lock up` to pin at the hub. The private key
+// volume in the image), for `lox up` to pin at the hub. The private key
 // never leaves that home.
 func hubKeyCmd(args []string, stdout, stderr io.Writer) int {
 	home, err := os.UserHomeDir()
