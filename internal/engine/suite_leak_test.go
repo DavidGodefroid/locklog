@@ -330,7 +330,9 @@ func TestSuiteLeak(t *testing.T) {
 			s := newSuite(t, recs, suiteConfig{Structured: mode, Workers: 2, Cost: oneGranuleCost()})
 			l := newLeakScanner(t, recs)
 			matched := 0
-			for _, c := range suiteCalls() {
+			calls := suiteCalls()
+			for k := 0; k < len(calls); k++ {
+				c := calls[k]
 				start := time.Now()
 				r := s.run(c)
 				t.Logf("%s: %d pages in %v", c.name, len(r.pages), time.Since(start))
@@ -349,6 +351,10 @@ func TestSuiteLeak(t *testing.T) {
 				t.Logf("%s: scanned in %v", c.name, time.Since(start))
 				if c.name == "search all" {
 					matched = l.nrecs
+					// LL-14's calls from what the agent read:
+					// context around the first, middle and last
+					// record returned, trace, tail.
+					calls = append(calls, refCalls(t, r.pages, "4812")...)
 				}
 			}
 			if matched != total {
@@ -447,6 +453,11 @@ func leakRefusals(t *testing.T, whole *suite, mode string, l *leakScanner, recs 
 			{"mistyped nested", MethodCount, json.RawMessage(`{"from":` + string(from) + `,"to":` + string(to) + `,"where":[{"field":"x","op":"=","value":1,` + jsonString(w) + `:[1]}]}`)},
 			{"malformed", MethodPatterns, json.RawMessage(`{"text":` + jsonString(w) + `,`)},
 			{"method", w, json.RawMessage(`{}`)},
+			{"context ref", MethodContext, ContextQuery{Ref: w}},
+			{"context field", MethodContext, json.RawMessage(`{"ref":"x","fields":[` + jsonString(w) + `]}`)},
+			{"trace id", MethodTrace, TraceQuery{ID: w, From: suiteFrom, To: suiteTo}},
+			{"trace source", MethodTrace, TraceQuery{ID: "4812", Sources: []string{w}, From: suiteFrom, To: suiteTo}},
+			{"tail where", MethodTail, TailQuery{Where: []Pred{{Field: w, Op: OpExists}}, Duration: "1s"}},
 		}
 		for _, call := range calls {
 			where := fmt.Sprintf("%s with %s %q", call.name, sample[i].Kind, w)
@@ -478,6 +489,11 @@ func leakRefusals(t *testing.T, whole *suite, mode string, l *leakScanner, recs 
 	}
 	l.refusal("over budget", r.refusal, nil)
 }
+
+var (
+	hexRun      = regexp.MustCompile(`[0-9a-f]{32,}`)
+	sealedValue = regexp.MustCompile(`"(ref|cursor)":"[^"]*"`)
+)
 
 // TestSuiteAgentRuleNamesNothing is the round-6 leak case: an agent rule
 // naming a field shown masked (by its pseudonym) and one naming a clear
@@ -511,7 +527,7 @@ func TestSuiteAgentRuleNamesNothing(t *testing.T) {
 						shown = k
 					}
 				}
-				if strings.Contains(string(r), "secretname") || strings.Contains(string(r), "Lyon") && mode == mask.StructuredRedactUnknown {
+				if rr := sealedValue.ReplaceAllString(string(r), `"$1":""`); strings.Contains(rr, "secretname") || strings.Contains(rr, "Lyon") && mode == mask.StructuredRedactUnknown {
 					t.Fatalf("shown: %s", r)
 				}
 			}
@@ -550,8 +566,11 @@ func TestSuiteAgentRuleNamesNothing(t *testing.T) {
 				}
 				nfiles++
 				b, _ := os.ReadFile(p)
+				// Keyed digests and keys are random hex: a short name of
+				// hex digits ("4812") would match them by chance.
+				scan := hexRun.ReplaceAll(bytes.ToLower(b), []byte("#"))
 				for _, n := range names {
-					if bytes.Contains(bytes.ToLower(b), bytes.ToLower([]byte(n))) {
+					if bytes.Contains(scan, bytes.ToLower([]byte(n))) {
 						t.Errorf("%s holds %q", filepath.Base(p), n)
 					}
 				}
@@ -578,6 +597,9 @@ func TestSuiteAgentRuleNamesNothing(t *testing.T) {
 			// The rules apply to what the engine shows next.
 			pages = s.mustRun(agentCall{"search", MethodSearch, suiteQuery(func(q *Query) { q.Limit = 200 })})
 			for _, p := range pages {
+				// Refs and cursors are random base64: "Lyon" can occur
+				// in them by chance.
+				p := sealedValue.ReplaceAll(p, []byte(`"$1":""`))
 				if strings.Contains(string(p), "Lyon") || strings.Contains(string(p), "secretname") {
 					t.Fatalf("after the rule: %.400s", p)
 				}
