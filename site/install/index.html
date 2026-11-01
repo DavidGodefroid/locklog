@@ -82,7 +82,7 @@ less install.sh &amp;&amp; sh install.sh</code></pre>
   <p class="prose">About five minutes. Run it on a <strong>non-production</strong> profile: your agent runs on your own account, where it could still read the logs directly.</p>
   <pre tabindex="0" class="term"><code><span class="cmt"># Describe your logs: setup detects files, journald and containers,
 # asks whether the profile is production (answer "no" for the trial),
-# and wires the detected agents (Claude Code, Codex, Gemini CLI)</span>
+# and wires the detected agents (Claude Code, Codex, Cursor, Gemini CLI)</span>
 locklog setup --agent host
 
 <span class="cmt"># The console, in a terminal you keep in view (setup prints the line;</span>

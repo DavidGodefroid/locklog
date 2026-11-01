@@ -31,6 +31,15 @@ Still open in this release:
 - On a cold start (no local index yet) a trusted count scans the
   not-yet-indexed rest with full masking, which misses its gate on a loaded
   host ([#94](https://github.com/DavidGodefroid/locklog/issues/94)).
+- `pii.list` and `pii.add` answer "none" until the console serves the PII
+  backend ([#64](https://github.com/DavidGodefroid/locklog/issues/64)).
+- Remote sources (Loki, Elasticsearch, OpenSearch) have open review
+  follow-ups: off production a failed Elasticsearch check still pushes the
+  configured selector, remote connections are not closed, and refusals can
+  quote strings the server sent
+  ([#106](https://github.com/DavidGodefroid/locklog/issues/106)); the
+  Elasticsearch check and scan liveness follow-ups of
+  [#93](https://github.com/DavidGodefroid/locklog/issues/93).
 - The leak harness checks every agent method's output; the bytes of the
   console socket, the audit and the MCP outputs are not scanned by it yet
   ([#86](https://github.com/DavidGodefroid/locklog/issues/86)).
@@ -240,7 +249,6 @@ Still open in this release:
   modes keep terms local. Until the newest `Check` has succeeded, no
   trusted term is pushed and no count is served on the server, and a
   stream whose pushed term is no longer server-side is stale.
-
 - The console opens Loki, Elasticsearch and OpenSearch sources (#96): the
   egress client of each (its allowlist, the credentials the console asked
   for or read from Vault, its tls mode), with the source's selector,
@@ -248,8 +256,7 @@ Still open in this release:
   tiebreaker fields. At connection the unauthenticated-read probe and, for
   Elasticsearch / OpenSearch, the privilege and mapping check run; a
   production profile is refused on either (an open endpoint, a
-  write-capable key), with an error that quotes no credential or response
-  body. Off production a failed check is noted on `:status` and the source
+  write-capable key), with an error that quotes no credential. Off production a failed check is noted on `:status` and the source
   matches its terms locally until the console reconnects. Remote sources
   use the remote budgets: their range, `limits.remote.count_range` for
   counts the server answers, and `limits.remote.requests_per_minute` for

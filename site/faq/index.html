@@ -48,7 +48,7 @@
 <p>v0.1.0 is the first release: files, journald, Docker and Loki with the standalone console, Elasticsearch and OpenSearch as a preview. It is early and in active development: try it on non-production data first. See the <a href="https://github.com/DavidGodefroid/locklog/blob/main/CHANGELOG.md">CHANGELOG</a>.</p>
 
 <h2 id="agents">Which agents does it work with?</h2>
-<p>Any agent that speaks MCP: Claude Code, Codex, Cursor or Gemini CLI, for example. <code>locklog setup</code> wires the agents it detects (Claude Code, Codex, Gemini CLI).</p>
+<p>Any agent that speaks MCP: Claude Code, Codex, Cursor or Gemini CLI, for example. <code>locklog setup</code> wires the agents it detects (Claude Code, Codex, Cursor, Gemini CLI).</p>
 
 <h2 id="search-clear">Can the agent search for a clear email address?</h2>
 <p>It can try, but the console refuses it (<code>E_PII_IN_QUERY</code>) and points it to <code>locklog_lookup</code>. Every record is masked inside the console before any predicate runs, so the agent only ever works on the masked view. Equality on a pseudonym works, so “every record of this user” still does.</p>
