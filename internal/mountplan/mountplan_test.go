@@ -1,6 +1,9 @@
 package mountplan
 
 import (
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -127,6 +130,83 @@ auth = "bearer"
 		p := profile(t, "[profiles.p.sources.api]\nkind = \"docker\"\ncontainers = [\"shop-api-1\"]\n[profiles.p.sources.sys]\n"+other+"\n")
 		if _, err := Lines(p); err == nil || !strings.Contains(err.Error(), "profile of their own") {
 			t.Errorf("docker with %s: %v", other, err)
+		}
+	}
+}
+
+// TLS files: a CA in the project's .locklog/, the console's home volume
+// or the image's /etc/ssl; a client certificate and key only in the home
+// volume.
+func TestTLSFiles(t *testing.T) {
+	prof := func(ca, cert, key string) config.Profile {
+		r := &config.Remote{URL: "https://es:9200"}
+		r.TLSCA, r.TLSCert, r.TLSKey = ca, cert, key
+		return config.Profile{Name: "p", Sources: []config.Source{{Name: "file", Kind: config.KindFile}, {Name: "es", Kind: config.KindElastic, Remote: r}}}
+	}
+	for _, c := range []struct {
+		ca, cert, key string
+		want          string
+	}{
+		{"", "", "", ""},
+		{"/p/.locklog/ca.crt", "", "", ""},
+		{"/p/.locklog/sub/ca.crt", "", "", ""},
+		{"/etc/ssl/certs/corp.pem", "", "", ""},
+		{"/home/locklog/tls/ca.crt", "/home/locklog/tls/c.crt", "/home/locklog/tls/c.key", ""},
+		{"/p/ca.crt", "", "", "copy the CA certificate into /p/.locklog/"},
+		{"/p/.locklog", "", "", "copy the CA certificate"},
+		{"/home/david/ca.crt", "", "", "copy the CA certificate"},
+		{"/p/.locklog/../ca.crt", "", "", "absolute, clean"},
+		{"", "/p/.locklog/c.crt", "/home/locklog/c.key", "tls_cert /p/.locklog/c.crt"},
+		{"", "/home/locklog/c.crt", "/p/.locklog/c.key", "would be readable by agents"},
+		{"", "/home/locklog", "/home/locklog/c.key", "tls_cert"},
+		{"", "/etc/ssl/c.crt", "/etc/ssl/c.key", "tls_cert"},
+	} {
+		err := TLSFiles(prof(c.ca, c.cert, c.key), "/p")
+		if c.want == "" && err != nil || c.want != "" && (err == nil || !strings.Contains(err.Error(), c.want)) {
+			t.Errorf("%+v: %v", c, err)
+		}
+	}
+}
+
+// A client key is never under the project, even inside the home volume;
+// a project inside the home volume is refused; links are resolved.
+func TestTLSFilesProject(t *testing.T) {
+	prof := func(ca, cert, key string) config.Profile {
+		r := &config.Remote{URL: "https://es:9200"}
+		r.TLSCA, r.TLSCert, r.TLSKey = ca, cert, key
+		return config.Profile{Name: "p", Sources: []config.Source{{Name: "es", Kind: config.KindElastic, Remote: r}}}
+	}
+	// A project inside the home volume: its .locklog/ key would be "in the
+	// home volume" and readable by agents.
+	if err := TLSFiles(prof("", "/home/locklog/p/.locklog/c.crt", "/home/locklog/p/.locklog/c.key"), "/home/locklog/p"); err == nil || !strings.Contains(err.Error(), "inside the console's home volume") {
+		t.Errorf("project in the home volume: %v", err)
+	}
+	if err := TLSFiles(prof("", "", ""), "/home/locklog/p"); err != nil {
+		t.Errorf("no TLS file: %v", err)
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("the console's paths are Linux paths")
+	}
+	// A link under .locklog/ pointing elsewhere is where it points.
+	proj := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(proj, ".locklog"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(t.TempDir(), "ca.crt")
+	if err := os.WriteFile(out, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(proj, ".locklog", "ca.crt")
+	if err := os.Symlink(out, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := TLSFiles(prof(link, "", ""), proj); err == nil || !strings.Contains(err.Error(), "not readable by the console") {
+		t.Errorf("a linked CA: %v", err)
+	}
+	// A key in the project root or .locklog/: refused.
+	for _, k := range []string{filepath.Join(proj, "c.key"), filepath.Join(proj, ".locklog", "c.key")} {
+		if err := TLSFiles(prof("", "/home/locklog/c.crt", k), proj); err == nil || !strings.Contains(err.Error(), "readable by agents") {
+			t.Errorf("key %s: %v", k, err)
 		}
 	}
 }

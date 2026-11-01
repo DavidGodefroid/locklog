@@ -169,10 +169,12 @@ type suiteConfig struct {
 	Rules       string
 	NoAgentMeta bool
 	Prefilter   bool
-	// Cost defaults to fixedCost(1) (whole plans in one call).
-	Cost    *CostModel
-	Workers int
-	Limits  func(*Limits)
+	// Cost defaults to fixedCost(1) (whole plans in one call);
+	// RealCost calibrates one on the masker, as the console does.
+	Cost     *CostModel
+	RealCost bool
+	Workers  int
+	Limits   func(*Limits)
 	// Budgets changes the rolling budgets (the defaults, the remote
 	// request pacing and metric queries unbounded); Engine changes any
 	// other option.
@@ -192,11 +194,8 @@ type suiteConfig struct {
 	// Loki); Trusted, when set, replaces the fixture's trusted names.
 	Sources map[string]source.Source
 	Trusted func(src, name string, label bool) bool
-	// Now replaces the suite clock; Calibrated sizes calls with the
-	// console's cost model, calibrated on this host (default: a fixed
-	// one).
-	Now        func() time.Time
-	Calibrated bool
+	// Now replaces the suite clock.
+	Now func() time.Time
 }
 
 type suite struct {
@@ -366,7 +365,7 @@ func newSuite(t testing.TB, recs map[string][]suiteRecord, cfg suiteConfig) *sui
 	sealer, _ := NewSealer(key)
 	cost := cfg.Cost
 	switch {
-	case cost == nil && cfg.Calibrated:
+	case cfg.RealCost:
 		p, _ := parse.New(parse.Options{})
 		cost = NewCostModel(p, func(ev parse.Event) { m.Mask("", ev) }, max(cfg.Workers, 1), time.Now)
 	case cost == nil:

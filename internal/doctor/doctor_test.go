@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -153,13 +154,80 @@ func TestDoctorUnknown(t *testing.T) {
 func TestBackendProbe(t *testing.T) {
 	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("<html>SECRET-VALUE-4242</html>")) }))
 	defer other.Close()
-	it := backendItem(context.Background(), "p/s", other.URL, 0)
+	lk := config.Source{Name: "s", Kind: config.KindLoki, Remote: &config.Remote{URL: other.URL}}
+	it := backendItem(context.Background(), "p/s", lk, 0)
 	if !it.Finding || !strings.Contains(it.Text, "API not recognised") || strings.Contains(it.Text, "SECRET") {
 		t.Errorf("item = %+v", it)
 	}
 	other.Close()
-	if it := backendItem(context.Background(), "p/s", other.URL, 0); it.Finding || !strings.Contains(it.Text, "not reachable") {
+	if it := backendItem(context.Background(), "p/s", lk, 0); it.Finding || !strings.Contains(it.Text, "not reachable") {
 		t.Errorf("closed: %+v", it)
+	}
+}
+
+// Elasticsearch and OpenSearch: the probe reads the mappings of the
+// source's indices without credentials.
+func TestBackendProbeElastic(t *testing.T) {
+	var paths []string
+	open := true
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			t.Errorf("a probe sent credentials: %v", r.Header)
+		}
+		paths = append(paths, r.URL.Path)
+		if !open {
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write([]byte(`{"error":"SECRET-VALUE-4242"}`))
+			return
+		}
+		w.Write([]byte(`{"logs-a":{"mappings":{"properties":{"user_email":{"type":"keyword"},"note":{"type":"text","meta":"SECRET-VALUE-4242"}}}}}`))
+	}))
+	defer srv.Close()
+	for _, kind := range []string{config.KindElastic, config.KindOpenSearch} {
+		paths = nil
+		open = true
+		src := config.Source{Name: "es", Kind: kind, Remote: &config.Remote{URL: srv.URL, Indices: []string{"logs-*", "audit"}}}
+		it := backendItem(context.Background(), "p/es", src, 0)
+		if !it.Finding || !strings.Contains(it.Text, "read without credentials") || strings.Contains(it.Text, "SECRET") || strings.Contains(it.Text, "user_email") {
+			t.Errorf("%s open: %+v", kind, it)
+		}
+		if len(paths) != 1 || paths[0] != "/audit,logs-*/_mapping" {
+			t.Errorf("%s probed %v", kind, paths)
+		}
+		open = false
+		if it := backendItem(context.Background(), "p/es", src, 0); it.Finding || !strings.Contains(it.Text, "needs credentials (status 401)") {
+			t.Errorf("%s closed: %+v", kind, it)
+		}
+	}
+}
+
+// The remote sources' TLS files the console could not read, or a client
+// key agents could, are findings.
+func TestTLSItem(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the console's paths are Linux paths")
+	}
+	project := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(project, ".locklog"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	prof := func(ca, cert, key string) config.Profile {
+		r := &config.Remote{URL: "https://es:9200"}
+		r.TLSCA, r.TLSCert, r.TLSKey = ca, cert, key
+		return config.Profile{Sources: []config.Source{{Name: "es", Kind: config.KindElastic, Remote: r}}}
+	}
+	ca := filepath.Join(project, ".locklog", "ca.crt")
+	if it, ok := tlsItem("p", prof(ca, "", ""), project); !ok || !it.Finding || !strings.Contains(it.Text, "cannot be read") {
+		t.Errorf("missing CA: %+v %v", it, ok)
+	}
+	if err := os.WriteFile(ca, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if it, ok := tlsItem("p", prof(ca, "", ""), project); ok {
+		t.Errorf("readable CA: %+v", it)
+	}
+	if it, ok := tlsItem("p", prof("", "/home/locklog/c.crt", filepath.Join(project, ".locklog", "c.key")), project); !ok || !it.Finding || !strings.Contains(it.Text, "readable by agents") {
+		t.Errorf("key in the project: %+v", it)
 	}
 }
 

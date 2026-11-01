@@ -105,7 +105,7 @@ func TestOpenerRefusesUnsupportedKindFirst(t *testing.T) {
 		t.Fatal("confined before refusing the profile")
 		return landlock.Status{}, nil
 	}}
-	pol := config.Policy{Profile: config.Profile{Name: "p", Sources: []config.Source{{Name: "l", Kind: config.KindLoki}}}}
+	pol := config.Policy{Profile: config.Profile{Name: "p", Sources: []config.Source{{Name: "l", Kind: "splunk"}}}}
 	if _, err := op.Open(context.Background(), logconsole.OpenOptions{Policy: pol}); err == nil || !strings.Contains(err.Error(), "does not read yet") {
 		t.Errorf("Open: %v", err)
 	}

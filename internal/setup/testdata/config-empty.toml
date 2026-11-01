@@ -12,3 +12,23 @@ version = 1
 # [profiles.staging.sources.app]
 # kind = "file"
 # paths = ["/var/log/app/app.log*"]
+
+# An Elasticsearch (kind = "elastic") or OpenSearch (kind = "opensearch")
+# source: uncomment and fill in. The console asks for the secret (or reads
+# it from Vault: credentials = "vault", vault_path); it is never written
+# here. Give it a read-only key: read and view_index_metadata on the indices
+# (monitor on the cluster); a production profile refuses any write or manage
+# privilege, and a backend that answers without credentials. Trusted fields
+# are keyword fields. The console reaches it on a Docker network:
+# LOCKLOG_NETWORK=<network> locklog console --profile staging-search
+# [profiles.staging-search]
+# production = false
+#
+# [profiles.staging-search.sources.search]
+# kind = "elastic"
+# url = "https://search.example.com:9200"
+# indices = ["logs-app-*"]
+# trusted_fields = ["service.name", "log.level"]
+# auth = "basic"
+# user = "locklog_reader"
+# credentials = "ask"

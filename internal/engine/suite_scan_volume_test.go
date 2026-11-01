@@ -114,7 +114,7 @@ func TestApprovedScanVolume(t *testing.T) {
 	start := time.Now()
 	paths, lines := writeScanVolume(t, dir, total, perFile, end)
 	t.Logf("generated %d files, %.2f GiB, %d lines in %v", len(paths), float64(total)/(1<<30), lines, time.Since(start).Round(time.Second))
-	s := newSuite(t, nil, suiteConfig{Structured: mask.StructuredRedactUnknown, Workers: 2, NoAgentMeta: true, Calibrated: true,
+	s := newSuite(t, nil, suiteConfig{Structured: mask.StructuredRedactUnknown, Workers: 2, NoAgentMeta: true, RealCost: true,
 		Now: time.Now, Files: map[string][]string{"json": paths}})
 	from := end.Add(-time.Duration(len(paths)) * 24 * time.Hour)
 	q := CountQuery{Query: Query{From: from, To: end, Sources: []string{"json"}, Text: "upstream timed out"}, Bucket: "24h"}

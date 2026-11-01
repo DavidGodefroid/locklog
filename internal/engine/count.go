@@ -275,18 +275,37 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 		}
 	}
 	lim := e.limits(ctx)
-	maxRange := lim.CountRange
-	if !trustedOnly {
-		maxRange = lim.LocalRange
+	// The range: a count with text, regex or masked-field predicates is
+	// bounded by the local range, and by the remote one for a remote
+	// source; a trusted-only count by the count range of each source it
+	// reads (the local index's, or the server's counts' for a remote
+	// source that answers them). A remote source without its own counts
+	// is scanned: the remote range, trusted-only or not.
+	maxRange := lim.LocalRange
+	if trustedOnly {
+		maxRange = 0
 	}
 	for _, s := range q.Sources {
-		// A remote source without its own counts is scanned: its range,
-		// trusted-only or not.
-		if src, ok := e.o.Sources[s]; ok && e.remote(s) {
-			if _, counts := src.(source.Counter); !trustedOnly || !counts {
-				maxRange = min(maxRange, lim.RemoteRange)
-			}
+		src, ok := e.o.Sources[s]
+		if !ok {
+			continue
 		}
+		r := lim.LocalRange
+		_, counts := src.(source.Counter)
+		switch {
+		case e.remote(s) && (!trustedOnly || !counts):
+			r = lim.RemoteRange
+		case trustedOnly && e.remote(s) && lim.RemoteCountRange > 0:
+			r = lim.RemoteCountRange
+		case trustedOnly:
+			r = lim.CountRange
+		}
+		if maxRange == 0 || r < maxRange {
+			maxRange = r
+		}
+	}
+	if maxRange == 0 {
+		maxRange = lim.CountRange
 	}
 	last := q.Last
 	var st cursorState

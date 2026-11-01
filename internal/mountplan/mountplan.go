@@ -11,6 +11,11 @@
 //	docker <glob>         an approved container name glob of a docker source: the
 //	                      launcher binds the containers root and maps the
 //	                      containers whose name matches
+//	remote                the profile reads a remote source (Loki,
+//	                      Elasticsearch, OpenSearch): nothing to bind, but the
+//	                      console needs the network LOCKLOG_NETWORK names
+//	                      (`locklog mounts` prints it last; Lines does not
+//	                      return it)
 //
 // No field holds a space, a comma, ';', ':', '=', a quote or a control character:
 // the config refuses such globs, and Lines refuses them again.
@@ -19,11 +24,15 @@ package mountplan
 import (
 	"fmt"
 	"path"
+	"path/filepath"
 	"slices"
 	"strings"
 
 	"github.com/DavidGodefroid/locklog/internal/config"
 )
+
+// RemoteLine is the plan's line of a profile with a remote source.
+const RemoteLine = "remote"
 
 // Line is one entry of the plan.
 type Line struct {
@@ -98,4 +107,100 @@ func Lines(p config.Profile) ([]Line, error) {
 		out = append(out, Line{Kind: config.KindJournald})
 	}
 	return out, nil
+}
+
+// ConsoleHome is the console's home volume in its image: only the console
+// mounts it (agents never do).
+const ConsoleHome = "/home/locklog"
+
+// imageCAs are the image's CA bundle directories.
+const imageCAs = "/etc/ssl"
+
+// beneath reports whether p is dir or under it.
+func beneath(p, dir string) bool {
+	return p == dir || strings.HasPrefix(p, strings.TrimSuffix(dir, "/")+"/")
+}
+
+// realPath is p cleaned and, where it exists here, with its symbolic
+// links resolved (its longest existing prefix is resolved and the rest
+// appended), so that a link cannot move a file in or out of a directory.
+func realPath(p string) string {
+	p = path.Clean(p)
+	rest := ""
+	for cur := p; ; {
+		if r, err := filepath.EvalSymlinks(cur); err == nil {
+			return path.Join(filepath.ToSlash(r), rest)
+		}
+		parent := path.Dir(cur)
+		if parent == cur {
+			return p
+		}
+		rest = path.Join(path.Base(cur), rest)
+		cur = parent
+	}
+}
+
+// under reports whether p is strictly beneath dir.
+func under(p, dir string) bool { return p != dir && beneath(p, dir) }
+
+// TLSFiles checks that the console can read the tls_ca, tls_cert and
+// tls_key files of p's remote sources without any mount of their own,
+// and that no agent can read a client key: the launcher binds only the
+// project's .locklog/ (read-only, also readable by agents) and the
+// console's home volume, and the console confines its reads to them and
+// the image's /etc/ssl. A CA certificate (public) may be in
+// project/.locklog/, the home volume or /etc/ssl; a client certificate
+// and its key only in the home volume, never under the project (a
+// project inside the home volume is refused). project is the project
+// root on the host, where .locklog/ is bound at the same path. Paths are
+// compared cleaned; those under the project with their links resolved.
+func TLSFiles(p config.Profile, project string) error {
+	// Only paths under the project are resolved: it is bound at the same
+	// path in the console, so its links are the console's. Every other
+	// path names a file of the console's image or volume, not of here.
+	raw, proj := "", ""
+	if project != "" {
+		raw, proj = path.Clean(project), realPath(project)
+	}
+	home := ConsoleHome
+	hasTLS := false
+	for _, s := range p.Sources {
+		if r := s.Remote; r != nil && (r.TLSCA != "" || r.TLSCert != "" || r.TLSKey != "") {
+			hasTLS = true
+		}
+	}
+	if hasTLS && proj != "" && (beneath(raw, home) || beneath(proj, home)) {
+		return fmt.Errorf("the project %s is inside the console's home volume %s: refused (its files would be readable by agents)", proj, home)
+	}
+	ll := path.Join(proj, ".locklog")
+	for _, s := range p.Sources {
+		r := s.Remote
+		if r == nil {
+			continue
+		}
+		for _, f := range []struct{ key, val string }{{"tls_ca", r.TLSCA}, {"tls_cert", r.TLSCert}, {"tls_key", r.TLSKey}} {
+			if f.val == "" {
+				continue
+			}
+			if !path.IsAbs(f.val) || path.Clean(f.val) != f.val {
+				return fmt.Errorf("source %s: %s %q: want an absolute, clean path", s.Name, f.key, f.val)
+			}
+			c := f.val
+			if raw != "" && (beneath(c, raw) || beneath(c, proj)) {
+				c = realPath(c)
+			}
+			inProject := proj != "" && beneath(c, proj)
+			switch {
+			case f.key == "tls_ca" && (proj != "" && under(c, ll) || beneath(c, imageCAs) || under(c, home)):
+			case f.key != "tls_ca" && under(c, home) && !inProject:
+			case f.key == "tls_ca":
+				return fmt.Errorf("source %s: tls_ca %s is not readable by the console: copy the CA certificate into %s/ (the console sees only the project's .locklog/, its home volume %s and the image's %s)",
+					s.Name, c, ll, home, imageCAs)
+			default:
+				return fmt.Errorf("source %s: %s %s is not readable by the console, or would be readable by agents: put the client certificate and key in the console's home volume (%s/..., the locklog-home volume), never in the project",
+					s.Name, f.key, c, home)
+			}
+		}
+	}
+	return nil
 }

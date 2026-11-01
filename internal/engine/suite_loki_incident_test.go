@@ -722,7 +722,7 @@ func TestLokiIncident(t *testing.T) {
 			if tc.level {
 				run = "lvl"
 			}
-			s := newSuite(t, nil, suiteConfig{Structured: mask.StructuredRedactUnknown, Workers: 2, NoAgentMeta: true, Calibrated: true,
+			s := newSuite(t, nil, suiteConfig{Structured: mask.StructuredRedactUnknown, Workers: 2, NoAgentMeta: true, RealCost: true,
 				Now:     time.Now,
 				Sources: map[string]source.Source{srcLoki: lokiSource(t, url, run, tc.level)},
 				// The source's trusted labels are its only trusted names
