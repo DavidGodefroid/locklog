@@ -172,7 +172,8 @@ cursor. The numbers behind these defaults are in
 
 ## The console
 
-`locklog console` prints nothing for a free call (the audit records it). It
+`locklog console` prints nothing for a free call (the audit records it),
+unless clear results are on (Ctrl-O, below). It
 opens an approval screen for scans, unmasks, approved lookups and change
 requests: you answer `y` (on production, the profile's name) or `n`. An
 unanswered screen times out after 5 minutes and the agent is told not to
@@ -183,6 +184,7 @@ retry unless asked.
 | `:status` | the profile, mode, session, pending changes, sources and budgets |
 | `:review` | the policy change and change requests waiting for you |
 | `:mode` (Shift+Tab) | manual or auto mode; auto approves scans on a non-production profile, never an unmask or a lookup; production stays manual |
+| Ctrl-O (`:results`) | clear results on or off: the records each agent call returns are printed in clear on this terminal only, never to the agent (see below) |
 | `:quit` | end the console |
 
 The unmask screen shows the record masked, the asked spans marked `» «`,
@@ -190,3 +192,15 @@ the agent's reason, and two warnings: the agent receives these clear values
 once, and can link them to every record with the same pseudonym in the
 epoch. After a yes the record is read again, and the unmask is refused
 (`E_STALE`) if the record, the epoch or the policy changed.
+
+With clear results on (Ctrl-O), the console prints, after each agent call,
+the records it returned with their pseudonyms in clear; secrets,
+`⟦redacted⟧` values and masked field names stay as they are. The agent
+still gets the masked result. The records are taken from the call itself
+(a remote record is never fetched again for this; a page served from the
+result cache is read again from a local source). The audit counts them
+(`shown_clear`), never their content. An unmask screen opened while clear
+results are on also shows its record in clear. lockkit refuses Ctrl-O at
+desktop levels 1 and 2 and warns on a production profile. On a production
+profile, where `unmask = "never"`, this is how you read a record the agent
+points you to.
