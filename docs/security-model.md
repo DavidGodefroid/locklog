@@ -54,7 +54,7 @@ the pseudonym keys and decides what leaves.
 | 9 | Only approved sources are opened; the policy is the approved copy; `.locklog/` is read-only for lea agents (lea placement planned) | approved store, mount plan, dev/inode checks |
 | 10 | Log content is untrusted text everywhere | JSON-escaped under an "untrusted" header, controls replaced; injection corpus |
 | 11 | Resources are bounded | plans, rolling budgets, a queue, container limits, decompression, response and journal DATA caps, a 64 MiB result cache |
-| 12 | Every call is audited, chained, without clear values | lockkit audit |
+| 12 | Every call is audited, chained, without clear values (the console's clear view, Ctrl-O, is counted as `shown_clear`, never recorded) | lockkit audit |
 | 13 | No egress except the configured backends; production backends authenticated over TLS | network none or a dedicated network; a dialer pinned to host:port; no proxy environment, no redirects off-host; an unauthenticated-read check |
 | 14 | Read-only by construction | read-only binds and root; `O_RDONLY` beneath-root opens; HTTP method and path allowlists |
 | 15 | Pseudonym keys never leave the home volume; old epoch keys are deleted | files 0600, rotation |

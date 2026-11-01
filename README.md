@@ -178,7 +178,11 @@ Your agent CLI's own login (Anthropic, OpenAI, Google) is yours to set up.
 | write, delete, admin | does not exist |
 
 The unmask screen shows the record **masked**, with the asked spans marked
-`» «`, the agent's reason and what a yes lets the agent link. Secrets are
+`» «`, the agent's reason and what a yes lets the agent link. To read a
+record yourself without sending anything to the agent, turn clear results
+on with Ctrl-O: the records the agent's calls return are then printed in
+clear on the console's terminal (secrets kept redacted), and an unmask
+screen shows its record in clear too. Secrets are
 never unmasked. On a non-production profile, auto mode (Shift+Tab) can
 approve scans for you; unmasks and approved lookups always wait for you, and
 production stays in manual mode.

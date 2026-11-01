@@ -102,7 +102,7 @@ type unmaskPlan struct {
 }
 
 // errUnmaskNever refuses every unmask of a profile with unmask = "never".
-var errUnmaskNever = &Error{Code: EUnmaskNever, Message: "unmask is off for this profile (unmask = \"never\", the production default): ask the human to read the record at the console (:reveal)"}
+var errUnmaskNever = &Error{Code: EUnmaskNever, Message: "unmask is off for this profile (unmask = \"never\", the production default): ask the human to read the record at the console, with clear results on (Ctrl-O)"}
 
 // Unmask reveals the clear values of exact pseudonyms of one record to the
 // agent, once, on a read-pii approval the human gives at the console
@@ -261,6 +261,7 @@ func (e *Engine) unmaskScreen(q UnmaskQuery, p unmaskPlan) Approval {
 	body := []string{"source: " + p.src, "record: " + when, "reveal: " + strings.Join(q.Pseudonyms, ", "),
 		fmt.Sprintf("spans: %d in this record (marked » «)", len(p.spans)), string(marked)}
 	return Approval{Class: "read-pii", Header: "unmask · read-pii", Note: e.o.Masker.Text(q.Reason), Body: body, NeverAuto: true,
+		Clear: []string{e.clearView(p)},
 		Warnings: []string{"the agent receives these clear values, once",
 			"the agent can link this value to every record with this pseudonym (in this epoch)"}}
 }

@@ -1064,7 +1064,8 @@ func (e *Engine) maskAll(ctx context.Context, src string, raws []source.RawRecor
 
 // outRecord renders a masked record for the agent: the masker's JSON plus
 // the source and the sealed ref; with fields, only those paths.
-func (e *Engine) outRecord(raw source.RawRecord, rec mask.Record, fields []string) (json.RawMessage, error) {
+func (e *Engine) outRecord(ctx context.Context, raw source.RawRecord, rec mask.Record, fields []string) (json.RawMessage, error) {
+	clearSinkFrom(ctx).keep(raw)
 	ref := e.seal("Lr1", refState{Source: raw.Ref.Source, Stream: raw.Ref.Stream, Offset: raw.Ref.Offset,
 		Length: raw.Ref.Length, Digest: e.RecordDigest(raw.Event.Raw), Epoch: e.o.Masker.Epoch(), PolicyFP: e.o.PolicyFP()})
 	var b bytes.Buffer
@@ -1263,7 +1264,7 @@ func (e *Engine) search(ctx context.Context, q Query, kind string) (_ SearchResu
 			if !q.match(rec, b) {
 				return
 			}
-			out, oerr := e.outRecord(raw, rec, q.Fields)
+			out, oerr := e.outRecord(ctx, raw, rec, q.Fields)
 			if oerr != nil {
 				outFailed = true // never a silently missing match
 				return
