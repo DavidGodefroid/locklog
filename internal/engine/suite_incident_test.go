@@ -6,7 +6,8 @@ package engine
 // way the skill teaches it — (1) a trusted-field count over the whole
 // range, served from the local index, to find when it started; (2)
 // patterns and a count with text over the narrowed hour, continued free;
-// (3) the records of the order (trace joins once LL-14 is merged). The
+// (3) the records of the order, its trace across the sources and the
+// context around one of them. The
 // gates are the number of approval prompts and the time to the answer.
 //
 //   - Incident (a), "order 4812": nginx access log (file, combined), the
@@ -336,29 +337,47 @@ func (a *jobAgent) job1(from, to time.Time, srcs []string) {
 	if len(cr.Groups) == 0 {
 		t.Fatal("step 2: no record of order 4812 in the hour")
 	}
-	// Step 3: the order's records, in every source.
-	sq := Query{From: incidentStart, To: hourTo, Text: "4812", Sources: srcs, Limit: 200}
-	seen := map[string]bool{}
-	for _, p := range a.ask(agentCall{"search the order", MethodSearch, sq}) {
+	// Step 3: the order traced across the sources (LL-14; it replaces
+	// the text search the job ran before), and the context around one of
+	// its records.
+	tq := TraceQuery{ID: "4812", From: incidentStart, To: hourTo, Sources: srcs, Limit: 200}
+	traced := map[string]bool{}
+	var ref string
+	for _, p := range a.ask(agentCall{"trace the order", MethodTrace, tq}) {
 		var sr SearchResult
 		json.Unmarshal(p, &sr)
 		for _, r := range sr.Records {
 			var h struct {
 				Source string `json:"source"`
+				Ref    string `json:"ref"`
 			}
 			json.Unmarshal(r, &h)
-			seen[h.Source] = true
+			traced[h.Source] = true
 			if strings.Contains(string(r), "@shop.example") {
 				t.Fatalf("step 3: an e-mail reached the agent: %s", r)
+			}
+			if ref == "" {
+				ref = h.Ref
 			}
 		}
 	}
 	for _, src := range srcs {
-		if !seen[src] {
-			t.Errorf("step 3: no record of order 4812 from %s", src)
+		if !traced[src] {
+			t.Errorf("step 3: the trace of order 4812 has no record from %s", src)
 		}
 	}
-	// TODO(LL-14): step 3 continues with log.trace from a record's ref.
+	if ref == "" {
+		t.Fatal("step 3: the trace returned no record")
+	}
+	var around ContextResult
+	pages = a.ask(agentCall{"context of a traced record", MethodContext, ContextQuery{Ref: ref, Before: 5, After: 5}})
+	if len(pages) != 1 {
+		t.Fatalf("step 3: context in %d pages", len(pages))
+	}
+	json.Unmarshal(pages[0], &around)
+	if len(around.Records) < 2 {
+		t.Errorf("step 3: context of %d records", len(around.Records))
+	}
 }
 
 // runJob runs job 1 on s and applies the gates: at most maxPrompts
@@ -370,8 +389,9 @@ func (a *jobAgent) job1(from, to time.Time, srcs []string) {
 // failure, so with maxPrompts 0 the check below is the strict "no prompt"
 // gate.
 //
-// overrunGap, when set, names a known gap behind a time overrun: the
-// variant then skips with it instead of failing (prompts still fail).
+// overrunGap, when set, names a known gap behind a time overrun: an
+// overrun up to half the gate again then skips with it instead of failing
+// (beyond, and prompts, still fail).
 func runJob(t *testing.T, s *suite, cold bool, maxPrompts int, gate time.Duration, overrunGap string, from, to time.Time, srcs []string) time.Duration {
 	start := time.Now()
 	a := &jobAgent{t: t, s: s, backfill: cold, deadline: start.Add(gate)}
@@ -400,7 +420,7 @@ func runJob(t *testing.T, s *suite, cold bool, maxPrompts int, gate time.Duratio
 		t.Errorf("%d approval prompts, want at most %d", a.prompts, maxPrompts)
 	}
 	if took > gate {
-		if overrunGap != "" && !t.Failed() {
+		if overrunGap != "" && !t.Failed() && took <= gate*3/2 {
 			t.Skipf("known gap, %s: answered in %v, gate %v", overrunGap, took.Round(time.Second), gate.Round(time.Second))
 		}
 		t.Errorf("answered in %v, gate %v", took, gate)
