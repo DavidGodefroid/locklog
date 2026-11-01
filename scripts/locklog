@@ -53,8 +53,9 @@
 #                        launcher's version; `locklog` for a launcher run
 #                        from a clone, the tag of `docker build -t locklog .`)
 #   LOCKLOG_VAULT=1      the image with the vault CLI (credentials = "vault")
-#   LOCKLOG_NETWORK      a Docker network the console joins to reach a
-#                        backend (default: none). Agents must not join it.
+#   LOCKLOG_NETWORK      a Docker network the console joins to reach a remote
+#                        backend (default: none; required by a remote source).
+#                        Agents must not join it.
 #   LOCKLOG_EXTRA_ROOTS  log directories beyond the built-in allowlist
 #                        (/var/log, /run/log/journal), separated by spaces
 #   VAULT_ADDR, VAULT_NAMESPACE  passed to the console
@@ -402,6 +403,10 @@ plan_line() {
 		done
 		[ -n "$found" ] || say "warning: no journal directory (/var/log/journal, /run/log/journal) on this host"
 		;;
+	remote)
+		[ $# -eq 1 ] || die "mount plan: malformed line: $*"
+		remote_lines=1
+		;;
 	*)
 		die "mount plan: unknown line: $*"
 		;;
@@ -414,6 +419,10 @@ plan_line() {
 docker_globs=
 docker_root=
 local_lines=
+# Set by a remote line: the profile reads a remote source (Loki,
+# Elasticsearch, OpenSearch), which the console reaches only on the network
+# LOCKLOG_NETWORK names.
+remote_lines=
 
 # add_docker_glob GLOB: a container name glob ([A-Za-z0-9_.*?-], as the
 # config allows), once.
@@ -1046,7 +1055,7 @@ console() {
 	esac
 
 	read_plan "$@"
-	if [ "$(uname -s)" = Darwin ] && [ "$(printf '%s\n' "$lines" | grep -c .)" -gt 0 ]; then
+	if [ "$(uname -s)" = Darwin ] && [ "$(printf '%s\n' "$lines" | grep -cvx -e '' -e remote)" -gt 0 ]; then
 		die "local log sources are not supported with Docker Desktop on macOS (the containers' logs live in its VM); use a remote source"
 	fi
 	# Read in this shell (no pipe), so that plan_line fills the plan.
@@ -1078,6 +1087,13 @@ EOF
 			die "LOCKLOG_NETWORK: invalid network name $LOCKLOG_NETWORK"
 		case "$LOCKLOG_NETWORK" in host | none | bridge) die "LOCKLOG_NETWORK: name a network of your own, not $LOCKLOG_NETWORK" ;; esac
 		net=$LOCKLOG_NETWORK
+	fi
+	if [ -n "$remote_lines" ] && [ "$net" = none ]; then
+		die "the profile reads a remote source (Loki, Elasticsearch, OpenSearch): name the Docker network the console reaches it on with LOCKLOG_NETWORK (a Compose network, or one of yours for a backend outside Docker: docker network create locklog-egress)"
+	fi
+	if [ -n "$remote_lines" ]; then
+		plan_text="$plan_text  remote sources reached on network $net (the agent must not be on it)
+"
 	fi
 	n=$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 1)
 	case "$n" in '' | *[!0-9]*) n=1 ;; esac
