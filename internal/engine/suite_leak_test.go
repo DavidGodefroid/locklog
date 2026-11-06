@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -306,6 +307,41 @@ func TestLeakScannerFires(t *testing.T) {
 	l.global("blanked ref", blankKey(t, []byte(`{"source":"json","ref":`+jsonString(c.Value)+`}`), "ref"))
 	if len(l.hits) != 0 {
 		t.Errorf("a blanked value was scanned: %+v", l.hits)
+	}
+}
+
+// TestLeakScannerScanID: a scan answer's well-formed id (random hex) is
+// not scanned against the corpus, even when its digits hold a canary's
+// digit run (#138, PR #137's first CI run: the id of "search regex" held
+// "9829767", the tail of the phone "+32 479 82 97 67" of seed 16); an id
+// of any other form, and the rest of the answer, still are.
+func TestLeakScannerScanID(t *testing.T) {
+	recs := leakCorpus(16)
+	l := newLeakScanner(t, recs)
+	const phone, tail = "+32 479 82 97 67", "9829767"
+	if !slices.ContainsFunc(l.forms, func(f leakForm) bool { return f.c.Value == phone && f.form == tail }) {
+		t.Fatalf("seed 16 no longer has the phone %q with the form %q", phone, tail)
+	}
+	page := func(id, tool string) []byte {
+		return []byte(`{"scan":{"id":` + jsonString(id) + `,"expires_at":"2026-10-30T23:00:00Z","done":false},"tool":` +
+			jsonString(tool) + `,"result":{"records":[],"complete":false,"cursor":""}}`)
+	}
+	well := "a1b2" + tail + "c3d4e5f607182" // 24 hex digits
+	l.scanPage("well-formed id", page(well, "search"))
+	if len(l.hits) != 0 {
+		t.Errorf("a well-formed scan id was scanned: %+v", l.hits)
+	}
+	for _, c := range []struct{ name, id, tool string }{
+		{"phone as id", phone, "search"},
+		{"hex id too long", well + "0", "search"},
+		{"hex id upper case", strings.ToUpper(well), "search"},
+		{"hex elsewhere", well, well},
+	} {
+		l.hits = nil
+		l.scanPage(c.name, page(c.id, c.tool))
+		if !slices.ContainsFunc(l.hits, func(h masktest.Hit) bool { return h.Canary.Value == phone }) {
+			t.Errorf("%s: the phone %q not found: %+v", c.name, phone, l.hits)
+		}
 	}
 }
 
