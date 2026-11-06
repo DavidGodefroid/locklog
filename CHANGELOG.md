@@ -6,7 +6,7 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.1.0] - 2026-11-01
+## [0.1.0] - 2026-11-06
 
 The first release: the console, the engine and the MCP server over files,
 journald, Docker and Loki logs (Elasticsearch and OpenSearch as a preview),
