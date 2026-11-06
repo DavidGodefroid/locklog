@@ -101,11 +101,21 @@ shows every ticket and decides it, by its rules or by you.
 
 ```sh
 brew trust davidgodefroid/tap                # Homebrew asks you to trust a third-party tap once
-brew install davidgodefroid/tap/lockfamily
+brew install davidgodefroid/tap/lockfamily   # or only this tool: brew install davidgodefroid/tap/locklog
 cd ~/projects/shop                           # the project whose logs the agent investigates
 lox init                                      # or: lox add locklog logs
 lox run                                       # in a terminal of its own, kept open
 ```
+
+`lox add locklog` and the locklog console in `lox run` come with the
+lockhub release that adds the locklog type
+([lockhub#84](https://github.com/DavidGodefroid/lockhub/issues/84),
+[#86](https://github.com/DavidGodefroid/lockhub/issues/86),
+[#87](https://github.com/DavidGodefroid/lockhub/issues/87); lockhub v0.9.0
+does not know it yet), and the tap's `locklog` formula, and locklog in
+`lockfamily`, with it. Until then, `scripts/install.sh` ([Install](#install))
+installs the launcher, whose verbs you can run yourself
+([docs/setup.md](docs/setup.md)).
 
 `lox add locklog <name>` runs locklog's three launcher verbs from the
 project ([docs/setup.md](docs/setup.md)):
@@ -286,12 +296,21 @@ it are in [docs/performance.md](docs/performance.md).
 
 ## Install
 
+The shortest path is the Lock Family's: install it with Homebrew, then let
+`lox add locklog` (or `lox init`) set up the lock from the project and
+`lox run` start it, in a terminal of its own, outside the agent:
+
 ```sh
-brew trust davidgodefroid/tap
-brew install davidgodefroid/tap/lockfamily   # lox and every lock's launcher
+brew trust davidgodefroid/tap                # Homebrew asks you to trust a third-party tap once
+brew install davidgodefroid/tap/lockfamily   # or only this tool: brew install davidgodefroid/tap/locklog
+cd ~/projects/shop
+lox add locklog logs                          # or: lox init
+lox run                                       # approvals live there
 ```
 
-Or locklog's launcher alone:
+Both need the lockhub release that knows locklog (see
+[Quick start](#quick-start)). Without Homebrew, `install.sh` installs
+locklog's launcher alone:
 
 ```sh
 curl -fsSL https://locklog.dev/install.sh | sh

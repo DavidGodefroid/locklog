@@ -5,7 +5,8 @@ name: release
 # as a draft (archives, signed checksums.txt, SBOMs) while the images are
 # built on native runners; the manifests are signed by digest; a fresh
 # runner pulls them anonymously and checks their signatures; only then is
-# the release published and the site (install.sh) redeployed.
+# the release published, the site (install.sh) redeployed and the Homebrew
+# tap asked to bump its formula.
 on:
   push:
     tags: ["v*"]
@@ -203,3 +204,30 @@ jobs:
           fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Asks the Homebrew tap (DavidGodefroid/homebrew-tap) to bump the locklog
+  # formula to this release, once the archives and the images are published
+  # and signed: the tap's bump workflow verifies them with cosign before
+  # rewriting the formula. Here goreleaser only drafts the release, so the
+  # job also waits for publish (the tap reads the published release). Needs
+  # the secret TAP_DISPATCH_TOKEN, a fine-grained token limited to the tap
+  # (Contents: read and write); without it the step is skipped. The token is
+  # in this job only, which runs no action.
+  tap:
+    name: homebrew tap
+    needs: [goreleaser, image-manifest, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    env:
+      TAP_DISPATCH_TOKEN: ${{ secrets.TAP_DISPATCH_TOKEN }}
+    steps:
+      - name: Bump the Homebrew formula
+        env:
+          GH_TOKEN: ${{ secrets.TAP_DISPATCH_TOKEN }}
+        if: ${{ env.TAP_DISPATCH_TOKEN != '' }}
+        run: |
+          gh api repos/DavidGodefroid/homebrew-tap/dispatches \
+            -f event_type=bump \
+            -f "client_payload[formula]=locklog" \
+            -f "client_payload[version]=${GITHUB_REF_NAME}"
