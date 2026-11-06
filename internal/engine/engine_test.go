@@ -74,8 +74,14 @@ type countingSource struct {
 	n *int
 }
 
+// countMu guards the counts of calls run in parallel (TestBusy); the
+// tests read them once the calls returned.
+var countMu sync.Mutex
+
 func (c countingSource) Scan(ctx context.Context, ch source.Chunk) (source.Iterator, error) {
+	countMu.Lock()
 	*c.n++
+	countMu.Unlock()
 	return c.Source.Scan(ctx, ch)
 }
 
