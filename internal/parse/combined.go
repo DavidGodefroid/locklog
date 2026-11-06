@@ -22,12 +22,11 @@ func (combinedFormat) Name() string { return "combined" }
 
 var combinedRe = regexp.MustCompile(`^(\S{1,255}) (\S{1,255}) (\S{1,255}) \[([0-9]{2}/[A-Z][a-z]{2}/[0-9]{4}:[0-9]{2}:[0-9]{2}:[0-9]{2} [+-][0-9]{4})\] "((?:[^"\\]|\\.)*)" ([1-5][0-9]{2}|-) ([0-9]{1,20}|-)(?: "((?:[^"\\]|\\.)*)" "((?:[^"\\]|\\.)*)")?(?: (.*))?$`)
 
-// Detect needs the "[" of the timestamp within the first 800 bytes (three
-// fields of at most 255 bytes) before it runs the expression.
+// Detect runs the hand-written matcher directly: it rejects a line that is
+// not an access log within its first few fields, so no byte-offset shortcut
+// is needed (one would also refuse valid lines, whose three leading fields
+// are up to 255 runes of up to 4 bytes each).
 func (combinedFormat) Detect(line string) bool {
-	if strings.IndexByte(line[:min(len(line), 800)], '[') < 0 {
-		return false
-	}
 	return combinedMatch(line) != nil
 }
 
@@ -50,6 +49,9 @@ func combinedMatch(text string) []int {
 				return nil
 			}
 			j++
+			if j-i > 255*utf8.UTFMax {
+				return nil // at least 256 runes: a long line is refused early
+			}
 		}
 		// Runes as the expression steps them (an invalid byte is one).
 		if n := utf8.RuneCountInString(text[i:j]); n < 1 || n > 255 || j >= len(text) {
@@ -186,10 +188,6 @@ func combinedQuoted(text string, i int) (int, bool) {
 func isDigit(c byte) bool { return c >= '0' && c <= '9' }
 
 func (combinedFormat) Decode(text string, o *Options) (Event, bool) {
-	// Detect's checks, with the expression run once.
-	if strings.IndexByte(text[:min(len(text), 800)], '[') < 0 {
-		return Event{}, false
-	}
 	m := combinedMatch(text)
 	if m == nil {
 		return Event{}, false

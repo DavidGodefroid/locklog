@@ -7,6 +7,7 @@ uses [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+
 - The unmask approval screen shows, for each pseudonym, how many records
   holding it agents were given in this epoch (counted by the console from
   the calls it answered and audited, never from clear values;
@@ -20,6 +21,7 @@ uses [Semantic Versioning](https://semver.org/).
   already is refused saying so.
 
 ### Changed
+
 - In hub mode an approved scan is bound to the agent's token as well as
   its uid: another agent of the same uid neither re-attaches to it nor
   continues it ([#115](https://github.com/DavidGodefroid/locklog/issues/115)).
@@ -37,6 +39,29 @@ uses [Semantic Versioning](https://semver.org/).
   unchecked instead of unchanged.
 
 ### Fixed
+
+- The combined (access log) format no longer refuses a valid line whose
+  three leading fields, up to 255 runes of up to 4 bytes each, put the
+  timestamp past byte 800 (#85).
+- An agent rule added while the local index builds a granule redacts the
+  records indexed after it: the index's memo of trusted values the masker
+  leaves clear follows the rules' generation (#84).
+- A descending journald search resumes the journal's entry-array walk at
+  each granule instead of walking the journal from its head per granule
+  (#51).
+- Numeric terms (`status = 500`, `in [200, 5e2]`, `!=`) are served from the
+  local index and prune its granules; a granule holding the number written
+  otherwise (`2e2` for `200`, which matches as a JSON number and not as a
+  string) is scanned. Trusted-only counts with them get the count range
+  (#52).
+- A source failure is printed on the console's terminal (method, source,
+  the class the agent gets and the error, masked and sanitised; never a
+  record); a stale stream is not (#54).
+- A `kind = "file"` source in `cri` or `docker-json` format refuses a
+  trusted `attrs` or `attrs.<key>`, which it never keeps (only a docker
+  source does); its `stream` stays a trusted label by default (#55).
+- The documentation says when `masked_failures` is not counted: a text
+  search with the opt-in pre-filter (#53).
 - Hub mode: an unaudited call withdraws only a ticket it submitted itself,
   never an earlier call's pending ticket it was lent; the plan of a
   ticket's run is finished even when the engine panics; a call without

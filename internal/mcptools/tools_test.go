@@ -549,6 +549,22 @@ func TestInputSchemas(t *testing.T) {
 			t.Errorf("%s regex = %v", tool, r)
 		}
 	}
+	// The query bounds the console enforces, stated by every schema that
+	// has the parameter.
+	for _, tool := range []string{ToolSearch, ToolCount, ToolPatterns, ToolContext, ToolTrace, ToolTail} {
+		for name, want := range map[string][2]any{
+			"text": {"maxLength", float64(256)}, "last": {"maxLength", float64(16)}, "cursor": {"maxLength", float64(4100)},
+			"sources": {"maxItems", float64(32)}, "where": {"maxItems", float64(32)}, "by": {"maxItems", float64(2)}, "fields": {"maxItems", float64(64)},
+		} {
+			p, ok := prop(tool, "properties")[name].(map[string]any)
+			if ok && p[want[0].(string)] != want[1] {
+				t.Errorf("%s %s = %v, want %s %v", tool, name, p, want[0], want[1])
+			}
+		}
+	}
+	if b := prop(ToolCount, "properties", "by"); b["maxItems"] != float64(2) {
+		t.Errorf("count by = %v", b)
+	}
 	if c := prop(ToolRequestChange, "properties", "change"); c["maxLength"] != float64(500) {
 		t.Errorf("change = %v, want the console's 500", c)
 	}

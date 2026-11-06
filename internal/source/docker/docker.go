@@ -99,6 +99,8 @@ type Options struct {
 	Index *index.Store
 	// Sensitive reports a trusted value a detector flags.
 	Sensitive func(field, value string) bool
+	// RulesGeneration changes when the rules behind Sensitive change.
+	RulesGeneration func() uint64
 	// Now is the clock (tests).
 	Now func() time.Time
 	// Self returns the ids of the console's own container (full, or
@@ -107,7 +109,7 @@ type Options struct {
 }
 
 // FromConfig returns the options of a configured docker source; the root
-// comes from RootEnv. The caller sets Index, Sensitive and Parse.Location.
+// comes from RootEnv. The caller sets Index, Sensitive, RulesGeneration and Parse.Location.
 func FromConfig(s config.Source) (Options, error) {
 	if s.Kind != config.KindDocker {
 		return Options{}, fmt.Errorf("source %q is not a docker source", s.Name)
@@ -381,7 +383,7 @@ func (s *Source) fileOptions(c Container) (file.Options, error) {
 	}
 	paths, alt := s.paths(c)
 	return file.Options{Name: s.opts.Name, Paths: paths, Alternates: alt, Roots: []string{s.opts.Root}, Parser: p,
-		Trusted: s.opts.Trusted, Index: s.opts.Index, Sensitive: s.opts.Sensitive, Now: s.opts.Now, NoXDev: true, Tag: c.Name}, nil
+		Trusted: s.opts.Trusted, Index: s.opts.Index, Sensitive: s.opts.Sensitive, RulesGeneration: s.opts.RulesGeneration, Now: s.opts.Now, NoXDev: true, Tag: c.Name}, nil
 }
 
 // byStream returns the served container of a stream, checking its name.
@@ -446,12 +448,23 @@ func (s *Source) selected(cs []*cont, sel source.Selector) []*cont {
 	ts := source.Selector{Terms: terms}
 	var out []*cont
 	for _, c := range cs {
-		if (s.opts.Sensitive != nil && s.opts.Sensitive(ContainerField, c.c.Name)) || ts.Match(nil, map[string]string{ContainerField: c.c.Name}) {
+		if (s.opts.Sensitive != nil && s.opts.Sensitive(ContainerField, c.c.Name)) || ambiguousName(terms, c.c.Name) || ts.Match(nil, map[string]string{ContainerField: c.c.Name}) {
 			out = append(out, c)
 		}
 	}
 	return out
 }
+
+// ambiguousName reports a container name whose match of a numeric term
+// depends on its kind (source.Term.Ambiguous): kept, as the index keeps an
+// unknown value. (A container name is a string: kept only to be safe.)
+func ambiguousName(terms []source.Term, name string) bool {
+	return slices.ContainsFunc(terms, func(t source.Term) bool { return t.Ambiguous(name) })
+}
+
+// NumericTerms implements source.NumericSelector: the file sources and the
+// container filter treat an ambiguous value of a numeric term as unknown.
+func (s *Source) NumericTerms() {}
 
 // Plan returns the chunks of the served containers matching sel, container
 // by container (sorted by name), each newest stream first.

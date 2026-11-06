@@ -337,3 +337,35 @@ func TestInitUserWritesNoAllowList(t *testing.T) {
 		t.Error("the user wiring carries the allow list, or the project one lost it")
 	}
 }
+
+// A project init refuses the home directory as the project root, and a
+// root whose .claude is the user's Claude Code directory: it would write
+// the allow list and the MCP server at user scope (#78).
+func TestInitRefusesUserScope(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	for _, agent := range []string{"claude", "codex"} {
+		if _, err := InitProject(home, agent); err == nil || !strings.Contains(err.Error(), "home directory") {
+			t.Errorf("%s: init in $HOME: %v", agent, err)
+		}
+	}
+	if entries, _ := os.ReadDir(home); len(entries) != 0 {
+		t.Errorf("a refused init wrote %v", entries)
+	}
+
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(root, ".claude"))
+	if _, err := InitProject(root, "claude"); err == nil || !strings.Contains(err.Error(), "Claude Code user directory") {
+		t.Errorf("init where .claude is CLAUDE_CONFIG_DIR: %v", err)
+	}
+	// Another project is fine.
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "elsewhere"))
+	if _, err := InitProject(root, "claude"); err != nil {
+		t.Fatal(err)
+	}
+}

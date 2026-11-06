@@ -820,3 +820,35 @@ func TestScanRechecksEachSlice(t *testing.T) {
 		t.Fatalf("after a re-Check: %v", err)
 	}
 }
+
+// TestScanStopsMidSliceAfterReCheck: the rest of a buffered slice is not
+// handed out once a re-Check keeps a pushed field local (#93): the next
+// record already fails with ErrStale.
+func TestScanStopsMidSliceAfterReCheck(t *testing.T) {
+	f := newFake(dataset(300))
+	s := newChecked(t, f, func(o *Options) { o.InFlight = 1 })
+	sel := source.Selector{Terms: []source.Term{{Field: "level", Label: true, Op: "!=", Values: []string{"info"}}}}
+	plan, err := s.Plan(ctx, source.Range{From: t0, To: t0.Add(10 * time.Minute)}, sel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	it, err := s.Scan(ctx, plan.Chunks[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer it.Close()
+	first, err := it.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	f.mapping = `{"logs-a":{"mappings":{"properties":{"@timestamp":{"type":"date"},"app":{"type":"keyword"},"level":{"type":"keyword","ignore_above":10}}}}}`
+	f.mu.Unlock()
+	if _, err := s.Check(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	rec, err := it.Next()
+	if !errors.Is(err, source.ErrStale) {
+		t.Fatalf("the next record after a re-Check: granule %d (first %d), %v", rec.Granule, first.Granule, err)
+	}
+}

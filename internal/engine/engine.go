@@ -210,6 +210,18 @@ func (e *Engine) remote(src string) bool {
 	return k != "file" && k != "journald" && k != "docker"
 }
 
+// numericTerms reports whether src takes numeric selector terms
+// (source.NumericSelector).
+func (e *Engine) numericTerms(src string) bool {
+	_, ok := e.o.Sources[src].(source.NumericSelector)
+	return ok
+}
+
+// selector is q's selector for src (Query.selector).
+func (e *Engine) selector(q *Query, src string) source.Selector {
+	return q.selector(src, e.o.Trusted, e.numericTerms(src))
+}
+
 // validator returns the validator of a call; trustedOnlyCount widens the
 // range to the count budget.
 func (e *Engine) validator(maxRange time.Duration) *validator {
@@ -307,7 +319,10 @@ type SearchResult struct {
 	Scanned      Scanned           `json:"scanned"`
 	Masking      Masking           `json:"masking"`
 	// MaskedFailures counts records withheld whole because masking
-	// failed (0 with the opt-in pre-filter, see prefilter.go).
+	// failed. With the opt-in pre-filter and a needle in the query (text
+	// or contains), it is not counted and stays 0: only the records
+	// holding the needles are masked, so the count would tell which
+	// failing records hold them (prefilter.go, docs/usage.md).
 	MaskedFailures int `json:"masked_failures,omitempty"`
 }
 
@@ -317,9 +332,9 @@ func (e *Engine) planQuery(ctx context.Context, q *Query, remoteBudget, localBud
 	r := source.Range{From: q.From, To: q.To}
 	for _, name := range q.Sources {
 		src := e.o.Sources[name]
-		p, err := src.Plan(ctx, r, q.selector(name, e.o.Trusted))
+		p, err := src.Plan(ctx, r, e.selector(q, name))
 		if err != nil {
-			return source.Byteplan{}, sourceError(err)
+			return source.Byteplan{}, e.sourceFailed(ctx, name, err)
 		}
 		plan.Chunks = append(plan.Chunks, p.Chunks...)
 	}
@@ -434,6 +449,58 @@ func descGranules(c source.Chunk) ([]source.Chunk, int64) {
 // sourceError maps an error of a source to a fixed, content-free refusal of
 // its class. Source errors may name files, hosts or label values, so their
 // text never reaches the agent.
+// sourceFailed is sourceError, the failure also reported to the operator
+// (WithSourceLog) for a source the call names: its name, the class the
+// agent gets and the error, masked (an error names files, a backend's
+// answer, never a record's text by construction; the masker covers what
+// it may still hold). A stale stream (a normal outcome), a spent rolling
+// budget and a cancelled call are not reported. src may be "" when the error names it
+// (inSource).
+func (e *Engine) sourceFailed(ctx context.Context, src string, err error) *Error {
+	r := sourceError(err)
+	l := sourceLogFrom(ctx)
+	if l == nil || r.Code != ESource || errors.Is(err, context.Canceled) {
+		return r
+	}
+	var named *namedError
+	if errors.As(err, &named) {
+		src, err = named.src, named.err
+	}
+	who := "a source"
+	if src != "" {
+		who = "source " + src
+	}
+	l(who + ": " + r.Message + ": " + e.o.Masker.Text(err.Error()))
+	return r
+}
+
+// namedError is a source's error that crossed a loop over several
+// sources (inSource): sourceFailed names the source.
+type namedError struct {
+	src string
+	err error
+}
+
+func (n *namedError) Error() string { return n.err.Error() }
+func (n *namedError) Unwrap() error { return n.err }
+
+// inSource names src in err for sourceFailed.
+func inSource(src string, err error) error { return &namedError{src: src, err: err} }
+
+type sourceLogKey struct{}
+
+// WithSourceLog attaches the operator's log to ctx: the engine reports
+// the failures of sources through it, one line each, for the console's
+// terminal only (never the agent, never the audit).
+func WithSourceLog(ctx context.Context, l func(line string)) context.Context {
+	return context.WithValue(ctx, sourceLogKey{}, l)
+}
+
+func sourceLogFrom(ctx context.Context) func(string) {
+	l, _ := ctx.Value(sourceLogKey{}).(func(string))
+	return l
+}
+
 func sourceError(err error) *Error {
 	switch {
 	case errors.Is(err, source.ErrStale), errors.Is(err, source.ErrNotFound), errors.Is(err, fs.ErrNotExist):
@@ -821,7 +888,7 @@ func (e *Engine) run(ctx context.Context, fp **frozen, chunk, gran int, needles 
 			if ctx.Err() != nil {
 				return chunk, gran, sc, failures, &Error{Code: ESource, Message: "cancelled"}
 			}
-			return chunk, gran, sc, failures, sourceError(err)
+			return chunk, gran, sc, failures, e.sourceFailed(ctx, c.Source, err)
 		}
 		if took := time.Since(maskStart); took > e.o.Cost.Time(recBytes)*3/2 && took > 100*time.Millisecond {
 			e.o.Cost.Recalibrate() // overrun: recalibrate at once

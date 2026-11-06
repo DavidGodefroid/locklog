@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -45,6 +46,8 @@ type AgentRules struct {
 
 	mu      sync.Mutex
 	entries []agentEntry
+	// generation counts the rules added since the rules were opened.
+	generation atomic.Uint64
 }
 
 type agentEntry struct {
@@ -165,7 +168,18 @@ func (a *AgentRules) add(source, clearPath, mode string, now time.Time, lim Agen
 		return err
 	}
 	a.entries = entries
+	a.generation.Add(1) // after the entries: a reader seeing it sees them
 	return nil
+}
+
+// RulesGeneration changes whenever a rule is added at runtime (an agent
+// rule, which TrustedValue applies at once): an answer of TrustedValue
+// remembered under one generation must be asked again under another.
+func (m *Masker) RulesGeneration() uint64 {
+	if m.o.Rules.Agent == nil {
+		return 0
+	}
+	return m.o.Rules.Agent.generation.Load()
 }
 
 // AgentAdd adds an agent rule (locklog_pii_add): the field named by its
