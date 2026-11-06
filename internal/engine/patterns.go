@@ -290,7 +290,16 @@ func (e *Engine) Patterns(ctx context.Context, q PatternsQuery) (_ PatternsResul
 			a.winChunks = len(plan.Chunks)
 		}
 		var aerr error
-		if f, digest, aerr = e.admitPlan(ctx, "patterns", digest, plan, false, func() []string { return scopeLines(q.Query) }); aerr != nil {
+		scope := func() []string {
+			lines := scopeLines(q.Query)
+			if q.offset > 0 {
+				// The plan reads the baseline window too: the screen
+				// names both ranges (the size line counts both).
+				lines = slices.Insert(lines, 2, "baseline: "+rangeText(base.From, base.To)+" (the same window "+q.Baseline+" earlier)")
+			}
+			return lines
+		}
+		if f, digest, aerr = e.admitPlan(ctx, "patterns", digest, plan, false, scope); aerr != nil {
 			return PatternsResult{}, aerr
 		}
 	}

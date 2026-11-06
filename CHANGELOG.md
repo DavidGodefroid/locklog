@@ -6,6 +6,38 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- The unmask approval screen shows, for each pseudonym, how many records
+  holding it agents were given in this epoch (counted by the console from
+  the calls it answered and audited, never from clear values;
+  [#91](https://github.com/DavidGodefroid/locklog/issues/91)).
+- `locklog_status` and `:status` show a docker source's containers map
+  (`ok`, `none`, `invalid`), the containers served and the stale ones
+  (removed, still mapped); and `budgets.lookups_left_peer`, the lookups
+  left to the calling agent's uid.
+- An approved scan re-attached after its last answered page says
+  `"resumed": true`; a continuation with the cursor of a page answered
+  already is refused saying so.
+
+### Changed
+
+- In hub mode an approved scan is bound to the agent's token as well as
+  its uid: another agent of the same uid neither re-attaches to it nor
+  continues it ([#115](https://github.com/DavidGodefroid/locklog/issues/115)).
+- An approved lookup (`lookup = "approved"`) is charged to the lookup
+  budget once approved, not when asked: a denied or pending lookup uses
+  none of it ([#98](https://github.com/DavidGodefroid/locklog/issues/98)).
+- `log.sources` describe requests draw on the remote request budget (since
+  0.1.0) and now have the call deadline: with the budget used up they are
+  refused at once instead of waiting for the window.
+- A free remote call whose request budget has no room before its deadline
+  is refused before any request, with its estimate.
+- A scan's reason is masked on its approval screen and in the audit, as an
+  unmask's or a lookup's; a patterns scan against a baseline names the
+  baseline window on its screen; a renewed scan ticket names its inputs
+  unchecked instead of unchanged.
+
 ### Fixed
 
 - The engine runs at most `limits.max_calls` agent calls at once (default
@@ -43,6 +75,13 @@ uses [Semantic Versioning](https://semver.org/).
   source does); its `stream` stays a trusted label by default (#55).
 - The documentation says when `masked_failures` is not counted: a text
   search with the opt-in pre-filter (#53).
+- Hub mode: an unaudited call withdraws only a ticket it submitted itself,
+  never an earlier call's pending ticket it was lent; the plan of a
+  ticket's run is finished even when the engine panics; a call without
+  peer credentials that needs no approval (a free lookup) runs, one that
+  needs an approval is refused with `E_APPROVAL`.
+- An approved scan over several remote sources paces each source under its
+  own name.
 
 ## [0.1.0] - 2026-11-06
 

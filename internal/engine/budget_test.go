@@ -218,17 +218,48 @@ func TestPacedDescribe(t *testing.T) {
 	})
 	cctx, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
-	if _, err := f.eng.o.Sources["lk"].Describe(f.eng.Paced(cctx, "lk")); err != nil {
+	pctx, cancel := f.eng.Paced(cctx, "lk")
+	defer cancel()
+	if _, err := f.eng.o.Sources["lk"].Describe(pctx); err != nil {
 		t.Fatal(err)
 	}
 	if f.eng.ledger.requestsLeft("lk") != 0 {
 		t.Fatal("the describe request was not charged")
 	}
-	if _, err := f.eng.o.Sources["lk"].Describe(f.eng.Paced(cctx, "lk")); err != errRequestBudget {
+	if _, err := f.eng.o.Sources["lk"].Describe(pctx); err != errRequestBudget {
 		t.Fatalf("second describe: %v", err)
 	}
+	// With no deadline of the caller's, the call's own: the describe is
+	// refused at once, never waiting for the window to refill.
+	nctx, ncancel := f.eng.Paced(context.Background(), "lk")
+	defer ncancel()
+	if d, ok := nctx.Deadline(); !ok || time.Until(d) > f.eng.o.Limits.Deadline {
+		t.Fatalf("no call deadline: %v %v", d, ok)
+	}
+	start := time.Now()
+	if _, err := f.eng.o.Sources["lk"].Describe(nctx); err != errRequestBudget || time.Since(start) > time.Second {
+		t.Fatalf("describe with no deadline: %v after %s", err, time.Since(start))
+	}
 	// A local source is not paced.
-	if f.eng.Paced(cctx, "app") != cctx {
+	if lctx, _ := f.eng.Paced(cctx, "app"); lctx != cctx {
 		t.Fatal("a local source got a request limiter")
+	}
+}
+
+// TestRequestFreeAt: when a remote source's next request fits the
+// per-minute budget.
+func TestRequestFreeAt(t *testing.T) {
+	l := newLedger(Budgets{RemoteRequestsPerMinute: 1}, time.Now)
+	if at := l.requestFreeAt("lk"); at.After(time.Now()) {
+		t.Fatalf("free at %v", at)
+	}
+	if at, err := l.takeRequest("lk", false); err != nil || !at.IsZero() {
+		t.Fatal(at, err)
+	}
+	if at := l.requestFreeAt("lk"); at.Before(time.Now().Add(50 * time.Second)) {
+		t.Fatalf("used up, free at %v", at)
+	}
+	if at := (newLedger(Budgets{}, time.Now)).requestFreeAt("lk"); at.After(time.Now()) {
+		t.Fatal("no budget: never waits")
 	}
 }

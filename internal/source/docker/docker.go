@@ -43,6 +43,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path"
 	"slices"
@@ -129,7 +130,32 @@ type Source struct {
 	mu      sync.Mutex
 	mapKey  string
 	mapTime time.Time
-	conts   map[string]*cont // served containers, by id
+	// mapState is the map as last read (MapOK, MapNone, MapInvalid).
+	mapState string
+	conts    map[string]*cont // served containers, by id
+}
+
+// The states of the containers map (ContainersStatus.Map).
+const (
+	// MapOK: the newest version is valid.
+	MapOK = "ok"
+	// MapNone: no version yet (nothing is served).
+	MapNone = "none"
+	// MapInvalid: the newest version is refused (nothing is served).
+	MapInvalid = "invalid"
+)
+
+// ContainersStatus is the docker source's part of :status and
+// locklog_status: counts only, never a container's name or id.
+type ContainersStatus struct {
+	// Map is the state of the containers map.
+	Map string `json:"map"`
+	// Served counts the containers the map and the globs serve.
+	Served int `json:"served"`
+	// Stale counts the served containers whose log file is gone (the
+	// container was removed): the map lags behind Docker, and they hold
+	// nothing to read.
+	Stale int `json:"stale"`
 }
 
 // cont is one served container and its file source.
@@ -266,6 +292,14 @@ func (s *Source) containers() ([]*cont, error) {
 		if key != s.mapKey || key == "" {
 			s.mapKey = key
 			m, ok := readNewest(s.opts.MapDir, names)
+			switch {
+			case ok:
+				s.mapState = MapOK
+			case len(names) == 0:
+				s.mapState = MapNone
+			default:
+				s.mapState = MapInvalid
+			}
 			if !ok {
 				m = Map{}
 			}
@@ -280,6 +314,26 @@ func (s *Source) containers() ([]*cont, error) {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].c.Name < out[j].c.Name })
 	return out, nil
+}
+
+// ContainersStatus reports the containers map and the served containers,
+// the stale ones counted: a served container whose live log file is gone.
+// Each is checked by name (a stat beneath the root, no read).
+func (s *Source) ContainersStatus() (ContainersStatus, error) {
+	cs, err := s.containers()
+	if err != nil {
+		return ContainersStatus{}, err
+	}
+	s.mu.Lock()
+	st := ContainersStatus{Map: s.mapState, Served: len(cs)}
+	s.mu.Unlock()
+	for _, c := range cs {
+		p, _ := s.paths(c.c)
+		if _, err := os.Lstat(p[0]); errors.Is(err, fs.ErrNotExist) {
+			st.Stale++
+		}
+	}
+	return st, nil
 }
 
 // apply makes m's approved containers the served ones: new ones get a file
