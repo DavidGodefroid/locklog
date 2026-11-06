@@ -131,10 +131,20 @@ opens the profile. There is no pseudonym-to-value store. An unmask re-reads
 the record by its sealed reference.
 
 Agent rules (`locklog_pii_add`) only tighten: they add masking and never
-remove it or change its kind. They will be stored in the console's home
-volume, never in the project's `.locklog/`, once the console serves them
-([#64](https://github.com/DavidGodefroid/locklog/issues/64)); until then the
-tools answer that there are no rules.
+remove it or change its kind. They name only fields the agent was shown,
+are capped (`pii_adds_per_hour`, `pii_rules_max`) and are stored in the
+console's home volume only, never in the project's `.locklog/`, each field
+as a keyed digest: the console's audit, terminal and approved policy hold
+that digest (`agent redact <digest>`), never a name, so a name the agent
+was shown masked is written nowhere. Every add, accepted or refused, is
+audited; `locklog_status` and `:status` count the rules and the adds of
+the last hour.
+
+The allow rules of `.locklog/pii.toml` loosen the masking: they are part
+of the reviewed policy. An added or widened allow rule waits for `:review`;
+the engine applies only the allow rules of the approved policy, and
+`:status` says how many in the file are not applied. Removing one only
+tightens and applies at once.
 
 ## What is not masked
 

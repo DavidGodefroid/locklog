@@ -117,7 +117,7 @@ it back and says so.
 | `locklog_trace` | one id or pseudonym across sources, merged timeline | free within budgets |
 | `locklog_tail` | new records for ≤ 50 s | free (rolling budgets) |
 | `locklog_lookup` | a clear value → its pseudonym (detector kinds only) | free, rate-limited |
-| `locklog_pii_list`, `locklog_pii_add` | the masking rules; add masking (never remove it). Until the console serves PII rules ([#64](https://github.com/DavidGodefroid/locklog/issues/64)) they answer that there are none | free, capped |
+| `locklog_pii_list`, `locklog_pii_add` | the masking rules; add masking (never remove it): `[pseudonym ]source:field`, a masked key by its `⟦key:ID⟧`. Capped by `pii_adds_per_hour` and `pii_rules_max`; `locklog_status` counts the agent's rules | free, capped, audited |
 | `locklog_request_change` | ask for a loosening | you decide at `:review` |
 | `locklog_scan` | one call over a budget, approved for its whole plan | you approve |
 | `locklog_unmask` | the clear value of up to 8 exact pseudonyms of one record, once, with a reason | you approve a ticket at `lox run`, the deck or a phone (automatically only with `auto.unmask = "auto"`); off by default on production |
