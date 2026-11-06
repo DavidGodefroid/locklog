@@ -210,8 +210,9 @@ type Options struct {
 	// MaxResponseBytes overrides MaxResponseBytes (tests).
 	MaxResponseBytes int64
 	// Headers are fixed request headers of the source (e.g. Loki's
-	// response-encoding flags). They never carry credentials: those go
-	// through the auth mode.
+	// response-encoding flags), each on the extra-header allowlist
+	// (checkHeaders). They never carry credentials: those go through the
+	// auth mode.
 	Headers map[string]string
 }
 
@@ -313,15 +314,22 @@ func New(r *config.Remote, allow *Allowlist, creds Credentials, opt Options) (*C
 	return c, nil
 }
 
-// checkHeaders refuses the headers that carry credentials, a tenant or the
-// host (those go through the auth mode and the source URL only), and the
-// headers that tag locklog's queries (User-Agent, X-Query-Tags), which a
-// fixed header must not override.
+// extraHeaders is the allowlist of the extra request headers a source may
+// set, by canonical name. Everything else is refused: credentials, the
+// tenant and the host go through the auth mode and the source URL only,
+// User-Agent and X-Query-Tags tag locklog's queries, and an unknown header
+// could do either under another name (a proxy's own auth header, a
+// forwarded-for). Add a name here only for a header locklog itself needs.
+var extraHeaders = map[string]bool{
+	// Loki 3: structured metadata apart from the stream labels.
+	"X-Loki-Response-Encoding-Flags": true,
+}
+
+// checkHeaders refuses any header outside extraHeaders, whatever its case.
 func checkHeaders(h map[string]string) error {
 	for k := range h {
-		switch http.CanonicalHeaderKey(k) {
-		case "Authorization", "Proxy-Authorization", "Cookie", "X-Scope-Orgid", "Host", "User-Agent", "X-Query-Tags":
-			return fmt.Errorf("egress: header %s is not a fixed header", k)
+		if !extraHeaders[http.CanonicalHeaderKey(k)] {
+			return fmt.Errorf("egress: header %q is not an allowed extra header", k)
 		}
 	}
 	return nil
@@ -438,8 +446,8 @@ func (c *Client) Get(ctx context.Context, path string, q url.Values) (Response, 
 }
 
 // GetWith is Get with extra request headers (e.g. Loki's response-encoding
-// flags, set by the source itself). They follow the fixed-header rule: no
-// credentials, tenant or host.
+// flags, set by the source itself). Like Options.Headers, each must be on
+// the extra-header allowlist (checkHeaders).
 func (c *Client) GetWith(ctx context.Context, path string, q url.Values, hdr map[string]string) (Response, error) {
 	if err := checkHeaders(hdr); err != nil {
 		return Response{}, err
