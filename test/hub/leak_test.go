@@ -371,7 +371,7 @@ func TestLeakHarnessConsoleBytes(t *testing.T) {
 			leakCalls(t, r, written)
 			var hits []masktest.Hit
 			hits = append(hits, scanner.scan("socket", sock.bytes())...)
-			hits = append(hits, scanner.scan("audit", []byte(r.auditLog()))...)
+			hits = append(hits, scanner.scan("audit", []byte(auditChainBlanked(r.auditLog())))...)
 			r.mu.Lock()
 			outputs := slices.Clone(r.outputs)
 			r.mu.Unlock()
@@ -508,3 +508,16 @@ func leakCalls(t *testing.T, r *rig, written []string) {
 }
 
 var tokenAny = regexp.MustCompile(`⟦(email|phone|iban|card|ip|person_name)[a-z_]*:[A-Z0-9]+⟧`)
+
+// auditChain is the audit's hash chain: each record's `prev_hash`, the
+// SHA-256 of the record before it. Its hex digits are random, and a run of
+// seven of them can equal the partial form of a numeric canary (the last
+// digits of a card or an IBAN), a false hit; the chain carries nothing of
+// a record's content but its hash.
+var auditChain = regexp.MustCompile(`"prev_hash":"sha256:[0-9a-f]{64}"`)
+
+// auditChainBlanked is the audit with its hash chain blanked, every other
+// byte scanned as written.
+func auditChainBlanked(a string) string {
+	return auditChain.ReplaceAllString(a, `"prev_hash":"sha256:-"`)
+}

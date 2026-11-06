@@ -338,10 +338,6 @@ func argumentError(msg string) string {
 	return "invalid arguments: " + strings.Join(names, ".") + " (" + m[2] + "); " + see
 }
 
-// piiPending ends the PII tools' descriptions: the console does not serve
-// PII rules yet, and answers that it has none.
-const piiPending = "Available once the console serves PII rules; until then it answers that locklog has no PII rules."
-
 // CodeProductionHostAgent is the refusal code of the host-agent guard.
 const CodeProductionHostAgent refusal.Code = "E_PRODUCTION_HOST_AGENT"
 
