@@ -12,6 +12,28 @@ You can run them yourself, in the project directory, in your own terminal.
 The console is not one of them: `lox run` starts it, hub-attached, in a
 terminal of its own (see the [usage](usage.md)).
 
+## Install
+
+The Lock Family's path is Homebrew, then `lox`:
+
+```sh
+brew trust davidgodefroid/tap                # Homebrew asks you to trust a third-party tap once
+brew install davidgodefroid/tap/lockfamily   # or only this tool: brew install davidgodefroid/tap/locklog
+cd ~/projects/shop                           # the project whose logs the agent investigates
+lox add locklog logs                          # or: lox init
+lox run                                       # in a terminal of its own, outside the agent
+```
+
+`lox add locklog` and the locklog console in `lox run` need the lockhub
+release that adds the locklog type (lockhub#84, #86, #87; lockhub v0.9.0
+does not know it), which the tap's `locklog` formula, and locklog in
+`lockfamily`, come with. The alternative, without Homebrew, installs the
+launcher alone, cosign-verified:
+
+```sh
+curl -fsSL https://locklog.dev/install.sh | sh   # or LOCKLOG_VERSION=vX.Y.Z
+```
+
 ## `locklog profile add`
 
     locklog profile add [--non-interactive] [--json] [--project DIR] [--profile NAME] [--production]
