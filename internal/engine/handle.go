@@ -93,6 +93,11 @@ func (e *Engine) Handle(ctx context.Context, method string, params json.RawMessa
 	}
 	var r *Error
 	if errors.As(err, &r) {
+		if r.lost != nil {
+			// A source's mount is gone or replaced: the session is lost,
+			// the call answers no refusal.
+			return nil, nil, r.lost
+		}
 		return nil, r, nil
 	}
 	return res, nil, err

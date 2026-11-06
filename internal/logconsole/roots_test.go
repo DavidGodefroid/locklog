@@ -310,3 +310,72 @@ func TestPolicyChangeFailedReopenIsAudited(t *testing.T) {
 		t.Errorf("no-session record: %+v", r)
 	}
 }
+
+// An unchecked containers root (the launcher could not stat it from the
+// host) is pinned at the first Connect by its device:inode, compared on
+// every call and on every reconnection: a root swapped after the start
+// loses the session (CodeConnLost) and the console does not reconnect to
+// the new directory.
+func TestUncheckedDockerRootPinned(t *testing.T) {
+	base := t.TempDir()
+	croot := filepath.Join(base, "containers")
+	if err := os.Mkdir(croot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	root := project(t, "version = 1\n[profiles.staging.sources.web]\nkind = \"docker\"\ncontainers = [\"shop-*\"]\n")
+	var engines []*fakeEngine
+	b := New(Options{Profile: "staging", Root: root, InContainer: true, DockerRoot: croot,
+		ExpectDir: devInoOf(t, filepath.Join(root, ".locklog")),
+		Open: func(_ context.Context, o OpenOptions) (Engine, error) {
+			if o.Roots.Docker != croot || o.Roots.DockerChecked {
+				t.Errorf("roots %+v", o.Roots)
+			}
+			e := &fakeEngine{}
+			engines = append(engines, e)
+			return e, nil
+		}})
+	pol, err := b.LoadPolicy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := &reconnectEnv{fakeEnv: &fakeEnv{policy: pol}, b: b}
+	ctx := console.WithPeer(context.Background(), ipc.Cred{UID: 1000, PID: 42})
+	ms := b.Methods()
+	if resp := ms[MethodSearch](ctx, ipc.Request{ID: 1, Method: MethodSearch}, env); resp.Error != nil || len(engines) != 1 || engines[0].method != MethodSearch {
+		t.Fatalf("first call: %+v engines=%d", resp.Error, len(engines))
+	}
+	// The same directory again: kept.
+	if resp := ms[MethodCount](ctx, ipc.Request{ID: 2, Method: MethodCount}, env); resp.Error != nil || env.lost != 0 {
+		t.Fatalf("second call: %+v lost=%d", resp.Error, env.lost)
+	}
+
+	// Swapped for another directory at the same path.
+	if err := os.Rename(croot, croot+".old"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(croot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	engines[0].method = ""
+	resp := ms[MethodSearch](ctx, ipc.Request{ID: 3, Method: MethodSearch}, env)
+	if resp.Error == nil || resp.Error.Code != ipc.CodeConnLost || env.lost != 1 || engines[0].method != "" || !engines[0].closed {
+		t.Fatalf("swapped root: %+v lost=%d engine ran %q", resp.Error, env.lost, engines[0].method)
+	}
+	if len(env.lines) != 1 || !strings.Contains(env.lines[0], "mounts changed") {
+		t.Errorf("console line: %q", env.lines)
+	}
+	// The next call reconnects: refused, the new directory is not the
+	// pinned one.
+	resp = ms[MethodSearch](ctx, ipc.Request{ID: 4, Method: MethodSearch}, env)
+	if resp.Error == nil || resp.Error.Code != ipc.CodeConnLost || len(engines) != 1 {
+		t.Fatalf("reconnect to the swapped root: %+v engines=%d", resp.Error, len(engines))
+	}
+	if _, err := b.Connect(context.Background(), console.Credentials{Policy: pol}); err == nil || !strings.Contains(err.Error(), "not the directory the console first read") {
+		t.Errorf("Connect to the swapped root: %v", err)
+	}
+	// Removed: lost as well.
+	os.Remove(croot)
+	if err := b.checkDocker(); err == nil {
+		t.Error("a removed containers root passed the check")
+	}
+}

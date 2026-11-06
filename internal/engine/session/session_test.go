@@ -471,3 +471,58 @@ func TestSessionValueTools(t *testing.T) {
 }
 
 var regexpEmail = regexp.MustCompile(`⟦email:[A-Z0-9]+⟧`)
+
+// A log root swapped under an open session: the call ends with
+// logconsole.ErrConnLost (the console drops the session), not a refusal.
+func TestRootSwappedLosesTheSession(t *testing.T) {
+	f := newFixture(t, fileProfile, appLog)
+	s := open(t, f.options(nil))
+	const q = `{"from":"2026-10-30T13:00:00Z","to":"2026-10-30T14:00:00Z"}`
+	if _, ref := call(t, s, logconsole.MethodSearch, q); ref != nil {
+		t.Fatalf("refused: %+v", ref)
+	}
+	if err := os.Rename(f.logs, f.logs+".old"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(f.logs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.logs, "app.log"), []byte(appLog), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, ref, err := s.Handle(context.Background(), logconsole.MethodSearch, json.RawMessage(q), logconsole.Caller{})
+	if res != nil || ref != nil || !errors.Is(err, logconsole.ErrConnLost) {
+		t.Errorf("swapped root: result %v, refusal %+v, error %v", res, ref, err)
+	}
+}
+
+// A production profile whose console runs without Landlock names it in its
+// residuals (:status, log.status; doctor says the same): its local sources
+// are read by an unconfined console.
+func TestProductionWithoutLandlockResidual(t *testing.T) {
+	prod := func(logs string) string {
+		return strings.Replace(fileProfile(logs), "[profiles.staging]\n", "[profiles.staging]\nproduction = true\n", 1)
+	}
+	f := newFixture(t, prod, appLog)
+	for _, tc := range []struct {
+		ll   landlock.Status
+		want bool
+	}{
+		{landlock.Status{State: landlock.Unsupported, Detail: "the kernel has no Landlock"}, true},
+		{landlock.Status{State: landlock.Enforced, ABI: 6}, false},
+	} {
+		s := open(t, f.options(func(o *Options) { o.Confinement.Landlock = tc.ll; o.FirstOpen = false }))
+		st := s.Status(context.Background()).(Status)
+		got := slices.ContainsFunc(st.Residuals, func(r string) bool { return strings.Contains(r, landlock.UnconfinedNote(tc.ll)) })
+		if got != tc.want || (!tc.want && len(st.Residuals) != 0) {
+			t.Errorf("%s: residuals %q", tc.ll, st.Residuals)
+		}
+		s.Close()
+	}
+	// Not production: no residual (the status line says it already).
+	f = newFixture(t, fileProfile, appLog)
+	s := open(t, f.options(nil))
+	if st := s.Status(context.Background()).(Status); len(st.Residuals) != 0 {
+		t.Errorf("staging residuals %q", st.Residuals)
+	}
+}

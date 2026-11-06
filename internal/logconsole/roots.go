@@ -32,7 +32,8 @@ type Roots struct {
 	// DockerChecked is set when the launcher could stat the containers
 	// root from the host and passed its device:inode; usually it cannot
 	// (/var/lib/docker is 0710 root), and the root is then the launcher's
-	// "not checked from the host" case.
+	// "not checked from the host" case: the console pins its device:inode
+	// at its first connection and checks it on every call (Backend).
 	DockerChecked bool
 }
 

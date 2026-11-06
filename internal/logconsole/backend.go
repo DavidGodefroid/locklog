@@ -235,6 +235,11 @@ type Backend struct {
 	// exp counts the records with each pseudonym returned to agents in
 	// the epoch (the unmask screen shows it), across sessions.
 	exp *Exposure
+	// dockerRoot and dockerID pin a containers root the launcher could
+	// not check from the host (Roots.DockerChecked unset): its
+	// device:inode as the console first read it, compared on every call
+	// and every reconnection, for the life of the process.
+	dockerRoot, dockerID string
 }
 
 var _ console.Backend = (*Backend)(nil)
@@ -423,6 +428,9 @@ func (b *Backend) Connect(ctx context.Context, c console.Credentials) (console.S
 	if err != nil {
 		return nil, err
 	}
+	if err := b.pinDocker(roots); err != nil {
+		return nil, err
+	}
 	var creds egress.Credentials
 	if c.Secret != nil {
 		creds = egress.Credentials{User: c.User, Secret: string(c.Secret)}
@@ -550,7 +558,7 @@ func (b *Backend) handler(method string) console.Handler {
 		// The mounts are checked again on every call (a root swapped
 		// after the start): a session whose logs are not the checked ones
 		// is dropped, and the next call reconnects, checking them all.
-		if err := CheckMounts(b.o); err != nil {
+		if err := b.checkMounts(); err != nil {
 			env.Println("the log mounts changed since the console checked them: the session is closed (" + env.Safe(env.Sanitizer().Error(err)) + ")")
 			return lost(req.ID, env, rec)
 		}
@@ -779,6 +787,70 @@ func expect(path, want string) error {
 	}
 	if got != want {
 		return fmt.Errorf("%s is not the directory the launcher checked (device:inode %s, want %s): refused", path, got, want)
+	}
+	return nil
+}
+
+// checkMounts is CheckMounts, then the pinned containers root.
+func (b *Backend) checkMounts() error {
+	if err := CheckMounts(b.o); err != nil {
+		return err
+	}
+	return b.checkDocker()
+}
+
+// pinDocker pins, in the launcher's container, the containers root of
+// roots when the launcher could not check it from the host: the first
+// Connect records its device:inode, every later one must find the same
+// directory. A checked root (an entry of LOCKLOG_EXPECT_ROOTS) is
+// CheckMounts' own.
+func (b *Backend) pinDocker(roots Roots) error {
+	if !b.o.InContainer || roots.Docker == "" || roots.DockerChecked {
+		return nil
+	}
+	fi, err := os.Lstat(roots.Docker)
+	if err != nil {
+		return fmt.Errorf("the containers root %s: %w", roots.Docker, err)
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("the containers root %s is not a directory (a link?): refused", roots.Docker)
+	}
+	id, err := devIno(fi)
+	if err != nil {
+		return err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	switch {
+	case b.dockerRoot == "":
+		b.dockerRoot, b.dockerID = roots.Docker, id
+	case b.dockerRoot != roots.Docker:
+		return fmt.Errorf("the containers root %s is not the one the console first read (%s): refused", roots.Docker, b.dockerRoot)
+	case b.dockerID != id:
+		return fmt.Errorf("the containers root %s is not the directory the console first read (device:inode %s, want %s): refused", roots.Docker, id, b.dockerID)
+	}
+	return nil
+}
+
+// checkDocker compares the pinned containers root with what is at its
+// path now (nothing pinned: nothing to check).
+func (b *Backend) checkDocker() error {
+	b.mu.Lock()
+	root, id := b.dockerRoot, b.dockerID
+	b.mu.Unlock()
+	if root == "" {
+		return nil
+	}
+	fi, err := os.Lstat(root)
+	if err != nil {
+		return fmt.Errorf("the containers root %s: %w", root, err)
+	}
+	got, err := devIno(fi)
+	if err != nil {
+		return err
+	}
+	if !fi.IsDir() || got != id {
+		return fmt.Errorf("the containers root %s is not the directory the console first read (device:inode %s, want %s): refused", root, got, id)
 	}
 	return nil
 }

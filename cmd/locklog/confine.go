@@ -27,13 +27,22 @@ var consoleReadWrite = []string{"/run/locklog", "/home/locklog", "/tmp"}
 // consoleSystemRead are the system paths the console still reads once
 // confined: the accounts and groups of the peer check (os/user reads them
 // on every connection), the separated setup's file, the zone info, the CA
-// bundle (remote sources), /proc (the peer's process name and status,
-// /proc/self/mountinfo for the docker source's own container, the
-// hostname) and /sys/class/net (the no-network check).
+// bundle (remote sources), the files of Go's resolver (without cgo it reads
+// them at every lookup: remote sources and the hub are dialled by name),
+// /proc (the peer's process name and status, /proc/self/mountinfo for the
+// docker source's own container, the hostname) and /sys/class/net (the
+// no-network check).
 var consoleSystemRead = []string{
 	"/etc/passwd", "/etc/group", "/etc/locklog", "/etc/localtime", "/usr/share/zoneinfo", "/etc/ssl",
+	"/etc/resolv.conf", "/etc/hosts", "/etc/nsswitch.conf",
 	"/proc", "/sys/class/net",
 }
+
+// consoleTerminal is the controlling terminal: a secret's prompt before
+// the console's reader starts (a remote source's password asked again
+// after the first connection failed) opens it and turns the echo off. The
+// console holds the same terminal as its standard streams already.
+var consoleTerminal = []string{"/dev/tty"}
 
 // confineInput is what the console's ruleset is computed from.
 type confineInput struct {
@@ -53,23 +62,35 @@ type confineInput struct {
 // checked log roots, the containers root and its map, the project's
 // .locklog and the system paths it still reads; writes only to its
 // volumes and /tmp; exec only of the vault CLI, when a source reads its
-// credentials from Vault.
-func confineRules(in confineInput) landlock.Rules {
-	r := landlock.Rules{ReadWrite: slices.Clone(consoleReadWrite)}
-	r.ReadOnly = append(r.ReadOnly, in.Roots.All()...)
-	if in.Docker {
-		r.ReadOnly = append(r.ReadOnly, docker.DefaultMapDir)
+// credentials from Vault; the controlling terminal. A log root at, beneath
+// or above a writable directory (an extra root under /tmp or the home
+// volume) is refused: the ruleset would let the console write there, or
+// a source read the console's own files.
+func confineRules(in confineInput) (landlock.Rules, error) {
+	r := landlock.Rules{ReadWrite: slices.Clone(consoleReadWrite), Terminal: slices.Clone(consoleTerminal)}
+	if in.StateDir != "" && !slices.ContainsFunc(r.ReadWrite, func(w string) bool { return beneath(in.StateDir, w) }) {
+		r.ReadWrite = append(r.ReadWrite, in.StateDir)
 	}
+	logs := in.Roots.All()
+	if in.Docker {
+		logs = append(logs, docker.DefaultMapDir)
+	}
+	for _, p := range logs {
+		for _, w := range r.ReadWrite {
+			if beneath(p, w) || beneath(w, p) {
+				return landlock.Rules{}, fmt.Errorf("the log root %s overlaps the console's writable %s: refused (bind the logs elsewhere than the console's volumes and /tmp)", p, w)
+			}
+		}
+	}
+	r.ReadOnly = logs
 	if in.Project != "" {
 		// Linux paths (Landlock is Linux-only), whatever the build's OS.
 		r.ReadOnly = append(r.ReadOnly, path.Join(in.Project, ".locklog"))
 	}
 	r.ReadOnly = append(r.ReadOnly, consoleSystemRead...)
-	if in.StateDir != "" && !slices.ContainsFunc(r.ReadWrite, func(w string) bool { return beneath(in.StateDir, w) }) {
-		r.ReadWrite = append(r.ReadWrite, in.StateDir)
-	}
-	// A path already beneath a writable one (a project under /tmp) is
-	// readable through it, and Landlock would refuse the overlap.
+	// A project's .locklog already beneath a writable directory (a project
+	// under /tmp) is readable through it, and Landlock would refuse the
+	// overlap.
 	r.ReadOnly = slices.DeleteFunc(r.ReadOnly, func(p string) bool {
 		return slices.ContainsFunc(r.ReadWrite, func(w string) bool { return beneath(p, w) })
 	})
@@ -78,7 +99,7 @@ func confineRules(in confineInput) landlock.Rules {
 		// os/exec opens /dev/null for the child's unset streams.
 		r.ReadWrite = append(r.ReadWrite, "/dev/null")
 	}
-	return r
+	return r, nil
 }
 
 func beneath(p, dir string) bool {
@@ -158,7 +179,10 @@ func (op *opener) confine(o logconsole.OpenOptions) (landlock.Status, error) {
 		return op.status, nil
 	}
 	vault := vaultCLI(pr, op.lookPath)
-	rules := confineRules(confineInput{Roots: o.Roots, Docker: docker, Project: o.Project, StateDir: o.StateDir, Vault: vault})
+	rules, err := confineRules(confineInput{Roots: o.Roots, Docker: docker, Project: o.Project, StateDir: o.StateDir, Vault: vault})
+	if err != nil {
+		return landlock.Status{}, err
+	}
 	st, err := op.restrict(rules)
 	if err != nil {
 		return landlock.Status{}, fmt.Errorf("the console could not confine itself (Landlock): %w", err)

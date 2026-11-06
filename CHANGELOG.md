@@ -8,6 +8,13 @@ uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- A leak harness over the bytes leaving the console: the canary corpus
+  served by a hub-attached console, its IPC socket replies, audit file, MCP
+  outputs and hub ticket screens scanned in every encoding: 0 hits
+  ([#86](https://github.com/DavidGodefroid/locklog/issues/86)).
+- On a production profile without Landlock, `:status` and `doctor` name the
+  residual: its local sources are read by an unconfined console
+  ([#62](https://github.com/DavidGodefroid/locklog/issues/62)).
 - The unmask approval screen shows, for each pseudonym, how many records
   holding it agents were given in this epoch (counted by the console from
   the calls it answered and audited, never from clear values;
@@ -22,6 +29,10 @@ uses [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- A log root at, beneath or above one of the console's writable
+  directories (an extra root under `/tmp` or the home volume) is refused
+  instead of losing its read-only Landlock rule
+  ([#62](https://github.com/DavidGodefroid/locklog/issues/62)).
 - In hub mode an approved scan is bound to the agent's token as well as
   its uid: another agent of the same uid neither re-attaches to it nor
   continues it ([#115](https://github.com/DavidGodefroid/locklog/issues/115)).
@@ -40,6 +51,19 @@ uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- The confined console resolves host names again: Landlock now grants
+  `/etc/hosts`, `/etc/resolv.conf` and `/etc/nsswitch.conf`, which Go's
+  resolver reads at every lookup (remote sources and the hub were dialled
+  by name to `[::1]:53`), and the controlling terminal for a secret asked
+  again ([#62](https://github.com/DavidGodefroid/locklog/issues/62)).
+- A containers root the launcher could not check from the host is pinned by
+  its device:inode at the first connection and checked on every call; a
+  file, journald or docker source whose root is gone, stale or replaced
+  ends the call as a lost session (`CodeConnLost`), not a refusal
+  ([#62](https://github.com/DavidGodefroid/locklog/issues/62)).
+- The MCP tools no longer echo what the agent sent in the SDK's argument
+  errors (schema validation, an unknown tool's name): a fixed text names
+  the argument and the rule ([#86](https://github.com/DavidGodefroid/locklog/issues/86)).
 - The combined (access log) format no longer refuses a valid line whose
   three leading fields, up to 255 runes of up to 4 bytes each, put the
   timestamp past byte 800 (#85).

@@ -32,6 +32,8 @@ const (
 	write = read | unix.LANDLOCK_ACCESS_FS_WRITE_FILE | unix.LANDLOCK_ACCESS_FS_REMOVE_DIR |
 		unix.LANDLOCK_ACCESS_FS_REMOVE_FILE | unix.LANDLOCK_ACCESS_FS_MAKE_DIR | unix.LANDLOCK_ACCESS_FS_MAKE_REG |
 		unix.LANDLOCK_ACCESS_FS_MAKE_SOCK | unix.LANDLOCK_ACCESS_FS_REFER | unix.LANDLOCK_ACCESS_FS_TRUNCATE
+	// A terminal: read, write and ioctl (a prompt's no-echo mode).
+	terminal = unix.LANDLOCK_ACCESS_FS_READ_FILE | unix.LANDLOCK_ACCESS_FS_WRITE_FILE | unix.LANDLOCK_ACCESS_FS_IOCTL_DEV
 	// The rights a rule on a file (not a directory) may carry.
 	fileRights = unix.LANDLOCK_ACCESS_FS_EXECUTE | unix.LANDLOCK_ACCESS_FS_WRITE_FILE |
 		unix.LANDLOCK_ACCESS_FS_READ_FILE | unix.LANDLOCK_ACCESS_FS_TRUNCATE | unix.LANDLOCK_ACCESS_FS_IOCTL_DEV
@@ -116,7 +118,7 @@ func Restrict(r Rules) (Status, error) {
 	for _, set := range []struct {
 		paths  []string
 		access uint64
-	}{{r.ReadOnly, read}, {r.Exec, readExec}, {r.ReadWrite, write}} {
+	}{{r.ReadOnly, read}, {r.Exec, readExec}, {r.ReadWrite, write}, {r.Terminal, terminal}} {
 		for _, p := range set.paths {
 			if err := addRule(int(fd), p, set.access&h); err != nil {
 				return Status{State: Unsupported, ABI: abi, Detail: "adding a rule failed"}, err

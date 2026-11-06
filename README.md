@@ -265,8 +265,10 @@ Loki 3 users: see [docs/loki.md](docs/loki.md) on the default
 The leak harness plants canaries of every detected kind, in every format
 and position and in encoded forms (percent, JSON `\u`, HTML entities,
 look-alikes, zero-width characters), and checks every byte that leaves the
-console: **0 leaks**, checked on every pull request (CI job `suites`, with
-the oracle and equivalence suites). Throughput and the budgets derived from
+console: what the engine returns (CI job `suites`, with the oracle and
+equivalence suites), and the IPC socket's replies, the audit file, the MCP
+tools' outputs and the hub tickets' screens (`test/hub`). **0 leaks**,
+checked on every pull request. Throughput and the budgets derived from
 it are in [docs/performance.md](docs/performance.md).
 
 ## Install
