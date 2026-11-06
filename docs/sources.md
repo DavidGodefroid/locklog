@@ -20,7 +20,7 @@ image (`debian:12`, `debian:trixie`, `ubuntu:24.04`, `fedora:41`):
   stream of 2,000 synthetic entries (short and long messages, multi-line,
   UTF-8, binary fields, `COREDUMP*`, `_CMDLINE`, `_EXE`, `_AUDIT_*`,
   repeated values, past timestamps, three boots);
-- a standalone `systemd-journald` fed through its native socket,
+- a separate `systemd-journald` fed through its native socket,
   `systemd-cat` and `logger` (503 entries, including long messages that
   journald compresses).
 

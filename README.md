@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <img src="site/assets/demo.svg" alt="Claude Code asks when the PDF errors started on a staging profile. locklog_count shows the step at 14:02, locklog_patterns finds the new pattern with the email and the IP masked, and locklog_trace follows order 4812: all free and masked. The agent then asks locklog_unmask for the email. The locklog console, in its own account and container, shows the read-pii approval screen with the masked record and the span marked; the human answers n. The agent gets denied and carries on without the address; the audit records every call with pseudonyms only." width="900">
+  <img src="site/assets/demo.svg" alt="Claude Code asks when the PDF errors started on a staging profile. locklog_count shows the step at 14:02, locklog_patterns finds the new pattern with the email and the IP masked, and locklog_trace follows order 4812: all free and masked. The agent then asks locklog_unmask for the email. lox run, lockhub's terminal outside the agent, shows the read-pii ticket with the masked record and the span marked, never auto-approved; the human answers n. The agent gets denied and carries on without the address; the audit records every call with pseudonyms only." width="900">
 </p>
 
 <p align="center">
@@ -41,8 +41,8 @@ masked, bounded, typed answers: counts, patterns, traces, lines around a
 hit. Emails, IPs, card numbers, national ids and the other values locklog
 detects become **pseudonyms** (`⟦email:7F3KQ2M9ZD4X⟧`), and secrets become
 `⟦secret⟧`, before anything leaves the console. Reads are free. Handing a
-clear value to the agent waits for your approval at the console and is off
-by default on production.
+clear value to the agent waits for your approval at `lox run` (lockhub) and
+is off by default on production.
 
 > [!NOTE]
 > **Early release.** v0.1.0 is the first release: see the
@@ -92,44 +92,55 @@ with its own credentials, sends all of it to the model provider.
 
 ## Quick start
 
-**Prerequisites:** a Linux host with the logs, Docker ≥ 19.03,
-[cosign](https://docs.sigstore.dev/cosign/system_config/installation/), and
-sudo for `/usr/local/bin`. The trial below takes about five minutes. Run it
-on a **non-production** profile: your agent runs on your own account, where
-it could still read the logs directly.
+**Prerequisites:** a Linux host with the logs, Docker ≥ 19.03 and
+[cosign](https://docs.sigstore.dev/cosign/system_config/installation/).
+locklog is one lock of the [Lock Family](https://lockfamily.dev): its
+console is started by `lox run` (lockhub), which you keep open in a
+terminal of its own, outside the agent; it starts the hub and the locks,
+shows every ticket and decides it, by its rules or by you.
 
 ```sh
-# 1. Install the launcher (it verifies the release and the image with cosign)
-curl -fsSL https://locklog.dev/install.sh | sh
-
-# 2. Describe your logs: setup detects files, journald and containers,
-#    asks whether the profile is production (answer "no" for the trial),
-#    and wires the detected agents (Claude Code, Codex, Cursor, Gemini CLI)
-locklog setup --agent host     # or only some agents: --agents claude
-
-# 3. The console, in a terminal you keep in view (setup prints the line;
-#    containers get a profile of their own, <profile>-docker)
-locklog console --profile <profile>
+brew trust davidgodefroid/tap                # Homebrew asks you to trust a third-party tap once
+brew install davidgodefroid/tap/lockfamily
+cd ~/projects/shop                           # the project whose logs the agent investigates
+lox init                                      # or: lox add locklog logs
+lox run                                       # in a terminal of its own, kept open
 ```
 
-Then, in another terminal, ask your agent: *"when did the 502s start?"*.
-It calls `locklog_count`, `locklog_patterns` and `locklog_trace`; the
-console audits every call and asks you only when the agent wants more than
-the free budgets or a value in clear. On the host, `locklog mcp` refuses
-every call on a production profile (`E_PRODUCTION_HOST_AGENT`): the host
-agent is the trial.
+`lox add locklog <name>` runs locklog's three launcher verbs from the
+project ([docs/setup.md](docs/setup.md)):
+
+- `locklog profile add --non-interactive --json --profile NAME`: a profile
+  of `.locklog/config.toml` from the logs this host has (files, journald,
+  containers); never a secret;
+- `locklog init claude`: the agent's `.mcp.json`, skill and allow list (the
+  free tools only);
+- `locklog doctor --fix --yes --json`: what an agent here can reach.
+
+`lox run` then reviews the profile, starts the console (attach with `lox
+attach <name>` for its own questions: the policy review at its first
+start) and decides the tickets. Then, in another terminal, ask your agent:
+*"when did the 502s start?"*. It calls `locklog_count`, `locklog_patterns`
+and `locklog_trace`: free, masked, audited. A scan, an unmask or an
+approved lookup becomes a ticket that `lox run` shows you and never
+approves on its own.
+
+On the host, `locklog mcp` (the server `.mcp.json` names) refuses every
+call on a production profile (`E_PRODUCTION_HOST_AGENT`): the host agent is
+a trial for non-production data, since your agent runs on your own
+account, where it could still read the logs directly. Without `lox run`,
+it says to run `lox run` first.
 
 ### For production
 
 On production the agent must not be able to read the logs, the Docker
 socket or the backends itself (precondition P1 below). Run it:
 
-- in **its own container**: `locklog setup --agent container` prints a
-  tested Dockerfile snippet for your agent image and the `docker run` line.
-  The agent user must not have sudo. See [docs/setup.md](docs/setup.md).
-
-Support in [lea](https://github.com/DavidGodefroid/lea) is planned; no lea
-release supports it yet (`locklog setup --agent lea` says so).
+- with [lea](https://github.com/DavidGodefroid/lea), which runs the agent
+  in a container of its own with the lock's socket mounted;
+- or in **its own container**: [docs/setup.md](docs/setup.md) has a tested
+  Dockerfile snippet for your agent image and the `docker run` line. The
+  agent user must not have sudo.
 
 Your agent CLI's own login (Anthropic, OpenAI, Google) is yours to set up.
 
@@ -137,18 +148,18 @@ Your agent CLI's own login (Anthropic, OpenAI, Google) is yours to set up.
 
 ```
  host (you)
-   locklog launcher
-     ├─ console container  locklog-console-<n>   uid 10051 "locklog", no capability,
-     │    read-only root, --cpus min(2,nproc), --memory 1g, --log-driver none
-     │    read-only, non-recursive binds of the approved log directories
-     │    volume locklog-home: pseudonym keys, local index, audit, rules (console only)
-     │    volume locklog-run:  /run/locklog (2750 locklog:locklog-clients), one socket
-     │                         per project and profile, <project-hash>-<profile>.sock (0660)
-     │    network: none, or the backend's network for Loki
-     └─ map loop: docker events → container names and ids of the approved globs
+   lox run (lockhub): the hub and the decisions, in a terminal of its own
+     └─ console container (one per lock)   uid 10051 "locklog", no capability,
+          read-only root, cpus min(2,nproc), memory 1g, logging none, hub-attached
+          read-only, non-recursive binds of the approved log directories
+          home volume:   pseudonym keys, local index, audit, rules (console only)
+          socket volume: /run/locklog (2750 locklog:locklog-clients), one socket
+                         per project and profile, <project-hash>-<profile>.sock (0660)
+          network: the hub's; and the lock's egress network for Loki, Elasticsearch
 
- agent (yours: your own container, or the host for the trial; lea planned)
-   MCP server `locklog mcp` → its project's socket in /run/locklog (peer uid checked by the kernel)
+ agent (yours: lea, your own container, or the host for the trial)
+   MCP server `locklog mcp` → its project's socket, the lock's socket volume
+   read-only (peer uid checked by the kernel)
 ```
 
 1. The console reads the approved sources, and only those. The sources are
@@ -172,27 +183,26 @@ Your agent CLI's own login (Anthropic, OpenAI, Google) is yours to set up.
 | `status`, `sources`, `search`, `count`, `patterns`, `context`, `trace`, `tail` within budgets | free, audited |
 | `lookup` (clear value → pseudonym, detector kinds only) | free, rate-limited, audited; or approved each time with `lookup = "approved"` |
 | `pii_list` / `pii_add` (agent masking rules, tighten only) | free, capped, audited (served once the console's PII backend lands, [#64](https://github.com/DavidGodefroid/locklog/issues/64)) |
-| `locklog_scan` (beyond a budget, approved once for its whole plan; its cursor continues free for 30 minutes) | you, at the console |
-| `locklog_unmask` (the clear value of exact spans of one record, once) | you, at the console, never auto-approved; **off by default on production** |
+| `locklog_scan` (beyond a budget, approved once for its whole plan; its cursor continues free for 30 minutes) | you, a ticket at `lox run` (or the deck, a phone), never auto-approved |
+| `locklog_unmask` (the clear value of exact spans of one record, once) | you, a ticket at `lox run`, the deck or a phone, never auto-approved; **off by default on production** |
 | `locklog_request_change` (any loosening) | you, at the console's `:review` |
 | write, delete, admin | does not exist |
 
-The unmask screen shows the record **masked**, with the asked spans marked
+An unmask ticket shows the record **masked**, with the asked spans marked
 `» «`, the agent's reason and what a yes lets the agent link. To read a
 record yourself without sending anything to the agent, turn clear results
-on with Ctrl-O: the records the agent's calls return are then printed in
-clear on the console's terminal (secrets kept redacted), and an unmask
-screen shows its record in clear too. Secrets are
-never unmasked. On a non-production profile, auto mode (Shift+Tab) can
-approve scans for you; unmasks and approved lookups always wait for you, and
-production stays in manual mode.
+on with Ctrl-O at the console (`lox attach <name>`): the records the
+agent's calls return are then printed in clear on the console's terminal
+(secrets kept redacted). Secrets are never unmasked. `lox run`'s auto mode
+approves no locklog ticket: scans, unmasks and approved lookups always wait
+for you.
 
 ## Safety model
 
 locklog enforces what it owns:
 
 - the console's **peer check**: only the clients group (10050), the image's
-  `agent` (10052) and the uids you list in `--allowed-uids` reach the
+  `agent` (10052) and the uids you list in `allowed_uids` reach the
   socket, never root or `nobody`;
 - its mounts (read-only, non-recursive), its network, and its image
   hardening; **no Docker socket** in any locklog container;
@@ -207,7 +217,7 @@ enforce:
 
 - **P1** The agent cannot read the logs, the Docker socket, the backends'
   unauthenticated ports or the cloud metadata service directly, cannot
-  become the console's account, and cannot write your launcher state.
+  become the console's account, and cannot write `lox run`'s state.
   That is lea's job, or your own container setup's.
 - **P2** Agents of one uid are one trust domain.
 - **P3** Backend read credentials are held only by the console. Log
@@ -274,6 +284,13 @@ it are in [docs/performance.md](docs/performance.md).
 ## Install
 
 ```sh
+brew trust davidgodefroid/tap
+brew install davidgodefroid/tap/lockfamily   # lox and every lock's launcher
+```
+
+Or locklog's launcher alone:
+
+```sh
 curl -fsSL https://locklog.dev/install.sh | sh
 ```
 
@@ -292,11 +309,10 @@ launcher's and the image's versions.
 
 ## Status
 
-v0.1.0, in active development: see the [CHANGELOG](CHANGELOG.md). It ships
-files, journald, Docker and Loki with the standalone console, and
-Elasticsearch and OpenSearch as a preview.
-v0.2.0 makes the console hub-only (started by `lox run`), and v0.3.0 adds the
-Elasticsearch and OpenSearch incident gates and the masked export.
+In active development: see the [CHANGELOG](CHANGELOG.md). v0.1.0 shipped
+files, journald, Docker and Loki, and Elasticsearch and OpenSearch as a
+preview. v0.2.0 makes the console hub-only, started by `lox run`; v0.3.0
+adds the Elasticsearch and OpenSearch incident gates and the masked export.
 
 ## The Lock family
 

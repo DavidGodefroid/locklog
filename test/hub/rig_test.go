@@ -76,14 +76,38 @@ type fakeIO struct {
 	mu      sync.Mutex
 	out     []string
 	prompts int
+	// asked are the prompts; answers are typed in order (none: no
+	// answer).
+	asked, answers []string
 }
 
 func (f *fakeIO) Println(s string) { f.mu.Lock(); defer f.mu.Unlock(); f.out = append(f.out, s) }
-func (f *fakeIO) Ask(context.Context, string, time.Duration) (string, bool) {
+func (f *fakeIO) Ask(_ context.Context, prompt string, _ time.Duration) (string, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.prompts++
-	return "", false
+	f.asked = append(f.asked, prompt)
+	if len(f.answers) == 0 {
+		return "", false
+	}
+	a := f.answers[0]
+	f.answers = f.answers[1:]
+	return a, true
+}
+
+// answer types a for the next prompt; lastPrompt is the last one asked.
+func (f *fakeIO) answer(a ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.answers = append(f.answers, a...)
+}
+func (f *fakeIO) lastPrompt() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.asked) == 0 {
+		return ""
+	}
+	return f.asked[len(f.asked)-1]
 }
 func (f *fakeIO) AskSecret(context.Context, string) ([]byte, error) {
 	return nil, errors.New("no secret")
@@ -112,7 +136,9 @@ type rig struct {
 	io    *fakeIO
 	clock *clock
 	state string
-	cs    *mcp.ClientSession
+	// cfg is the project's config file.
+	cfg string
+	cs  *mcp.ClientSession
 	// outputs are every text and structured output the agent got.
 	mu      sync.Mutex
 	outputs []string
@@ -168,7 +194,8 @@ func newRig(t *testing.T, o rigOpts) *rig {
 		t.Fatal(err)
 	}
 	c := strings.ReplaceAll(strings.ReplaceAll(conf, "LOGS", logs), "EXTRA", o.extra)
-	if err := os.WriteFile(filepath.Join(root, ".locklog", "config.toml"), []byte(c), 0o644); err != nil {
+	r.cfg = filepath.Join(root, ".locklog", "config.toml")
+	if err := os.WriteFile(r.cfg, []byte(c), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if o.rules != "" {
