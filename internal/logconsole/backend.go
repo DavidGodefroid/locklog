@@ -111,6 +111,21 @@ type Revealer interface {
 	Reveal(ctx context.Context, result any) []string
 }
 
+type operatorLogKey struct{}
+
+// WithOperatorLog attaches the console's operator log to ctx: the engine
+// prints a line there (a source's failure) for the human at the console's
+// terminal only, never for the agent nor the audit.
+func WithOperatorLog(ctx context.Context, l func(line string)) context.Context {
+	return context.WithValue(ctx, operatorLogKey{}, l)
+}
+
+// OperatorLogFrom returns the call's operator log, or nil.
+func OperatorLogFrom(ctx context.Context) func(string) {
+	l, _ := ctx.Value(operatorLogKey{}).(func(string))
+	return l
+}
+
 // ApproveFrom returns the call's approver, or nil.
 func ApproveFrom(ctx context.Context) Approve {
 	a, _ := ctx.Value(approveKey{}).(Approve)
@@ -493,6 +508,9 @@ func (b *Backend) handler(method string) console.Handler {
 		cctx, cancel := ls.callContext(ctx)
 		cctx = WithApprove(cctx, func(ctx context.Context, s console.Screen) console.Approval { return env.Approve(ctx, req.ID, s) })
 		cctx = WithShowResults(cctx, env.ShowResults())
+		cctx = WithOperatorLog(cctx, func(line string) {
+			env.Println(method + ": " + env.Safe(env.Sanitizer().Error(errors.New(line))))
+		})
 		result, refused, err := ls.engine.Handle(cctx, method, params, c)
 		// The clear view: with results on (Ctrl-O), the records the
 		// agent gets masked are shown here in clear, on this terminal

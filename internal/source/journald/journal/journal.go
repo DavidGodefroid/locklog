@@ -201,12 +201,31 @@ func (f *File) objectHeader(off uint64, typ uint8, min, max uint64) (flags uint8
 // each entry's index and object offset, in file order (seqnum order), until
 // fn returns false.
 func (f *File) EntryOffsets(fn func(i uint64, off uint64) bool) error {
-	off := f.h.EntryArrayOffset
+	return f.EntryOffsetsFrom(ArrayPos{}, func(i, off uint64, _ ArrayPos) bool { return fn(i, off) })
+}
+
+// ArrayPos is a position in the entry-array chain: the offset of an
+// entry-array object and the index of its first entry. The zero value is
+// the head of the chain.
+type ArrayPos struct {
+	Offset, Index uint64
+}
+
+// EntryOffsetsFrom walks the chain as EntryOffsets does, from the array at
+// p (the zero ArrayPos: the header's first), and also gives fn the position
+// of the array holding each entry: a later walk may resume there (a
+// position read from an earlier walk of the same, unchanged file) without
+// reading the arrays before it.
+func (f *File) EntryOffsetsFrom(p ArrayPos, fn func(i uint64, off uint64, at ArrayPos) bool) error {
+	off, i := p.Offset, p.Index
+	if off == 0 {
+		off, i = f.h.EntryArrayOffset, 0
+	}
 	item := uint64(8)
 	if f.compact {
 		item = 4
 	}
-	var i, prev uint64
+	var prev uint64
 	for n := 0; off != 0; n++ {
 		if n > maxArrayChain || off <= prev {
 			return corrupt("entry array chain", off)
@@ -220,6 +239,7 @@ func (f *File) EntryOffsets(fn func(i uint64, off uint64) bool) error {
 		if err := f.read(b, off); err != nil {
 			return err
 		}
+		at := ArrayPos{Offset: off, Index: i}
 		next := binary.LittleEndian.Uint64(b[16:])
 		items := b[24:]
 		for j := uint64(0); j+item <= uint64(len(items)); j += item {
@@ -236,7 +256,7 @@ func (f *File) EntryOffsets(fn func(i uint64, off uint64) bool) error {
 				// An offline file has exactly NEntries entries.
 				return corrupt("more entries than the header holds", off)
 			}
-			if !fn(i, p) {
+			if !fn(i, p, at) {
 				return nil
 			}
 			i++

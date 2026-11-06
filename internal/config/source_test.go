@@ -78,6 +78,27 @@ trusted = ["vhost", "level"]`))["staging"]
 	wantErr(t, src(`kind = "file"`), "at least one absolute path glob")
 }
 
+// TestFileFramedLabels: a file source in a framed format (cri,
+// docker-json) trusts the frame's stream by default, as a label; it keeps
+// no frame attrs (only a docker source does, with attrs), so a trusted
+// attrs or attrs.<key> would never hold a value and is refused (#55).
+func TestFileFramedLabels(t *testing.T) {
+	for _, format := range []string{"cri", "docker-json"} {
+		s := mustParse(t, src(`kind = "file"`+"\n"+`paths = ["/var/log/a"]`+"\n"+`format = "`+format+`"`))["staging"].Sources[0]
+		if !slices.Contains(s.TrustedFields(), "stream") {
+			t.Errorf("%s: trusted = %v", format, s.TrustedFields())
+		}
+		for _, f := range []string{"attrs", "attrs.tag"} {
+			wantErr(t, src(`kind = "file"`+"\n"+`paths = ["/var/log/a"]`+"\n"+`format = "`+format+`"`+"\n"+`trusted = ["`+f+`"]`), "keeps no frame attrs")
+		}
+	}
+	// In an unframed format, attrs.tag is a line field.
+	s := mustParse(t, src(`kind = "file"`+"\n"+`paths = ["/var/log/a"]`+"\n"+`format = "json"`+"\n"+`trusted = ["attrs.tag"]`))["staging"].Sources[0]
+	if !slices.Equal(s.TrustedFields(), []string{"attrs.tag"}) {
+		t.Errorf("json: trusted = %v", s.TrustedFields())
+	}
+}
+
 func quote(s string) string {
 	return `"` + strings.ReplaceAll(strings.ReplaceAll(s, `\`, `\\`), `"`, `\"`) + `"`
 }

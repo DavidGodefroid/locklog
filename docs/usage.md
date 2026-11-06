@@ -60,7 +60,7 @@ credentials = "ask"          # typed at the console, never written to disk
 | `unmask` | `never` on production, else `approved` | Whether the agent may ask you to unmask a value |
 | `lookup` | `free` | `locklog_lookup` free and rate-limited, or `approved` (a ticket each time) |
 | `strict` | `false` | Accepted and reviewed, but not applied yet (planned: every search and count becomes a ticket) |
-| `prefilter` | `false` | Opt-in speed-up for non-production; reveals through latency how many records hold a clear substring |
+| `prefilter` | `false` | Opt-in speed-up for non-production; reveals through latency how many records hold a clear substring, and turns off the `masked_failures` count of text searches (see The agent's tools) |
 | `user_journals` | `false` | Also serve `user-*.journal` files |
 | `pseudonym_rotation` | `7d` | Epoch length (`session` or a duration; `never` is refused on production) |
 | `pseudonym_max_age` | `30d` | How long a replaced epoch key is kept; older ones are deleted when the console opens the profile |
@@ -72,7 +72,7 @@ countable), plus per kind:
 
 | Kind | Keys |
 |---|---|
-| `file` | `paths` (absolute globs; `**` only with `recursive = true`, depth ≤ 4) |
+| `file` | `paths` (absolute globs; `**` only with `recursive = true`, depth ≤ 4). In `cri` or `docker-json` format, the frame's `stream` is trusted by default, as a label; frame `attrs` are not kept (only a `docker` source keeps them), so trusting `attrs` or `attrs.<key>` is refused |
 | `journald` | `units` (globs on `_SYSTEMD_UNIT`), `allow` (extra fields, reviewed; core dumps, command lines, executables, audit and `OBJECT_` fields can never be allowed) |
 | `docker` | `containers` (name globs; a glob matching a locklog console is refused), `attrs` (json-file log-opt attributes to keep) |
 | `loki` | `url`, `selector`, `trusted_labels`, `trusted_metadata`, `auth` (`none` refused on production, `basic`, `bearer`, `mtls`), `org_id`, `user` (basic), `credentials` (`ask` or `vault`, with `vault_path`), `tls`, `tls_ca`, `tls_cert` and `tls_key` (mtls) |
@@ -127,7 +127,14 @@ it back and says so.
 
 Every result carries the pseudonym `epoch`. A result with
 `complete: false` has a `cursor`: passing it back continues the same plan
-for free. Log lines are untrusted data. The skill installed by `locklog
+for free. A record the masker fails on is withheld whole and counted in
+`masked_failures`. One exception: with `prefilter = true`, a search whose
+query has `text` or a `contains` predicate masks only the records whose
+clear text holds those needles, so counting the failures would tell whether
+a failing record holds them. Such a search does not count failures:
+`masked_failures` is absent (0) although failing records are still
+withheld. Counts, patterns, context, trace and tail are not pre-filtered
+and always count them. Log lines are untrusted data. The skill installed by `locklog
 init` tells the agent so, and tells it to start with `locklog_count` on
 trusted fields.
 
@@ -173,7 +180,11 @@ cursor. The numbers behind these defaults are in
 ## The console
 
 `locklog console` prints nothing for a free call (the audit records it),
-unless clear results are on (Ctrl-O, below). It
+unless clear results are on (Ctrl-O, below) or a source fails: then it
+prints one line with the method, the source, the class of failure the
+agent gets (`E_SOURCE`) and the error, masked and sanitised (a file path,
+a backend's status; never a record). A stale stream, which the agent just
+runs again, is not printed. It
 opens an approval screen for scans, unmasks, approved lookups and change
 requests: you answer `y` (on production, the profile's name) or `n`. An
 unanswered screen times out after 5 minutes and the agent is told not to

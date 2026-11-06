@@ -60,6 +60,11 @@ var parserTrusted = map[string][]string{
 	"docker-json": {"stream"},
 }
 
+// framedFormat reports a format whose lines are frames (cri,
+// docker-json): their stream and attrs are labels, apart from the
+// payload's fields.
+func framedFormat(f string) bool { return f == "cri" || f == "docker-json" }
+
 // Source is one approved log source of a profile. It never holds a secret.
 type Source struct {
 	Name string `json:"name"`
@@ -295,6 +300,13 @@ func buildSource(name string, r rawSource, production bool) (Source, error) {
 		}
 		if !fieldNameRe.MatchString(f) {
 			return Source{}, errf("trusted: invalid field name %q", f)
+		}
+		// A framed format's frame keys (parse.FrameKeys) are labels: the
+		// stream is trusted by default (parserTrusted); a file source
+		// keeps no frame attrs (only a docker source does, with attrs),
+		// so trusting one would select and count nothing.
+		if head, _, _ := strings.Cut(f, "."); s.Kind == KindFile && framedFormat(s.Format) && head == "attrs" {
+			return Source{}, errf("trusted: %s: a file source keeps no frame attrs (only a docker source keeps them, named in attrs); its records never hold it", f)
 		}
 		if messageField(f) {
 			return Source{}, errf("trusted: %s is the message text of a parsed line, always served masked; it cannot be trusted", f)

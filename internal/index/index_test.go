@@ -28,7 +28,7 @@ func ev(t time.Time, fields ...string) parse.Event {
 var t0 = time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
 
 func TestBuilderCountsPerMinute(t *testing.T) {
-	b := NewBuilder([]string{"level", "http.status"}, func(f, v string) bool { return v == "secret" })
+	b := NewBuilder([]string{"level", "http.status"}, func(f, v string) bool { return v == "secret" }, nil)
 	nested := ev(t0.Add(30*time.Second), "level", "error")
 	nested.Fields = append(nested.Fields, parse.Member{Key: "http", Value: parse.Value{Kind: parse.KindObject,
 		Members: []parse.Member{{Key: "status", Value: parse.Value{Kind: parse.KindNumber, Str: "502"}}}}})
@@ -58,7 +58,7 @@ func TestBuilderCountsPerMinute(t *testing.T) {
 // always asked; the answers are the same as without the memo.
 func TestBuilderMemoizesSensitivity(t *testing.T) {
 	asked := map[string]int{}
-	b := NewBuilder([]string{"level"}, func(f, v string) bool { asked[v]++; return v == "secret" })
+	b := NewBuilder([]string{"level"}, func(f, v string) bool { asked[v]++; return v == "secret" }, nil)
 	long := strings.Repeat("x", memoValueMax+1)
 	for i := range 8 * memoMax {
 		v := []string{"error", "secret", long, fmt.Sprint(i)}[min(i%4, 3)]
@@ -80,8 +80,35 @@ func TestBuilderMemoizesSensitivity(t *testing.T) {
 	}
 }
 
+// TestBuilderMemoFollowsRulesGeneration: a value memoized as not sensitive
+// is asked again once the rules generation moves (an agent rule added
+// while the granule is built), so the records after the rule are indexed
+// as Redacted (#84).
+func TestBuilderMemoFollowsRulesGeneration(t *testing.T) {
+	var gen uint64
+	ruled := false
+	asked := 0
+	b := NewBuilder([]string{"level"}, func(f, v string) bool { asked++; return ruled }, func() uint64 { return gen })
+	b.Add(ev(t0, "level", "error"))
+	b.Add(ev(t0, "level", "error"))
+	if asked != 1 {
+		t.Fatalf("asked %d times before the rule", asked)
+	}
+	ruled, gen = true, gen+1
+	b.Add(ev(t0, "level", "error"))
+	b.Add(ev(t0, "level", "error"))
+	if asked != 2 {
+		t.Fatalf("asked %d times after the rule", asked)
+	}
+	g := b.Finish(0, 0, 1, true)
+	want := []Count{{Vals: []string{Redacted}, N: 2}, {Vals: []string{"error"}, N: 2}}
+	if !reflect.DeepEqual(g.Minutes[0].Counts, want) {
+		t.Fatalf("%+v", g.Minutes[0].Counts)
+	}
+}
+
 func TestBuilderBoundsTuples(t *testing.T) {
-	b := NewBuilder([]string{"k"}, nil)
+	b := NewBuilder([]string{"k"}, nil, nil)
 	for i := 0; i < MaxTuples+50; i++ {
 		b.Add(ev(t0, "k", fmt.Sprint(i)))
 	}
@@ -109,7 +136,7 @@ func TestTupleKeyUnambiguous(t *testing.T) {
 func TestStreamDropsHighCardinality(t *testing.T) {
 	s := NewStream(1, 2, "g", []string{"a", "b"})
 	for n := int64(0); n < 3; n++ {
-		b := NewBuilder(s.Fields, nil)
+		b := NewBuilder(s.Fields, nil, nil)
 		for i := 0; i < 30; i++ {
 			b.Add(ev(t0, "a", fmt.Sprint(int(n)*30+i), "b", "x"))
 		}
@@ -132,7 +159,7 @@ func TestStorePersistence(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := NewStream(7, 9, "gen1", []string{"level"})
-	b := NewBuilder(s.Fields, nil)
+	b := NewBuilder(s.Fields, nil, nil)
 	b.Add(ev(t0, "level", "info"))
 	s.Put(b.Finish(0, 0, 100, false))
 	st.With("app", 7, 9, func(*Stream) *Stream { return s })
