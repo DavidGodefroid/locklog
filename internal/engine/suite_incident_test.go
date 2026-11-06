@@ -16,11 +16,14 @@ package engine
 //     (daily rotated files) and journald history; warm (index built) and
 //     cold (no index: the backfill runs newest first at full speed while
 //     the agent works), each also with the host slowed about 3× (a CPU
-//     hog). By default it runs on a small volume; LOCKLOG_INCIDENT_VOLUME
-//     (bytes per day, e.g. 1GiB) sets the volume, and with
-//     LOCKLOG_JOURNAL_REMOTE (the systemd-journal-remote binary) the
-//     journal history is imported in export format with past timestamps,
-//     as the CI incidents job does.
+//     hog). LOCKLOG_INCIDENT_VOLUME (bytes per day, e.g. 1GiB) sets the
+//     volume, and with LOCKLOG_JOURNAL_REMOTE (the systemd-journal-remote
+//     binary) the journal history is imported in export format with past
+//     timestamps, as the CI incidents job does (1GiB, the gated run).
+//     Without LOCKLOG_INCIDENT_VOLUME it is a local smoke run on 16 MiB a
+//     day, with LOCKLOG_SUITES=1 only: CI never runs that default (the
+//     suites job does not select this test), and its times gate nothing
+//     the 1 GiB run does not.
 
 import (
 	"bufio"
@@ -500,6 +503,7 @@ func parseSize(t testing.TB, s string) int64 {
 // on the same data and host load (the count of 7 days cannot be answered
 // before the index holds them, or a scan approval).
 func TestIncidentVolume(t *testing.T) {
+	// The local smoke default (see the file's comment); CI sets 1GiB.
 	perDay := int64(16 << 20)
 	if v := os.Getenv("LOCKLOG_INCIDENT_VOLUME"); v != "" {
 		perDay = parseSize(t, v)

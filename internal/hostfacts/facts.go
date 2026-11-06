@@ -15,6 +15,7 @@ package hostfacts
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -51,8 +52,12 @@ type Container struct {
 type Facts struct {
 	// EUID is the effective uid (-1: unknown).
 	EUID int
-	// Groups are the account's group names.
-	Groups []string
+	// Groups are the account's group names. GroupsAmbiguous is set when
+	// they come from id -Gn's line and a name may hold a space (SSSD, AD:
+	// "docker users@corp.example" reads as "docker" and a piece): a name
+	// of Groups may then be a piece of another.
+	Groups          []string
+	GroupsAmbiguous bool
 	// Sudo is one of the Sudo states ("" unknown).
 	Sudo string
 	// Docker is one of the Docker states ("" unknown); DockerHost is set
@@ -78,29 +83,53 @@ type Facts struct {
 }
 
 var (
-	nameRe   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
-	imageRe  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_./:@-]{0,254}$`)
-	labelRe  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
-	groupRe  = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.-]{0,63}\$?$`)
-	agentRe  = regexp.MustCompile(`^[a-z]{1,16}$`)
-	pathRe   = regexp.MustCompile(`^(/|~/)[^\x00-\x1f\x7f]{0,1000}$`)
-	stateRe  = regexp.MustCompile(`^[a-z-]{1,32}$`)
-	maxLines = 20000
+	nameRe  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
+	imageRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_./:@-]{0,254}$`)
+	labelRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
+	groupRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.-]{0,63}\$?$`)
+	gidRe   = regexp.MustCompile(`^[0-9]{1,10}$`)
+	// A group's full name, as getent gives it: spaces allowed.
+	fullGroupRe = regexp.MustCompile(`^[^\x00-\x1f\x7f]{1,256}$`)
+	agentRe     = regexp.MustCompile(`^[a-z]{1,16}$`)
+	pathRe      = regexp.MustCompile(`^(/|~/)[^\x00-\x1f\x7f]{0,1000}$`)
+	stateRe     = regexp.MustCompile(`^[a-z-]{1,32}$`)
+	maxLines    = 20000
 )
 
 // Parse reads a facts file. Unknown keys are skipped (a newer launcher);
-// a malformed value of a known key is an error. Every line after "logs" is
-// a log path: a path that would break a line (a newline in a file name)
-// can only add log paths, which profile add checks like any other.
+// a malformed value of a known key is an error. Everything after "logs0"
+// is log paths, NUL-delimited (find -print0): a newline in a file or
+// directory name cannot forge a path, and such a path is dropped. After
+// "logs" (an older launcher), every line is a log path: a path that would
+// break a line can only add log paths, which profile add checks like any
+// other.
 func Parse(r io.Reader) (Facts, error) {
 	f := Facts{EUID: -1}
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 4096), 1<<16)
+	nul := false
+	sc.Split(func(data []byte, atEOF bool) (int, []byte, error) {
+		if !nul {
+			return bufio.ScanLines(data, atEOF)
+		}
+		if i := bytes.IndexByte(data, 0); i >= 0 {
+			return i + 1, data[:i], nil
+		}
+		if atEOF && len(data) > 0 {
+			return len(data), data, nil
+		}
+		return 0, nil, nil
+	})
 	if !sc.Scan() || sc.Text() != Header {
 		return f, fmt.Errorf("hostfacts: not a facts file (want %q first)", Header)
 	}
 	logs := false
 	n := 0
+	// The groups: id -Gn's line (names split on spaces), id -G's gids and
+	// the name of each gid ("group GID NAME", NAME whole), settled at the end.
+	var pieces, gids []string
+	piecesBad := false
+	named := map[string]string{}
 	for sc.Scan() {
 		n++
 		if n > maxLines {
@@ -121,6 +150,8 @@ func Parse(r io.Reader) (Facts, error) {
 		switch key {
 		case "logs":
 			logs = true
+		case "logs0":
+			logs, nul = true, true
 		case "euid":
 			v, err := strconv.Atoi(rest)
 			if err != nil || v < 0 {
@@ -129,15 +160,30 @@ func Parse(r io.Reader) (Facts, error) {
 			f.EUID = v
 		case "groups":
 			// id -Gn splits on spaces: a directory group with a space or
-			// an '@' (SSSD, AD: "domain users@corp.example") gives pieces
-			// that are no group name. They are skipped: none of them is a
-			// group doctor looks for.
-			f.Groups = []string{}
+			// an '@' (SSSD, AD: "domain users@corp.example") gives pieces.
+			// The ones that are no group name are skipped.
+			pieces = []string{}
 			for _, g := range strings.Fields(rest) {
 				if groupRe.MatchString(g) {
-					f.Groups = append(f.Groups, g)
+					pieces = append(pieces, g)
+				} else {
+					piecesBad = true
 				}
 			}
+		case "gids":
+			gids = []string{}
+			for _, g := range strings.Fields(rest) {
+				if !gidRe.MatchString(g) {
+					return f, bad()
+				}
+				gids = append(gids, g)
+			}
+		case "group":
+			gid, name, ok := strings.Cut(rest, " ")
+			if !ok || !gidRe.MatchString(gid) || !fullGroupRe.MatchString(name) {
+				return f, bad()
+			}
+			named[gid] = name
 		case "sudo":
 			if rest != SudoAbsent && rest != SudoPassword && rest != SudoNoPasswd {
 				return f, bad()
@@ -193,7 +239,32 @@ func Parse(r io.Reader) (Facts, error) {
 	if err := sc.Err(); err != nil {
 		return f, fmt.Errorf("hostfacts: %w", err)
 	}
+	f.Groups, f.GroupsAmbiguous = settleGroups(pieces, piecesBad, gids, named)
 	return f, nil
+}
+
+// settleGroups returns the account's group names: the name of every gid
+// when each has one (exact), else id -Gn's pieces, ambiguous when a piece
+// was no name or there are more pieces than gids.
+func settleGroups(pieces []string, piecesBad bool, gids []string, named map[string]string) ([]string, bool) {
+	if len(gids) > 0 {
+		names := make([]string, 0, len(gids))
+		for _, g := range gids {
+			n, ok := named[g]
+			if !ok {
+				names = nil
+				break
+			}
+			names = append(names, n)
+		}
+		if names != nil {
+			return names, false
+		}
+	}
+	if pieces == nil {
+		return nil, false
+	}
+	return pieces, piecesBad || (len(gids) > 0 && len(pieces) != len(gids))
 }
 
 // parseContainer reads "NAME IMAGE SERVICE PROJECT NETWORKS" ("-" for an
