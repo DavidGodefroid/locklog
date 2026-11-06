@@ -2,13 +2,12 @@ package engine
 
 import (
 	"math/big"
-	"regexp"
 	"regexp/syntax"
-	"strconv"
 	"strings"
 	"sync/atomic"
 
 	"github.com/DavidGodefroid/locklog/internal/mask"
+	"github.com/DavidGodefroid/locklog/internal/source"
 )
 
 // Masked-view semantics (design §4.4 rule 1): every predicate is evaluated
@@ -363,13 +362,10 @@ func compare(p *Pred, v val) (int, bool) {
 	return strings.Compare(t, p.vals[0]), true
 }
 
-var jsonNumber = regexp.MustCompile(`^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?$`)
-
-// Number literal bounds: big.Rat's cost grows with the exponent (1e999999
-// takes milliseconds), and log content chooses it.
+// Number literal bounds (source.ParseNumber).
 const (
-	maxNumberLen      = 400
-	maxNumberExponent = 400
+	maxNumberLen      = source.MaxNumberLen
+	maxNumberExponent = source.MaxNumberExponent
 )
 
 // numberParses counts parseNumber calls (tests bound the work of numeric
@@ -377,23 +373,12 @@ const (
 var numberParses atomic.Int64
 
 // parseNumber returns the exact value of a number literal within the
-// bounds; a literal beyond them is not a number to compare (equality falls
+// bounds (source.ParseNumber: the index and the evaluator read numbers
+// alike); a literal beyond them is not a number to compare (equality falls
 // back to its text).
 func parseNumber(s string) (*big.Rat, bool) {
 	numberParses.Add(1)
-	// The JSON number grammar only: big.Rat also takes hex, octal and
-	// binary mantissas, p exponents (0x1p9999999), fractions and
-	// underscores.
-	if len(s) > maxNumberLen || !jsonNumber.MatchString(s) {
-		return nil, false
-	}
-	if i := strings.IndexAny(s, "eE"); i >= 0 {
-		e, err := strconv.Atoi(s[i+1:])
-		if err != nil || e > maxNumberExponent || e < -maxNumberExponent {
-			return nil, false
-		}
-	}
-	return new(big.Rat).SetString(s)
+	return source.ParseNumber(s)
 }
 
 // inSet is an in predicate's values, precomputed once: a leaf is parsed at

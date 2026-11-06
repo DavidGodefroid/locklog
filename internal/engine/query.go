@@ -151,11 +151,13 @@ type Query struct {
 }
 
 // numeric reports whether a value of the predicate is a number. The
-// evaluator compares numbers by exact value (200 = 200.0 = 2e2), while the
-// index and source selectors hold raw literals compared as text, so a
-// numeric term is never pushed down to a source nor answered from the index:
-// it is evaluated on the masked records only. It reads the raw value, so it
-// holds before validation too (Count sizes its range from it).
+// evaluator compares a number leaf with it by exact value (200 = 200.0 =
+// 2e2) and any other leaf by text, while index and source selectors hold
+// raw values without their kind: a numeric term is pushed down only to a
+// source that honors source.Term.Numbers (source.NumericSelector: the local
+// index, which treats a value whose match depends on the kind as unknown),
+// never to the others. It reads the raw value, so it holds before
+// validation too (Count sizes its range from it).
 func (p *Pred) numeric() bool {
 	d := json.NewDecoder(strings.NewReader(string(p.Value)))
 	d.UseNumber()
@@ -177,18 +179,19 @@ func (p *Pred) numeric() bool {
 }
 
 // trustedOnly reports whether the query uses only trusted-field selection:
-// no text, no regex, every predicate an equality on a trusted field with
-// non-numeric values (see numeric).
-func (q *Query) trustedOnly(trusted func(src, name string, label bool) bool) bool {
+// no text, no regex, every predicate an equality on a trusted field, with
+// numeric values only where every source takes numeric terms (numeric).
+func (q *Query) trustedOnly(trusted func(src, name string, label bool) bool, numeric func(src string) bool) bool {
 	if q.Text != "" || q.Regex != "" || q.trace != nil {
 		return false
 	}
 	for _, p := range q.Where {
-		if !slices.Contains([]string{OpEq, OpNe, OpIn}, p.Op) || p.numeric() {
+		if !slices.Contains([]string{OpEq, OpNe, OpIn}, p.Op) {
 			return false
 		}
+		num := p.numeric()
 		for _, s := range q.Sources {
-			if !trusted(s, p.name(), p.label()) {
+			if !trusted(s, p.name(), p.label()) || num && !numeric(s) {
 				return false
 			}
 		}
@@ -197,20 +200,34 @@ func (q *Query) trustedOnly(trusted func(src, name string, label bool) bool) boo
 }
 
 // selector returns the trusted-field terms of the query, used for planning;
-// numeric terms are left out (see numeric).
-func (q *Query) selector(src string, trusted func(src, name string, label bool) bool) source.Selector {
+// numeric terms only when numeric is set (see Pred.numeric).
+func (q *Query) selector(src string, trusted func(src, name string, label bool) bool, numeric bool) source.Selector {
 	var sel source.Selector
 	for _, p := range q.Where {
-		if !trusted(src, p.name(), p.label()) || p.numeric() {
+		if !trusted(src, p.name(), p.label()) {
 			continue
+		}
+		var nums []string
+		if p.numeric() {
+			if !numeric {
+				continue
+			}
+			for i, v := range p.vals {
+				if p.nums[i] != nil {
+					nums = append(nums, v)
+				}
+			}
+			if len(nums) == 0 {
+				continue // not validated: never pushed down
+			}
 		}
 		// A label predicate is pushed as a label term, a field one
 		// as a field term: a source applies each in its namespace.
 		switch p.Op {
 		case OpEq, OpIn:
-			sel.Terms = append(sel.Terms, source.Term{Field: p.name(), Label: p.label(), Op: OpIn, Values: p.vals})
+			sel.Terms = append(sel.Terms, source.Term{Field: p.name(), Label: p.label(), Op: OpIn, Values: p.vals, Numbers: nums})
 		case OpNe:
-			sel.Terms = append(sel.Terms, source.Term{Field: p.name(), Label: p.label(), Op: OpNe, Values: p.vals})
+			sel.Terms = append(sel.Terms, source.Term{Field: p.name(), Label: p.label(), Op: OpNe, Values: p.vals, Numbers: nums})
 		}
 	}
 	return sel

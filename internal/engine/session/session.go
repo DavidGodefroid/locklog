@@ -113,6 +113,9 @@ type Session struct {
 	prod     bool
 	notes    []string
 	inflight atomic.Int64
+	// remotes are the remote sources' egress clients: Close closes their
+	// pooled connections.
+	remotes []*egress.Client
 
 	stop    context.CancelFunc
 	indexer sync.WaitGroup
@@ -514,7 +517,7 @@ func (s *Session) openSource(ctx context.Context, c config.Source, o Options) (s
 			keys = append(keys, index.TermKey(f, isLabel(c, f)))
 		}
 		return file.New(file.Options{Name: c.Name, Paths: c.Paths, Recursive: c.Recursive, Roots: roots, Parser: p,
-			Trusted: keys, Index: s.store, Sensitive: sensitive, Now: o.Now})
+			Trusted: keys, Index: s.store, Sensitive: sensitive, RulesGeneration: m.RulesGeneration, Now: o.Now})
 	case config.KindJournald:
 		if len(o.Roots.Journal) == 0 {
 			return nil, errors.New("no checked journal directory")
@@ -536,7 +539,7 @@ func (s *Session) openSource(ctx context.Context, c config.Source, o Options) (s
 		if o.MapDir != "" {
 			do.MapDir = o.MapDir
 		}
-		do.Index, do.Sensitive, do.Now = s.store, sensitive, o.Now
+		do.Index, do.Sensitive, do.RulesGeneration, do.Now = s.store, sensitive, m.RulesGeneration, o.Now
 		return docker.New(do)
 	case config.KindLoki, config.KindElastic, config.KindOpenSearch:
 		return s.openRemote(ctx, c, o)
@@ -567,10 +570,14 @@ func (s *Session) startIndexer() {
 	}()
 }
 
-// Close stops the indexer, saves the index and releases the epoch store.
+// Close stops the indexer, saves the index, releases the epoch store and
+// closes the remote sources' connections.
 func (s *Session) Close() error {
 	var err error
 	s.once.Do(func() {
+		for _, c := range s.remotes {
+			c.Close()
+		}
 		if s.stop != nil {
 			s.stop()
 			s.indexer.Wait()
@@ -600,6 +607,10 @@ func (s *Session) Handle(ctx context.Context, method string, params json.RawMess
 		sink := engine.NewClearSink()
 		cv.Kept = sink
 		ctx = engine.WithClearSink(ctx, sink)
+	}
+	// A source's failure is reported on the console's terminal.
+	if l := logconsole.OperatorLogFrom(ctx); l != nil {
+		ctx = engine.WithSourceLog(ctx, l)
 	}
 	switch method {
 	case logconsole.MethodStatus:
