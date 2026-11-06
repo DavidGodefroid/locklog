@@ -234,6 +234,7 @@ func Open(ctx context.Context, o Options) (_ *Session, err error) {
 		// lookup = "approved" makes every lookup a read-pii approval.
 		LookupApproved: pr.Lookup == config.LookupApproved,
 		Production:     pr.Production,
+		MaxCalls:       pr.Limits.Calls(),
 		// An approved scan paces its remote requests at the profile's
 		// remote rate (S3: 600/min, 240/min on production), its own and
 		// not drawn from the rolling budget (R6-P2); the source's
@@ -697,6 +698,8 @@ var retries = map[string]refusal.Retry{
 	engine.EOverBudget: refusal.RetryRewrite, engine.EPolicyChanged: refusal.RetryRewrite, engine.EStale: refusal.RetryRewrite,
 	engine.ESource: refusal.RetryStop, engine.EMask: refusal.RetryStop,
 	engine.EApproval: refusal.RetryAskUser, engine.EUnmaskNever: refusal.RetryAskUser,
+	// Busy: the same call, unchanged, once another one answered.
+	engine.EBusy: refusal.RetryRewrite,
 }
 
 // hints are the default rewrite hints.
@@ -707,6 +710,7 @@ var hints = map[string]string{
 	engine.EPIIInQuery:    "address personal values by their pseudonym (⟦kind:ID⟧) as the records show them",
 	engine.EUnknownField:  "use a field name the records or log.sources show",
 	engine.EUnmaskNever:   "ask the human to read the record at the console, with clear results on (Ctrl-O), or to set unmask = \"approved\"",
+	engine.EBusy:          "run fewer calls in parallel: wait for one to answer, then send this call again unchanged",
 }
 
 // refusalOf is the console's form of an engine refusal. Its text holds no

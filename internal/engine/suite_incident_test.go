@@ -274,10 +274,35 @@ func (a *jobAgent) ask(c agentCall) []json.RawMessage {
 }
 
 func lastCount(t testing.TB, pages []json.RawMessage) CountResult {
+	return wholeCount(t, pages)
+}
+
+// wholeCount is the whole count of a count's pages: its last page, with
+// the groups of the pages before it when the whole count was paged.
+func wholeCount(t testing.TB, pages []json.RawMessage) CountResult {
+	t.Helper()
 	var r CountResult
 	if err := json.Unmarshal(pages[len(pages)-1], &r); err != nil {
 		t.Fatal(err)
 	}
+	groups := r.Groups
+	for i := len(pages) - 2; i >= 0 && r.GroupsTotal > 0; i-- {
+		var p CountResult
+		if err := json.Unmarshal(pages[i], &p); err != nil {
+			t.Fatal(err)
+		}
+		if p.GroupsTotal == 0 {
+			t.Fatalf("page %d of a paged count is not one of its pages", i)
+		}
+		groups = append(slices.Clone(p.Groups), groups...)
+		if p.GroupsFrom == 0 {
+			break
+		}
+	}
+	if r.GroupsTotal > 0 && len(groups) != r.GroupsTotal {
+		t.Fatalf("%d groups in the pages of a %d-group count", len(groups), r.GroupsTotal)
+	}
+	r.Groups, r.GroupsFrom = groups, 0
 	return r
 }
 

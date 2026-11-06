@@ -122,6 +122,9 @@ type budget struct {
 	over    bool
 	// chunk is the plan chunk of the record being visited (run sets it).
 	chunk int
+	// drop, set by a visitor, drops the group being visited and stops
+	// the call before it (never the call's first group; see run).
+	drop bool
 }
 
 const (

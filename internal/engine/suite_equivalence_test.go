@@ -69,6 +69,7 @@ func answer(t testing.TB, e *Engine, pages []json.RawMessage) string {
 	norm, _ := normalizePages(t, e, pages)
 	var recs []any
 	var last map[string]any
+	var paged []any
 	for _, p := range norm {
 		var m map[string]any
 		if err := json.Unmarshal([]byte(p), &m); err != nil {
@@ -81,7 +82,18 @@ func answer(t testing.TB, e *Engine, pages []json.RawMessage) string {
 				recs = append(recs, rec)
 			}
 		}
+		if _, ok := m["groups_total"]; ok {
+			// A whole count, paged: its groups are every page's.
+			if _, ok := m["groups_from"]; !ok {
+				paged = nil
+			}
+			gs, _ := m["groups"].([]any)
+			paged = append(paged, gs...)
+		}
 		last = m
+	}
+	if paged != nil {
+		last["groups"] = paged
 	}
 	out := map[string]any{"records": recs}
 	if n, ok := last["records"].(float64); ok {
