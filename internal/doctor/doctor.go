@@ -73,9 +73,14 @@ type Endpoint struct {
 	Method string
 	URL    string
 	Header map[string]string
+	// What names what the path serves in the report's lines (default
+	// "metadata credentials").
+	What string
 	// Answers is the finding when it answers 200 (default: its
 	// credentials are handed out).
 	Answers string
+	// Remedy is the finding's remedy, the cloud's own.
+	Remedy string
 }
 
 // Metadata are the clouds' metadata paths: a 200 means this account can
@@ -83,12 +88,16 @@ type Endpoint struct {
 // hands out its identity's tokens (Azure: its instance document, which
 // issues nothing).
 var Metadata = []Endpoint{
-	{Cloud: "AWS", Method: http.MethodGet, URL: "http://169.254.169.254/latest/meta-data/iam/security-credentials/"},
+	{Cloud: "AWS", Method: http.MethodGet, URL: "http://169.254.169.254/latest/meta-data/iam/security-credentials/",
+		Remedy: "block the metadata service for the agent (a firewall rule, IMDSv2 with hop limit 1, no instance identity) or run it where it is not reachable"},
 	{Cloud: "GCP", Method: http.MethodGet, URL: "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/",
-		Header: map[string]string{"Metadata-Flavor": "Google"}},
+		Header: map[string]string{"Metadata-Flavor": "Google"},
+		Remedy: "block the metadata server for the agent (a firewall rule to 169.254.169.254, or a VM without a service account) or run it where it is not reachable"},
 	{Cloud: "Azure", Method: http.MethodGet, URL: "http://169.254.169.254/metadata/instance?api-version=2021-02-01",
 		Header:  map[string]string{"Metadata": "true"},
-		Answers: "the Azure metadata service answers (status %d): an identity may be available to the agent (a managed identity's tokens come from it)"},
+		What:    "metadata service",
+		Answers: "the Azure metadata service answers (status %d): an identity may be available to the agent (a managed identity's tokens come from it)",
+		Remedy:  "block the instance metadata service for the agent (a firewall rule to 169.254.169.254, or no managed identity on the VM) or run it where it is not reachable"},
 }
 
 // Options of one doctor run.
@@ -153,6 +162,11 @@ func Run(ctx context.Context, o Options) (Report, error) {
 		switch {
 		case f.Groups == nil:
 			add(Item{Unknown: true, Text: "group " + g.name + ": the account's groups are unknown"})
+		case f.InGroup(g.name) && f.GroupsAmbiguous:
+			// Fail safe: a piece of a name with a space may read as the
+			// group; the finding stays, and says so.
+			add(Item{Finding: true, Text: "group " + g.name + ": the account's group names read " + g.name + " (or a group name with a space was split there: check with getent group); " + g.why,
+				Remedy: g.remedy})
 		case f.InGroup(g.name):
 			add(Item{Finding: true, Text: "group " + g.name + ": the agent's account is a member; " + g.why, Remedy: g.remedy})
 		default:
@@ -406,6 +420,10 @@ func tlsItem(n string, p config.Profile, project string) (Item, bool) {
 
 // metadataItem probes one cloud metadata credential path.
 func metadataItem(ctx context.Context, e Endpoint, timeout time.Duration) Item {
+	what := e.What
+	if what == "" {
+		what = "metadata credentials"
+	}
 	req, err := http.NewRequestWithContext(ctx, e.Method, e.URL, nil)
 	if err != nil {
 		return Item{Unknown: true, Text: e.Cloud + " metadata: bad endpoint"}
@@ -415,18 +433,21 @@ func metadataItem(ctx context.Context, e Endpoint, timeout time.Duration) Item {
 	}
 	resp, err := client(timeout).Do(req)
 	if err != nil {
-		return Item{Text: e.Cloud + " metadata credentials: not reachable"}
+		return Item{Text: e.Cloud + " " + what + ": not reachable"}
 	}
 	resp.Body.Close()
 	if resp.StatusCode == http.StatusOK {
-		text := fmt.Sprintf("%s metadata credentials answer (status %d): the agent can take the instance's cloud identity", e.Cloud, resp.StatusCode)
+		text := fmt.Sprintf("%s %s answer (status %d): the agent can take the instance's cloud identity", e.Cloud, what, resp.StatusCode)
 		if e.Answers != "" {
 			text = fmt.Sprintf(e.Answers, resp.StatusCode)
 		}
-		return Item{Finding: true, Text: text,
-			Remedy: "block the metadata service for the agent (a firewall rule, IMDSv2 with hop limit 1, no instance identity) or run it where it is not reachable"}
+		remedy := e.Remedy
+		if remedy == "" {
+			remedy = "block the " + e.Cloud + " metadata service for the agent (a firewall rule) or run it where it is not reachable"
+		}
+		return Item{Finding: true, Text: text, Remedy: remedy}
 	}
-	return Item{Text: fmt.Sprintf("%s metadata credentials: status %d", e.Cloud, resp.StatusCode)}
+	return Item{Text: fmt.Sprintf("%s %s: status %d", e.Cloud, what, resp.StatusCode)}
 }
 
 // Print writes the report and returns the exit code: 1 when a production

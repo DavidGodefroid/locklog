@@ -18,6 +18,24 @@ takes the launcher verbs every lock of the Lock Family takes (#117).
 - On a production profile without Landlock, `:status` and `doctor` name the
   residual: its local sources are read by an unconfined console
   ([#62](https://github.com/DavidGodefroid/locklog/issues/62)).
+- docs/recipes/holmesgpt.md: HolmesGPT's CLI in its own container with the
+  locklog client and only the lock's socket volume from `up.json`, locklog
+  as its stdio MCP server, `MCP_TOOL_CALL_TIMEOUT_SEC=600`; a test checks
+  that the recipes' tools, ids and volume match the code
+  ([#37](https://github.com/DavidGodefroid/locklog/issues/37)).
+- `locklog_pii_list` and `locklog_pii_add` are served: an agent rule
+  (`[pseudonym ]source:field`, a masked key by its `⟦key:ID⟧`) masks a
+  field the agent was shown, from the next call on; it is capped by
+  `pii_adds_per_hour` and `pii_rules_max`, stored as a keyed digest in the
+  console's home volume only (never in `.locklog/pii.toml`), audited
+  accepted or refused with that digest and never a name, and counted in
+  `locklog_status` and `:status` (`agent_rules`)
+  ([#64](https://github.com/DavidGodefroid/locklog/issues/64)).
+- The allow rules of `.locklog/pii.toml` are part of the reviewed policy:
+  an added or widened one is a loosening approved at `:review`, a removed
+  one applies at once, and the engine applies only the approved ones
+  ([#61](https://github.com/DavidGodefroid/locklog/issues/61)).
+
 - The unmask approval screen shows, for each pseudonym, how many records
   holding it agents were given in this epoch (counted by the console from
   the calls it answered and audited, never from clear values;
@@ -114,6 +132,19 @@ takes the launcher verbs every lock of the Lock Family takes (#117).
 - The MCP tools no longer echo what the agent sent in the SDK's argument
   errors (schema validation, an unknown tool's name): a fixed text names
   the argument and the rule ([#86](https://github.com/DavidGodefroid/locklog/issues/86)).
+- `locklog doctor` before any profile checks the account as for a
+  production profile (red, exit 1) and says to run `locklog profile add`;
+  it exited 0 (#87).
+- An AD/SSSD group with a space (`docker users@corp.example`) no longer
+  reads as the docker group: the launcher's facts name each gid whole
+  (`id -G`, `getent group`); without them, a matching piece stays a
+  finding that says the name may be split (#87).
+- Each cloud's metadata line and remedy are its own: Azure's speak of its
+  metadata service, not of credentials, and only AWS's names IMDSv2 (#87).
+- `profile add` writes `.locklog/` through the directory it opened and
+  checked after the prompts: a `.locklog/` replaced by a link meanwhile is
+  refused, never followed (#87). The launcher's log paths are
+  NUL-delimited (`find -print0`): a newline in a name cannot forge a path.
 - The engine runs at most `limits.max_calls` agent calls at once (default
   4); one more is refused at once with `E_BUSY` (#50). A call's deadline
   covers its planning: a plan cut by it is refused as over budget, and a
@@ -262,7 +293,8 @@ Still open in this release:
   the start), the file, journald and docker sources given only the mount
   roots the launcher checked (every planned root must be in
   `LOCKLOG_EXPECT_ROOTS`, the containers root may be the launcher's "not
-  checked from the host" case), the calibrated cost model, the profile's per-call budgets, and
+  checked from the host" case), the calibrated cost model, the profile's
+  per-call budgets, and
   `log.status`/`log.sources`. In its image the console confines itself with
   Landlock before it opens any source, and a docker source on a production
   profile needs Landlock or openat2; `:status` shows the Landlock state.
@@ -270,7 +302,8 @@ Still open in this release:
   call ends it with a connection-lost error (the next call reconnects).
 - The MCP server (`locklog mcp`): `locklog_status`, `locklog_sources`,
   `locklog_search`, `locklog_count` (also `by_pattern`), `locklog_patterns`
-  (the console now serves `log.patterns`), the PII rules and change requests, each
+  (the console now serves `log.patterns`), the PII rules and change
+  requests, each
   a thin adapter over the console; a host agent (the launcher's `mcp`) is
   refused on production profiles, as the console's status reports them,
   with the structured refusal `E_PRODUCTION_HOST_AGENT` (and when the
@@ -293,7 +326,8 @@ Still open in this release:
   included) read by name from the containers root through a name → id map,
   approved globs checked again at read time, console containers never served,
   no read across a mount point; the `docker-json` format, and an `attrs`
-  allowlist on the `docker-json` frames. The launcher binds the containers root with gid 0, keeps the map
+  allowlist on the `docker-json` frames. The launcher binds the containers
+  root with gid 0, keeps the map
   current with a `docker events` loop, labels console containers, and gains
   `locklog refresh`. gid 0 applies to the whole console, so a docker source
   runs in a console of its own: the mount plan and the launcher refuse it
@@ -348,7 +382,8 @@ Still open in this release:
   `locklog-run` volume = one trust domain); `--agent lea` says where lea
   stands. The home directory is never a project: setup refuses it, and the
   launcher's walk ignores a `~/.locklog/`. The facts file is 0600 (doctor,
-  which runs as the agent account, gets it on its input). `--loki-proxy SERVICE` wires `internal/authproxy` for a Compose
+  which runs as the agent account, gets it on its input). `--loki-proxy
+  SERVICE` wires `internal/authproxy` for a Compose
   Loki: Caddy gets only a bcrypt hash, the token is shown once on the
   terminal (and refused without one), the CA key is discarded, the files go
   to `~/.config/locklog/proxy/` (0700, outside the project), and only the
@@ -358,7 +393,8 @@ Still open in this release:
   euid 0, a readable `/var/log/journal` or `/var/lib/docker`, cloud
   credential files, unauthenticated read probes of the configured backends
   and of the clouds' metadata paths, none of which issues a token (Azure:
-  the instance document, "an identity may be available") (a status code and whether
+  the instance document, "an identity may be available") (a status code and
+  whether
   the API was recognised; never a response body), with a remedy for each
   finding; residuals: Landlock, containers with `IpcMode` shareable, swarm
   mode. On a production profile the findings are red and doctor exits 1.
@@ -437,7 +473,8 @@ Still open in this release:
   tiebreaker fields. At connection the unauthenticated-read probe and, for
   Elasticsearch / OpenSearch, the privilege and mapping check run; a
   production profile is refused on either (an open endpoint, a
-  write-capable key), with an error that quotes no credential. Off production a failed check is noted on `:status` and the source
+  write-capable key), with an error that quotes no credential. Off
+  production a failed check is noted on `:status` and the source
   matches its terms locally until the console reconnects. Remote sources
   use the remote budgets: their range, `limits.remote.count_range` for
   counts the server answers, and `limits.remote.requests_per_minute` for

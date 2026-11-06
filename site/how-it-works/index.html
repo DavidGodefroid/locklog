@@ -84,7 +84,7 @@
   <tbody>
   <tr><th scope="row"><code>status</code>, <code>sources</code>, <code>search</code>, <code>count</code>, <code>patterns</code>, <code>context</code>, <code>trace</code>, <code>tail</code> within budgets</th><td>free, audited</td></tr>
   <tr><th scope="row"><code>lookup</code> (clear value → pseudonym, detector kinds only)</th><td>free, rate-limited, audited; or approved each time with <code>lookup = "approved"</code></td></tr>
-  <tr><th scope="row"><code>pii_list</code> / <code>pii_add</code> (agent masking rules, tighten only)</th><td>free, capped, audited (served once the console’s PII backend lands, <a href="https://github.com/DavidGodefroid/locklog/issues/64">#64</a>)</td></tr>
+  <tr><th scope="row"><code>pii_list</code> / <code>pii_add</code> (agent masking rules, tighten only)</th><td>free, capped, audited</td></tr>
   <tr><th scope="row"><code>locklog_scan</code> (beyond a budget, approved once for its whole plan; its cursor continues free for 30 minutes)</th><td>you, a ticket at <code>lox run</code>, never auto-approved</td></tr>
   <tr><th scope="row"><code>locklog_unmask</code> (the clear value of exact spans of one record, once)</th><td>you, a ticket at <code>lox run</code>, the deck or a phone, never auto-approved; <strong>off by default on production</strong></td></tr>
   <tr><th scope="row"><code>locklog_request_change</code> (any loosening)</th><td>you, at the console’s <code>:review</code></td></tr>
@@ -107,7 +107,7 @@
   </ol>
   <div class="prose">
     <p>A pseudonym is <code>⟦kind:ID⟧</code>: 12 Crockford base32 characters (60 bits) of an HMAC-SHA256 under a random per-epoch key. The key rotates every 7 days by default (<code>pseudonym_rotation</code>); a replaced key is deleted once it has been replaced for <code>pseudonym_max_age</code> (30 days by default), when the console opens the profile. There is no pseudonym-to-value store: an unmask re-reads the record by its sealed reference.</p>
-    <p>Agent rules (<code>locklog_pii_add</code>) only tighten: they add masking and never remove it or change its kind. They will be stored in the console’s home volume, never in the project’s <code>.locklog/</code>, once the console serves them (<a href="https://github.com/DavidGodefroid/locklog/issues/64">#64</a>); until then the tools answer that there are no rules.</p>
+    <p>Agent rules (<code>locklog_pii_add</code>) only tighten: they add masking and never remove it or change its kind. They are stored in the console’s home volume only, never in the project’s <code>.locklog/</code>, each field as a keyed digest: the audit and the console hold that digest, never a name. The allow rules of <code>.locklog/pii.toml</code> apply only once approved at the console (<code>:review</code>).</p>
   </div>
 </section>
 

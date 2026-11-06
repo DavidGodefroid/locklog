@@ -57,6 +57,15 @@ or terminals starts with `//go:build unix`; a single test skips with
 Never point a test at a real remote service or at real logs: tests use
 generated corpora with synthetic values.
 
+The heavy suites (internal/engine, `suite_*_test.go`) skip unless asked:
+`LOCKLOG_SUITES=1` runs the leak, oracle, equivalence and injection suites
+(`LOCKLOG_SUITE_FULL=1` writes every canary kind in every encoding), and
+`LOCKLOG_SUITE_TIMING=1` the oracle's latency cases (never with `-short`).
+The local incidents run on the generated volume `LOCKLOG_INCIDENT_VOLUME`
+sets per day (CI: `1GiB`); without it, `TestIncidentVolume` with
+`LOCKLOG_SUITES=1` is a 16 MiB-a-day smoke run that CI does not run.
+`.github/workflows/ci.yml` shows how CI runs each of them.
+
 ## Pull requests
 
 - Write the failing test first, then the fix.

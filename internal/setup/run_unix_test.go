@@ -224,7 +224,9 @@ func TestAddProfileRefuses(t *testing.T) {
 func TestRunLokiProxyLeak(t *testing.T) {
 	// authproxy checks every ancestor of the proxy's directory, from /: the
 	// sticky /tmp of t.TempDir would be refused. The first of the checkout
-	// and the home directory whose ancestors pass is used instead.
+	// and the home directory whose ancestors pass is used instead; a run
+	// killed before its cleanup leaves the directory, which .gitignore
+	// keeps out of commits.
 	tmp, err := os.MkdirTemp(safeBase(t), ".locklog-leak-test-")
 	if err != nil {
 		t.Fatal(err)
@@ -397,6 +399,11 @@ func safeBase(t *testing.T) string {
 		if ok {
 			return r
 		}
+	}
+	// In CI the leak test must run: a runner where it cannot is a failure,
+	// not a skip.
+	if os.Getenv("CI") != "" {
+		t.Fatalf("no directory among %v whose ancestors are all yours or root's and writable by no one else (CI is set: the leak test must run)", cands)
 	}
 	t.Skipf("no directory among %v whose ancestors are all yours or root's and writable by no one else", cands)
 	return ""

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/DavidGodefroid/lockkit/console"
+	"github.com/DavidGodefroid/lockkit/refusal"
 
 	"github.com/DavidGodefroid/locklog/internal/config"
 	"github.com/DavidGodefroid/locklog/internal/engine"
@@ -312,7 +313,7 @@ func TestProjectAllowRulesNotApplied(t *testing.T) {
 	f := newFixture(t, fileProfile, appLog)
 	os.WriteFile(filepath.Join(f.root, ".locklog", "pii.toml"), []byte("[[allow]]\nfield = \"user\"\n[[mask]]\nfield = \"msg\"\nmode = \"redact\"\n"), 0o644)
 	s := open(t, f.options(nil))
-	if n := s.Status(context.Background()).(Status).Notes; len(n) != 1 || !strings.Contains(n[0], "allow rule") {
+	if n := s.Status(context.Background()).(Status).Notes; len(n) != 1 || !strings.Contains(n[0], "1 allow rule(s)") || !strings.Contains(n[0], ":review") {
 		t.Errorf("notes = %q", n)
 	}
 	res, _ := call(t, s, logconsole.MethodSearch, `{"from":"2026-10-30T13:00:00Z","to":"2026-10-30T14:00:00Z"}`)
@@ -321,6 +322,89 @@ func TestProjectAllowRulesNotApplied(t *testing.T) {
 		t.Errorf("rules: %s", out)
 	}
 }
+
+// Only the allow rules of the approved policy apply: one in the file but
+// not approved is skipped, and the note counts it; one approved but gone
+// from the file does not apply either.
+func TestProjectAllowRulesApprovedApplied(t *testing.T) {
+	f := newFixture(t, fileProfile, appLog)
+	os.WriteFile(filepath.Join(f.root, ".locklog", "pii.toml"), []byte("[[allow]]\nfield = \"user\"\n[[allow]]\nfield = \"level\"\nsources = [\"app\"]\n"), 0o644)
+	o := f.options(nil)
+	o.Policy.PIIAllow = []string{"allow field=user", "allow field=gone"}
+	o.Policy = config.Canonical(o.Policy)
+	s := open(t, o)
+	n := s.Status(context.Background()).(Status).Notes
+	if len(n) != 1 || !strings.Contains(n[0], "1 allow rule(s)") {
+		t.Errorf("notes = %q", n)
+	}
+	res, _ := call(t, s, logconsole.MethodSearch, `{"from":"2026-10-30T13:00:00Z","to":"2026-10-30T14:00:00Z"}`)
+	out, _ := json.Marshal(res)
+	if !strings.Contains(string(out), `"user":"Jane Doe"`) {
+		t.Errorf("the approved allow rule is not applied: %s", out)
+	}
+	if _, allow := s.PIIRules(); !slices.Equal(allow, []string{"allow field=user"}) {
+		t.Errorf("allow rules in force = %q", allow)
+	}
+}
+
+// An agent rule: checked against the names shown, its canonical form a
+// keyed digest, applied at once, counted in the status, listed without
+// its field; pii.toml is never written.
+func TestAgentRules(t *testing.T) {
+	f := newFixture(t, fileProfile, appLog)
+	pii := filepath.Join(f.root, ".locklog", "pii.toml")
+	s := open(t, f.options(nil))
+	if _, r := s.CheckAgentRule("app:msg"); r == nil || r.Info.Code != engine.EUnknownField {
+		t.Fatalf("a field never shown: %+v", r)
+	}
+	call(t, s, logconsole.MethodSearch, `{"from":"2026-10-30T13:00:00Z","to":"2026-10-30T14:00:00Z"}`)
+	for pattern, code := range map[string]string{
+		"nosuch:status":            engine.EUnknownField,
+		"partial app:msg":          engine.EUnknownField, // not a mode: part of the name
+		"app:jane.doe@example.com": engine.EPIIInQuery,
+		"app:level":                engine.EBadQuery, // trusted by the human
+	} {
+		if _, r := s.CheckAgentRule(pattern); r == nil || r.Info.Code != refusalCode(code) {
+			t.Errorf("CheckAgentRule(%q) = %+v, want %s", pattern, r, code)
+		}
+	}
+	canon, r := s.CheckAgentRule("msg")
+	if r != nil {
+		t.Fatalf("one source, no source named: %+v", r)
+	}
+	if !strings.HasPrefix(canon, "agent redact ") || strings.Contains(canon, "msg") {
+		t.Fatalf("canonical = %q", canon)
+	}
+	if st := s.Status(context.Background()).(Status).AgentRules; st.Rules != 0 {
+		t.Fatalf("checked, not added: %+v", st)
+	}
+	if r, err := s.AddAgentRule(canon); r != nil || err != nil {
+		t.Fatalf("add: %+v %v", r, err)
+	}
+	if r, err := s.AddAgentRule(canon); err != nil || r == nil || r.Info.Code != engine.EBadQuery {
+		t.Fatalf("second add: %+v %v", r, err)
+	}
+	if r, err := s.AddAgentRule("agent redact app:msg"); r != nil || err == nil {
+		t.Fatalf("a malformed canonical form: %+v %v", r, err)
+	}
+	st := s.Status(context.Background()).(Status).AgentRules
+	if st.Rules != 1 || st.AddsLastHour != 1 || st.LastAdd == nil || !st.LastAdd.Equal(t0.Add(time.Hour)) {
+		t.Fatalf("status = %+v", st)
+	}
+	mask, _ := s.PIIRules()
+	if len(mask) != 1 || !strings.HasPrefix(mask[0], "agent redact") || strings.Contains(mask[0], strings.TrimPrefix(canon, "agent redact ")) {
+		t.Errorf("listed = %q", mask)
+	}
+	if _, err := os.Stat(pii); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("pii.toml written: %v", err)
+	}
+	// The pseudonym mode, with the source named.
+	if _, r := s.CheckAgentRule("pseudonym app:user"); r != nil {
+		t.Errorf("pseudonym app:user: %+v", r)
+	}
+}
+
+func refusalCode(c string) refusal.Code { return refusal.Code(c) }
 
 func TestLimitsAndNames(t *testing.T) {
 	l := limits(config.DefaultLimits(false))

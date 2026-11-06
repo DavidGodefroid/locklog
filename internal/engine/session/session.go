@@ -114,6 +114,11 @@ type Session struct {
 	prod     bool
 	notes    []string
 	inflight atomic.Int64
+	// rules are the masking rules in force; agent caps the agent's own
+	// (pii.add), and now is the engine's clock.
+	rules *mask.Rules
+	agent mask.AgentLimits
+	now   func() time.Time
 	// remotes are the remote sources' egress clients: Close closes their
 	// pooled connections.
 	remotes []*egress.Client
@@ -178,11 +183,12 @@ func Open(ctx context.Context, o Options) (_ *Session, err error) {
 	if s.epochs, err = openEpochs(filepath.Join(dir, "epochs"), fresh, pr, o.FirstOpen, o.Now(), o.EpochsOpened); err != nil {
 		return nil, err
 	}
-	rules, notes, err := loadRules(o.Project, filepath.Join(dir, "pii"))
+	rules, notes, err := loadRules(o.Project, filepath.Join(dir, "pii"), o.Policy.PIIAllow)
 	if err != nil {
 		return nil, err
 	}
-	s.notes = notes
+	s.notes, s.rules, s.now = notes, rules, o.Now
+	s.agent = mask.AgentLimits{PerHour: pr.Limits.PIIAddsPerHour, Total: pr.Limits.PIIRulesMax}
 	values, err := valueDetectors(pr.Detectors)
 	if err != nil {
 		return nil, err
@@ -361,9 +367,10 @@ func openEpochs(dir string, create bool, pr config.Profile, first bool, now time
 // loadRules reads the human's rules: the project's .locklog/pii.toml
 // (names and modes) and the console's value rules and agent rules (its PII
 // directory, in the home volume). The project's allow rules loosen the
-// masking without the console's review: they are not applied (notes says
-// so on :status).
-func loadRules(project, piiDir string) (*mask.Rules, []string, error) {
+// masking: only those of the approved policy (approved, their canonical
+// texts) apply; the others are skipped, and notes says how many on
+// :status.
+func loadRules(project, piiDir string, approved []string) (*mask.Rules, []string, error) {
 	var notes []string
 	r := &mask.Rules{}
 	if project != "" {
@@ -372,8 +379,16 @@ func loadRules(project, piiDir string) (*mask.Rules, []string, error) {
 			return nil, nil, err
 		}
 		r.Mask = pr.Mask
-		if len(pr.Allow) > 0 {
-			notes = append(notes, fmt.Sprintf("%d allow rule(s) of .locklog/pii.toml not applied: an allow rule loosens the masking and is not part of the reviewed policy yet", len(pr.Allow)))
+		skipped := 0
+		for _, a := range pr.Allow {
+			if slices.Contains(approved, a.Text()) {
+				r.Allow = append(r.Allow, a)
+			} else {
+				skipped++
+			}
+		}
+		if skipped > 0 {
+			notes = append(notes, fmt.Sprintf("%d allow rule(s) of .locklog/pii.toml not applied: an allow rule loosens the masking and applies once approved at the console (:review)", skipped))
 		}
 	}
 	if err := os.MkdirAll(piiDir, 0o700); err != nil {
@@ -744,6 +759,8 @@ type Status struct {
 	// Residuals name the docker source's missing guards.
 	Residuals []string `json:"residuals,omitempty"`
 	Notes     []string `json:"notes,omitempty"`
+	// AgentRules counts the agent's masking rules (pii.add).
+	AgentRules AgentRuleStatus `json:"agent_rules"`
 	// Budgets is what is left of the rolling budgets.
 	Budgets engine.BudgetStatus `json:"budgets"`
 }
@@ -760,6 +777,10 @@ type SourceStatus struct {
 // Status implements logconsole.Engine.
 func (s *Session) Status(ctx context.Context) any {
 	st := Status{Epoch: s.maskers.base.Epoch(), Landlock: s.conf.Landlock.String(), Notes: s.notes, Budgets: s.eng.BudgetStatusFor(ctx)}
+	if s.rules != nil && s.rules.Agent != nil {
+		as := s.rules.Agent.Stats(s.now())
+		st.AgentRules = AgentRuleStatus{Rules: as.Rules, AddsLastHour: as.LastHour, LastAdd: timePtr(as.Last)}
+	}
 	for _, n := range s.names {
 		ss := SourceStatus{Name: n, Kind: s.srcs[n].Kind()}
 		if d, ok := s.srcs[n].(interface {

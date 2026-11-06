@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/DavidGodefroid/locklog/internal/config"
 	"github.com/DavidGodefroid/locklog/internal/hostfacts"
@@ -103,7 +104,7 @@ func run(t *testing.T, o Options) (string, int, Report) {
 // never shown.
 func TestDoctorExposedProduction(t *testing.T) {
 	open, closed := server(t, http.StatusOK), server(t, http.StatusUnauthorized)
-	meta := []Endpoint{{Cloud: "AWS", Method: http.MethodGet, URL: open.URL + "/latest/meta-data/iam/security-credentials/"}}
+	meta := []Endpoint{{Cloud: "AWS", Method: http.MethodGet, URL: open.URL + "/latest/meta-data/iam/security-credentials/", Remedy: Metadata[0].Remedy}}
 	out, code, r := run(t, Options{Facts: badHost(), Profiles: profiles(t, false, open.URL, closed.URL), Metadata: meta,
 		Landlock: func() (int, string) { return 0, "ENOSYS" }})
 	// The Loki sources are non-production (auth none), so this report is
@@ -134,6 +135,37 @@ func TestDoctorClean(t *testing.T) {
 		t.Errorf("exit %d, %d findings", code, r.Count())
 	}
 	golden(t, "clean-prod.txt", []byte(out))
+}
+
+// The groups (#87): an exact directory group "docker users@corp.example"
+// is not the docker group; ambiguous names (id -Gn split on spaces) keep
+// a matching piece a finding, fail safe, and say why it may be wrong.
+func TestDoctorGroups(t *testing.T) {
+	groupItem := func(f hostfacts.Facts) Item {
+		t.Helper()
+		f.EUID = 1000
+		r, err := Run(context.Background(), Options{Facts: f, Metadata: []Endpoint{}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, it := range r.Findings {
+			if strings.HasPrefix(it.Text, "group docker:") {
+				return it
+			}
+		}
+		t.Fatalf("no docker group item: %+v", r.Findings)
+		return Item{}
+	}
+	if it := groupItem(hostfacts.Facts{Groups: []string{"dev", "docker users@corp.example"}}); it.Finding || it.Unknown {
+		t.Errorf("exact directory group: %+v", it)
+	}
+	it := groupItem(hostfacts.Facts{Groups: []string{"dev", "docker"}, GroupsAmbiguous: true})
+	if !it.Finding || !strings.Contains(it.Text, "space") {
+		t.Errorf("ambiguous docker piece: %+v", it)
+	}
+	if it := groupItem(hostfacts.Facts{Groups: []string{"dev", "docker"}}); !it.Finding || strings.Contains(it.Text, "space") {
+		t.Errorf("docker member: %+v", it)
+	}
 }
 
 // Unknown facts are never "ok", and a pinned profile must exist.
@@ -241,8 +273,37 @@ func TestMetadataEndpoints(t *testing.T) {
 	}
 	s := server(t, http.StatusOK)
 	it := metadataItem(context.Background(), Endpoint{Cloud: "Azure", Method: http.MethodGet, URL: s.URL,
-		Answers: Metadata[2].Answers}, 0)
+		Answers: Metadata[2].Answers, Remedy: Metadata[2].Remedy, What: Metadata[2].What}, 0)
 	if !it.Finding || !strings.Contains(it.Text, "an identity may be available") || strings.Contains(it.Text, "SECRET") {
 		t.Errorf("azure item = %+v", it)
+	}
+}
+
+// Each cloud's item and remedy are its own (#87): the Azure lines never
+// say "credentials" (its probe lists none), and only AWS's remedy names
+// IMDSv2's hop limit.
+func TestMetadataWordingPerCloud(t *testing.T) {
+	ok, refused := server(t, http.StatusOK), server(t, http.StatusNotFound)
+	for _, e := range Metadata {
+		var lines []string
+		for _, url := range []string{ok.URL, refused.URL, "http://127.0.0.1:1/"} {
+			x := e
+			x.URL = url
+			it := metadataItem(context.Background(), x, time.Second)
+			lines = append(lines, it.Text, it.Remedy)
+			if url == ok.URL && (!it.Finding || it.Remedy == "") {
+				t.Errorf("%s: answering is no finding: %+v", e.Cloud, it)
+			}
+		}
+		all := strings.Join(lines, "\n")
+		if !strings.Contains(all, e.Cloud) {
+			t.Errorf("%s: its lines do not name it:\n%s", e.Cloud, all)
+		}
+		if e.Cloud == "Azure" && strings.Contains(all, "credentials") {
+			t.Errorf("Azure lines speak of credentials:\n%s", all)
+		}
+		if (e.Cloud == "AWS") != strings.Contains(all, "IMDSv2") {
+			t.Errorf("%s lines and IMDSv2:\n%s", e.Cloud, all)
+		}
 	}
 }

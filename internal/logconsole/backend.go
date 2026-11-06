@@ -30,6 +30,7 @@ import (
 
 	"github.com/DavidGodefroid/locklog/internal/config"
 	"github.com/DavidGodefroid/locklog/internal/egress"
+	"github.com/DavidGodefroid/locklog/internal/mask"
 	"github.com/DavidGodefroid/locklog/internal/product"
 )
 
@@ -240,6 +241,15 @@ type Backend struct {
 	// device:inode as the console first read it, compared on every call
 	// and every reconnection, for the life of the process.
 	dockerRoot, dockerID string
+	// cur is the open session (pii.list and pii.add reach its engine),
+	// nil once closed.
+	cur *session
+	// env is the console, as the first call met it: pii.add's refusals
+	// are audited through it.
+	env console.Env
+	// pendingAdd is the canonical form of the agent rule SaveMask just
+	// stored, until the console's record of it (AuditRecord).
+	pendingAdd string
 }
 
 var _ console.Backend = (*Backend)(nil)
@@ -353,13 +363,25 @@ func (b *Backend) LoadPolicy() (console.Policy, error) {
 	if err != nil {
 		return nil, err
 	}
-	return Policy{p}, nil
+	// The allow rules of .locklog/pii.toml loosen the masking: they are
+	// part of the policy, reviewed as any loosening, and the engine
+	// applies only those of the approved policy.
+	rules, err := mask.LoadProjectRules(filepath.Join(b.o.Root, ".locklog", "pii.toml"))
+	if err != nil {
+		return nil, err
+	}
+	for _, a := range rules.Allow {
+		p.PIIAllow = append(p.PIIAllow, a.Text())
+	}
+	return Policy{config.Canonical(p)}, nil
 }
 
 // session is one open engine.
 type session struct {
 	engine Engine
 	policy Policy
+	// closing is called once the session closes.
+	closing func(*session)
 
 	// done is closed when the session closes: the calls in flight are
 	// cancelled (callContext).
@@ -377,6 +399,9 @@ func (s *session) Close() error {
 	s.once.Do(func() {
 		if s.done != nil {
 			close(s.done)
+		}
+		if s.closing != nil {
+			s.closing(s)
 		}
 		err = s.engine.Close()
 	})
@@ -439,10 +464,22 @@ func (b *Backend) Connect(ctx context.Context, c console.Credentials) (console.S
 	if err != nil {
 		return nil, err
 	}
+	ls := newSession(e, pol)
+	ls.closing = b.closed
 	b.mu.Lock()
 	b.fp = policyFP(pol)
+	b.cur = ls
 	b.mu.Unlock()
-	return newSession(e, pol), nil
+	return ls, nil
+}
+
+// closed forgets s once it closes, if it is the open session.
+func (b *Backend) closed(s *session) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.cur == s {
+		b.cur = nil
+	}
 }
 
 // Checks implements console.Backend: a console with no remote source and
@@ -522,6 +559,11 @@ func (b *Backend) handler(method string) console.Handler {
 		if len(params) == 0 {
 			params = json.RawMessage("{}")
 		}
+		b.mu.Lock()
+		if b.env == nil {
+			b.env = env
+		}
+		b.mu.Unlock()
 		// Recorded first: a call refused before the engine runs (no
 		// session, a failed reopen) is audited too.
 		rec := newRecord(ctx, env, method, params)
