@@ -24,7 +24,7 @@ const (
 	maxLookupV  = 256 // engine.MaxLookupValue
 	maxToken    = 64  // a pseudonym ⟦kind:ID⟧
 	maxKind     = 32
-	maxScanArgs = 16 // the keys of a scan's query
+	maxScanArgs = 16   // the keys of a scan's query
 	maxText     = 256  // engine.MaxNeedle: a text needle, in bytes
 	maxCursor   = 4100 // a sealed cursor: "Lc1." and at most 4096 base64 bytes (engine.Sealer.Open)
 	maxSources  = 32   // engine.MaxSources

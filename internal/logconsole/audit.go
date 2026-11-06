@@ -52,11 +52,11 @@ func newRecord(ctx context.Context, env console.Env, method string, params json.
 	}
 	console.StampPeer(ctx, &r.Base)
 	var scope struct {
-		Sources []string `json:"sources"`
-		From     string `json:"from"`
-		To       string `json:"to"`
-		Last     string `json:"last"`
-		Baseline string `json:"baseline"`
+		Sources  []string `json:"sources"`
+		From     string   `json:"from"`
+		To       string   `json:"to"`
+		Last     string   `json:"last"`
+		Baseline string   `json:"baseline"`
 		// A scan's tool and its parameters (the same scope inside).
 		Tool  string          `json:"tool"`
 		Query json.RawMessage `json:"query"`

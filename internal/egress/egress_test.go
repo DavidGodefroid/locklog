@@ -132,7 +132,6 @@ func TestGetWithHeaders(t *testing.T) {
 	if _, err := c.GetWith(context.Background(), "/loki/api/v1/labels", q, LokiHeaders); err != nil || s.auth != "Bearer s3cret" || s.query != q.Encode() {
 		t.Fatalf("GetWith: %v %+v", err, &s)
 	}
-	n := s.n.Load()
 	// Allowlisted names pass in any case.
 	for _, h := range []string{"X-Loki-Response-Encoding-Flags", "x-loki-response-encoding-flags", "X-LOKI-RESPONSE-ENCODING-FLAGS"} {
 		hdr := map[string]string{h: "categorize-labels"}
@@ -143,7 +142,7 @@ func TestGetWithHeaders(t *testing.T) {
 			t.Errorf("allowlisted header %s not sent: %v", h, err)
 		}
 	}
-	n = s.n.Load()
+	n := s.n.Load()
 	// Everything else is refused, whatever its case: credentials, tenant,
 	// host, query tags, and any header nobody allowlisted.
 	for _, h := range []string{"Authorization", "cookie", "X-Scope-OrgID", "Host", "User-Agent", "x-query-tags",
