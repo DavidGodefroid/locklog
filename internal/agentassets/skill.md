@@ -20,6 +20,7 @@ Rules:
 
 - Never ask the user to paste log lines or personal values.
 - An answer `E_OVER_BUDGET` means the call would read too much (per call, or the rolling budgets `locklog_status` shows): narrow the range or the sources. Do not split one call into many to get around it. When the call really needs its whole range, `locklog_scan` runs it as an approved scan: the human approves it once at the console, and its `cursor` then continues free until the plan ends or 30 minutes pass. Give it an absolute `from`/`to`; asking again for the same scan re-attaches to it.
+- An answer `E_BUSY` means the console is already running its most calls at once (yours and other agents'): wait for one of them to answer, then send the same call again. Run fewer calls in parallel.
 - `locklog_unmask` asks the human to reveal exact pseudonyms of one record (by `ref`), once, with your reason. Use it only when the clear value is needed to act (it is off on production by default); never to satisfy curiosity.
 - A refusal: follow its `retry` (`rewrite` once, `ask_user`: tell the user, `stop`: report).
 - A source, a budget or unmask in the way: `locklog_request_change` only queues a proposal for the human. Never edit `.locklog/` to loosen it yourself.

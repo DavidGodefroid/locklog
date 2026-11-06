@@ -432,7 +432,7 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 		// that run splits (into a new frozen plan) is dropped with it,
 		// and the poll ends incomplete (chunk < len).
 		pf := &frozen{plan: pruned}
-		chunk, _, psc, _, rerr := e.run(pctx, &pf, 0, 0, needles, left, q.evalFactor(), func(raw source.RawRecord, rec mask.Record, b *budget) {
+		chunk, _, psc, _, rerr := e.run(pctx, &pf, 0, 0, needles, left, q.evalFactor(), runOpts{}, func(raw source.RawRecord, rec mask.Record, b *budget) {
 			k := keyOf(raw.Ref)
 			p := pos{raw.Ref.Offset, raw.Ref.Length}
 			if e.remote(raw.Ref.Source) {

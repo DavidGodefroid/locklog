@@ -91,6 +91,7 @@ type rawLimits struct {
 	LookupsPerHourPerUID int        `toml:"lookups_per_hour_per_uid"`
 	PIIAddsPerHour       int        `toml:"pii_adds_per_hour"`
 	PIIRulesMax          int        `toml:"pii_rules_max"`
+	MaxCalls             int        `toml:"max_calls"`
 	IdleTimeout          string     `toml:"idle_timeout"`
 	MaxSession           string     `toml:"max_session"`
 }
@@ -439,6 +440,7 @@ func buildLimits(r rawLimits, production bool) (Limits, error) {
 		{"lookups_per_hour_per_uid", r.LookupsPerHourPerUID, LookupsCeiling, &l.LookupsPerHourPerUID},
 		{"pii_adds_per_hour", r.PIIAddsPerHour, PIIAddsCeiling, &l.PIIAddsPerHour},
 		{"pii_rules_max", r.PIIRulesMax, PIIRulesCeiling, &l.PIIRulesMax},
+		{"max_calls", r.MaxCalls, CallsCeiling, &l.MaxCalls},
 	} {
 		switch {
 		case f.val < 0:

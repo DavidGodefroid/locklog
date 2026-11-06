@@ -231,6 +231,19 @@ uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- The engine runs at most `limits.max_calls` agent calls at once (default
+  4); one more is refused at once with `E_BUSY` (#50). A call's deadline
+  covers its planning: a plan cut by it is refused as over budget, and a
+  call left no time stops before any work with its cursor (#49).
+- The output cap bounds every answer: a record larger than it comes back
+  as an `oversized` stub with its ref (#48), and a count whose groups do
+  not fit keeps the largest ones, marked `truncated` with what it left out
+  (#47). A search without predicates whose matches outgrow the page cache
+  continues with its cursor instead of being refused (#46).
+- The split of an over-budget remote slice drops its narrower slices
+  outside the query's range (a window's and its baseline's for patterns)
+  before reading them: a dense second just outside the range no longer
+  refuses it (#73).
 - `locklog console --profile P --allowed-uids UID` (the own-container
   recipe's line for an agent uid the image does not know) works through
   the launcher: the mount plan (`locklog mounts`) gets the profile only.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -86,6 +87,55 @@ type CountResult struct {
 	IndexedFrom    *time.Time `json:"indexed_from,omitempty"`
 	IndexedUntil   *time.Time `json:"indexed_until,omitempty"`
 	MaskedFailures int        `json:"masked_failures,omitempty"`
+	// Truncated is set when the groups did not fit one answer
+	// (Limits.MaxOutput): Groups then holds the largest ones, and
+	// OmittedGroups and OmittedN tell how many groups and records were
+	// left out. The count itself is whole: narrow it (fewer buckets, a
+	// coarser by) to see them.
+	Truncated     bool  `json:"truncated,omitempty"`
+	OmittedGroups int   `json:"omitted_groups,omitempty"`
+	OmittedN      int64 `json:"omitted_n,omitempty"`
+}
+
+// fitGroups bounds a count's answer by the output cap: when its groups do
+// not fit, the groups with the most records are kept (in their order) up to
+// the cap, and the answer says how many groups and records were left out.
+func (e *Engine) fitGroups(res *CountResult) {
+	sizes := make([]int, len(res.Groups))
+	total := pageOverhead
+	for i, g := range res.Groups {
+		b, _ := json.Marshal(g)
+		sizes[i] = len(b) + 1
+		total += sizes[i]
+	}
+	if total <= e.o.Limits.MaxOutput {
+		return
+	}
+	// The truncation marker's own bytes are part of the page.
+	size := pageOverhead + len(`,"truncated":true,"omitted_groups":,"omitted_n":`) + 2*20
+	byN := make([]int, len(res.Groups))
+	for i := range byN {
+		byN[i] = i
+	}
+	sort.SliceStable(byN, func(i, j int) bool { return res.Groups[byN[i]].N > res.Groups[byN[j]].N })
+	kept := make([]bool, len(res.Groups))
+	for _, i := range byN {
+		if size+sizes[i] > e.o.Limits.MaxOutput {
+			break
+		}
+		size += sizes[i]
+		kept[i] = true
+	}
+	out := res.Groups[:0]
+	for i, g := range res.Groups {
+		if kept[i] {
+			out = append(out, g)
+			continue
+		}
+		res.OmittedGroups++
+		res.OmittedN += g.N
+	}
+	res.Groups, res.Truncated = out, true
 }
 
 // agg accumulates a count across continuations.
@@ -250,6 +300,7 @@ func (q *CountQuery) bucketOf(t time.Time) time.Time {
 // does (countFailed), while any other count leaves it out, since its masked
 // predicates cannot be evaluated on it.
 func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr error) {
+	ctx = startCall(ctx)
 	// The caller's predicates are not shared: validation and evaluation
 	// write into them.
 	q.Where = slices.Clone(q.Where)
@@ -374,14 +425,16 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 		}()
 	} else {
 		var plan source.Byteplan
+		pctx, cancel := e.planContext(ctx)
+		defer cancel()
 		// An approved scan scans its whole plan, frozen at the approval
 		// (never part from the index).
 		if trustedOnly && q.bucket%time.Minute == 0 && e.indexable(q.Sources) && scanFrom(ctx) == nil {
-			p, err := e.indexCounts(ctx, &q, a)
+			p, err := e.indexCounts(pctx, &q, a)
 			if err == nil {
 				plan = p
 			} else if !errors.Is(err, source.ErrNotIndexable) {
-				return CountResult{}, sourceError(err)
+				return CountResult{}, planError(ctx, pctx, sourceError(err))
 			} else {
 				a = newAgg()
 			}
@@ -401,8 +454,8 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 			// stream order (the cheapest).
 			pq := q.Query
 			pq.Order = "asc"
-			p, err := e.planQuery(ctx, &pq, lim.RemoteBytes, lim.LocalBytes)
-			if err != nil {
+			p, err := e.planQuery(pctx, &pq, lim.RemoteBytes, lim.LocalBytes)
+			if err = planError(ctx, pctx, err); err != nil {
 				return CountResult{}, err
 			}
 			plan = p
@@ -422,7 +475,14 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 	if q.ByPattern {
 		factor++ // templating reads every matching message
 	}
-	chunk, gran, sc, failures, err = e.run(ctx, &f, chunk, gran, nil, e.callBytes(ctx, q.Sources), factor, func(raw source.RawRecord, rec mask.Record, b *budget) {
+	// Records count by the minute they start in when the index answers
+	// part of the count (rangeContains): a slice keeps the minutes
+	// around the range.
+	keepFrom, keepTo := q.From, q.To
+	if a.indexed {
+		keepFrom, keepTo = q.From.Truncate(time.Minute), q.To.Truncate(time.Minute).Add(time.Minute)
+	}
+	chunk, gran, sc, failures, err = e.run(ctx, &f, chunk, gran, nil, e.callBytes(ctx, q.Sources), factor, runOpts{keep: inRange(keepFrom, keepTo)}, func(raw source.RawRecord, rec mask.Record, b *budget) {
 		if rec.Failed() && trustedOnly {
 			// The index counts every record by its trusted values;
 			// a scan of a trusted-only count does the same for a
@@ -494,6 +554,7 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 		}
 		return groupKey(time.Time{}, res.Groups[i].Key) < groupKey(time.Time{}, res.Groups[j].Key)
 	})
+	e.fitGroups(&res)
 	res.Complete = chunk >= len(f.plan.Chunks)
 	if !res.Complete {
 		st := cursorState{Plan: f.id, Query: digest, Chunk: chunk, Granule: gran, Epoch: e.o.Masker.Epoch(), PolicyFP: e.o.PolicyFP(), Cache: e.aggs.put(a),

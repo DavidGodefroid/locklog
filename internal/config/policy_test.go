@@ -129,6 +129,8 @@ func TestDiffLoosens(t *testing.T) {
 		{name: "range larger", cur: "[profiles.pp.limits.local]\nrange = \"30d\"\n", field: "limits.local.range", loosens: true},
 		{name: "range smaller", cur: "[profiles.pp.limits.local]\nrange = \"1d\"\n", field: "limits.local.range", loosens: false},
 		{name: "records larger", cur: "[profiles.pp.limits]\nmax_records = 500\n", field: "limits.max_records", loosens: true},
+		{name: "calls more", cur: "[profiles.pp.limits]\nmax_calls = 8\n", field: "limits.max_calls", loosens: true},
+		{name: "calls fewer", cur: "[profiles.pp.limits]\nmax_calls = 2\n", field: "limits.max_calls", loosens: false},
 		{name: "session longer", cur: "[profiles.pp.limits]\nmax_session = \"1d\"\n", field: "limits.max_session", loosens: true},
 		{name: "network added", cNet: "shop_default", field: "network", loosens: true},
 		{name: "network changed", aNet: "a", cNet: "b", field: "network", loosens: true},
@@ -266,6 +268,23 @@ func TestCanonicalJSONStable(t *testing.T) {
 	}
 	if !strings.Contains(string(b), `"extra_roots":["/a","/b"]`) {
 		t.Errorf("extra roots not canonical: %s", b)
+	}
+}
+
+// TestMaxCallsDefaultFingerprint: limits.max_calls unset or set to its
+// default is one policy (no change, the same fingerprint, no key in its
+// JSON): a profile written before the setting keeps its approval.
+func TestMaxCallsDefaultFingerprint(t *testing.T) {
+	a := policyOf(t, "", "")
+	b := policyOf(t, "[profiles.pp.limits]\nmax_calls = 4\n", "")
+	if d := b.Diff(a); len(d) != 0 || a.Fingerprint() != b.Fingerprint() {
+		t.Errorf("default max_calls: diff %+v, fingerprints %s %s", d, a.Fingerprint(), b.Fingerprint())
+	}
+	if j, _ := json.Marshal(Canonical(b)); strings.Contains(string(j), "max_calls") {
+		t.Errorf("the default is in the policy: %s", j)
+	}
+	if c := policyOf(t, "[profiles.pp.limits]\nmax_calls = 8\n", ""); c.Fingerprint() == a.Fingerprint() || c.Profile.Limits.Calls() != 8 {
+		t.Errorf("max_calls = 8: %d calls", c.Profile.Limits.Calls())
 	}
 }
 
