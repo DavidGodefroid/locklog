@@ -28,7 +28,14 @@ func (m *Masker) noteMasked(id, name string) {
 	m.names.masked[id] = name
 }
 
-func (m *Masker) noteClear(source, name string) {
+// noteClear notes a name shown in clear for source; it reports whether the
+// book holds it (it holds at most maxNames). The source "" (the cost
+// model's calibration corpus, never shown) names nothing: its thousands of
+// names would fill the book.
+func (m *Masker) noteClear(source, name string) bool {
+	if source == "" {
+		return false
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	set := m.names.clear[source]
@@ -40,6 +47,7 @@ func (m *Masker) noteClear(source, name string) {
 		set[name] = true
 		m.names.nClear++
 	}
+	return set[name]
 }
 
 func (m *Masker) maskedName(id string) (string, bool) {

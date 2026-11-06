@@ -294,7 +294,7 @@ func (e *Engine) Patterns(ctx context.Context, q PatternsQuery) (_ PatternsResul
 
 	sc, failures := Scanned{}, 0
 	var err *Error
-	chunk, gran, sc, failures, err = e.run(ctx, &f, chunk, gran, nil, e.callBytes(ctx, q.Sources), q.evalFactor()+1, func(raw source.RawRecord, rec mask.Record, b *budget) {
+	chunk, gran, sc, failures, err = e.run(ctx, &f, chunk, gran, nil, e.callBytes(ctx, q.Sources), q.evalFactor()+1, nil, func(raw source.RawRecord, rec mask.Record, b *budget) {
 		t, timed := rec.Time()
 		var bucket time.Time
 		switch {

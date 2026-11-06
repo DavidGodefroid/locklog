@@ -236,7 +236,9 @@ var errMetricBudget = errors.New("engine: the metric query budget per hour is us
 // (source.Limiter): at most RemoteRequestsPerMinute per rolling minute,
 // for the source and for the console. A request that would wait past the
 // call's deadline fails with errRequestBudget. metric, when set, also
-// charges each request as a server-side metric query.
+// charges each request as a server-side metric query, but for a count's
+// log fetches (source.AsLogFetch: Loki's boundary entries, bounded by the
+// source), which are requests only (#112).
 type requestLimiter struct {
 	l      *ledger
 	src    string
@@ -246,8 +248,9 @@ type requestLimiter struct {
 var _ source.Limiter = requestLimiter{}
 
 func (r requestLimiter) Wait(ctx context.Context) error {
+	metric := r.metric && !source.IsLogFetch(ctx)
 	for {
-		at, err := r.l.takeRequest(r.src, r.metric)
+		at, err := r.l.takeRequest(r.src, metric)
 		if err != nil {
 			return err
 		}

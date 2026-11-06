@@ -977,3 +977,75 @@ func TestAttrKeysTrustOnlyAttributes(t *testing.T) {
 		t.Errorf("trusted payload container without AttrKeys = %q", v.Text())
 	}
 }
+
+// TestCleanKeyCache: a field name that masks to itself is cached per source
+// once the name book holds it; masking is unchanged (the same record masks
+// the same way again, a name holding a value is masked every time) and the
+// name book still knows the names each source showed in clear.
+func TestCleanKeyCache(t *testing.T) {
+	m := newMasker(t, Options{Structured: StructuredDetect})
+	line := `{"level":"error","order":"4812","jane.doe@example.com":"x","password=hunter2hunter2":"y"}`
+	first, _ := json.Marshal(m.Mask("api", event(t, line)))
+	for range 3 {
+		again, _ := json.Marshal(m.Mask("api", event(t, line)))
+		if !bytes.Equal(first, again) {
+			t.Fatalf("masked differently once cached:\n%s\n%s", first, again)
+		}
+	}
+	if strings.Contains(string(first), "jane") || strings.Contains(string(first), "hunter2") {
+		t.Fatalf("a name holding a value or a secret shown: %s", first)
+	}
+	n := 0
+	m.cleanKeys.Range(func(k, _ any) bool {
+		n++
+		if s := k.(string); strings.Contains(s, "jane") || strings.Contains(s, "hunter2") {
+			t.Errorf("a masked name cached: %q", s)
+		}
+		return true
+	})
+	if n != 2 {
+		t.Fatalf("%d names cached, want 2 (level, order)", n)
+	}
+	// Another source has its own names shown in clear.
+	if m.shownClear("db", "order") {
+		t.Fatal("db never showed order")
+	}
+	m.Mask("db", event(t, line))
+	if !m.shownClear("db", "order") || !m.shownClear("api", "level") {
+		t.Fatal("the name book lost a name shown in clear")
+	}
+}
+
+// TestCleanTrustedCache: the values of trusted fields that mask to
+// themselves are cached; a trusted value holding a personal value or a
+// secret never is, and masks the same way every time; untrusted values are
+// never cached.
+func TestCleanTrustedCache(t *testing.T) {
+	m := newMasker(t, Options{Structured: StructuredDetect, Trusted: []string{"level", "owner", "status"}})
+	lines := []string{
+		`{"level":"error","status":502,"owner":"jane.doe@example.com","note":"plain"}`,
+		`{"level":"error","status":502,"owner":"password=hunter2hunter2","note":"plain"}`,
+	}
+	for _, line := range lines {
+		first, _ := json.Marshal(m.Mask("api", event(t, line)))
+		for range 3 {
+			again, _ := json.Marshal(m.Mask("api", event(t, line)))
+			if !bytes.Equal(first, again) {
+				t.Fatalf("masked differently once cached:\n%s\n%s", first, again)
+			}
+		}
+		if strings.Contains(string(first), "jane") || strings.Contains(string(first), "hunter2") {
+			t.Fatalf("a trusted value holding a value or a secret shown: %s", first)
+		}
+	}
+	var cached []string
+	m.cleanTrusted.Range(func(k, _ any) bool {
+		_, v, _ := strings.Cut(k.(string), "\x00")
+		cached = append(cached, v)
+		return true
+	})
+	slices.Sort(cached)
+	if !slices.Equal(cached, []string{"502", "error"}) {
+		t.Fatalf("cached %q, want the clean trusted values only", cached)
+	}
+}

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -623,6 +624,65 @@ func TestNoDigestOnTheSocket(t *testing.T) {
 	}
 }
 
+// countingMasker counts the records it masks.
+type countingMasker struct {
+	*mask.Masker
+	n *atomic.Int64
+}
+
+func (c countingMasker) Mask(src string, ev parse.Event) mask.Record {
+	c.n.Add(1)
+	return c.Masker.Mask(src, ev)
+}
+
+// TestTrustedCountScansWithoutMasking (#94): a count with only trusted by
+// and where scans what the index does not hold without masking the records
+// whose trusted values are known: it counts them by those values, as the
+// index does (a record masking would fail on included, never a masked
+// failure). A record holding a trusted value a detector flags is masked,
+// and counted by its masked value as before.
+func TestTrustedCountScansWithoutMasking(t *testing.T) {
+	content := boomLog(3000) + "time=2026-10-30T21:30:00Z level=jane.doe@example.com status=500 msg=\"x\"\n"
+	var n atomic.Int64
+	f := newFixtureMask(t, content, withBoom, func(o *Options) { o.Masker = countingMasker{o.Masker.(*mask.Masker), &n} })
+	cq := CountQuery{Query: q(func(q *Query) { q.Where = []Pred{{Field: "status", Op: "!=", Value: raw("200")}} }), Bucket: "1h", By: []string{"level"}}
+	res, err := f.eng.Count(ctx, cq)
+	if err != nil || !res.Complete || !res.FromIndex || res.Scanned.Granules == 0 {
+		t.Fatalf("%v %+v", err, res)
+	}
+	if n.Load() != 1 {
+		t.Fatalf("%d records masked, want 1 (the one whose level is an e-mail)", n.Load())
+	}
+	want := map[string]int64{}
+	for i := range 3000 {
+		if 200+100*(i%4) != 200 {
+			want[levels[i%len(levels)]]++
+		}
+	}
+	want["error"] += 3 // the records masking fails on: counted as the index does
+	got := map[string]int64{}
+	for _, g := range res.Groups {
+		k := "-"
+		if len(g.Key) == 1 && g.Key[0] != nil {
+			k = *g.Key[0]
+		}
+		got[k] += g.N
+	}
+	if strings.Contains(fmt.Sprint(strip(res.Groups)), "jane") {
+		t.Fatalf("a flagged trusted value reached the agent: %v", strip(res.Groups))
+	}
+	for k, v := range got {
+		if strings.HasPrefix(k, mask.Open+"email:") && v == 1 {
+			delete(got, k)
+			want["email"] = 0
+		}
+	}
+	delete(want, "email")
+	if !maps.Equal(got, want) || res.MaskedFailures != 0 {
+		t.Fatalf("groups %v, want %v; %d masked failures", got, want, res.MaskedFailures)
+	}
+}
+
 func TestCountFromIndexEqualsScan(t *testing.T) {
 	heavyRace(t)
 	// The last granule holds records the masker fails on: the index
@@ -639,7 +699,9 @@ func TestCountFromIndexEqualsScan(t *testing.T) {
 	if !want.FromIndex || want.IndexedFrom != nil {
 		t.Fatalf("cold count: from_index %v indexed_from %v", want.FromIndex, want.IndexedFrom)
 	}
-	if want.MaskedFailures != 3 || total(want.Groups) != 22503 {
+	// The records masking fails on are counted by their trusted values,
+	// never masked (#94): no masked failure, as from the index.
+	if want.MaskedFailures != 0 || total(want.Groups) != 22503 {
 		t.Fatalf("cold count: %d records, %d masked failures", total(want.Groups), want.MaskedFailures)
 	}
 	ix := newFixtureMask(t, content, withBoom, nil)

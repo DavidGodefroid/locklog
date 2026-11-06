@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"maps"
 	"slices"
-	"strings"
 	"testing"
 
 	"github.com/DavidGodefroid/lockkit/pii"
@@ -71,7 +70,6 @@ func answer(t testing.TB, e *Engine, pages []json.RawMessage) string {
 	var recs []any
 	var last map[string]any
 	for _, p := range norm {
-		p, _, _ = strings.Cut(p, noisyMark)
 		var m map[string]any
 		if err := json.Unmarshal([]byte(p), &m); err != nil {
 			t.Fatal(err)

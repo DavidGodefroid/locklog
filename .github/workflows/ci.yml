@@ -317,10 +317,22 @@ jobs:
   # suites' fake Loki on loopback: against the real Loki the 25 x 2 runs
   # per case take over 40 minutes, and the network adds noise the oracle
   # does not measure (what the engine's work reveals).
+  # Two jobs: the idle cases and the cases under the CPU hog (a process of
+  # its own, processHog), each well within the hour.
   suites-latency:
-    name: suites (latency)
+    name: suites (latency, ${{ matrix.cases }})
     runs-on: ubuntu-latest
     timeout-minutes: 65
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - cases: idle
+            run: '^TestSuiteOracleLatency$'
+            skip: '^TestSuiteOracleLatency$/hog'
+          - cases: CPU hog
+            run: '^TestSuiteOracleLatency$/hog'
+            skip: '^$'
     env:
       CGO_ENABLED: "0"
     steps:
@@ -333,10 +345,13 @@ jobs:
           check-latest: true
       - name: latency
         shell: bash
+        env:
+          RUN_CASES: ${{ matrix.run }}
+          SKIP_CASES: ${{ matrix.skip }}
         run: |
           set -o pipefail
           GOMAXPROCS=2 LOCKLOG_SUITES=1 LOCKLOG_SUITE_TIMING=1 go test -count=1 -timeout 60m -v \
-            -run '^TestSuiteOracleLatency$' ./internal/engine/ 2>&1 |
+            -run "$RUN_CASES" -skip "$SKIP_CASES" ./internal/engine/ 2>&1 |
             grep -v -E '^=== (RUN|PAUSE|CONT)' | tee latency.log
 
   # Local incident (b) at realistic volume (R6-P1): 7 days x 1 GiB/day of

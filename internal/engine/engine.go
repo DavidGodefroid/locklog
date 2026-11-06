@@ -566,7 +566,9 @@ func errSliceOver() *Error {
 // run executes a frozen plan from (chunk, granule) until the plan ends, the
 // call's byte budget is used, or the next group of granules would not fit
 // before the deadline. Each group is first fetched (read, decompressed or
-// downloaded), then every record of it is masked before visit sees it.
+// downloaded), then every record of it is masked before visit sees it; with
+// need set, only the records need selects (the others reach visit
+// unmasked: mask.Record.Valid is false).
 //
 // Stopping points are group boundaries, decided from planned bytes before a
 // fetch and from the bytes actually fetched before masking (remote sources:
@@ -589,7 +591,7 @@ func errSliceOver() *Error {
 // depends on the bytes the selector's records take (the byte cap) or, when
 // that cap is the time left to mask, on the cost model.
 func (e *Engine) run(ctx context.Context, fp **frozen, chunk, gran int, needles []string, callBytes, factor int64,
-	visit func(raw source.RawRecord, rec mask.Record, b *budget)) (_, _ int, sc Scanned, failures int, _ *Error) {
+	need func(source.RawRecord) bool, visit func(raw source.RawRecord, rec mask.Record, b *budget)) (_, _ int, sc Scanned, failures int, _ *Error) {
 	plan := (*fp).plan
 	factor = max(factor, 1)
 	// Deadlines are wall-clock (Options.Now is the query clock).
@@ -629,6 +631,15 @@ func (e *Engine) run(ctx context.Context, fp **frozen, chunk, gran int, needles 
 		per[src] += n
 	}
 	filtered := e.o.Prefilter && len(needles) > 0
+	// The group's masking runs while it is fetched (maskPipe); a group
+	// dropped or refused on the way stops its pipe.
+	var pipe *maskPipe
+	defer func() { pipe.stop() }()
+	newPipe := func(ctx context.Context, src string) *maskPipe {
+		pipe.stop()
+		pipe = e.newMaskPipe(ctx, src, need)
+		return pipe
+	}
 	// unknownEst is the bytes the last group of unknown bytes fetched,
 	// the estimate of the next one.
 	var unknownEst int64
@@ -716,7 +727,7 @@ func (e *Engine) run(ctx context.Context, fp **frozen, chunk, gran int, needles 
 		if compressed(c) {
 			groupLimit += sub.Start()
 		}
-		raws, total, fetched, recBytes, err := e.fetch(groupCtx, sub, needles, groupLimit, recLimit)
+		raws, total, fetched, recBytes, err := e.fetch(groupCtx, sub, needles, groupLimit, recLimit, newPipe(groupCtx, c.Source))
 		// A remote group's bytes are what was fetched, whatever happens
 		// to them next: one dropped below (past its byte limit, or more
 		// than the time left can mask) cost the backend and the budget
@@ -743,7 +754,7 @@ func (e *Engine) run(ctx context.Context, fp **frozen, chunk, gran int, needles 
 			// (memory) instead; masking is bounded by the group's
 			// deadline (an overrun is refused as retryable, and
 			// recalibrates). Every call makes progress (#88).
-			raws, total, fetched, recBytes, err = e.fetch(groupCtx, sub, needles, groupLimit, groupLimit)
+			raws, total, fetched, recBytes, err = e.fetch(groupCtx, sub, needles, groupLimit, groupLimit, newPipe(groupCtx, c.Source))
 		}
 		if errors.Is(err, errFetchCap) {
 			cancel()
@@ -790,7 +801,10 @@ func (e *Engine) run(ctx context.Context, fp **frozen, chunk, gran int, needles 
 		maskStart := time.Now()
 		var recs []mask.Record
 		if err == nil {
-			recs, err = e.maskAll(groupCtx, c.Source, raws)
+			recs, err = pipe.wait()
+			if err == nil && len(recs) != len(raws) {
+				err = errors.New("engine: masked records out of step with the group")
+			}
 		}
 		cancel()
 		if err != nil {
@@ -934,8 +948,9 @@ var errFetchCap = errors.New("engine: group past its byte limit")
 // records: past either, fetch stops with errFetchCap.
 //
 // It also returns the bytes of the records read (before the pre-filter),
-// what masking them costs.
-func (e *Engine) fetch(ctx context.Context, c source.Chunk, needles []string, limit, recLimit int64) (raws []source.RawRecord, total int, processed, recBytes int64, err error) {
+// what masking them costs. Each record kept is handed to pipe (nil: none)
+// as it is read, to be masked while the rest is fetched.
+func (e *Engine) fetch(ctx context.Context, c source.Chunk, needles []string, limit, recLimit int64, pipe *maskPipe) (raws []source.RawRecord, total int, processed, recBytes int64, err error) {
 	if limit > 0 {
 		// A source that buffers before it yields (a remote slice)
 		// stops its fetch there (source.ErrByteLimit).
@@ -977,6 +992,7 @@ func (e *Engine) fetch(ctx context.Context, c source.Chunk, needles []string, li
 			continue
 		}
 		raws = append(raws, raw)
+		pipe.add(raw)
 	}
 }
 
@@ -1034,6 +1050,82 @@ func (e *Engine) limiter(ctx context.Context, src string) source.Limiter {
 		return sc.limiter(src)
 	}
 	return requestLimiter{l: e.ledger, src: src}
+}
+
+// maskPipe masks a group's records on the workers while the group is still
+// being fetched (#104): reading and parsing (one goroutine) overlap masking
+// (the workers) instead of preceding it. Records are masked in full, each
+// to its place in the group's order, as maskAll does; with need set, only
+// the records need selects (the others stay unmasked, mask.Record{}).
+type maskPipe struct {
+	ctx    context.Context
+	need   func(source.RawRecord) bool
+	in     chan maskJob
+	wg     sync.WaitGroup
+	blocks [][]mask.Record // fixed blocks: a worker's slot never moves
+	n      int
+	done   bool
+}
+
+type maskJob struct {
+	ev  parse.Event
+	dst *mask.Record
+}
+
+const maskBlock = 1024
+
+func (e *Engine) newMaskPipe(ctx context.Context, src string, need func(source.RawRecord) bool) *maskPipe {
+	p := &maskPipe{ctx: ctx, need: need, in: make(chan maskJob, 4*maskBlock)}
+	for w := 0; w < max(1, e.o.Workers); w++ {
+		p.wg.Add(1)
+		go func() {
+			defer p.wg.Done()
+			for j := range p.in {
+				if ctx.Err() != nil {
+					continue // the group is dropped: wait reports ctx's error
+				}
+				*j.dst = e.o.Masker.Mask(src, j.ev)
+			}
+		}()
+	}
+	return p
+}
+
+// add hands the group's next record to the workers (nil p: none).
+func (p *maskPipe) add(raw source.RawRecord) {
+	if p == nil {
+		return
+	}
+	i := p.n
+	p.n++
+	if i/maskBlock == len(p.blocks) {
+		p.blocks = append(p.blocks, make([]mask.Record, maskBlock))
+	}
+	if p.need != nil && !p.need(raw) || p.ctx.Err() != nil {
+		return
+	}
+	p.in <- maskJob{ev: raw.Event, dst: &p.blocks[i/maskBlock][i%maskBlock]}
+}
+
+// wait returns the group's masked records, in order, once every worker is
+// done (responses are released after workers are done).
+func (p *maskPipe) wait() ([]mask.Record, error) {
+	p.stop()
+	recs := make([]mask.Record, p.n)
+	for i := range recs {
+		recs[i] = p.blocks[i/maskBlock][i%maskBlock]
+	}
+	return recs, p.ctx.Err()
+}
+
+// stop ends the workers, once (nil p: nothing).
+func (p *maskPipe) stop() {
+	if p == nil || p.done {
+		return
+	}
+	p.done = true
+	close(p.in)
+	p.wg.Wait()
 }
 
 // maskAll masks every record on the workers, in order. It returns only after
@@ -1255,7 +1347,7 @@ func (e *Engine) search(ctx context.Context, q Query, kind string) (_ SearchResu
 		var err *Error
 		var found []match
 		size, over, outFailed := matchesSize(pending), false, false
-		chunk, gran, sc, failures, err = e.run(ctx, &f, chunk, gran, needles, e.callBytes(ctx, q.Sources), q.evalFactor(), func(raw source.RawRecord, rec mask.Record, b *budget) {
+		chunk, gran, sc, failures, err = e.run(ctx, &f, chunk, gran, needles, e.callBytes(ctx, q.Sources), q.evalFactor(), nil, func(raw source.RawRecord, rec mask.Record, b *budget) {
 			// Granules hold records around the range: keep the
 			// range's (and the untimed ones).
 			if t, ok := rec.Time(); ok && !q.rangeContains(t, false) {

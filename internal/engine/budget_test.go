@@ -193,6 +193,21 @@ func TestRequestLimiter(t *testing.T) {
 	if err := mr.Wait(context.Background()); err != errMetricBudget {
 		t.Fatalf("second metric query: %v", err)
 	}
+	// A count's log fetches (Loki's boundary entries) are requests, not
+	// metric queries (#112): charged to the request budget only.
+	m = newLedger(Budgets{MetricQueriesPerHour: 1, RemoteRequestsPerMinute: 10}, time.Now)
+	mr = requestLimiter{l: m, src: "lk", metric: true}
+	for range 3 {
+		if err := mr.Wait(source.AsLogFetch(context.Background())); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if m.metricLeft("lk") != 1 || m.requestsLeft("lk") != 7 {
+		t.Fatalf("log fetches: %d metric queries left, %d requests", m.metricLeft("lk"), m.requestsLeft("lk"))
+	}
+	if err := mr.Wait(context.Background()); err != nil || m.metricLeft("lk") != 0 || m.requestsLeft("lk") != 6 {
+		t.Fatalf("a metric query after them: %v, %d left", err, m.metricLeft("lk"))
+	}
 }
 
 // describeSource is a remote source whose Describe sends one request.

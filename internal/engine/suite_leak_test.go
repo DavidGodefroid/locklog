@@ -191,7 +191,7 @@ func (l *leakScanner) page(where string, page []byte) {
 	}
 	// The plan's scanned work (bytes fetched, granules, records) is not
 	// log content; its 7-digit byte counts would match digit-run canary
-	// forms by chance (on a real Loki they vary run to run, #111).
+	// forms by chance.
 	if _, ok := m["scanned"]; ok {
 		m["scanned"] = json.RawMessage(`{}`)
 	}

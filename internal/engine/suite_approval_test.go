@@ -215,6 +215,22 @@ func echoLine(l string) bool {
 // carried, which the agent may see echoed anywhere on its screen.
 func (l *leakScanner) screen(where string, a Approval, own []masktest.Canary) {
 	a.Note = ""
+	// The clear view is the human's own (the console shows it on its
+	// terminal with Ctrl-O): it never reaches the agent nor a hub, and
+	// holds the record in clear by design; its secrets stay masked.
+	if len(a.Clear) > 0 {
+		b, _ := json.Marshal(a.Clear)
+		before := len(l.hits)
+		l.global(where+" (clear view)", b)
+		kept := l.hits[:before]
+		for _, h := range l.hits[before:] {
+			if h.Canary.Kind == "secret" {
+				kept = append(kept, h)
+			}
+		}
+		l.hits = kept
+	}
+	a.Clear = nil
 	a.Body = slices.DeleteFunc(slices.Clone(a.Body), echoLine)
 	b, _ := json.Marshal(a)
 	before := len(l.hits)
@@ -688,11 +704,10 @@ func TestSuiteApprovalOracle(t *testing.T) {
 	sa := newSuite(t, oracleCorpus(a, 300, 9000, suiteSources()), cfg)
 	sb := newSuite(t, oracleCorpus(b, 300, 9000, suiteSources()), cfg)
 	ca, cb := &screens{}, &screens{}
-	screenText := func(c *screens) string {
+	screenText := func(c *screens, vals oracleValues) string {
 		var out []string
 		for _, s := range c.take() {
-			b, _ := json.Marshal(s)
-			out = append(out, anyToken.ReplaceAllString(string(b), "⟦$1⟧"))
+			out = append(out, oracleScreen(s, vals))
 		}
 		return strings.Join(out, "\n")
 	}
@@ -708,7 +723,7 @@ func TestSuiteApprovalOracle(t *testing.T) {
 		if len(x) < 3 && !strings.HasPrefix(c.name, "patterns") {
 			t.Errorf("scan %s: %d pages: no stopping point compared", c.name, len(x))
 		}
-		if sx, sy := screenText(ca), screenText(cb); sx != sy {
+		if sx, sy := screenText(ca, a), screenText(cb, b); sx != sy {
 			t.Errorf("scan %s: the screens differ:\n%s\n%s", c.name, sx, sy)
 		}
 	}
@@ -719,6 +734,21 @@ func TestSuiteApprovalOracle(t *testing.T) {
 	if d := firstDiff(ua, ub); d != "" {
 		t.Errorf("unmask and lookup: the planted values change the answer: %s", d)
 	}
+}
+
+// oracleScreen renders an approval screen for comparison: pseudonym ids
+// dropped and, in its clear view (the human's own, which shows the
+// record's values by design), the planted values replaced by "planted".
+func oracleScreen(a Approval, vals oracleValues) string {
+	a.Clear = slices.Clone(a.Clear)
+	for i, l := range a.Clear {
+		for _, v := range vals {
+			l = strings.ReplaceAll(l, v, "planted")
+		}
+		a.Clear[i] = l
+	}
+	b, _ := json.Marshal(a)
+	return anyToken.ReplaceAllString(string(b), "⟦$1⟧")
 }
 
 // oracleUnmask runs unmasks and lookups on an oracle fixture and renders
@@ -744,8 +774,7 @@ func oracleUnmask(t *testing.T, s *suite, con *screens, vals oracleValues) []str
 		txt = strings.ReplaceAll(anyToken.ReplaceAllString(txt, "⟦$1⟧"), s.masker.Epoch(), "EPOCH")
 		var scr []string
 		for _, sc := range con.take() {
-			b, _ := json.Marshal(sc)
-			scr = append(scr, anyToken.ReplaceAllString(string(b), "⟦$1⟧"))
+			scr = append(scr, oracleScreen(sc, vals))
 		}
 		out = append(out, name+": "+txt+" screens "+strings.Join(scr, " | "))
 	}
