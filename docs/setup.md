@@ -228,3 +228,6 @@ reaches the console on it: one volume is one trust domain.
 CI builds this snippet into an agent image and calls the console from it
 (job `own-container recipe (e2e)`, for uid 10052 and for an uid admitted by
 `--allowed-uids`).
+
+The [HolmesGPT recipe](recipes/holmesgpt.md) applies it to HolmesGPT's CLI,
+with locklog as its stdio MCP server.

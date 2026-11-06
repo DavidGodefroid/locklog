@@ -142,16 +142,59 @@ func (a *AgentRules) Len() int {
 }
 
 func (a *AgentRules) add(source, clearPath, mode string, now time.Time, lim AgentLimits) error {
-	d := a.digest(source, clearPath)
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	return a.Add(AgentRule{Digest: a.digest(source, clearPath), Mode: mode}, now, lim)
+}
+
+// AgentRule is an agent rule as CheckAgentRule returns it: the keyed
+// digest of its (source, clear path) and its mode, nothing else. Its
+// String form is the canonical pattern the console records, prints and
+// audits: it never holds a name, clear or as shown.
+type AgentRule struct {
+	Digest string
+	Mode   string
+}
+
+// agentRulePrefix starts the canonical form of an agent rule.
+const agentRulePrefix = "agent "
+
+// String is the canonical form: "agent <mode> <digest>".
+func (r AgentRule) String() string { return agentRulePrefix + r.Mode + " " + r.Digest }
+
+// ParseAgentRule parses the canonical form of an agent rule.
+func ParseAgentRule(s string) (AgentRule, error) {
+	bad := errors.New("mask: not an agent rule")
+	rest, ok := strings.CutPrefix(s, agentRulePrefix)
+	if !ok {
+		return AgentRule{}, bad
+	}
+	mode, digest, ok := strings.Cut(rest, " ")
+	if !ok || (mode != ModeRedact && mode != ModePseudonym) || !validDigest(digest) {
+		return AgentRule{}, bad
+	}
+	return AgentRule{Digest: digest, Mode: mode}, nil
+}
+
+// validDigest is 64 lower-case hex digits.
+func validDigest(d string) bool {
+	if len(d) != 64 {
+		return false
+	}
+	for i := 0; i < len(d); i++ {
+		if c := d[i]; !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// allows reports why entries refuse a rule of digest d at now: one
+// already there, or a cap reached. a.mu is held.
+func (a *AgentRules) allows(d string, now time.Time, lim AgentLimits) error {
+	recent := 0
 	for _, e := range a.entries {
 		if e.Digest == d {
 			return ErrRuleExists
 		}
-	}
-	recent := 0
-	for _, e := range a.entries {
 		if now.Sub(e.Added) < time.Hour {
 			recent++
 		}
@@ -159,7 +202,21 @@ func (a *AgentRules) add(source, clearPath, mode string, now time.Time, lim Agen
 	if lim.Total <= 0 || lim.PerHour <= 0 || len(a.entries) >= lim.Total || recent >= lim.PerHour {
 		return ErrRuleCap
 	}
-	entries := append(slices.Clone(a.entries), agentEntry{Digest: d, Mode: mode, Added: now.UTC()})
+	return nil
+}
+
+// Add stores a rule CheckAgentRule returned, checking again, under the
+// lock, that no rule has its digest and that the caps allow it.
+func (a *AgentRules) Add(r AgentRule, now time.Time, lim AgentLimits) error {
+	if (r.Mode != ModeRedact && r.Mode != ModePseudonym) || !validDigest(r.Digest) {
+		return errors.New("mask: not an agent rule")
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err := a.allows(r.Digest, now, lim); err != nil {
+		return err
+	}
+	entries := append(slices.Clone(a.entries), agentEntry{Digest: r.Digest, Mode: r.Mode, Added: now.UTC()})
 	data, err := json.Marshal(entries)
 	if err != nil {
 		return err
@@ -172,6 +229,48 @@ func (a *AgentRules) add(source, clearPath, mode string, now time.Time, lim Agen
 	return nil
 }
 
+// AgentStats count the agent's rules: in all, added within the hour
+// before now, and the last one's time (zero for none).
+type AgentStats struct {
+	Rules    int
+	LastHour int
+	Last     time.Time
+}
+
+// Stats returns the counts of the rules at now.
+func (a *AgentRules) Stats(now time.Time) AgentStats {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	st := AgentStats{Rules: len(a.entries)}
+	for _, e := range a.entries {
+		if now.Sub(e.Added) < time.Hour {
+			st.LastHour++
+		}
+		if e.Added.After(st.Last) {
+			st.Last = e.Added
+		}
+	}
+	return st
+}
+
+// AgentListed is an agent rule as listed: its mode and when it was added,
+// never its field.
+type AgentListed struct {
+	Mode  string
+	Added time.Time
+}
+
+// List returns the rules in the order they were added.
+func (a *AgentRules) List() []AgentListed {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	out := make([]AgentListed, len(a.entries))
+	for i, e := range a.entries {
+		out[i] = AgentListed{Mode: e.Mode, Added: e.Added}
+	}
+	return out
+}
+
 // RulesGeneration changes whenever a rule is added at runtime (an agent
 // rule, which TrustedValue applies at once): an answer of TrustedValue
 // remembered under one generation must be asked again under another.
@@ -182,28 +281,40 @@ func (m *Masker) RulesGeneration() uint64 {
 	return m.o.Rules.Agent.generation.Load()
 }
 
-// AgentAdd adds an agent rule (locklog_pii_add): the field named by its
-// shown path (clear names as shown, masked names as ⟦key:ID⟧, translated
-// here, in the console, to the clear name). It only tightens: the field's
-// names must all have been shown (clear, or masked under this epoch), the
-// path holds no glob, no personal value and no secret, no human rule
-// decides the field, and the mode is redact or pseudonym. The rule is
-// saved as a keyed digest in the PII directory only.
+// AgentAdd adds an agent rule (locklog_pii_add): CheckAgentRule, then
+// the rule stored.
 func (m *Masker) AgentAdd(source, shownPath, mode string, now time.Time, lim AgentLimits) error {
-	if m.o.Rules.Agent == nil {
-		return errors.New("mask: no PII directory for agent rules")
+	r, err := m.CheckAgentRule(source, shownPath, mode, now, lim)
+	if err != nil {
+		return err
+	}
+	return m.o.Rules.Agent.Add(r, now, lim)
+}
+
+// CheckAgentRule checks an agent rule (locklog_pii_add) without adding
+// it: the field named by its shown path (clear names as shown, masked
+// names as ⟦key:ID⟧, translated here, in the console, to the clear name).
+// It only tightens: the field's names must all have been shown (clear, or
+// masked under this epoch), the path holds no glob, no personal value and
+// no secret, no human rule decides the field, the mode is redact or
+// pseudonym, no agent rule has the field yet and the caps allow one more.
+// The rule returned holds the keyed digest of the field, never its name:
+// AgentRules.Add stores it in the PII directory only.
+func (m *Masker) CheckAgentRule(source, shownPath, mode string, now time.Time, lim AgentLimits) (AgentRule, error) {
+	if m.o.Rules == nil || m.o.Rules.Agent == nil {
+		return AgentRule{}, errors.New("mask: no PII directory for agent rules")
 	}
 	if mode != ModeRedact && mode != ModePseudonym {
-		return ErrRuleMode
+		return AgentRule{}, ErrRuleMode
 	}
 	if !validName(source) {
-		return ErrUnknownField
+		return AgentRule{}, ErrUnknownField
 	}
 	if strings.ContainsAny(shownPath, "*?[]") {
-		return ErrPIIInQuery // no glob: it could probe masked names
+		return AgentRule{}, ErrPIIInQuery // no glob: it could probe masked names
 	}
 	if plain := blankPlaceholders(shownPath); finds(m.o.Values, plain) || finds(m.o.Secrets, plain) || finds(m.o.Rules, plain) {
-		return ErrPIIInQuery
+		return AgentRule{}, ErrPIIInQuery
 	}
 	parts := splitPath(shownPath)
 	clear := make([]string, len(parts))
@@ -214,7 +325,7 @@ func (m *Masker) AgentAdd(source, shownPath, mode string, now time.Time, lim Age
 			id, ok := strings.CutPrefix(strings.TrimSuffix(p, Close), Open+KeyKind+":")
 			name, known := m.maskedName(id)
 			if !ok || !known {
-				return ErrUnknownField
+				return AgentRule{}, ErrUnknownField
 			}
 			clear[i] = name
 			continue
@@ -223,10 +334,10 @@ func (m *Masker) AgentAdd(source, shownPath, mode string, now time.Time, lim Age
 		// secret, and one never shown in clear (it may be a masked name:
 		// the answer is the same as for a name that does not exist).
 		if finds(m.o.Values, p) || finds(m.o.Secrets, p) || finds(m.o.Rules, p) {
-			return ErrPIIInQuery
+			return AgentRule{}, ErrPIIInQuery
 		}
 		if !m.shownClear(source, p) {
-			return ErrUnknownField
+			return AgentRule{}, ErrUnknownField
 		}
 		clear[i] = p
 	}
@@ -234,20 +345,28 @@ func (m *Masker) AgentAdd(source, shownPath, mode string, now time.Time, lim Age
 	// A path through a masked name is matched by its digest only: its
 	// shape is not checked.
 	if err := checkPath(cp, false); err != nil && !masked {
-		return ErrUnknownField
+		return AgentRule{}, ErrUnknownField
 	}
 	// Through a masked name, the human's rules and trusted fields are not
 	// consulted either (their answer would tell of the clear name): the
 	// agent's rule only tightens, and a human rule still wins.
 	if !masked {
 		if _, ok := m.o.Rules.human(source, cp); ok {
-			return ErrRuleExists
+			return AgentRule{}, ErrRuleExists
 		}
 		if m.trusted[cp] {
-			return ErrRuleExists // trusted by the human: only the human changes it
+			return AgentRule{}, ErrRuleExists // trusted by the human: only the human changes it
 		}
 	}
-	return m.o.Rules.Agent.add(source, cp, mode, now, lim)
+	a := m.o.Rules.Agent
+	r := AgentRule{Digest: a.digest(source, cp), Mode: mode}
+	a.mu.Lock()
+	err := a.allows(r.Digest, now, lim)
+	a.mu.Unlock()
+	if err != nil {
+		return AgentRule{}, err
+	}
+	return r, nil
 }
 
 // finds reports whether f finds anything in s.
