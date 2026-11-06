@@ -84,6 +84,28 @@ credentials. The console reaches the backend on a Docker network:
 `LOCKLOG_NETWORK=<network> locklog console --profile <profile>-search`; the
 launcher refuses a remote source without one.
 
+The backend check runs once per connection, before the agent can call; a
+reconnection checks again. Off production, a failure that concerns the
+scope refuses the profile too: a time field that is not a date, a selector
+field that is not a plain keyword field (on a text field a term matches a
+token, which widens the scope), mappings that cannot be read when the
+source has a selector, or a check that failed before it could type-check
+them (a wrong secret, an unreachable backend). Any other failure off
+production leaves the source open with a note on `:status`: its terms are
+matched locally and its counts scanned until a reconnection checks again.
+A refusal quotes what the backend reported (its version, privilege, role,
+index or field names) cut to 64 characters of a plain charset, and at most
+eight privileges; never a response body.
+
+Known limits:
+
+- Scoped API keys (an Elasticsearch key with role descriptors) are judged
+  by the privileges `_security/user/_privileges` reports; they are not yet
+  tested against a production cluster.
+- Without `tiebreaker`, more documents at one timestamp than one page
+  holds is an error: the page cannot resume between them. It fails
+  safe; set `tiebreaker` to a keyword field unique per document.
+
 ### TLS files of a remote source
 
 The launcher mounts no file for a remote source: the console reads only the

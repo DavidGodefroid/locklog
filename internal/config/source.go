@@ -563,6 +563,15 @@ func buildRemote(kind string, r rawSource, production bool, errf func(string, ..
 	if (rem.TLSCert == "") != (rem.TLSKey == "") {
 		return nil, errf("tls_cert and tls_key go together: set both, or neither")
 	}
+	// The console reads these files in its container: a relative or '~'
+	// path would resolve against whatever its working directory is (the
+	// launcher's mount plan refuses them too, but a console started
+	// without it would not).
+	for _, f := range []struct{ key, val string }{{"tls_ca", rem.TLSCA}, {"tls_cert", rem.TLSCert}, {"tls_key", rem.TLSKey}} {
+		if f.val != "" && (!path.IsAbs(f.val) || path.Clean(f.val) != f.val) {
+			return nil, errf("%s: want an absolute, clean path (no '~', '..', '.', '//' or trailing '/')", f.key)
+		}
+	}
 
 	tls := scheme == "https"
 	if rem.TLS == "" {

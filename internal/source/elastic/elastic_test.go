@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -694,6 +695,82 @@ func TestCheckPrivileges(t *testing.T) {
 	s = newSource(t, newFake(nil), func(o *Options) { o.Kind = KindOpenSearch })
 	if _, err := s.Check(ctx, false); err == nil {
 		t.Fatal("an Elasticsearch backend passed for kind opensearch")
+	}
+}
+
+// Off production, a Check failure that concerns the scope (the time
+// field, a selector field, or a failure before they are type-checked) is
+// ErrScope: the wiring refuses the source, since the selector and the time
+// range are sent whatever Check found. Other failures are not.
+func TestCheckScopeFailures(t *testing.T) {
+	sel := func(o *Options) { o.Selector = map[string]string{"env": "prod"} }
+	for _, tt := range []struct {
+		name  string
+		mod   func(*fakeES)
+		opt   func(*Options)
+		scope bool // the failure is ErrScope (false: another failure, or none)
+		ok    bool
+	}{
+		{"time field a keyword", func(f *fakeES) { f.types["@timestamp"] = "keyword" }, nil, true, false},
+		{"selector on a text field", func(f *fakeES) { f.types["env"] = "text" }, sel, true, false},
+		{"selector with a normalizer", func(f *fakeES) {
+			f.types["env"] = "keyword"
+			f.mapping = `{"logs-a":{"mappings":{"properties":{"env":{"type":"keyword","normalizer":"lc"},"app":{"type":"keyword"},"level":{"type":"keyword"}}}}}`
+		}, sel, true, false},
+		{"mappings unreadable with a selector", func(f *fakeES) { f.types["env"] = "keyword"; f.mapping = "nope" }, sel, true, false},
+		{"mappings unreadable without a selector", func(f *fakeES) { f.mapping = "nope" }, nil, false, true},
+		{"backend version unreadable", func(f *fakeES) { f.version = "x" }, nil, true, false},
+		{"another flavour", func(f *fakeES) { f.flavour, f.roles = "opensearch", []string{"readall"} }, nil, true, false},
+		{"trusted field a text field", func(f *fakeES) { f.types["level"] = "text" }, nil, false, false},
+		{"trusted field with a normalizer", func(f *fakeES) {
+			f.mapping = `{"logs-a":{"mappings":{"properties":{"level":{"type":"keyword","normalizer":"lc"},"app":{"type":"keyword"}}}}}`
+		}, nil, false, false},
+		{"trusted field also the selector, a text field", func(f *fakeES) { f.types["level"] = "text" }, func(o *Options) { o.Selector = map[string]string{"level": "x"} }, true, false},
+	} {
+		f := newFake(nil)
+		tt.mod(f)
+		s := newSource(t, f, tt.opt)
+		_, err := s.Check(ctx, false)
+		if (err == nil) != tt.ok || errors.Is(err, ErrScope) != tt.scope {
+			t.Errorf("%s: err = %v, ErrScope %t", tt.name, err, errors.Is(err, ErrScope))
+		}
+	}
+}
+
+// Server-provided strings in Check's refusals are bounded and reduced to a
+// plain charset, and a long list is cut.
+func TestCheckRefusalsBoundServerStrings(t *testing.T) {
+	hostile := "evil\x1b[31m\n" + strings.Repeat("A", 500)
+	privs := []string{"monitor", hostile}
+	for i := 0; i < 20; i++ {
+		privs = append(privs, fmt.Sprintf("priv%d", i))
+	}
+	list, _ := json.Marshal(privs)
+	f := newFake(nil)
+	grants(`"cluster":` + string(list))(f)
+	_, err := newSource(t, f, nil).Check(ctx, true)
+	if err == nil {
+		t.Fatal("a write key passed")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "\x1b") || strings.Contains(msg, "\n") || strings.Contains(msg, strings.Repeat("A", maxShown+1)) {
+		t.Errorf("a server string passed unbounded: %q", msg)
+	}
+	if !strings.Contains(msg, "more") || len(msg) > 1500 {
+		t.Errorf("the list is not cut (%d bytes): %q", len(msg), msg)
+	}
+	// A version and a role name.
+	f = newFake(nil)
+	f.version = "7." + hostile
+	_, err = newSource(t, f, nil).Check(ctx, false)
+	if err == nil || !strings.Contains(err.Error(), "not supported") || strings.Contains(err.Error(), "\x1b") || strings.Contains(err.Error(), strings.Repeat("A", maxShown+1)) {
+		t.Errorf("version: %v", err)
+	}
+	f = newFake(nil)
+	f.flavour, f.roles = "opensearch", []string{"readall", hostile}
+	_, err = newSource(t, f, func(o *Options) { o.Kind = KindOpenSearch }).Check(ctx, true)
+	if err == nil || strings.Contains(err.Error(), "\x1b") || strings.Contains(err.Error(), strings.Repeat("A", maxShown+1)) {
+		t.Errorf("role: %v", err)
 	}
 }
 

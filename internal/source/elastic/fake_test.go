@@ -55,6 +55,7 @@ type fakeES struct {
 	seg      string
 	docs     []fakeDoc
 	flavour  string // "" (Elasticsearch) or "opensearch"
+	version  string // the Elasticsearch version GET / answers (default 8.15.3)
 	grants   string // the _privileges answer
 	resolved string // the _resolve/index answer
 	mapping  string // the _mapping answer (default: defaultMapping)
@@ -120,7 +121,11 @@ func (f *fakeES) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte(`{"name":"n","version":{"distribution":"opensearch","number":"2.17.1"},"tagline":"The OpenSearch Project"}`))
 			return
 		}
-		_, _ = w.Write([]byte(`{"name":"n","version":{"number":"8.15.3","build_flavor":"default"},"tagline":"You Know, for Search"}`))
+		v := f.version
+		if v == "" {
+			v = "8.15.3"
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"name": "n", "version": map[string]any{"number": v, "build_flavor": "default"}, "tagline": "You Know, for Search"})
 	case r.Method == "GET" && r.URL.Path == "/_resolve/index"+pre:
 		if r.URL.Query().Get("expand_wildcards") != "open" {
 			f.fail(w, 400, "expand_wildcards")

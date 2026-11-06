@@ -16,6 +16,73 @@ import (
 	"github.com/DavidGodefroid/locklog/internal/source"
 )
 
+// ErrScope marks a Check failure that concerns the source's scope: the
+// time field or a selector field is not what Check requires (a date; a
+// plain keyword field), or Check failed before it could type-check them.
+// The selector and the time range are sent with every request whatever
+// Check found, so such a failure refuses the source even off production
+// (on a text field a selector term matches a token, and a time field that
+// is not a date compares as text: either widens the scope).
+var ErrScope = errors.New("elasticsearch source: the scope (time field, selector) is not verified")
+
+// scopeError is a Check failure that concerns the scope: errors.Is(err,
+// ErrScope); its text is the cause's.
+type scopeError struct{ err error }
+
+func (e *scopeError) Error() string        { return e.err.Error() }
+func (e *scopeError) Unwrap() error        { return e.err }
+func (e *scopeError) Is(target error) bool { return target == ErrScope }
+
+func scopeErr(err error) error { return &scopeError{err} }
+
+// Server-provided strings quoted in Check's errors and Info (a version,
+// role, privilege, index or field names, mapping values) are bounded and
+// reduced to a plain charset: they reach only the human's terminal, but
+// a refusal must not relay arbitrary response content.
+const (
+	maxShown     = 64
+	maxShownList = 8
+)
+
+// shown bounds a server-provided string to maxShown bytes of
+// [A-Za-z0-9._:/*?@+=-], every other byte as '?'.
+func shown(s string) string {
+	cut := len(s) > maxShown
+	if cut {
+		s = s[:maxShown]
+	}
+	b := []byte(s)
+	for i, c := range b {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', strings.IndexByte("._:/*?@+=-", c) >= 0:
+		default:
+			b[i] = '?'
+		}
+	}
+	if cut {
+		return string(b) + "..."
+	}
+	return string(b)
+}
+
+// shownAll is shown of every element.
+func shownAll(xs []string) []string {
+	out := make([]string, len(xs))
+	for i, x := range xs {
+		out[i] = shown(x)
+	}
+	return out
+}
+
+// shownList joins at most maxShownList elements (already shown), and
+// counts the rest.
+func shownList(xs []string) string {
+	if len(xs) <= maxShownList {
+		return strings.Join(xs, ", ")
+	}
+	return strings.Join(xs[:maxShownList], ", ") + fmt.Sprintf(" and %d more", len(xs)-maxShownList)
+}
+
 // Info is what Check learnt of the backend.
 type Info struct {
 	Flavour string
@@ -53,12 +120,12 @@ func (s *Source) detect(ctx context.Context) (string, string, error) {
 	switch {
 	case r.Version.Distribution == "opensearch":
 		if major < 2 {
-			return "", "", fmt.Errorf("elasticsearch source: OpenSearch %s is not supported (2.x and later)", r.Version.Number)
+			return "", "", fmt.Errorf("elasticsearch source: OpenSearch %s is not supported (2.x and later)", shown(r.Version.Number))
 		}
 		return FlavourOpenSearch, r.Version.Number, nil
 	case r.Version.Distribution == "":
 		if major < 8 {
-			return "", "", fmt.Errorf("elasticsearch source: Elasticsearch %s is not supported (8.x and later)", r.Version.Number)
+			return "", "", fmt.Errorf("elasticsearch source: Elasticsearch %s is not supported (8.x and later)", shown(r.Version.Number))
 		}
 		return FlavourElasticsearch, r.Version.Number, nil
 	}
@@ -104,7 +171,7 @@ func checkGrantShape(raw json.RawMessage, remote bool) error {
 		}
 		for k := range g {
 			if !slices.Contains(indexGrantKeys, k) && (!remote || k != "clusters") {
-				return fmt.Errorf("elasticsearch source: an index grant holds an unknown member %q", k)
+				return fmt.Errorf("elasticsearch source: an index grant holds an unknown member %s", shown(k))
 			}
 		}
 	}
@@ -289,7 +356,7 @@ func esWrite(body []byte, readable []string) ([]string, error) {
 			}
 			for k := range e {
 				if k != "privileges" && k != "clusters" {
-					return nil, fmt.Errorf("elasticsearch source: a remote_cluster grant holds an unknown member %q", k)
+					return nil, fmt.Errorf("elasticsearch source: a remote_cluster grant holds an unknown member %s", shown(k))
 				}
 			}
 		}
@@ -298,7 +365,7 @@ func esWrite(body []byte, readable []string) ([]string, error) {
 	for k, v := range raw {
 		if !slices.Contains(knownPrivilegeKeys, k) {
 			if t := strings.TrimSpace(string(v)); t != "[]" && t != "{}" && t != "null" {
-				write = append(write, "unknown:"+k)
+				write = append(write, "unknown:"+shown(k))
 			}
 		}
 	}
@@ -308,20 +375,20 @@ func esWrite(body []byte, readable []string) ([]string, error) {
 	}
 	for _, p := range u.Cluster {
 		if !readOnlyCluster(p) {
-			write = append(write, "cluster:"+p)
+			write = append(write, "cluster:"+shown(p))
 		}
 	}
 	for _, rc := range u.RemoteCluster {
 		for _, p := range rc.Privileges {
 			if !readOnlyCluster(p) {
-				write = append(write, "remote_cluster:"+p)
+				write = append(write, "remote_cluster:"+shown(p))
 			}
 		}
 	}
 	for _, g := range u.RemoteIndices {
 		for _, p := range g.Privileges {
 			if !slices.Contains(readIndex, p) {
-				write = append(write, "remote:"+strings.Join(g.Names, ",")+":"+p)
+				write = append(write, "remote:"+strings.Join(shownAll(g.Names), ",")+":"+shown(p))
 			}
 		}
 	}
@@ -336,7 +403,7 @@ func esWrite(body []byte, readable []string) ([]string, error) {
 		}
 		for _, p := range g.Privileges {
 			if !slices.Contains(readIndex, p) {
-				write = append(write, strings.Join(g.Names, ",")+":"+p+mark)
+				write = append(write, strings.Join(shownAll(g.Names), ",")+":"+shown(p)+mark)
 			}
 		}
 	}
@@ -347,7 +414,7 @@ func esWrite(body []byte, readable []string) ([]string, error) {
 		write = append(write, "application privileges")
 	}
 	if len(u.RunAs) > 0 {
-		write = append(write, "run_as:"+strings.Join(u.RunAs, ","))
+		write = append(write, "run_as:"+strings.Join(shownAll(u.RunAs), ","))
 	}
 	sort.Strings(write)
 	return slices.Compact(write), nil
@@ -394,7 +461,7 @@ func (s *Source) osPrivileges(ctx context.Context) ([]string, error) {
 	}
 	for _, role := range r.Roles {
 		if !slices.Contains(readOnlyRoles, role) && !slices.Contains(s.o.ReadOnlyRoles, role) {
-			write = append(write, "role:"+role)
+			write = append(write, "role:"+shown(role))
 		}
 	}
 	sort.Strings(write)
@@ -436,7 +503,16 @@ func (s *Source) fieldCaps(ctx context.Context, fields []string) (fieldCapsRespo
 // not served otherwise); Check may run again at any time (on reconnect,
 // on a timer): while it runs, and after it fails, the source pushes no
 // trusted term and serves no count, and streams planned under an earlier
-// state that pushed a term now kept local are stale (source.ErrStale).
+// state that pushed a term now kept local are stale (source.ErrStale),
+// down to the next record of a scan.
+//
+// Concurrent Checks (#93), which the console's wiring never runs (one
+// Check per connection, before the source is served):
+//   - a failure, even of an older or cancelled Check, also voids a newer
+//     Check still running: it fails safe, and the caller checks again
+//     after any failure;
+//   - Check shares the source's InFlight requests with scans: a slow scan
+//     can delay it up to the client's timeout.
 func (s *Source) Check(ctx context.Context, production bool) (info Info, retErr error) {
 	var err error
 	// A failure, whenever it lands, leaves nothing server-side: it also
@@ -460,11 +536,14 @@ func (s *Source) Check(ctx context.Context, production bool) (info Info, retErr 
 	gen := s.gen
 	s.checked = false
 	s.mu.Unlock()
+	// Every failure before the time field and the selector are
+	// type-checked leaves the scope unverified (ErrScope).
 	if info.Flavour, info.Version, err = s.detect(ctx); err != nil {
-		return info, err
+		return info, scopeErr(err)
 	}
+	info.Version = shown(info.Version)
 	if want := map[string]string{KindElastic: FlavourElasticsearch, KindOpenSearch: FlavourOpenSearch}[s.o.Kind]; info.Flavour != want {
-		return info, fmt.Errorf("elasticsearch source: the backend is %s, the source is kind = %q", info.Flavour, s.o.Kind)
+		return info, scopeErr(fmt.Errorf("elasticsearch source: the backend is %s, the source is kind = %q", info.Flavour, s.o.Kind))
 	}
 	var write []string
 	if info.Flavour == FlavourOpenSearch {
@@ -479,7 +558,7 @@ func (s *Source) Check(ctx context.Context, production bool) (info Info, retErr 
 		return info, fmt.Errorf("elasticsearch source: the key's privileges cannot be read, which a production profile refuses: %w", err)
 	}
 	if production && len(info.Write) > 0 {
-		return info, fmt.Errorf("elasticsearch source: the key holds write or manage privileges (%s): a production profile needs a read-only key", strings.Join(info.Write, ", "))
+		return info, fmt.Errorf("elasticsearch source: the key holds write or manage privileges (%s): a production profile needs a read-only key", shownList(info.Write))
 	}
 	// The fields the source names in a body: the time field, the trusted
 	// and tiebreaker fields, and the selector's (its terms are the scope:
@@ -495,15 +574,24 @@ func (s *Source) Check(ctx context.Context, production bool) (info Info, retErr 
 	}
 	sort.Strings(keywords)
 	fields := append([]string{s.o.TimeField}, keywords...)
+	selector := func(f string) bool { _, ok := s.o.Selector[f]; return ok }
+	// scoped marks a failure on f as a scope one when f is the time field
+	// or a selector field.
+	scoped := func(f string, err error) error {
+		if f == s.o.TimeField || selector(f) {
+			return scopeErr(err)
+		}
+		return err
+	}
 	fc, err := s.fieldCaps(ctx, fields)
 	if err != nil {
-		return info, fmt.Errorf("elasticsearch source: %w", err)
+		return info, scopeErr(fmt.Errorf("elasticsearch source: %w", err))
 	}
 	for _, f := range fields {
 		types, ok := fc.Fields[f]
 		if !ok || len(types) == 0 {
 			if production {
-				return info, fmt.Errorf("elasticsearch source: no index of the source maps %s: a production profile refuses a field it cannot type-check", f)
+				return info, scoped(f, fmt.Errorf("elasticsearch source: no index of the source maps %s: a production profile refuses a field it cannot type-check", f))
 			}
 			continue // no index maps it yet
 		}
@@ -511,10 +599,10 @@ func (s *Source) Check(ctx context.Context, production bool) (info Info, retErr 
 			switch {
 			case f == s.o.TimeField:
 				if t != "date" && t != "date_nanos" {
-					return info, fmt.Errorf("elasticsearch source: the time field %s is a %s, not a date", f, t)
+					return info, scopeErr(fmt.Errorf("elasticsearch source: the time field %s is a %s, not a date", f, shown(t)))
 				}
 			case t != "keyword" && t != "constant_keyword":
-				return info, fmt.Errorf("elasticsearch source: %s is a %s field; trusted, selector and tiebreaker fields must be keyword fields", f, t)
+				return info, scoped(f, fmt.Errorf("elasticsearch source: %s is a %s field; trusted, selector and tiebreaker fields must be keyword fields", f, shown(t)))
 			}
 		}
 	}
@@ -529,15 +617,19 @@ func (s *Source) Check(ctx context.Context, production bool) (info Info, retErr 
 	// local (pushable), counts by it are not served; a selector field
 	// with a null_value is refused (it would select absent ones). A
 	// field missing from an index is refused on production; mappings or
-	// settings that cannot be read are refused on production, and keep
-	// every term local elsewhere.
-	selector := func(f string) bool { _, ok := s.o.Selector[f]; return ok }
+	// settings that cannot be read are refused on production and with a
+	// selector (ErrScope), and keep every term local elsewhere.
 	related := func(a, b string) bool { return a == b || strings.HasPrefix(a, b+".") || strings.HasPrefix(b, a+".") }
 	local := map[string]bool{}
 	m, err := s.mappingFacts(ctx, info.Flavour)
 	switch {
 	case err != nil && production:
 		return info, fmt.Errorf("elasticsearch source: reading the mappings and settings (the key needs view_index_metadata), which a production profile requires: %w", err)
+	case err != nil && len(s.o.Selector) > 0:
+		// A selector field's normalizer, runtime field or copy_to cannot
+		// be ruled out: the selector is sent anyway, so the scope is
+		// unverified.
+		return info, scopeErr(fmt.Errorf("elasticsearch source: reading the mappings and settings (the key needs view_index_metadata), which a source with a selector requires: %w", err))
 	case err != nil:
 		for _, f := range keywords {
 			local[f] = true
@@ -545,18 +637,18 @@ func (s *Source) Check(ctx context.Context, production bool) (info Info, retErr 
 	default:
 		for _, ix := range m.indices {
 			if ix.dynamicRisk != "" {
-				return info, fmt.Errorf("elasticsearch source: %s in some index: new fields could be copied into, or computed as, the source's fields; refused", ix.dynamicRisk)
+				return info, scopeErr(fmt.Errorf("elasticsearch source: %s in some index: new fields could be copied into, or computed as, the source's fields; refused", ix.dynamicRisk))
 			}
 			// The time field too: neither copied into nor computed.
 			_, tpath, _ := ix.field(s.o.TimeField)
 			for _, r := range ix.runtime {
 				if related(r, s.o.TimeField) || related(r, tpath) {
-					return info, fmt.Errorf("elasticsearch source: the time field %s is (under) a runtime field in some index", s.o.TimeField)
+					return info, scopeErr(fmt.Errorf("elasticsearch source: the time field %s is (under) a runtime field in some index", s.o.TimeField))
 				}
 			}
 			for _, t := range ix.copyTo {
 				if related(t, s.o.TimeField) || related(t, tpath) {
-					return info, fmt.Errorf("elasticsearch source: a copy_to writes into the time field %s in some index", s.o.TimeField)
+					return info, scopeErr(fmt.Errorf("elasticsearch source: a copy_to writes into the time field %s in some index", s.o.TimeField))
 				}
 			}
 		}
@@ -565,29 +657,29 @@ func (s *Source) Check(ctx context.Context, production bool) (info Info, retErr 
 				d, path, ok := ix.field(f)
 				for _, r := range ix.runtime {
 					if f == r || strings.HasPrefix(f, r+".") || path == r || strings.HasPrefix(path, r+".") {
-						return info, fmt.Errorf("elasticsearch source: %s is (under) a runtime field in some index: it cannot be trusted or selected on", f)
+						return info, scoped(f, fmt.Errorf("elasticsearch source: %s is (under) a runtime field in some index: it cannot be trusted or selected on", f))
 					}
 				}
 				for _, t := range ix.copyTo {
 					if related(t, f) || (ok && related(t, path)) {
-						return info, fmt.Errorf("elasticsearch source: a copy_to writes into %s in some index: its terms are not its documents' values; it cannot be trusted or selected on", f)
+						return info, scoped(f, fmt.Errorf("elasticsearch source: a copy_to writes into %s in some index: its terms are not its documents' values; it cannot be trusted or selected on", f))
 					}
 				}
 				switch {
 				case !ok:
 					if production {
-						return info, fmt.Errorf("elasticsearch source: %s is not mapped in every index of the source: a production profile refuses it", f)
+						return info, scoped(f, fmt.Errorf("elasticsearch source: %s is not mapped in every index of the source: a production profile refuses it", f))
 					}
 					local[f] = true
 					continue
 				case d.Type != "keyword" && d.Type != "constant_keyword":
-					return info, fmt.Errorf("elasticsearch source: %s is mapped as %q in some index; trusted, selector and tiebreaker fields must be keyword fields", f, d.Type)
+					return info, scoped(f, fmt.Errorf("elasticsearch source: %s is mapped as %s in some index; trusted, selector and tiebreaker fields must be keyword fields", f, shown(d.Type)))
 				case d.Normalizer != "":
-					return info, fmt.Errorf("elasticsearch source: %s has a normalizer in some index: its indexed terms are not its values; it cannot be trusted or selected on", f)
+					return info, scoped(f, fmt.Errorf("elasticsearch source: %s has a normalizer in some index: its indexed terms are not its values; it cannot be trusted or selected on", f))
 				case d.Script != nil:
-					return info, fmt.Errorf("elasticsearch source: %s is computed by a script in some index: it cannot be trusted or selected on", f)
+					return info, scoped(f, fmt.Errorf("elasticsearch source: %s is computed by a script in some index: it cannot be trusted or selected on", f))
 				case d.NullValue != nil && selector(f):
-					return info, fmt.Errorf("elasticsearch source: selector field %s has a null_value in some index: the selector would match documents without it", f)
+					return info, scoped(f, fmt.Errorf("elasticsearch source: selector field %s has a null_value in some index: the selector would match documents without it", f))
 				}
 				if d.IgnoreAbove != nil || d.NullValue != nil || ix.ignoreAbove {
 					local[f] = true
@@ -686,7 +778,7 @@ func (s *Source) mappingFacts(ctx context.Context, flavour string) (mappingFacts
 				full := prefix + n
 				ix.fields[full] = d
 				if dynamicRisky(d.Dynamic) {
-					ix.dynamicRisk = "dynamic: " + string(d.Dynamic) + " on " + full
+					ix.dynamicRisk = "dynamic: " + shown(string(d.Dynamic)) + " on " + shown(full)
 				}
 				if d.CopyTo != nil {
 					ts, ok := stringOrArray(d.CopyTo)
@@ -704,7 +796,7 @@ func (s *Source) mappingFacts(ctx context.Context, flavour string) (mappingFacts
 			return mappingFacts{}, bad
 		}
 		if dynamicRisky(i.Mappings.Dynamic) {
-			ix.dynamicRisk = "dynamic: " + string(i.Mappings.Dynamic)
+			ix.dynamicRisk = "dynamic: " + shown(string(i.Mappings.Dynamic))
 		}
 		for _, tmpl := range i.Mappings.DynamicTemplates {
 			if len(tmpl) != 1 {
@@ -716,7 +808,7 @@ func (s *Source) mappingFacts(ctx context.Context, flavour string) (mappingFacts
 					return mappingFacts{}, err
 				}
 				if risk != "" {
-					ix.dynamicRisk = "the dynamic template " + strconv.Quote(name) + " " + risk
+					ix.dynamicRisk = "the dynamic template " + shown(name) + " " + risk
 				}
 			}
 		}
@@ -791,11 +883,11 @@ func templateRisk(raw json.RawMessage) (string, error) {
 		case d.Script != nil:
 			return "has a script" + at
 		case dynamicRisky(d.Dynamic):
-			return "sets dynamic: " + string(d.Dynamic) + at
+			return "sets dynamic: " + shown(string(d.Dynamic)) + at
 		}
 		for _, sub := range []map[string]mappingDef{d.Properties, d.Fields} {
 			for n, c := range sub {
-				if r := walk(c, at+" under "+n); r != "" {
+				if r := walk(c, at+" under "+shown(n)); r != "" {
 					return r
 				}
 			}

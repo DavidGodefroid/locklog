@@ -26,10 +26,14 @@ import (
 //     flavour, a read-only key, the trusted fields' mappings. A failure
 //     refuses the profile.
 //
-// Off production, Check runs too; a failure is noted on :status (no
-// detail) and the source stays open, failing closed: until a Check
-// succeeds it pushes no trusted term to the server and serves no count
-// there (its terms are matched locally, its counts scanned).
+// Off production, Check runs too. A failure that concerns the scope
+// (elastic.ErrScope: the time field is not a date, a selector field not a
+// plain keyword field, or Check failed before it could type-check them)
+// refuses the profile: the selector and the time range are sent with
+// every request. Any other failure is noted on :status (no detail) and
+// the source stays open, failing closed: until a Check succeeds it pushes
+// no trusted term to the server and serves no count there (its terms are
+// matched locally, its counts scanned).
 //
 // Re-Check policy (#93): one Check, here, before the source is handed to
 // the engine. Nothing plans, scans, counts or describes the source before
@@ -68,6 +72,8 @@ func (s *Session) openRemote(ctx context.Context, c config.Source, o Options) (s
 		if err != nil {
 			return nil, err
 		}
+		// Closed with the session, also when this open fails.
+		s.remotes = append(s.remotes, cl)
 		if err := egress.CheckUnauthenticated(ctx, cl, prod); err != nil {
 			return nil, refused(err)
 		}
@@ -82,6 +88,8 @@ func (s *Session) openRemote(ctx context.Context, c config.Source, o Options) (s
 		if err != nil {
 			return nil, err
 		}
+		// Closed with the session, also when this open fails.
+		s.remotes = append(s.remotes, cl)
 		if err := egress.CheckElasticUnauthenticated(ctx, cl, prod, r.Indices); err != nil {
 			return nil, refused(err)
 		}
@@ -96,7 +104,11 @@ func (s *Session) openRemote(ctx context.Context, c config.Source, o Options) (s
 			return nil, err
 		}
 		if _, err := src.Check(ctx, prod); err != nil {
-			if prod {
+			// A failure on the scope (the time field, a selector field,
+			// or one before they are type-checked) refuses the source
+			// everywhere: the selector and the time range are sent
+			// whatever Check found (#106).
+			if prod || errors.Is(err, elastic.ErrScope) {
 				return nil, refused(err)
 			}
 			s.notes = append(s.notes, fmt.Sprintf("source %s: the backend check (privileges, field mappings) failed: its trusted terms are matched locally and its counts scanned (reconnect to check again)", c.Name))

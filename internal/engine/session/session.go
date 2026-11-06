@@ -112,6 +112,9 @@ type Session struct {
 	prod     bool
 	notes    []string
 	inflight atomic.Int64
+	// remotes are the remote sources' egress clients: Close closes their
+	// pooled connections.
+	remotes []*egress.Client
 
 	stop    context.CancelFunc
 	indexer sync.WaitGroup
@@ -565,10 +568,14 @@ func (s *Session) startIndexer() {
 	}()
 }
 
-// Close stops the indexer, saves the index and releases the epoch store.
+// Close stops the indexer, saves the index, releases the epoch store and
+// closes the remote sources' connections.
 func (s *Session) Close() error {
 	var err error
 	s.once.Do(func() {
+		for _, c := range s.remotes {
+			c.Close()
+		}
 		if s.stop != nil {
 			s.stop()
 			s.indexer.Wait()
