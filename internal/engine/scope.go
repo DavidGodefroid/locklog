@@ -21,8 +21,27 @@ type Approval struct {
 	// Clear is the clear view of the screen's record (secrets and
 	// redactions kept), for the console's own terminal only: the
 	// console shows it when its clear-results switch (Ctrl-O) is on.
-	// It never reaches the agent, nor a hub.
+	// It never reaches the agent, nor a hub's masked screen: in hub mode
+	// it goes sealed to the pinned devices only (the clear screen).
 	Clear []string
+	// HubBody, when set, replaces Body on the hub's masked screen: the
+	// lines of Body that hold a clear value are left out of it (an
+	// approved lookup's values). Body stays the console's screen and the
+	// clear screen sealed to the devices.
+	HubBody []string
+	// Hash is the keyed plan hash the approval binds (HMAC under K_ref),
+	// and Inputs its keyed input digests by name: what a hub ticket is
+	// bound to (plans.Binding). Moving names the inputs a renewal cannot
+	// check without reading the record again. None of them ever reaches
+	// the agent.
+	Hash   string
+	Inputs map[string]string
+	Moving []string
+}
+
+// inputDigest is the keyed digest of one plan-hash input (Approval.Inputs).
+func (e *Engine) inputDigest(name string, v []byte) string {
+	return e.o.Sealer.Digest("locklog/input/v1", []byte(name), v)
 }
 
 // Approver asks the human. It returns nil once approved; any other error

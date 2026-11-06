@@ -55,6 +55,7 @@ func mcpCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		Dial:      mcptools.DialClient(cwd, version),
 		Version:   version,
 		HostAgent: os.Getenv("LOCKLOG_HOST_AGENT") == "1",
+		Requester: mcpkit.RequesterFromEnv(),
 	})
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
