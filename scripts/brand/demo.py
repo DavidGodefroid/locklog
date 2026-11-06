@@ -21,9 +21,11 @@ production.
 """
 
 LOOP = 16.0
-C = dict(bg="#0b1120", pane="#020617", bar="#0f172a", border="#253047", text="#e2e8f0",
-         dim="#64748b", sub="#94a3b8", green="#4ade80", teal="#5eead4", violet="#a78bfa",
-         red="#f87171", yellow="#facc15", accent="#38bdf8", amber="#fbbf24")
+# The Lock Family's terminal (lockfamily assets/tokens.css: --term-bg, the carbon
+# theme's --card and --ink-2, the signature ink): a neutral frame on both themes.
+C = dict(bg="#1a1814", pane="#0e0d0a", bar="#25221b", border="#575146", text="#e2e8f0",
+         dim="#8a826f", sub="#b2a994", green="#4ade80", teal="#5eead4", violet="#a78bfa",
+         red="#f87171", yellow="#facc15", accent="#a3bdff", amber="#fbbf24")
 FONT = "'JetBrains Mono','SF Mono',Menlo,Consolas,'DejaVu Sans Mono',monospace"
 SANS = "Inter,-apple-system,'Segoe UI',system-ui,Helvetica,Arial,'DejaVu Sans',sans-serif"
 

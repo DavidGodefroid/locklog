@@ -3,30 +3,42 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Install — locklog</title>
-  <meta name="description" content="Install locklog with Homebrew (brew install davidgodefroid/tap/lockfamily) and lox add locklog, or the launcher alone with install.sh; try it on a non-production profile, and place the agent for production.">
+  <title>Install locklog: the Lock Family, then the launcher</title>
+  <meta name="description" content="Install locklog: the Lock Family with Homebrew, the signed install script, a trial on non-production logs, and where your agent runs on production.">
   <meta name="color-scheme" content="light dark">
-  <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
-  <meta name="theme-color" content="#0b1120" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#f4efe4" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#16140f" media="(prefers-color-scheme: dark)">
   <link rel="canonical" href="https://locklog.dev/install/">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="locklog">
-  <meta property="og:title" content="Install — locklog">
-  <meta property="og:description" content="Install locklog with Homebrew (brew install davidgodefroid/tap/lockfamily) and lox add locklog, or the launcher alone with install.sh; try it on a non-production profile, and place the agent for production.">
+  <meta property="og:title" content="Install locklog: the Lock Family, then the launcher">
+  <meta property="og:description" content="Install locklog: the Lock Family with Homebrew, the signed install script, a trial on non-production logs, and where your agent runs on production.">
   <meta property="og:url" content="https://locklog.dev/install/">
+  <meta property="og:image" content="https://locklog.dev/assets/og.png">
+  <meta property="og:image:type" content="image/png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="locklog: your agent reads the logs, not the people in them.">
   <meta property="og:locale" content="en_US">
-  <meta name="twitter:card" content="summary">
-  <meta name="twitter:title" content="Install — locklog">
-  <meta name="twitter:description" content="Install locklog with Homebrew (brew install davidgodefroid/tap/lockfamily) and lox add locklog, or the launcher alone with install.sh; try it on a non-production profile, and place the agent for production.">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Install locklog: the Lock Family, then the launcher">
+  <meta name="twitter:description" content="Install locklog: the Lock Family with Homebrew, the signed install script, a trial on non-production logs, and where your agent runs on production.">
+  <meta name="twitter:image" content="https://locklog.dev/assets/og.png">
+  <meta name="twitter:image:alt" content="locklog: your agent reads the logs, not the people in them.">
   <link rel="icon" href="../assets/logo.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="apple-touch-icon" href="../assets/apple-touch-icon.png">
+  <link rel="preload" href="../assets/fonts/zilla-slab-700.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="../assets/fonts/source-serif-4-400.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="../assets/tokens.css">
+  <link rel="stylesheet" href="../assets/lock-site.css">
   <script src="../assets/anchors.js" defer></script>
+  <script src="../assets/copy.js" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#main">Skip to content</a>
   <header class="site-header">
     <div class="wrap">
-      <a class="brand" href="../"><img src="../assets/logo.svg" alt="" width="32" height="32"><span class="wordmark">lock<span>log</span></span></a>
+      <a class="brand" href="../"><img src="../assets/logo.svg" alt="" width="32" height="32"><span class="wordmark">locklog</span></a>
       <nav class="site-nav" aria-label="Main">
         <ul>
           <li><a href="../">Home</a></li>
@@ -41,63 +53,81 @@
   </header>
   <main id="main" tabindex="-1">
     <div class="wrap">
+
+<p class="eyebrow">Install · pre-release v0.2.x</p>
 <h1>Install locklog</h1>
 <div class="prose">
   <p class="lead">A launcher on the host, the console in its own container, and your agent placed where it cannot read the logs itself.</p>
 </div>
 
-<div class="notice" role="note"><p><strong>Early release.</strong> locklog is in early releases (see the <a href="https://github.com/DavidGodefroid/locklog/blob/main/CHANGELOG.md">CHANGELOG</a>). It is built on <a href="https://github.com/DavidGodefroid/lockkit">lockkit</a>, and its design is public in <a href="https://github.com/DavidGodefroid/locklog/blob/main/docs/security-model.md">docs/security-model.md</a>.</p></div>
-
 <section aria-labelledby="status">
   <h2 id="status">Status</h2>
-  <p class="prose"><code>lox add locklog</code> and the locklog console in <code>lox run</code> come with the lockhub release that adds the locklog type (<a href="https://github.com/DavidGodefroid/lockhub/issues/84">lockhub#84</a>, <a href="https://github.com/DavidGodefroid/lockhub/issues/86">#86</a>, <a href="https://github.com/DavidGodefroid/lockhub/issues/87">#87</a>; lockhub v0.9.0 does not know it yet), and the tap’s <code>locklog</code> formula, and locklog in <code>lockfamily</code>, with it. <code>install.sh</code> installs the latest <strong>published</strong> release (v0.2.0 at this writing); <code>LOCKLOG_VERSION=vX.Y.Z</code> pins a tag. Follow the <a href="https://github.com/DavidGodefroid/locklog/blob/main/CHANGELOG.md">CHANGELOG</a> and the <a href="https://github.com/DavidGodefroid/locklog/releases">releases page</a>.</p>
+  <div class="prose">
+    <p>locklog v0.2.0 is released. Its console is started by <code>lox run</code> (lockhub) only.</p>
+    <ul>
+      <li><code>lox add locklog</code> and the locklog console in <code>lox run</code> come with the lockhub release after v0.9.0 (<a href="https://github.com/DavidGodefroid/lockhub/issues/84">lockhub#84</a>, <a href="https://github.com/DavidGodefroid/lockhub/issues/86">#86</a>, <a href="https://github.com/DavidGodefroid/lockhub/issues/87">#87</a>). lockhub v0.9.0 does not know locklog yet.</li>
+      <li>The tap’s <code>locklog</code> formula, and locklog in <code>lockfamily</code>, come with that release.</li>
+      <li>Today, <code>install.sh</code> installs the latest <strong>published</strong> release of the launcher (v0.2.0 at this writing), whose verbs you can run yourself.</li>
+    </ul>
+    <p>Follow the <a href="https://github.com/DavidGodefroid/locklog/blob/main/CHANGELOG.md">CHANGELOG</a> and the <a href="https://github.com/DavidGodefroid/locklog/releases">releases page</a>.</p>
+  </div>
 </section>
 
 <section aria-labelledby="prerequisites">
   <h2 id="prerequisites">Prerequisites</h2>
   <ul class="prose">
     <li>A Linux host with the logs.</li>
-    <li>Docker ≥ 19.03.</li>
+    <li>Docker 19.03 or later.</li>
     <li><a href="https://docs.sigstore.dev/cosign/system_config/installation/">cosign</a>, to verify the release and the image.</li>
     <li>Homebrew, or (for <code>install.sh</code>) sudo for <code>/usr/local/bin</code>.</li>
-    <li>A terminal you keep in view, where the console stays open.</li>
+    <li>A terminal you keep in view, where <code>lox run</code> stays open.</li>
   </ul>
 </section>
 
 <section aria-labelledby="install">
-  <h2 id="install">Install</h2>
-  <p class="prose">The shortest path is the Lock Family’s: install it with Homebrew, then let <code>lox add locklog</code> (or <code>lox init</code>) set up the lock from the project and <code>lox run</code> start it, in a terminal of its own, outside the agent.</p>
-  <pre tabindex="0" class="term"><code>brew trust davidgodefroid/tap                <span class="cmt"># Homebrew asks you to trust a third-party tap once</span>
-brew install davidgodefroid/tap/lockfamily   <span class="cmt"># or only this tool: brew install davidgodefroid/tap/locklog</span>
-cd ~/projects/shop
-lox add locklog logs                          <span class="cmt"># or: lox init</span>
-lox run                                       <span class="cmt"># approvals live there</span></code></pre>
-  <h3 id="install-sh">Or the launcher alone</h3>
-  <pre tabindex="0" class="term"><code>curl -fsSL https://locklog.dev/install.sh | sh</code></pre>
-  <div class="prose">
-    <p><code>install.sh</code> installs the latest published release, or <code>LOCKLOG_VERSION=vX.Y.Z</code>. It verifies the release with cosign before it installs a root-owned <code>/usr/local/bin/locklog</code>, and the launcher runs the image by its signed digest.</p>
-    <h3 id="read-first">Read the script first</h3>
-    <p>To read it before you run it, download it from <code>locklog.dev</code> or from the repository:</p>
+  <h2 id="install">With Homebrew</h2>
+  <div class="install">
+    <div class="install-head"><span>Install the Lock Family with Homebrew</span></div>
+    <pre tabindex="0" aria-label="Install commands"><code><span class="cmd">brew trust davidgodefroid/tap</span>
+<span class="cmd">brew install davidgodefroid/tap/lockfamily</span></code></pre>
+    <p class="install-note">Homebrew asks you to trust a third-party tap once. With the next lockhub release, <code>brew install davidgodefroid/tap/locklog</code> installs this Lock alone (with <code>davidgodefroid/tap/lox</code>).</p>
   </div>
-  <pre tabindex="0" class="term"><code>curl -fsSLO https://locklog.dev/install.sh   <span class="cmt"># or raw.githubusercontent.com/DavidGodefroid/locklog/main/scripts/install.sh</span>
+  <ol class="steps prose">
+    <li><p>From the project whose logs the agent investigates, <code>lox add locklog</code> sets up the lock (or <code>lox init</code>).</p>
+      <pre tabindex="0"><code>cd ~/projects/shop
+lox add locklog</code></pre></li>
+    <li><p>In a terminal of its own, outside the agent, keep <code>lox run</code> open. Approvals live there.</p>
+      <pre tabindex="0"><code>lox run</code></pre></li>
+  </ol>
+
+  <h3 id="install-sh">Or the launcher alone</h3>
+  <pre tabindex="0"><code>curl -fsSL https://locklog.dev/install.sh | sh</code></pre>
+  <div class="prose">
+    <p><code>install.sh</code> installs the latest published release, or <code>LOCKLOG_VERSION=vX.Y.Z</code>.</p>
+    <p>It verifies the release with cosign before it installs a root-owned <code>/usr/local/bin/locklog</code>. The launcher runs the image by its signed digest.</p>
+    <h3 id="read-first">Read the script first</h3>
+    <p>Download it from <code>locklog.dev</code>, or from the repository (<code>raw.githubusercontent.com/DavidGodefroid/locklog/main/scripts/install.sh</code>):</p>
+  </div>
+  <pre tabindex="0"><code>curl -fsSLO https://locklog.dev/install.sh
 less install.sh &amp;&amp; sh install.sh</code></pre>
   <p class="prose"><code>locklog update</code> moves to another release; <code>locklog version</code> shows the launcher’s and the image’s versions.</p>
 </section>
 
 <section aria-labelledby="trial">
   <h2 id="trial">Trial, on a non-production profile</h2>
-  <p class="prose">Run it on a <strong>non-production</strong> profile: a host agent runs on your own account, where it could still read the logs directly. <code>lox add locklog</code> runs locklog’s launcher verbs from the project: <code>locklog profile add --non-interactive</code> (a profile from the logs this host has; never a secret), <code>locklog init claude</code> and <code>locklog doctor --fix --yes</code>.</p>
-  <pre tabindex="0" class="term"><code><span class="cmt"># The Lock Family: lox and every lock's launcher (cosign verifies each image)</span>
-brew trust davidgodefroid/tap
-brew install davidgodefroid/tap/lockfamily   <span class="cmt"># or: brew install davidgodefroid/tap/locklog</span>
-
-<span class="cmt"># From the project: lox add runs locklog profile add, init claude and doctor;
-# lox run, in a terminal of its own, starts the hub and the console and
-# decides the tickets</span>
-cd ~/projects/shop
-lox add locklog logs
-lox run</code></pre>
-  <p class="prose">Then, in another terminal, ask your agent: <em>“when did the 502s start?”</em>. It calls <code>locklog_count</code>, <code>locklog_patterns</code> and <code>locklog_trace</code>: free, masked, audited; a scan or a value in clear becomes a ticket that <code>lox run</code> shows you and never approves on its own. Attach to the console (<code>lox attach logs</code>) for its own questions: the policy review at its first start. In this trial the MCP server runs as the image’s <code>agent</code> account, launched from your account, and the launcher’s <code>mcp</code> refuses production profiles.</p>
+  <div class="prose">
+    <p>Start on a <strong>non-production</strong> profile: a host agent runs on your own account, where it could still read the logs directly.</p>
+    <p><code>lox add locklog</code> runs locklog’s three launcher verbs from the project (<a href="https://github.com/DavidGodefroid/locklog/blob/main/docs/setup.md">docs/setup.md</a>):</p>
+    <ul>
+      <li><code>locklog profile add --non-interactive</code>: a profile from the logs this host has (files, journald, containers); never a secret.</li>
+      <li><code>locklog init claude</code>: the agent’s <code>.mcp.json</code>, skill and allow list (the free tools only). Also <code>codex</code>, <code>cursor</code> or <code>gemini</code>.</li>
+      <li><code>locklog doctor --fix --yes</code>: what an agent here can reach.</li>
+    </ul>
+    <p>Then, in another terminal, ask your agent: <em>“when did the 502s start?”</em>. It calls <code>locklog_count</code>, <code>locklog_patterns</code> and <code>locklog_trace</code>: free, masked, audited.</p>
+    <p>A scan, an unmask or an approved lookup becomes a ticket that <code>lox run</code> shows you. With the default rules it never approves one on its own.</p>
+    <p>Attach to the console (<code>lox attach &lt;name&gt;</code>) for its own questions: the policy review at its first start.</p>
+    <p>In this trial the MCP server runs as the image’s <code>agent</code> account, launched from your account. The launcher’s <code>mcp</code> refuses production profiles (<code>E_PRODUCTION_HOST_AGENT</code>).</p>
+  </div>
 </section>
 
 <section aria-labelledby="production">
@@ -107,20 +137,50 @@ lox run</code></pre>
     <li><h3>In lea</h3><p><a href="https://github.com/DavidGodefroid/lea">lea</a> runs the agent in a container of its own, with the lock’s socket mounted.</p></li>
     <li><h3>In its own container</h3><p><a href="https://github.com/DavidGodefroid/locklog/blob/main/docs/setup.md#the-own-container-recipe">docs/setup.md</a> has a tested Dockerfile snippet for your agent image and the <code>docker run</code> line. The agent user must not have sudo.</p></li>
   </ul>
-  <p class="prose">Your agent CLI’s own login (Anthropic, OpenAI, Google) is yours to set up. Then run <code>locklog doctor</code> where the agent runs: it checks the common ways P1 fails, and on a production profile its findings are errors.</p>
+  <div class="prose">
+    <p>Your agent CLI’s own login is yours to set up.</p>
+    <p>Then run <code>locklog doctor</code> where the agent runs. It checks the common ways P1 fails; on a production profile its findings are errors.</p>
+  </div>
 </section>
+
     </div>
   </main>
   <footer class="site-footer">
-    <div class="wrap">
-      <ul>
-        <li><a href="https://github.com/DavidGodefroid/locklog">Source on GitHub</a></li>
-        <li><a href="https://github.com/DavidGodefroid/locklog/blob/main/README.md">README</a></li>
-        <li><a href="https://github.com/DavidGodefroid/locklog/blob/main/docs/security-model.md">Security model</a></li>
-        <li><a href="https://github.com/DavidGodefroid/locklog/blob/main/CHANGELOG.md">Changelog</a></li>
-        <li><a href="https://lockfamily.dev/">The Lock family</a></li>
-      </ul>
-      <p>v0.2.0, in active development. locklog is licensed under the <a href="https://github.com/DavidGodefroid/locklog/blob/main/LICENSE">Apache License 2.0</a>.</p>
+    <div class="wrap footer-grid">
+      <div class="footer-about">
+        <a class="brand" href="../"><img src="../assets/logo.svg" alt="" width="32" height="32"><span class="wordmark">locklog</span></a>
+        <p>Logs for AI agents: masked, bounded log search. The agent reads the logs, not the people in them.</p>
+        <p class="family-link">Part of the <a href="https://lockfamily.dev">Lock Family</a>, harness security for AI agents.</p>
+      </div>
+      <nav aria-labelledby="footer-lock">
+        <h2 id="footer-lock">locklog</h2>
+        <ul>
+          <li><a href="https://github.com/DavidGodefroid/locklog">Source on GitHub</a></li>
+          <li><a href="https://github.com/DavidGodefroid/locklog/blob/main/README.md">README</a></li>
+          <li><a href="https://github.com/DavidGodefroid/locklog/blob/main/docs/usage.md">Usage guide</a></li>
+          <li><a href="https://github.com/DavidGodefroid/locklog/blob/main/docs/security-model.md">Security model</a></li>
+          <li><a href="https://github.com/DavidGodefroid/locklog/blob/main/CHANGELOG.md">Changelog</a></li>
+          <li><a href="https://github.com/DavidGodefroid/locklog/blob/main/SECURITY.md">Report a vulnerability</a></li>
+        </ul>
+      </nav>
+      <nav class="family-strip" aria-labelledby="footer-family">
+        <h2 id="footer-family">The Lock Family</h2>
+        <ul>
+          <li data-lock="locksql"><a href="https://github.com/DavidGodefroid/locksql">locksql</a><span>SQL databases, PII masked</span></li>
+          <li data-lock="lockmq"><a href="https://github.com/DavidGodefroid/lockmq">lockmq</a><span>RabbitMQ queues</span></li>
+          <li data-lock="lockfile"><a href="https://github.com/DavidGodefroid/lockfile">lockfile</a><span>Files: S3, SFTP, disk</span></li>
+          <li data-lock="lockhttp"><a href="https://github.com/DavidGodefroid/lockhttp">lockhttp</a><span>Outbound HTTP(S)</span></li>
+          <li data-lock="locklog" aria-current="true"><a href="https://github.com/DavidGodefroid/locklog">locklog</a><span>Logs, masked search</span></li>
+          <li data-lock="lockssh"><a href="https://github.com/DavidGodefroid/lockssh">lockssh</a><span>Commands over SSH</span></li>
+          <li data-lock="lockhub"><a href="https://github.com/DavidGodefroid/lockhub">lockhub</a><span>The approval hub and <code>lox</code></span></li>
+          <li data-lock="lockkit"><a href="https://github.com/DavidGodefroid/lockkit">lockkit</a><span>The shared Go core</span></li>
+          <li data-lock="lea"><a href="https://github.com/DavidGodefroid/lea">lea</a><span>Agents in containers</span></li>
+        </ul>
+      </nav>
+    </div>
+    <div class="wrap footer-bottom">
+      <p>Pre-release (v0.2.x). locklog is licensed under the <a href="https://github.com/DavidGodefroid/locklog/blob/main/LICENSE">Apache License 2.0</a>.</p>
+      <p><a href="https://lockfamily.dev">lockfamily.dev</a> · <a href="https://github.com/DavidGodefroid/lockfamily">the family on GitHub</a></p>
     </div>
   </footer>
 </body>
