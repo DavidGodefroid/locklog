@@ -237,7 +237,7 @@ uses [Semantic Versioning](https://semver.org/).
   call left no time stops before any work with its cursor (#49).
 - The output cap bounds every answer: a record larger than it comes back
   as an `oversized` stub with its ref (#48), and a count whose groups do
-  not fit keeps the largest ones, marked `truncated` with what it left out
+  not fit is paged with a cursor (a partial one is marked `truncated`)
   (#47). A search without predicates whose matches outgrow the page cache
   continues with its cursor instead of being refused (#46).
 - The split of an over-budget remote slice drops its narrower slices

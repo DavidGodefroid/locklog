@@ -15,63 +15,62 @@ import (
 	"github.com/DavidGodefroid/locklog/internal/source"
 )
 
-// TestCountOutputCap: a count whose groups do not fit one answer keeps the
-// groups with the most records within Limits.MaxOutput, marks the answer
-// truncated and tells how many groups and records it left out (#47).
+// TestCountOutputCap: a whole count whose groups do not fit one answer is
+// paged within Limits.MaxOutput: every page holds the next groups in order,
+// with a cursor to the rest, and the pages together are the whole count; a
+// partial count shows the first groups that fit, marked truncated (#47).
 func TestCountOutputCap(t *testing.T) {
 	const capBytes = 4 << 10
 	f := newFixture(t, genLog(t0, 1000, "c@example.org"), func(o *Options) { o.Limits.MaxOutput = capBytes })
 	cq := CountQuery{Query: q(func(q *Query) { q.To = t0.Add(1000 * time.Second) }), By: []string{"level"}, Bucket: "10s"}
-	res, err := f.eng.Count(ctx, cq)
-	if err != nil {
-		t.Fatal(err)
-	}
-	b, _ := json.Marshal(res)
-	if len(b) > capBytes {
-		t.Fatalf("%d bytes over the %d cap", len(b), capBytes)
-	}
-	if !res.Truncated || res.OmittedGroups == 0 || len(res.Groups) == 0 || !res.Complete {
-		t.Fatalf("truncated %v, %d omitted, %d kept, complete %v", res.Truncated, res.OmittedGroups, len(res.Groups), res.Complete)
-	}
-	var n int64
-	minKept := int64(1 << 62)
-	for i, g := range res.Groups {
-		n += g.N
-		minKept = min(minKept, g.N)
-		if i > 0 && g.Bucket.Before(res.Groups[i-1].Bucket) {
-			t.Fatal("kept groups out of order")
-		}
-	}
-	if n+res.OmittedN != 1000 {
-		t.Fatalf("%d kept + %d omitted records, want 1000", n, res.OmittedN)
-	}
-	// The kept groups are the largest: every group of the whole answer
-	// with more records than the smallest kept one is kept.
 	whole := *f
 	o := f.eng.o
 	o.Limits.MaxOutput = 1 << 20
 	whole.eng, _ = New(o)
 	all, err := whole.eng.Count(ctx, cq)
-	if err != nil || all.Truncated {
-		t.Fatalf("%v, truncated %v", err, all.Truncated)
+	if err != nil || !all.Complete || all.GroupsTotal != 0 {
+		t.Fatalf("%v, complete %v", err, all.Complete)
 	}
-	if len(all.Groups) != len(res.Groups)+res.OmittedGroups {
-		t.Fatalf("%d groups, %d kept + %d omitted", len(all.Groups), len(res.Groups), res.OmittedGroups)
-	}
-	larger := 0
-	for _, g := range all.Groups {
-		if g.N > minKept {
-			larger++
+	var groups []Group
+	c := cq
+	for pages := 0; ; pages++ {
+		res, err := f.eng.Count(ctx, c)
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
-	kept := 0
-	for _, g := range res.Groups {
-		if g.N > minKept {
-			kept++
+		if b, _ := json.Marshal(res); len(b) > capBytes {
+			t.Fatalf("page %d: %d bytes over the %d cap", pages, len(b), capBytes)
 		}
+		if res.GroupsFrom != len(groups) || res.GroupsTotal != len(all.Groups) || len(res.Groups) == 0 || res.Truncated {
+			t.Fatalf("page %d: from %d of %d, %d groups", pages, res.GroupsFrom, res.GroupsTotal, len(res.Groups))
+		}
+		groups = append(groups, res.Groups...)
+		if res.Complete {
+			if pages == 0 {
+				t.Fatal("one page")
+			}
+			break
+		}
+		if pages > 100 {
+			t.Fatal("never completes")
+		}
+		c.Cursor = res.Cursor
 	}
-	if kept != larger {
-		t.Fatalf("%d groups larger than the smallest kept, %d kept", larger, kept)
+	if a, b := mustJSON(groups), mustJSON(all.Groups); string(a) != string(b) {
+		t.Fatal("the pages are not the whole count")
+	}
+	// A partial count (one granule per call over a larger log).
+	g := newFixture(t, genLog(t0, 30000, "c@example.org"), func(o *Options) {
+		oneGranulePerCall(o)
+		o.Limits.MaxOutput = capBytes
+	})
+	cq.To, cq.Bucket = t0.Add(30000*time.Second), "1m"
+	res, err := g.eng.Count(ctx, cq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Complete || !res.Truncated || res.OmittedGroups == 0 || res.OmittedN == 0 || len(res.Groups) == 0 || res.GroupsTotal != 0 {
+		t.Fatalf("partial: complete %v, truncated %v, %d omitted (%d records), %d kept", res.Complete, res.Truncated, res.OmittedGroups, res.OmittedN, len(res.Groups))
 	}
 }
 

@@ -182,10 +182,12 @@ The output cap applies to every answer:
 - A record whose masked rendering alone exceeds it comes back as a stub:
   its `source`, `ref` and `ts`, `"oversized": true` and the `bytes` of its
   rendering. Ask for some of its fields (`fields`), or for its context.
-- A count whose groups do not fit keeps the groups with the most records
-  and says `"truncated": true`, with `omitted_groups` and `omitted_n` (the
-  records in the groups left out). The count itself is whole: use fewer
-  buckets or another `by` to see the rest.
+- A whole count whose groups do not fit is paged: each page holds the next
+  groups in order (`groups_from` of `groups_total`) and a `cursor` to the
+  rest, for free; the last page is `complete`. A partial count (its scan
+  continues) shows the first groups that fit, with `"truncated": true`,
+  `omitted_groups` and `omitted_n` (the records in the groups left out for
+  now).
 - A search keeps the matches its page cannot hold for the next pages.
   When one call's matches outgrow that cache (64 MiB for the console), a
   query without predicates (browsing a range) stops before the part that

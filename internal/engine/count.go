@@ -87,55 +87,38 @@ type CountResult struct {
 	IndexedFrom    *time.Time `json:"indexed_from,omitempty"`
 	IndexedUntil   *time.Time `json:"indexed_until,omitempty"`
 	MaskedFailures int        `json:"masked_failures,omitempty"`
-	// Truncated is set when the groups did not fit one answer
-	// (Limits.MaxOutput): Groups then holds the largest ones, and
-	// OmittedGroups and OmittedN tell how many groups and records were
-	// left out. The count itself is whole: narrow it (fewer buckets, a
-	// coarser by) to see them.
+	// A count whose groups do not fit one answer (Limits.MaxOutput) is
+	// paged once it is whole: each page holds the next groups, in order,
+	// from GroupsFrom of GroupsTotal, and a cursor to the rest (complete
+	// on the last). A partial count (its scan goes on) shows the first
+	// groups that fit, Truncated set, and OmittedGroups and OmittedN
+	// what it left out for now.
+	GroupsFrom    int   `json:"groups_from,omitempty"`
+	GroupsTotal   int   `json:"groups_total,omitempty"`
 	Truncated     bool  `json:"truncated,omitempty"`
 	OmittedGroups int   `json:"omitted_groups,omitempty"`
 	OmittedN      int64 `json:"omitted_n,omitempty"`
 }
 
-// fitGroups bounds a count's answer by the output cap: when its groups do
-// not fit, the groups with the most records are kept (in their order) up to
-// the cap, and the answer says how many groups and records were left out.
-func (e *Engine) fitGroups(res *CountResult) {
-	sizes := make([]int, len(res.Groups))
-	total := pageOverhead
-	for i, g := range res.Groups {
+// countOverhead is what a count's page holds besides its groups.
+const countOverhead = 768
+
+// fitGroups keeps the groups of a count's answer from from on that fit the
+// output cap (at least one), in order, and returns how many it kept.
+func (e *Engine) fitGroups(groups []Group, from int) int {
+	// The rest of the page: the epoch, the cursor, the scanned work, the
+	// index's span and the paging fields.
+	size := countOverhead
+	n := 0
+	for _, g := range groups[from:] {
 		b, _ := json.Marshal(g)
-		sizes[i] = len(b) + 1
-		total += sizes[i]
-	}
-	if total <= e.o.Limits.MaxOutput {
-		return
-	}
-	// The truncation marker's own bytes are part of the page.
-	size := pageOverhead + len(`,"truncated":true,"omitted_groups":,"omitted_n":`) + 2*20
-	byN := make([]int, len(res.Groups))
-	for i := range byN {
-		byN[i] = i
-	}
-	sort.SliceStable(byN, func(i, j int) bool { return res.Groups[byN[i]].N > res.Groups[byN[j]].N })
-	kept := make([]bool, len(res.Groups))
-	for _, i := range byN {
-		if size+sizes[i] > e.o.Limits.MaxOutput {
+		if n > 0 && size+len(b)+1 > e.o.Limits.MaxOutput {
 			break
 		}
-		size += sizes[i]
-		kept[i] = true
+		size += len(b) + 1
+		n++
 	}
-	out := res.Groups[:0]
-	for i, g := range res.Groups {
-		if kept[i] {
-			out = append(out, g)
-			continue
-		}
-		res.OmittedGroups++
-		res.OmittedN += g.N
-	}
-	res.Groups, res.Truncated = out, true
+	return n
 }
 
 // agg accumulates a count across continuations.
@@ -406,14 +389,14 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 	res := CountResult{Epoch: e.o.Masker.Epoch(), Groups: []Group{}}
 
 	var f *frozen
-	chunk, gran := 0, 0
+	chunk, gran, groupsFrom := 0, 0, 0
 	a := newAgg()
 	if cursor != "" {
 		var err *Error
 		if f, err = e.resume(st, digest); err != nil {
 			return CountResult{}, err
 		}
-		chunk, gran = st.Chunk, st.Granule
+		chunk, gran, groupsFrom = st.Chunk, st.Granule, st.Groups
 		var ok bool
 		if a, ok = e.aggs.get(st.Cache); !ok {
 			return CountResult{}, &Error{Code: EStale, Span: "cursor", Message: "the cursor expired: run the query again"}
@@ -554,13 +537,35 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 		}
 		return groupKey(time.Time{}, res.Groups[i].Key) < groupKey(time.Time{}, res.Groups[j].Key)
 	})
-	e.fitGroups(&res)
-	res.Complete = chunk >= len(f.plan.Chunks)
+	scanned := chunk >= len(f.plan.Chunks)
+	if groupsFrom > len(res.Groups) {
+		return CountResult{}, &Error{Code: EStale, Span: "cursor", Message: "the cursor expired: run the query again"}
+	}
+	nextGroups := 0
+	if n := e.fitGroups(res.Groups, groupsFrom); groupsFrom > 0 || n < len(res.Groups) {
+		if scanned {
+			// The whole count, paged.
+			res.GroupsFrom, res.GroupsTotal = groupsFrom, len(res.Groups)
+			if groupsFrom+n < len(res.Groups) {
+				nextGroups = groupsFrom + n
+			}
+		} else {
+			res.Truncated, res.OmittedGroups = true, len(res.Groups)-n
+			for _, g := range res.Groups[n:] {
+				res.OmittedN += g.N
+			}
+		}
+		res.Groups = res.Groups[groupsFrom : groupsFrom+n]
+	}
+	res.Complete = scanned && nextGroups == 0
 	if !res.Complete {
 		st := cursorState{Plan: f.id, Query: digest, Chunk: chunk, Granule: gran, Epoch: e.o.Masker.Epoch(), PolicyFP: e.o.PolicyFP(), Cache: e.aggs.put(a),
-			From: q.From, To: q.To, Last: last, Scan: scanID(ctx)}
+			From: q.From, To: q.To, Last: last, Scan: scanID(ctx), Groups: nextGroups}
 		res.Cursor = e.seal("Lc1", st)
-		if cu, ok := coveredUntil(f.plan, chunk, gran, q.Query); ok {
+		if scanned {
+			to := q.To
+			res.CoveredUntil = &to
+		} else if cu, ok := coveredUntil(f.plan, chunk, gran, q.Query); ok {
 			res.CoveredUntil = &cu
 		}
 	} else {

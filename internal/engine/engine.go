@@ -245,6 +245,9 @@ type cursorState struct {
 	// Scan is the approved scan the cursor continues (log.scan), bound
 	// to its peer uid; "" for a free call.
 	Scan string `json:"s,omitempty"`
+	// Groups is where the next page of a whole count's groups starts
+	// (Count).
+	Groups int `json:"n,omitempty"`
 }
 
 // refState is sealed into a record ref.
