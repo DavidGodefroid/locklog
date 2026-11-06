@@ -126,6 +126,10 @@ func FromConfig(s config.Source) (Options, error) {
 type Source struct {
 	opts Options
 	self []string
+	// guard pins the containers root, for this source and its
+	// containers' file sources: a root gone or replaced since it was
+	// first read fails every call (source.ErrMountLost).
+	guard source.RootGuard
 
 	mu      sync.Mutex
 	mapKey  string
@@ -283,6 +287,9 @@ func (s *Source) paths(c Container) ([]string, map[string]string) {
 // containers returns the served containers, sorted by name, re-reading the
 // map when it changed.
 func (s *Source) containers() ([]*cont, error) {
+	if err := s.guard.Check(s.opts.Root); err != nil {
+		return nil, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.opts.Now()
@@ -383,7 +390,7 @@ func (s *Source) fileOptions(c Container) (file.Options, error) {
 	}
 	paths, alt := s.paths(c)
 	return file.Options{Name: s.opts.Name, Paths: paths, Alternates: alt, Roots: []string{s.opts.Root}, Parser: p,
-		Trusted: s.opts.Trusted, Index: s.opts.Index, Sensitive: s.opts.Sensitive, RulesGeneration: s.opts.RulesGeneration, Now: s.opts.Now, NoXDev: true, Tag: c.Name}, nil
+		Trusted: s.opts.Trusted, Index: s.opts.Index, Sensitive: s.opts.Sensitive, RulesGeneration: s.opts.RulesGeneration, Now: s.opts.Now, NoXDev: true, Tag: c.Name, Guard: &s.guard}, nil
 }
 
 // byStream returns the served container of a stream, checking its name.

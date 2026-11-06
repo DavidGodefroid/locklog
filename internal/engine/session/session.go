@@ -652,6 +652,11 @@ func (s *Session) Handle(ctx context.Context, method string, params json.RawMess
 	if ref != nil {
 		return nil, refusalOf(ref), nil
 	}
+	if errors.Is(err, source.ErrMountLost) {
+		// A log root gone or replaced under the session: the console
+		// drops it and checks every mount again on reconnecting.
+		return nil, nil, fmt.Errorf("%w: %w", logconsole.ErrConnLost, err)
+	}
 	return res, nil, err
 }
 
@@ -695,7 +700,7 @@ func (s *Session) hubRequest(a engine.Approval) logconsole.HubRequest {
 		risk = ticket.RiskReadPII
 	}
 	return logconsole.HubRequest{Risk: risk, Header: a.Header, Note: s.maskers.base.Text(a.Note), Body: a.Body, HubBody: a.HubBody,
-		Warnings: a.Warnings, Clear: a.Clear, PlanHash: a.Hash, Inputs: a.Inputs, Moving: a.Moving, Production: s.prod, NeverAuto: a.NeverAuto}
+		Warnings: a.Warnings, Clear: a.Clear, PlanHash: a.Hash, Inputs: a.Inputs, Moving: a.Moving, Production: s.prod}
 }
 
 // noParams refuses parameters to a method that takes none.
@@ -787,10 +792,24 @@ func (s *Session) Status(ctx context.Context) any {
 		}
 		st.Sources = append(st.Sources, ss)
 	}
+	if s.prod && !s.conf.Landlock.Available() && s.localFiles() {
+		st.Residuals = append(st.Residuals, landlock.UnconfinedNote(s.conf.Landlock))
+	}
 	if s.docker {
-		st.Residuals = docker.Residuals(s.conf.Landlock, s.conf.Openat2)
+		st.Residuals = append(st.Residuals, docker.Residuals(s.conf.Landlock, s.conf.Openat2)...)
 	}
 	return st
+}
+
+// localFiles reports whether the session reads file or journald sources
+// (the docker source's guards have residuals of their own).
+func (s *Session) localFiles() bool {
+	for _, n := range s.names {
+		if k := s.srcs[n].Kind(); k == config.KindFile || k == config.KindJournald {
+			return true
+		}
+	}
+	return false
 }
 
 // SourceInfo is one source of log.sources, masked.

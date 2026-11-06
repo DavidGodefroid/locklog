@@ -22,6 +22,26 @@ takes the launcher verbs every lock of the Lock Family takes (#117).
   without a `level` label, behind a latency proxy and on a slowed host;
   the ingest overrides it needs are in `docs/loki.md`. The approved-scan
   test (CI job `scan-volume`) scans 20 GiB of local files on one approval.
+- A leak harness over the bytes leaving the console: the canary corpus
+  served by a hub-attached console, its IPC socket replies, audit file, MCP
+  outputs and hub ticket screens scanned in every encoding: 0 hits
+  ([#86](https://github.com/DavidGodefroid/locklog/issues/86)).
+- On a production profile without Landlock, `:status` and `doctor` name the
+  residual: its local sources are read by an unconfined console
+  ([#62](https://github.com/DavidGodefroid/locklog/issues/62)).
+- Auto mode per profile for `lox run` (#126): `auto = "full-auto"`, or an
+  `[profiles.P.auto]` table setting `read` (an approved scan), `unmask` and
+  `lookup` (an approved lookup) to `auto`, `ask` or `deny` (default `ask`
+  for all three: unchanged behaviour). `deny` is refused by the console
+  before any ticket (`E_AUTO_DENY`; `lookup = "deny"` refuses free lookups
+  too); `ask` tickets are signed `never_auto` and an auto rule's approval
+  of one is refused; `auto` tickets are left to `lox run`'s auto mode. The
+  rules are part of the fingerprinted policy (stored sparsely: approved
+  policies keep their fingerprint); moving one toward `auto` is a reviewed
+  loosening, with the typed profile name on production. Shown in the
+  review, `:status` and `locklog_status` (`auto`); the audit records
+  `auto_rule` and `decided_by`. New `locklog profile rules [--json]
+  [--project DIR] [--profile NAME]`, which `lox run` reads.
 - docs/recipes/holmesgpt.md: HolmesGPT's CLI in its own container with the
   locklog client and only the lock's socket volume from `up.json`, locklog
   as its stdio MCP server, `MCP_TOOL_CALL_TIMEOUT_SEC=600`; a test checks
@@ -54,6 +74,12 @@ takes the launcher verbs every lock of the Lock Family takes (#117).
 
 ### Changed
 
+- A log root at, beneath or above one of the console's writable
+  directories (an extra root under `/tmp` or the home volume) is refused
+  instead of losing its read-only Landlock rule
+  ([#62](https://github.com/DavidGodefroid/locklog/issues/62)).
+- Hub tickets are version 2 (lockkit's kind `read`, the profile as their
+  subject), so that `lox run` can apply a profile's rules to them (#126).
 - **Breaking.** lockkit v0.13.0 (from v0.8.1). `locklog console` without
   `--hub`, `--hub-key-file` and `--instance` refuses before it touches the
   terminal, the project or the config, with lockkit's "the console is
@@ -139,6 +165,19 @@ takes the launcher verbs every lock of the Lock Family takes (#117).
   (twice its time at the cost model's worst-case rate) instead of 30
   minutes, at most 4 hours; its approval screen and `expires_at` say so.
   A 20 GiB scan of local files then completes on its one approval (#104).
+- The confined console resolves host names again: Landlock now grants
+  `/etc/hosts`, `/etc/resolv.conf` and `/etc/nsswitch.conf`, which Go's
+  resolver reads at every lookup (remote sources and the hub were dialled
+  by name to `[::1]:53`), and the controlling terminal for a secret asked
+  again ([#62](https://github.com/DavidGodefroid/locklog/issues/62)).
+- A containers root the launcher could not check from the host is pinned by
+  its device:inode at the first connection and checked on every call; a
+  file, journald or docker source whose root is gone, stale or replaced
+  ends the call as a lost session (`CodeConnLost`), not a refusal
+  ([#62](https://github.com/DavidGodefroid/locklog/issues/62)).
+- The MCP tools no longer echo what the agent sent in the SDK's argument
+  errors (schema validation, an unknown tool's name): a fixed text names
+  the argument and the rule ([#86](https://github.com/DavidGodefroid/locklog/issues/86)).
 - `locklog doctor` before any profile checks the account as for a
   production profile (red, exit 1) and says to run `locklog profile add`;
   it exited 0 (#87).

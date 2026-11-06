@@ -436,11 +436,11 @@ func TestHubRequesterIsThePeer(t *testing.T) {
 	}
 }
 
-// lox run's auto mode never approves an unmask, an approved lookup or an
-// approved scan: their tickets carry never_auto, and the lock drops an
-// auto rule's approval of one (ticket.ErrAuto), whatever the ticket's
-// version: nothing runs, nothing clear reaches the agent, and the ticket
-// waits for a human, whose approval runs it.
+// With the default auto rules (every action ask), lox run's auto mode
+// never approves an unmask, an approved lookup or an approved scan: their
+// tickets carry never_auto, and the lock drops an auto rule's approval of
+// one (ticket.ErrAuto): nothing runs, nothing clear reaches the agent,
+// and the ticket waits for a human, whose approval runs it.
 func TestHubAutoRuleNeverApproves(t *testing.T) {
 	auto := func(d *ticket.Decision) {
 		d.V, d.Rule = ticket.VersionKinds, &ticket.Rule{By: ticket.RuleAuto, ID: "default:read"}

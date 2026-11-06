@@ -48,6 +48,9 @@ type Error struct {
 	Span string `json:"span,omitempty"`
 	// Estimate is the plan estimate of an over-budget call.
 	Estimate *Estimate `json:"estimate,omitempty"`
+	// lost is set for a source's lost mount (source.ErrMountLost): Handle
+	// returns it as the call's error, not as a refusal.
+	lost error
 }
 
 func (e *Error) Error() string {

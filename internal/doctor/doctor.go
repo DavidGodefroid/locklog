@@ -32,6 +32,7 @@ import (
 	"github.com/DavidGodefroid/locklog/internal/config"
 	"github.com/DavidGodefroid/locklog/internal/egress"
 	"github.com/DavidGodefroid/locklog/internal/hostfacts"
+	"github.com/DavidGodefroid/locklog/internal/landlock"
 	"github.com/DavidGodefroid/locklog/internal/mountplan"
 )
 
@@ -248,6 +249,14 @@ func Run(ctx context.Context, o Options) (Report, error) {
 		} else {
 			r.Residuals = append(r.Residuals, Item{Finding: true, Text: "Landlock is unavailable (" + why + "): a docker source relies on the mounts alone",
 				Remedy: "a kernel with Landlock (5.13 or later, lsm=landlock), not disabled by the container runtime's seccomp profile"})
+			// The console's :status says the same of a production
+			// profile with local sources.
+			for _, n := range names {
+				if p := profiles[n]; p.Production && localSources(p) {
+					r.Residuals = append(r.Residuals, Item{Finding: true,
+						Text: "profile " + n + ": " + landlock.UnconfinedNote(landlock.Status{State: landlock.Unsupported, Detail: why})})
+				}
+			}
 		}
 	}
 	for _, c := range f.IPCShareable {
@@ -263,6 +272,16 @@ func Run(ctx context.Context, o Options) (Report, error) {
 		r.Residuals = append(r.Residuals, Item{Text: "swarm mode " + f.Swarm})
 	}
 	return r, nil
+}
+
+// localSources reports whether p reads file, journald or docker logs.
+func localSources(p config.Profile) bool {
+	for _, s := range p.Sources {
+		if s.Kind == config.KindFile || s.Kind == config.KindJournald || s.Kind == config.KindDocker {
+			return true
+		}
+	}
+	return false
 }
 
 func contains(xs []string, x string) bool {

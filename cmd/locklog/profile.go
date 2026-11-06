@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/DavidGodefroid/lockkit/kit"
 	"github.com/DavidGodefroid/lockkit/verbs"
 	"golang.org/x/term"
 
@@ -59,8 +60,18 @@ func profileCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 		return exit
 	}
+	if len(args) > 0 && args[0] == "rules" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return fail(verbs.CodeFailed, 1, err)
+		}
+		// The approved policies, where the console keeps them (its home
+		// volume): readable when run beside it, else the file's rules.
+		stateBase, _ := kit.StateBase()
+		return profileRulesCmd(args[1:], cwd, stateBase, stdout, stderr)
+	}
 	if len(args) == 0 || args[0] != "add" {
-		return fail(verbs.CodeUsage, 2, errors.New("the only subcommand is add"))
+		return fail(verbs.CodeUsage, 2, errors.New("the subcommands are add and rules"))
 	}
 	fs := flag.NewFlagSet("profile add", flag.ContinueOnError)
 	nonInteractive := fs.Bool(verbs.FlagNonInteractive, false, "never ask: a missing value is a usage error")

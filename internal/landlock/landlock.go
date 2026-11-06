@@ -22,9 +22,11 @@
 //	})
 //
 // Every path the console reads after Restrict must be listed (CA bundles,
-// zone info, /proc/self files, and device files such as /dev/null or
-// /dev/tty): anything else is refused. IOCTL_DEV is never granted, not even
-// beneath the read-write roots. Only filesystem access is confined: network
+// zone info, the resolver's files, /proc/self files, and device files such
+// as /dev/null or /dev/tty): anything else is refused. IOCTL_DEV is never
+// granted, not even beneath the read-write roots, but on a Terminal rule:
+// a character device (the controlling terminal, /dev/tty) read, written and
+// put in no-echo mode by a secret's prompt. Only filesystem access is confined: network
 // and scoping (abstract sockets, signals) are not handled.
 package landlock
 
@@ -32,7 +34,9 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -82,6 +86,15 @@ func (s Status) String() string {
 	return b.String()
 }
 
+// UnconfinedNote is the residual of a production profile whose console runs
+// without Landlock (st not Available): its local sources are read by a
+// console no ruleset confines, the read-only mounts its only guard. The
+// console's :status and doctor show it.
+func UnconfinedNote(st Status) string {
+	return "Landlock is not enforced (" + st.String() + "): this production profile's local sources are read by an unconfined console, " +
+		"guarded by the read-only mounts alone; use a kernel with Landlock (5.13 or later, in the lsm= list) and a seccomp profile that allows it"
+}
+
 // Rules are the paths granted: anything else is refused once restricted.
 // A missing path is skipped. Rules on nested paths add up, so a ReadOnly or
 // Exec path at or beneath a ReadWrite one is refused (it would be
@@ -91,6 +104,11 @@ type Rules struct {
 	ReadOnly  []string
 	ReadWrite []string
 	Exec      []string
+	// Terminal are character devices (only) granted read, write and
+	// ioctl: the controlling terminal, which a secret's prompt opens and
+	// turns the echo off on. A process holding the terminal as its
+	// standard streams already has these rights on it.
+	Terminal []string
 }
 
 // resolve cleans the paths and resolves their symbolic links (a missing
@@ -125,9 +143,17 @@ func (r Rules) resolve() (Rules, error) {
 	if out.Exec, err = res(r.Exec); err != nil {
 		return Rules{}, err
 	}
+	if out.Terminal, err = res(r.Terminal); err != nil {
+		return Rules{}, err
+	}
+	for _, p := range out.Terminal {
+		if fi, err := os.Stat(p); err != nil || fi.Mode()&fs.ModeCharDevice == 0 {
+			return Rules{}, fmt.Errorf("landlock: the terminal %s is not a character device", p)
+		}
+	}
 	beneath := func(p, d string) bool { return p == d || strings.HasPrefix(p, strings.TrimSuffix(d, "/")+"/") }
 	for _, w := range out.ReadWrite {
-		for _, p := range append(append([]string{}, out.ReadOnly...), out.Exec...) {
+		for _, p := range slices.Concat(out.ReadOnly, out.Exec, out.Terminal) {
 			if beneath(p, w) {
 				return Rules{}, fmt.Errorf("landlock: %s is beneath the read-write %s: it would be writable", p, w)
 			}

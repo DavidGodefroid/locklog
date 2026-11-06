@@ -65,6 +65,7 @@ credentials = "ask"          # typed at the console, never written to disk
 | `pseudonym_rotation` | `7d` | Epoch length (`session` or a duration; `never` is refused on production) |
 | `pseudonym_max_age` | `30d` | How long a replaced epoch key is kept; older ones are deleted when the console opens the profile |
 | `limits` | see Budgets | Per-call and rolling budgets |
+| `auto` | every action `ask` | The profile's auto mode for `lox run`: `"full-auto"`, or a table of `read`, `unmask`, `lookup` set to `auto`, `ask` or `deny` (see What `lox run` decides) |
 
 Sources take `kind`, `format`, `multiline` (`none` or `indent`) and
 `trusted` (fields shown in clear after the detectors, selectable and
@@ -119,7 +120,7 @@ it back and says so.
 | `locklog_pii_list`, `locklog_pii_add` | the masking rules; add masking (never remove it): `[pseudonym ]source:field`, a masked key by its `⟦key:ID⟧`. Capped by `pii_adds_per_hour` and `pii_rules_max`; `locklog_status` counts the agent's rules | free, capped, audited |
 | `locklog_request_change` | ask for a loosening | you decide at `:review` |
 | `locklog_scan` | one call over a budget, approved for its whole plan | you approve |
-| `locklog_unmask` | the clear value of up to 8 exact pseudonyms of one record, once, with a reason | you approve at the console, never automatically; off by default on production |
+| `locklog_unmask` | the clear value of up to 8 exact pseudonyms of one record, once, with a reason | you approve a ticket at `lox run`, the deck or a phone (automatically only with `auto.unmask = "auto"`); off by default on production |
 
 Every result carries the pseudonym `epoch`. A result with
 `complete: false` has a `cursor`: passing it back continues the same plan
@@ -261,15 +262,67 @@ socket the same way, mounted by lea.
 
 ### What `lox run` decides, and what it asks
 
-A scan, an unmask or an approved lookup becomes a ticket on lockhub. Each
-is `never_auto`: `lox run`'s auto mode never approves one, and the console
-refuses an auto rule's approval of one (lockkit's `ErrAuto`); the ticket
-waits for you, at `lox run`, the deck or a paired phone. A scan is risk
-`read` (one approval covers its whole plan, its continuations need no
-ticket); an unmask and an approved lookup are `read-pii`, which only the
-terminal, the deck or a phone approve, never a chat facade. The free tools
-need no ticket. Per-profile auto rules (`auto`/`ask`/`deny`, as locksql and
-lockmq have) are not there yet: every locklog ticket is asked.
+A scan, an unmask or an approved lookup becomes a ticket on lockhub. A
+scan is risk `read` (one approval covers its whole plan, its continuations
+need no ticket); an unmask and an approved lookup are `read-pii`, which
+only the terminal, the deck or a phone approve, never a chat facade. The
+free tools (search, count, patterns, context, trace, tail, a free lookup)
+need no ticket. The tickets are version 2 (lockkit's kind `read`, the
+profile as their subject), so that `lox run` can apply the profile's rules.
+
+Each profile has an auto mode, one rule per action that becomes a ticket:
+
+| Action | Ticket | Default |
+|---|---|---|
+| `read` | an approved scan (`locklog_scan`) | `ask` |
+| `unmask` | an unmask (`locklog_unmask`) | `ask` |
+| `lookup` | an approved lookup (`lookup = "approved"`) | `ask` |
+
+```toml
+[profiles.local]
+auto = "full-auto"      # every action auto
+
+[profiles.prod.auto]
+read = "auto"           # scans left to lox run's auto mode
+unmask = "deny"         # never, even with your approval
+# lookup = "ask"        # the default
+```
+
+A table may start from a preset (`preset = "full-auto"` or `"default"`)
+and override actions. Unknown keys and values are refused, with the
+profile named and the value never quoted. The console holds its side,
+whatever `lox run` does:
+
+- `deny`: the console refuses the call before any ticket (`E_AUTO_DENY`,
+  retry `ask_user`), in both of `lox run`'s modes. `lookup = "deny"`
+  refuses free lookups too; the free tools are not affected by `read`.
+- `ask`: the ticket is signed `never_auto`. `lox run` asks you; an auto
+  rule's approval of it is refused by the console (lockkit's `ErrAuto`):
+  nothing runs, the agent hears that the ticket waits for you, and your
+  approval then runs it.
+- `auto`: the ticket is left to `lox run`'s auto mode, which may approve
+  it without a question (manual mode still asks).
+
+The rules belong to the approved policy (its fingerprint; the defaults
+are stored sparsely, so a policy approved before the rules existed keeps
+its fingerprint). Moving a rule toward `auto` (`deny` → `ask` → `auto`)
+is a loosening: the console applies it only once you accept it at its
+start or at `:review`, with the profile's name typed on a production
+profile. A move toward `deny` applies at once; a ticket asked before it
+is then refused and withdrawn. The rules in force show in the review, in
+`:status`, and in `locklog_status` (`auto`).
+
+`locklog profile rules [--json] [--project DIR] [--profile NAME]` prints
+each profile's effective rules, the defaults filled in; this is what `lox
+run` reads. With the console's state readable (beside the console), the
+rules are those of the approved policy (`"source": "approved"`), and a
+config file whose rules differ is flagged `pending_review` with its
+`file_rules`; elsewhere they are the config file's (`"source": "files"`).
+
+The audit records the rule in force (`auto_rule`, such as `"auto.read =
+ask"`) on a ticket's pending, approved, refused and run records and on a
+denied call, and what decided a ticket (`decided_by`: `human`, or
+`auto:<rule id>` from `lox run`'s decision).
 
 ## The console
 

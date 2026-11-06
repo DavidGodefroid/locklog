@@ -24,6 +24,7 @@ locklog doctor: what the agent's account can reach here (advisory: a check, not 
 residuals (the console's own guards; warnings, whatever the profile):
   warn  Landlock is unavailable (ENOSYS): a docker source relies on the mounts alone
         remedy: a kernel with Landlock (5.13 or later, lsm=landlock), not disabled by the container runtime's seccomp profile
+  warn  profile main: Landlock is not enforced (landlock unsupported: ENOSYS): this production profile's local sources are read by an unconfined console, guarded by the read-only mounts alone; use a kernel with Landlock (5.13 or later, in the lsm= list) and a seccomp profile that allows it
   warn  container shm-1 runs with IpcMode shareable: its /dev/shm mount can appear in the console's bound containers root
         remedy: use --ipc private (the default) unless another container joins it; Landlock guards the console against it
   warn  swarm mode is active: services' secrets are mounted under the containers root

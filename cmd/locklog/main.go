@@ -20,6 +20,9 @@ Commands:
   profile add [--non-interactive] [--json] [--profile NAME] [--production] ...
                           add a profile to .locklog/config.toml from this host's logs
                           (never a secret: the console asks at start, or Vault)
+  profile rules [--json] [--project DIR] [--profile NAME]
+                          the auto mode of each profile, as lox run applies it
+                          (read, unmask, lookup: auto, ask or deny)
   doctor [--profile P] [--fix [--yes]] [--json]
                           check what the agent's account can reach (advisory), and the agents' wiring
   mcp [--profile P] [--instance NAME]

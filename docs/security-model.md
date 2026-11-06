@@ -48,7 +48,7 @@ the pseudonym keys and decides what leaves.
 | 2 | The console shares only its socket volume with agents, read-only; the home volume, the map directory and the hub network never | `lox run`; the launcher's and lea's checks of up.json and the volume's labels |
 | 3 | Nothing unmasked leaves the console except an approved unmask; secrets never | masking pipeline, typed masked responses; canary harness |
 | 4 | Agent predicates see only the masked view; every record is masked before any predicate; no text is sent to a backend; plans, charges and stopping points depend on the plan, never on matches; agent rules only tighten | engine, oracle and equivalence suites |
-| 5 | Approved operations run only on a decision bound to the plan hash (exact spans for an unmask, the whole plan for a scan) and the policy fingerprint, once; never auto-approved: every ticket is `never_auto`, and an auto rule's approval is refused (`ErrAuto`). `read-pii` only from `tty`, `deck` or `mobile` | lockkit plans and tickets; the facade check in the console |
+| 5 | Approved operations run only on a decision bound to the plan hash (exact spans for an unmask, the whole plan for a scan) and the policy fingerprint, once. Auto approval only where the approved policy's auto rule for the action is `auto` (default `ask` for scans, unmasks and approved lookups; moving a rule toward `auto` is a reviewed loosening, typed profile name on production): any other ticket is signed `never_auto` and an auto rule's approval of it is refused (`ErrAuto`); a `deny` rule refuses the call before any ticket (`E_AUTO_DENY`). `read-pii` only from `tty`, `deck` or `mobile` | lockkit plans and tickets; the console's auto rules and facade check |
 | 6 | No approve or reveal method on the agent socket | lockkit |
 | 7 | Hub unreachable ⇒ approvals wait; free reads continue with the local audit | hub client |
 | 8 | No hub auto-discovery: the console runs only with the hub flags `lox run` gives it | lockkit (`ErrNoHub`) |
@@ -188,6 +188,37 @@ point. Where the kernel has Landlock, it denies itself writes beneath its
 roots. Even so, a compromised console could read such propagated files.
 `doctor` names shareable-IPC containers and swarm mode as a residual.
 Measurements are in [sources.md](sources.md).
+
+## The console's confinement and its mounts
+
+In its image the console applies a Landlock ruleset to itself before it
+opens any source. It reads beneath the checked log roots, the containers
+root and its map, the project's `.locklog` and the system files it still
+needs: accounts, zone info, CA bundle, `/proc`, `/sys/class/net` and the
+files of Go's resolver (`/etc/hosts`, `/etc/resolv.conf`,
+`/etc/nsswitch.conf`), read at every lookup because remote sources and the
+hub are dialled by name. It writes only to its volumes and `/tmp`. It may
+read, write and put in no-echo mode the controlling terminal `/dev/tty`,
+for a secret asked again; it already holds that terminal as its standard
+streams. A log root at, beneath or above a writable directory (an extra
+root under `/tmp` or the home volume) is refused: the ruleset would let the
+console write there. `/proc` is granted whole, because no Landlock rule
+follows a peer's pid.
+
+The mounts are checked again on every call. These are the device:inode of
+`.locklog` and of each root the launcher checked, plus a containers root
+the launcher could not stat from the host, pinned by the console at its
+first connection. A source whose root is gone, stale (`ESTALE`) or
+replaced since it first read it ends the call as a lost session
+(`CodeConnLost`). The console drops the session, and the next call
+reconnects and checks everything again. A swap during one long call is
+caught by the next call.
+
+Without Landlock (an old kernel, the LSM off, its syscalls blocked by
+seccomp), the console still starts and says so in `:status`. On a
+production profile with local sources, `:status` and `doctor` also name
+the residual: those sources are read by an unconfined console, and the
+read-only mounts are their only guard.
 
 ## Prompt injection
 

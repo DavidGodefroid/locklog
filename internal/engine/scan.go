@@ -391,8 +391,9 @@ func (e *Engine) scanScreen(tool string, plan source.Byteplan, scope []string, n
 		}
 	}
 	body = append(body, size, fmt.Sprintf("approved for its whole plan: continuations need no new approval, until it ends or %s from now", ttl))
-	// NeverAuto: one human approval covers the whole plan (its
-	// continuations run without a ticket each), so no auto rule takes it.
+	// NeverAuto: one approval covers the whole plan (its continuations
+	// run without a ticket each). On the hub, only auto.read = "auto"
+	// leaves it to lox run's auto mode.
 	return Approval{Class: "read", Header: "scan · read", Note: note, Body: body, NeverAuto: true,
 		Warnings: []string{"the agent receives the masked records of the whole plan"}}
 }

@@ -1114,3 +1114,38 @@ func TestDiscardHonoursCancel(t *testing.T) {
 		t.Fatalf("processed %d", st.processed())
 	}
 }
+
+// A mount root swapped or removed under the source is a lost mount
+// (source.ErrMountLost), not a stale stream: the console drops the
+// session.
+func TestRootSwappedIsMountLost(t *testing.T) {
+	e := newEnv(t)
+	e.write("logs/app.log", genLines(t0, 20), t0.Add(20*time.Second))
+	s := e.source([]string{e.root + "/logs/*.log"})
+	r := source.Range{From: t0, To: t0.Add(time.Hour)}
+	plan, err := s.Plan(ctx, r, source.Selector{})
+	if err != nil || len(plan.Chunks) == 0 {
+		t.Fatalf("plan: %+v %v", plan, err)
+	}
+	recs := scanPlan(t, s, plan)
+	if len(recs) == 0 {
+		t.Fatal("no records")
+	}
+	// The root is replaced by another directory holding the same file.
+	if err := os.Rename(e.root, e.root+".old"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(e.root + ".old") })
+	e.write("logs/app.log", genLines(t0, 20), t0.Add(20*time.Second))
+	if _, err := s.Reread(ctx, recs[0].Ref); !errors.Is(err, source.ErrMountLost) {
+		t.Errorf("reread under a swapped root: %v", err)
+	}
+	if _, err := s.Plan(ctx, r, source.Selector{}); !errors.Is(err, source.ErrMountLost) {
+		t.Errorf("plan under a swapped root: %v", err)
+	}
+	// Removed.
+	os.RemoveAll(e.root)
+	if _, err := s.Plan(ctx, r, source.Selector{}); !errors.Is(err, source.ErrMountLost) {
+		t.Errorf("plan under a removed root: %v", err)
+	}
+}

@@ -655,3 +655,37 @@ func TestContainersStatus(t *testing.T) {
 		t.Fatalf("invalid: %+v %v", st, err)
 	}
 }
+
+// The containers root swapped under the source is a lost mount
+// (source.ErrMountLost), even for a container whose file source was made
+// before: the docker source and its containers' sources share one guard.
+func TestRootSwappedIsMountLost(t *testing.T) {
+	e := newEnv(t)
+	a := id('a')
+	e.write(a, a+"-json.log", frames("live", 2, t0))
+	e.writeMap(1, "locklog-map 1\nc "+a+" shop-api-1 1 0\n")
+	s := e.source("shop-*")
+	if recs := scanAll(t, s, source.Selector{}); len(recs) != 2 {
+		t.Fatalf("records %d", len(recs))
+	}
+	os.Chmod(e.root, 0o755)
+	if err := os.Rename(e.root, e.root+".old"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(e.root, 0o710); err != nil {
+		t.Fatal(err)
+	}
+	e.write(a, a+"-json.log", frames("planted", 2, t0))
+	if _, err := s.Plan(ctx, everything, source.Selector{}); !errors.Is(err, source.ErrMountLost) {
+		t.Errorf("plan under a swapped root: %v", err)
+	}
+	// A container mapped after the swap gets a new file source: the
+	// shared guard still refuses the new root.
+	b := id('b')
+	e.write(b, b+"-json.log", frames("planted", 2, t0))
+	e.writeMap(2, "locklog-map 1\nc "+b+" shop-web-1 1 0\n")
+	e.now = e.now.Add(time.Hour)
+	if _, err := s.Plan(ctx, everything, source.Selector{}); !errors.Is(err, source.ErrMountLost) {
+		t.Errorf("plan of a container mapped after the swap: %v", err)
+	}
+}

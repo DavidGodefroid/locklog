@@ -34,6 +34,13 @@ type Record struct {
 	// ShownClear counts the records shown in clear on the console's
 	// terminal (results on, Ctrl-O), never to the agent.
 	ShownClear int `json:"shown_clear,omitempty"`
+	// AutoRule is the profile's auto rule for the call's action
+	// ("auto.read = ask", #126): what made its ticket asked or left to
+	// lox run's auto mode, or what refused a denied call. DecidedBy is
+	// what decided its ticket, from the hub's version-2 decision:
+	// "human" or "auto:<rule id>".
+	AutoRule  string `json:"auto_rule,omitempty"`
+	DecidedBy string `json:"decided_by,omitempty"`
 }
 
 // AuditEvent implements audit.Record.

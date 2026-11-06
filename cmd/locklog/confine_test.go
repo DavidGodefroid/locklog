@@ -19,9 +19,18 @@ import (
 )
 
 func TestConfineRules(t *testing.T) {
-	sys := []string{"/etc/passwd", "/etc/group", "/etc/locklog", "/etc/localtime", "/usr/share/zoneinfo", "/etc/ssl", "/proc", "/sys/class/net"}
+	sys := []string{"/etc/passwd", "/etc/group", "/etc/locklog", "/etc/localtime", "/usr/share/zoneinfo", "/etc/ssl",
+		"/etc/resolv.conf", "/etc/hosts", "/etc/nsswitch.conf", "/proc", "/sys/class/net"}
+	rules := func(in confineInput) landlock.Rules {
+		t.Helper()
+		r, err := confineRules(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
 	// Files and the journal.
-	r := confineRules(confineInput{
+	r := rules(confineInput{
 		Roots:   logconsole.Roots{Dirs: []string{"/var/log/nginx", "/srv/logs"}, Journal: []string{"/var/log/journal"}},
 		Project: "/home/dev/shop", StateDir: "/home/locklog/.local/state/locklog",
 	})
@@ -32,9 +41,13 @@ func TestConfineRules(t *testing.T) {
 	if !slices.Equal(r.ReadWrite, []string{"/run/locklog", "/home/locklog", "/tmp"}) || r.Exec != nil {
 		t.Errorf("read-write = %q, exec = %q", r.ReadWrite, r.Exec)
 	}
+	// The controlling terminal (a secret's prompt), whatever the policy.
+	if !slices.Equal(r.Terminal, []string{"/dev/tty"}) {
+		t.Errorf("terminal = %q", r.Terminal)
+	}
 	// Docker: the containers root and the map directory; the vault CLI
 	// when a source reads its credentials from Vault.
-	r = confineRules(confineInput{Roots: logconsole.Roots{Docker: "/var/lib/docker/containers"}, Docker: true, Project: "/p", Vault: "/usr/local/bin/vault"})
+	r = rules(confineInput{Roots: logconsole.Roots{Docker: "/var/lib/docker/containers"}, Docker: true, Project: "/p", Vault: "/usr/local/bin/vault"})
 	want = append([]string{"/var/lib/docker/containers", "/run/locklog-map", "/p/.locklog"}, sys...)
 	if !slices.Equal(r.ReadOnly, want) || !slices.Equal(r.Exec, []string{"/usr/local/bin/vault"}) || !slices.Contains(r.ReadWrite, "/dev/null") {
 		t.Errorf("docker rules = %+v", r)
@@ -42,9 +55,24 @@ func TestConfineRules(t *testing.T) {
 	// A project under /tmp is readable through /tmp (Landlock refuses a
 	// read-only rule beneath a read-write one); a state directory outside
 	// the home volume is writable.
-	r = confineRules(confineInput{Project: "/tmp/shop", StateDir: "/var/lib/locklog-state"})
+	r = rules(confineInput{Project: "/tmp/shop", StateDir: "/var/lib/locklog-state"})
 	if slices.Contains(r.ReadOnly, "/tmp/shop/.locklog") || !slices.Contains(r.ReadWrite, "/var/lib/locklog-state") {
 		t.Errorf("rules = %+v", r)
+	}
+	// A log root at or beneath a writable directory, or holding one, is
+	// refused: the console could write there (an extra root).
+	for _, in := range []confineInput{
+		{Roots: logconsole.Roots{Dirs: []string{"/tmp/logs"}}},
+		{Roots: logconsole.Roots{Dirs: []string{"/home/locklog/logs"}}},
+		{Roots: logconsole.Roots{Dirs: []string{"/tmp"}}},
+		{Roots: logconsole.Roots{Dirs: []string{"/home"}}},
+		{Roots: logconsole.Roots{Dirs: []string{"/"}}},
+		{Roots: logconsole.Roots{Dirs: []string{"/var/lib/locklog-state/logs"}}, StateDir: "/var/lib/locklog-state"},
+		{Roots: logconsole.Roots{Journal: []string{"/run"}}},
+	} {
+		if r, err := confineRules(in); err == nil || !strings.Contains(err.Error(), "overlaps the console's writable") {
+			t.Errorf("%+v: %+v %v", in.Roots, r, err)
+		}
 	}
 }
 

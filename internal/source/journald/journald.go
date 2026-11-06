@@ -87,6 +87,9 @@ type Source struct {
 	opts    Options
 	fields  map[string]bool // served besides MESSAGE
 	trusted map[string]bool
+	// guard pins the journal roots: one gone or replaced since it was
+	// first read fails every call (source.ErrMountLost).
+	guard source.RootGuard
 
 	mu      sync.Mutex
 	catalog []fileInfo
@@ -174,6 +177,11 @@ func (s *Source) journalFile(name string) bool {
 
 // files lists the journal files, newest first (by their newest entry).
 func (s *Source) files(ctx context.Context) ([]fileInfo, error) {
+	for _, root := range s.opts.Roots {
+		if err := s.guard.Check(root); err != nil {
+			return nil, err
+		}
+	}
 	s.mu.Lock()
 	if s.catalog != nil && s.opts.Now().Sub(s.catTime) < catalogTTL {
 		c := s.catalog
