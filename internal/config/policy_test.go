@@ -354,3 +354,60 @@ func TestDiffElasticSources(t *testing.T) {
 		t.Error("index order changed the fingerprint")
 	}
 }
+
+// The approved allow rules of .locklog/pii.toml are part of the policy:
+// canonical (sorted, de-duplicated), fingerprinted; an added or widened
+// rule is a loosening, a removed one only tightens. A policy without any
+// keeps the fingerprint it had before the field existed.
+func TestPolicyPIIAllow(t *testing.T) {
+	base := policyOf(t, "", "")
+	data, err := json.Marshal(base)
+	if err != nil || strings.Contains(string(data), "pii_allow") {
+		t.Fatalf("a policy without allow rules encodes them: %s %v", data, err)
+	}
+	a := base
+	a.PIIAllow = []string{"allow field=user.id", "allow field=order sources=api", "allow field=user.id"}
+	a = Canonical(a)
+	if strings.Join(a.PIIAllow, "|") != "allow field=order sources=api|allow field=user.id" {
+		t.Fatalf("canonical allow rules = %q", a.PIIAllow)
+	}
+	if a.Fingerprint() == base.Fingerprint() {
+		t.Fatal("the allow rules are not fingerprinted")
+	}
+	var back Policy
+	data, _ = json.Marshal(a)
+	if err := json.Unmarshal(data, &back); err != nil || back.Fingerprint() != a.Fingerprint() {
+		t.Fatalf("round trip: %v", err)
+	}
+	loosens := func(changes []kconfig.Change) (n int) {
+		for _, c := range changes {
+			if c.Loosens {
+				n++
+			}
+		}
+		return n
+	}
+	if ch := a.Diff(base); loosens(ch) != 2 {
+		t.Errorf("adding allow rules: %+v", ch)
+	}
+	if ch := base.Diff(a); len(ch) != 2 || loosens(ch) != 0 {
+		t.Errorf("removing allow rules: %+v", ch)
+	}
+	widened := a
+	widened.PIIAllow = []string{"allow field=order", "allow field=user.id"}
+	if ch := widened.Diff(a); loosens(ch) != 1 {
+		t.Errorf("widening an allow rule (every source): %+v", ch)
+	}
+	if !slicesContain(a.Describe(), "pii allow: allow field=order sources=api") {
+		t.Errorf("Describe = %q", a.Describe())
+	}
+}
+
+func slicesContain(lines []string, s string) bool {
+	for _, l := range lines {
+		if l == s {
+			return true
+		}
+	}
+	return false
+}

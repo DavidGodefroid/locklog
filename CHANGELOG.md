@@ -11,6 +11,19 @@ takes the launcher verbs every lock of the Lock Family takes (#117).
 
 ### Added
 
+- `locklog_pii_list` and `locklog_pii_add` are served: an agent rule
+  (`[pseudonym ]source:field`, a masked key by its `⟦key:ID⟧`) masks a
+  field the agent was shown, from the next call on; it is capped by
+  `pii_adds_per_hour` and `pii_rules_max`, stored as a keyed digest in the
+  console's home volume only (never in `.locklog/pii.toml`), audited
+  accepted or refused with that digest and never a name, and counted in
+  `locklog_status` and `:status` (`agent_rules`)
+  ([#64](https://github.com/DavidGodefroid/locklog/issues/64)).
+- The allow rules of `.locklog/pii.toml` are part of the reviewed policy:
+  an added or widened one is a loosening approved at `:review`, a removed
+  one applies at once, and the engine applies only the approved ones
+  ([#61](https://github.com/DavidGodefroid/locklog/issues/61)).
+
 - The unmask approval screen shows, for each pseudonym, how many records
   holding it agents were given in this epoch (counted by the console from
   the calls it answered and audited, never from clear values;

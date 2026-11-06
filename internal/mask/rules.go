@@ -355,7 +355,7 @@ func (r *Rules) agent(source, clearPath string) (string, bool) {
 func (r *Rules) Texts() []string {
 	var out []string
 	for _, m := range append(slices.Clone(r.Mask), r.Allow...) {
-		out = append(out, m.text())
+		out = append(out, m.Text())
 	}
 	for _, v := range r.Values {
 		out = append(out, "value kind="+v.Kind+" regex="+v.Regex)
@@ -364,7 +364,9 @@ func (r *Rules) Texts() []string {
 	return out
 }
 
-func (r Rule) text() string {
+// Text is the rule's canonical form: "<mode> field=<path>", then
+// " sources=<a,b>" and " kind=<kind>" when set (sources sorted).
+func (r Rule) Text() string {
 	t := r.Mode + " field=" + r.Field
 	if len(r.Sources) > 0 {
 		t += " sources=" + strings.Join(r.Sources, ",")
@@ -416,21 +418,21 @@ func Change(old, new Rules) (loosenings []string) {
 			continue // an allow rule removed: tighter
 		}
 		// A mask rule removed or weakened.
-		loosenings = append(loosenings, "removes: "+m.text())
+		loosenings = append(loosenings, "removes: "+m.Text())
 	}
 	for k, m := range after {
 		if _, had := before[k]; had {
 			if m.Mode == ModePseudonym && before[k].Kind != m.Kind {
-				loosenings = append(loosenings, "changes the kind: "+m.text())
+				loosenings = append(loosenings, "changes the kind: "+m.Text())
 			}
 			continue
 		}
 		if m.Mode == ModeAllow {
-			loosenings = append(loosenings, "adds: "+m.text())
+			loosenings = append(loosenings, "adds: "+m.Text())
 			continue
 		}
 		if m.Mode == ModePseudonym {
-			loosenings = append(loosenings, "adds: "+m.text())
+			loosenings = append(loosenings, "adds: "+m.Text())
 		}
 		// A new redact rule only tightens.
 	}
@@ -440,13 +442,13 @@ func Change(old, new Rules) (loosenings []string) {
 	inOld := map[string]bool{}
 	for _, m := range old.Mask {
 		if m.Mode == ModePseudonym {
-			oldP = append(oldP, m.text())
-			inOld[m.text()] = true
+			oldP = append(oldP, m.Text())
+			inOld[m.Text()] = true
 		}
 	}
 	for _, m := range new.Mask {
-		if m.Mode == ModePseudonym && inOld[m.text()] {
-			newP = append(newP, m.text())
+		if m.Mode == ModePseudonym && inOld[m.Text()] {
+			newP = append(newP, m.Text())
 		}
 	}
 	if !slices.Equal(oldP, newP) {
