@@ -20,6 +20,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -591,8 +592,16 @@ func (s *Session) Handle(ctx context.Context, method string, params json.RawMess
 	s.inflight.Add(1)
 	defer s.inflight.Add(-1)
 	// The caller: its kernel-verified uid (an approved scan and the
-	// lookup limits are bound to it) and the console's approval screen.
-	ctx = engine.WithPeer(ctx, engine.Peer{UID: c.UID, Known: c.PID != 0 || c.UID != 0, Approve: s.approver(ctx)})
+	// lookup limits are bound to it), in hub mode its agent's token (an
+	// approved scan is bound to it too) and the console's approval screen.
+	peer := engine.Peer{UID: c.UID, Approve: s.approver(ctx)}
+	if hc := logconsole.HubCallFrom(ctx); hc != nil {
+		peer.Token = hc.TokenHash()
+	}
+	ctx = engine.WithPeer(ctx, peer)
+	if x := logconsole.ExposureFrom(ctx); x != nil {
+		ctx = engine.WithExposureCount(ctx, x.Count)
+	}
 	// The clear view (Ctrl-O): the engine keeps the call's own records,
 	// so that Reveal reads nothing again from a backend.
 	if cv := logconsole.ClearViewFrom(ctx); cv != nil && cv.On {
@@ -723,13 +732,24 @@ type Status struct {
 type SourceStatus struct {
 	Name string `json:"name"`
 	Kind string `json:"kind"`
+	// Containers is a docker source's containers map: its state, the
+	// containers served and the stale ones (removed, still mapped).
+	Containers *docker.ContainersStatus `json:"containers,omitempty"`
 }
 
 // Status implements logconsole.Engine.
-func (s *Session) Status(context.Context) any {
-	st := Status{Epoch: s.maskers.base.Epoch(), Landlock: s.conf.Landlock.String(), Notes: s.notes, Budgets: s.eng.BudgetStatus()}
+func (s *Session) Status(ctx context.Context) any {
+	st := Status{Epoch: s.maskers.base.Epoch(), Landlock: s.conf.Landlock.String(), Notes: s.notes, Budgets: s.eng.BudgetStatusFor(ctx)}
 	for _, n := range s.names {
-		st.Sources = append(st.Sources, SourceStatus{Name: n, Kind: s.srcs[n].Kind()})
+		ss := SourceStatus{Name: n, Kind: s.srcs[n].Kind()}
+		if d, ok := s.srcs[n].(interface {
+			ContainersStatus() (docker.ContainersStatus, error)
+		}); ok {
+			if cs, err := d.ContainersStatus(); err == nil {
+				ss.Containers = &cs
+			}
+		}
+		st.Sources = append(st.Sources, ss)
 	}
 	if s.docker {
 		st.Residuals = docker.Residuals(s.conf.Landlock, s.conf.Openat2)
@@ -784,7 +804,9 @@ func (s *Session) describe(ctx context.Context) Sources {
 	for _, n := range s.names {
 		src := s.srcs[n]
 		info := SourceInfo{Name: n, Kind: src.Kind()}
-		sch, err := src.Describe(s.eng.Paced(ctx, n))
+		dctx, cancel := s.eng.Paced(ctx, n)
+		sch, err := src.Describe(dctx)
+		cancel()
 		if err != nil {
 			info.Error = "the source could not be described"
 			out.Sources = append(out.Sources, info)
@@ -833,26 +855,81 @@ func (s *Session) Reveal(ctx context.Context, result any) []string {
 	return s.eng.ClearRecords(ctx, sink, refs)
 }
 
-// collectRefs appends the ref of every record under a "records" array.
-func collectRefs(v any, refs *[]string) {
+// Exposed implements logconsole.Exposer: each record of an agent call's
+// result (search, trace, context, tail, an approved scan's page) by its
+// key and the pseudonyms it showed the agent, and their epoch.
+func (s *Session) Exposed(result any) (string, []logconsole.ExposedRecord) {
+	b, err := json.Marshal(result)
+	if err != nil {
+		return "", nil
+	}
+	var v any
+	if json.Unmarshal(b, &v) != nil {
+		return "", nil
+	}
+	var recs []map[string]any
+	collectRecords(v, &recs)
+	epoch := ""
+	var out []logconsole.ExposedRecord
+	for _, m := range recs {
+		ref, _ := m["ref"].(string)
+		key, ep, ok := s.eng.RefRecord(ref)
+		if !ok || (epoch != "" && ep != epoch) {
+			continue
+		}
+		epoch = ep
+		raw, err := json.Marshal(m)
+		if err != nil {
+			continue
+		}
+		var ps []string
+		for _, t := range pseudonymRe.FindAllString(string(raw), -1) {
+			kind, _, _ := strings.Cut(strings.TrimPrefix(t, mask.Open), ":")
+			if kind == "secret" || kind == "redacted" || kind == mask.KeyKind || slices.Contains(ps, t) {
+				continue
+			}
+			ps = append(ps, t)
+		}
+		if len(ps) > 0 {
+			out = append(out, logconsole.ExposedRecord{Key: key, Pseudonyms: ps})
+		}
+	}
+	return epoch, out
+}
+
+// pseudonymRe finds the placeholders ⟦kind:ID⟧ a rendered record holds.
+var pseudonymRe = regexp.MustCompile(`⟦[^⟦⟧:\s"]+:[^⟦⟧\s"]+⟧`)
+
+// collectRecords appends every record (an object with a ref) under a
+// "records" array.
+func collectRecords(v any, out *[]map[string]any) {
 	switch x := v.(type) {
 	case map[string]any:
 		for k, e := range x {
 			if recs, ok := e.([]any); ok && k == "records" {
 				for _, r := range recs {
 					if m, ok := r.(map[string]any); ok {
-						if ref, ok := m["ref"].(string); ok {
-							*refs = append(*refs, ref)
+						if _, ok := m["ref"].(string); ok {
+							*out = append(*out, m)
 						}
 					}
 				}
 				continue
 			}
-			collectRefs(e, refs)
+			collectRecords(e, out)
 		}
 	case []any:
 		for _, e := range x {
-			collectRefs(e, refs)
+			collectRecords(e, out)
 		}
+	}
+}
+
+// collectRefs appends the ref of every record under a "records" array.
+func collectRefs(v any, refs *[]string) {
+	var recs []map[string]any
+	collectRecords(v, &recs)
+	for _, m := range recs {
+		*refs = append(*refs, m["ref"].(string))
 	}
 }

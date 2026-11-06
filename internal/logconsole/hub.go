@@ -89,12 +89,17 @@ type HubCall struct {
 	agent string
 	fp    string
 	rec   *Record
+	// noPeer: the kernel did not name the caller (no peer credentials).
+	// The call runs while it needs no approval (a free lookup); an
+	// approval is refused, never asked on the hub nor on the terminal.
+	noPeer bool
 
 	mu sync.Mutex
 	// run is the plan begun for this call (Finish after the run).
 	run *plans.Plan
-	// submitted is the plan submitted by this call (withdrawn when the
-	// call cannot be audited).
+	// submitted is the plan this call created and submitted (withdrawn
+	// when the call cannot be audited); never a pending plan of an
+	// earlier call that lent its ticket.
 	submitted string
 	used      bool
 }
@@ -185,11 +190,22 @@ const (
 	msgExpired      = "ticket expired, and could not be asked again: ask again without the ticket"
 )
 
+// TokenHash is the hash of the agent's token the call's plans are bound
+// to (plans.Binding.TokenHash): what binds an approved scan to the agent
+// too (engine.Peer.Token).
+func (h *HubCall) TokenHash() string { return plans.HashToken(h.caller.Token) }
+
 // Approve decides r on the hub: a new request is submitted (pending), the
 // run of a ticket begins when its decision verifies and binds this plan.
 // It returns nil once the run may proceed, or a *Declined with the
 // agent's answer.
 func (h *HubCall) Approve(ctx context.Context, r HubRequest) error {
+	if h.noPeer {
+		// Bound to, and shown as, the peer uid: without one, refused.
+		h.env.Println(console.Paint.Warn(h.method + ": " + errNoPeerText))
+		return &Declined{Resp: refusalResp(h.id, &Refusal{Message: errNoPeerText,
+			Info: refusal.Info{Code: "E_APPROVAL", Retry: refusal.RetryAskUser, Hint: "connect through the agent's console socket, which names the caller"}}, h.env)}
+	}
 	h.mu.Lock()
 	used := h.used
 	h.used = true
@@ -220,7 +236,7 @@ func (h *HubCall) submit(ctx context.Context, r HubRequest, hash string) error {
 	st := h.hub.Store
 	// The same request of the same agent, pending already, lends its
 	// ticket (hubclient.Submit would): no plan is left behind.
-	planID := ""
+	planID, created := "", false
 	if p, ok := st.FindPending(h.caller, hash); ok {
 		planID = p.ID
 	} else {
@@ -231,7 +247,7 @@ func (h *HubCall) submit(ctx context.Context, r HubRequest, hash string) error {
 			h.env.Println(console.Paint.Fail("hub: the plan could not be stored: " + h.env.Safe(err.Error())))
 			return &Declined{Resp: console.ErrResp(h.id, ipc.CodeInternal, msgNotSubmitted)}
 		}
-		planID = p.ID
+		planID, created = p.ID, true
 	}
 	hb := r.HubBody
 	if hb == nil {
@@ -265,16 +281,20 @@ func (h *HubCall) submit(ctx context.Context, r HubRequest, hash string) error {
 		if err == nil {
 			err = errors.New("no ticket")
 		}
-		_ = st.End(planID, h.caller, plans.Withdrawn, "not submitted")
+		if created {
+			_ = st.End(planID, h.caller, plans.Withdrawn, "not submitted")
+		}
 		h.env.Println(console.Paint.Fail(h.method + ": not submitted to the hub: " + h.env.Safe(err.Error())))
 		if errors.Is(err, hubclient.ErrRateLimited) {
 			return &Declined{Resp: console.ErrResp(h.id, ipc.CodeInternal, msgRateLimited)}
 		}
 		return &Declined{Resp: console.ErrResp(h.id, ipc.CodeInternal, msgNotSubmitted)}
 	}
-	h.mu.Lock()
-	h.submitted = planID
-	h.mu.Unlock()
+	if created {
+		h.mu.Lock()
+		h.submitted = planID
+		h.mu.Unlock()
+	}
 	line := h.method + " · " + string(r.Risk) + ": pending on lockhub as ticket " + h.env.Safe(id)
 	if err != nil {
 		line += console.Paint.Dim(" (not delivered yet: " + h.env.Safe(err.Error()) + ")")
@@ -491,7 +511,7 @@ func withHub(st any, h *console.Hub) any {
 }
 
 // newHubCall is the hub call of an approved method's request.
-func (b *Backend) newHubCall(h *console.Hub, env console.Env, id int64, method string, e envelope, uid int, rec *Record) (*HubCall, error) {
+func (b *Backend) newHubCall(h *console.Hub, env console.Env, id int64, method string, e envelope, uid int, noPeer bool, rec *Record) (*HubCall, error) {
 	p, ok := env.Policy().(Policy)
 	if !ok {
 		return nil, fmt.Errorf("no locklog policy in force")
@@ -501,7 +521,7 @@ func (b *Backend) newHubCall(h *console.Hub, env console.Env, id int64, method s
 		now = time.Now
 	}
 	return &HubCall{hub: h, env: env, now: now, id: id, method: method, ticket: e.Ticket, caller: plans.Caller{UID: uid, Token: e.Requester.Token},
-		agent: peerName(uid), fp: policyFP(p), rec: rec}, nil
+		agent: peerName(uid), fp: policyFP(p), rec: rec, noPeer: noPeer}, nil
 }
 
 // peerName is who the hub shows as the requester: the kernel-verified

@@ -183,9 +183,11 @@ retry unless asked.
 | `:quit` | end the console |
 
 The unmask screen shows the record masked, the asked spans marked `» «`,
-the agent's reason, and two warnings: the agent receives these clear values
-once, and can link them to every record with the same pseudonym in the
-epoch. After a yes the record is read again, and the unmask is refused
+the agent's reason, how many records holding each pseudonym agents were
+given in this epoch (counted by the console from the calls it answered and
+audited, by pseudonym only, since the console started), and two warnings:
+the agent receives these clear values once, and can link them to every
+record with the same pseudonym in the epoch. After a yes the record is read again, and the unmask is refused
 (`E_STALE`) if the record, the epoch or the policy changed.
 
 With clear results on (Ctrl-O), the console prints, after each agent call,

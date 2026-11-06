@@ -217,6 +217,9 @@ type Backend struct {
 	// fp is the policy in force (the last session's), in a ticket's form:
 	// what a renewal is checked against.
 	fp string
+	// exp counts the records with each pseudonym returned to agents in
+	// the epoch (the unmask screen shows it), across sessions.
+	exp *Exposure
 }
 
 var _ console.Backend = (*Backend)(nil)
@@ -226,7 +229,7 @@ func New(o Options) *Backend {
 	if o.SysClassNet == "" {
 		o.SysClassNet = "/sys/class/net"
 	}
-	return &Backend{o: o}
+	return &Backend{o: o, exp: NewExposure(time.Now())}
 }
 
 // Sanitizer scrubs locklog's error text: URL userinfo and Authorization
@@ -539,20 +542,22 @@ func (b *Backend) handler(method string) console.Handler {
 		cctx, cancel := ls.callContext(ctx)
 		cctx = WithApprove(cctx, func(ctx context.Context, s console.Screen) console.Approval { return env.Approve(ctx, req.ID, s) })
 		cctx = WithShowResults(cctx, env.ShowResults())
+		cctx = WithExposure(cctx, b.exp)
 		var hc *HubCall
 		if h := console.HubOf(env); h != nil && approved {
 			// Hub mode: the approval is a ticket on lockhub, never a
 			// prompt here. It is bound to, and shown as, the peer the
-			// kernel names: without peer credentials, refused.
-			if !peerKnown {
-				cancel()
-				return failed(req.ID, env, rec, ipc.CodeInternal, errNoPeerText, errNoPeerText)
-			}
-			if hc, err = b.newHubCall(h, env, req.ID, method, ev, c.UID, &rec); err != nil {
+			// kernel names: without peer credentials, an approval is
+			// refused (a call that needs none, a free lookup, runs).
+			if hc, err = b.newHubCall(h, env, req.ID, method, ev, c.UID, !peerKnown, &rec); err != nil {
 				cancel()
 				return failed(req.ID, env, rec, ipc.CodeInternal, "no log engine for the policy in force", "no log engine for the policy in force")
 			}
 			cctx = WithHubCall(cctx, hc)
+			// The plan a decided ticket began ends whatever happens to
+			// the call, a panic of the engine included (no-op once
+			// finished below with the call's outcome).
+			defer hc.finish(context.WithoutCancel(ctx), false, "failed")
 		}
 		result, refused, err := ls.engine.Handle(cctx, method, params, c)
 		if hc != nil {
@@ -638,6 +643,13 @@ func (b *Backend) handler(method string) console.Handler {
 				hc.withdraw(context.WithoutCancel(ctx))
 			}
 			return console.ErrResp(req.ID, ipc.CodeInternal, "the call could not be audited: refused")
+		}
+		// What the answer returns to the agent, audited: its records'
+		// pseudonyms are counted (the unmask screen's exposure).
+		if rec.Decision == "ok" {
+			if ex, ok := ls.engine.(Exposer); ok {
+				b.exp.Add(ex.Exposed(result))
+			}
 		}
 		return resp
 	}
