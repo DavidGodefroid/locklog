@@ -846,3 +846,27 @@ func TestDescendingScanResumesTheWalk(t *testing.T) {
 		t.Fatalf("the descending scans walked %d entries for %d", n, len(es))
 	}
 }
+
+// A journal root swapped or removed under the source is a lost mount
+// (source.ErrMountLost); a root absent from the start is skipped.
+func TestRootSwappedIsMountLost(t *testing.T) {
+	r := root(t, map[string]string{"system.journal": "fedora-41/remote.journal.gz"})
+	s := newSource(t, Options{Roots: []string{r}})
+	ctx := context.Background()
+	if _, err := s.Plan(ctx, everything, source.Selector{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(r, r+".old"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(r, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Plan(ctx, everything, source.Selector{}); !errors.Is(err, source.ErrMountLost) {
+		t.Errorf("plan under a swapped root: %v", err)
+	}
+	os.Remove(r)
+	if _, err := s.Plan(ctx, everything, source.Selector{}); !errors.Is(err, source.ErrMountLost) {
+		t.Errorf("plan under a removed root: %v", err)
+	}
+}

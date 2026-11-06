@@ -74,8 +74,14 @@ type countingSource struct {
 	n *int
 }
 
+// countMu guards the counts of calls run in parallel (TestBusy); the
+// tests read them once the calls returned.
+var countMu sync.Mutex
+
 func (c countingSource) Scan(ctx context.Context, ch source.Chunk) (source.Iterator, error) {
+	countMu.Lock()
 	*c.n++
+	countMu.Unlock()
 	return c.Source.Scan(ctx, ch)
 }
 
@@ -2474,5 +2480,39 @@ func TestPlanAtTheByteBudget(t *testing.T) {
 	_, sp := allRecords(t, f.eng, q(func(q *Query) { q.Text = "orders/4812"; q.Limit = 200 }))
 	if len(sp) == 0 {
 		t.Fatal("no search page")
+	}
+}
+
+// TestMountLostIsNotARefusal: a source whose mount root is gone or
+// replaced (source.ErrMountLost), or whose reads hit a stale handle
+// (ESTALE), ends the call with that error, never a refusal: the console
+// drops the session (logconsole.ErrConnLost) and reconnects.
+func TestMountLostIsNotARefusal(t *testing.T) {
+	lost := func() error { return fmt.Errorf("file source: %w: /var/log/app", source.ErrMountLost) }
+	stale := func() error {
+		return &fs.PathError{Op: "read", Path: "/var/log/app/app.log", Err: syscall.ESTALE}
+	}
+	for name, tc := range map[string]struct {
+		es     func(*errSource)
+		method string
+		params string
+	}{
+		"plan":        {func(s *errSource) { s.plan = lost }, MethodSearch, ""},
+		"scan":        {func(s *errSource) { s.scan = lost }, MethodSearch, ""},
+		"scan estale": {func(s *errSource) { s.scan = stale }, MethodSearch, ""},
+		"index":       {func(s *errSource) { s.count = lost }, MethodCount, `,"by":["level"]`},
+		"count scan":  {func(s *errSource) { s.scan = stale }, MethodCount, `,"by":["level"]`},
+	} {
+		f := newFixture(t, genLog(t0, 100, "c@example.org"), nil)
+		es := errSource{countingSource: f.eng.o.Sources["app"].(countingSource)}
+		tc.es(&es)
+		f.eng.o.Sources["app"] = es
+		from, _ := json.Marshal(t0.Add(-time.Hour))
+		to, _ := json.Marshal(t0.Add(time.Hour))
+		params := json.RawMessage(`{"from":` + string(from) + `,"to":` + string(to) + tc.params + `}`)
+		res, ref, err := f.eng.Handle(ctx, tc.method, params)
+		if ref != nil || res != nil || !errors.Is(err, source.ErrMountLost) {
+			t.Errorf("%s: result %v, refusal %v, error %v; want a mount-lost error", name, res, ref, err)
+		}
 	}
 }

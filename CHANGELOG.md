@@ -11,6 +11,13 @@ takes the launcher verbs every lock of the Lock Family takes (#117).
 
 ### Added
 
+- A leak harness over the bytes leaving the console: the canary corpus
+  served by a hub-attached console, its IPC socket replies, audit file, MCP
+  outputs and hub ticket screens scanned in every encoding: 0 hits
+  ([#86](https://github.com/DavidGodefroid/locklog/issues/86)).
+- On a production profile without Landlock, `:status` and `doctor` name the
+  residual: its local sources are read by an unconfined console
+  ([#62](https://github.com/DavidGodefroid/locklog/issues/62)).
 - Auto mode per profile for `lox run` (#126): `auto = "full-auto"`, or an
   `[profiles.P.auto]` table setting `read` (an approved scan), `unmask` and
   `lookup` (an approved lookup) to `auto`, `ask` or `deny` (default `ask`
@@ -56,6 +63,10 @@ takes the launcher verbs every lock of the Lock Family takes (#117).
 
 ### Changed
 
+- A log root at, beneath or above one of the console's writable
+  directories (an extra root under `/tmp` or the home volume) is refused
+  instead of losing its read-only Landlock rule
+  ([#62](https://github.com/DavidGodefroid/locklog/issues/62)).
 - Hub tickets are version 2 (lockkit's kind `read`, the profile as their
   subject), so that `lox run` can apply a profile's rules to them (#126).
 - **Breaking.** lockkit v0.13.0 (from v0.8.1). `locklog console` without
@@ -123,6 +134,19 @@ takes the launcher verbs every lock of the Lock Family takes (#117).
 
 ### Fixed
 
+- The confined console resolves host names again: Landlock now grants
+  `/etc/hosts`, `/etc/resolv.conf` and `/etc/nsswitch.conf`, which Go's
+  resolver reads at every lookup (remote sources and the hub were dialled
+  by name to `[::1]:53`), and the controlling terminal for a secret asked
+  again ([#62](https://github.com/DavidGodefroid/locklog/issues/62)).
+- A containers root the launcher could not check from the host is pinned by
+  its device:inode at the first connection and checked on every call; a
+  file, journald or docker source whose root is gone, stale or replaced
+  ends the call as a lost session (`CodeConnLost`), not a refusal
+  ([#62](https://github.com/DavidGodefroid/locklog/issues/62)).
+- The MCP tools no longer echo what the agent sent in the SDK's argument
+  errors (schema validation, an unknown tool's name): a fixed text names
+  the argument and the rule ([#86](https://github.com/DavidGodefroid/locklog/issues/86)).
 - `locklog doctor` before any profile checks the account as for a
   production profile (red, exit 1) and says to run `locklog profile add`;
   it exited 0 (#87).

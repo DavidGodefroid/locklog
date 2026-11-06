@@ -642,3 +642,40 @@ func TestValueToolsForward(t *testing.T) {
 		}
 	}
 }
+
+// The SDK's own errors on a tool's arguments (schema validation, decoding)
+// and on an unknown tool quote what the agent sent: the agent gets a fixed
+// text naming the argument and the rule, never the value or a key it wrote.
+func TestArgumentErrorsEchoNothing(t *testing.T) {
+	c := &fakeConn{}
+	cs := connect(t, withConn(c))
+	const canary = "jane.canary@example.org"
+	for name, tc := range map[string]struct {
+		tool string
+		args map[string]any
+		want string
+	}{
+		"maxLength":   {ToolPatterns, map[string]any{"from": "2026-10-30T13:00:00Z", "baseline": canary + canary}, "invalid arguments: baseline (maxLength)"},
+		"unknown key": {ToolSearch, map[string]any{"from": "2026-10-30T13:00:00Z", canary: 1}, "invalid arguments"},
+		"type":        {ToolSearch, map[string]any{"from": "2026-10-30T13:00:00Z", "limit": canary}, "invalid arguments: limit (type)"},
+		"enum":        {ToolScan, map[string]any{"tool": canary, "query": map[string]any{}}, "invalid arguments: tool (enum)"},
+		"nested":      {ToolSearch, map[string]any{"where": []any{map[string]any{"field": "x", "op": canary}}}, "invalid arguments"},
+	} {
+		res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: tc.tool, Arguments: tc.args})
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		got := text(res)
+		sc, _ := json.Marshal(res.StructuredContent)
+		if !res.IsError || strings.Contains(got, "canary") || strings.Contains(string(sc), "canary") || !strings.Contains(got, tc.want) {
+			t.Errorf("%s: %q %s", name, got, sc)
+		}
+	}
+	_, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "locklog_" + canary})
+	if err == nil || strings.Contains(err.Error(), "canary") || !strings.Contains(err.Error(), "unknown tool") {
+		t.Errorf("unknown tool: %v", err)
+	}
+	if len(c.methods()) != 0 {
+		t.Errorf("forwarded: %q", c.methods())
+	}
+}

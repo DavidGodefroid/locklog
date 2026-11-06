@@ -510,6 +510,9 @@ func sourceLogFrom(ctx context.Context) func(string) {
 }
 
 func sourceError(err error) *Error {
+	if lost := source.MountLost(err); errors.Is(lost, source.ErrMountLost) {
+		return &Error{Code: ESource, Message: "the log session was lost", lost: lost}
+	}
 	switch {
 	case errors.Is(err, source.ErrStale), errors.Is(err, source.ErrNotFound), errors.Is(err, fs.ErrNotExist):
 		return &Error{Code: EStale, Message: "a log stream changed since the plan was made: run the query again"}

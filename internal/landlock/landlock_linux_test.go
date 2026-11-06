@@ -102,8 +102,9 @@ func TestRestrictChild(t *testing.T) {
 	}
 	ro, rw, out, ex := filepath.Join(base, "ro"), filepath.Join(base, "rw"), filepath.Join(base, "outside"), filepath.Join(base, "ex")
 	// Device file rules: /dev/null read-only, /dev/zero read-write,
-	// /dev/full exec.
-	st, err := Restrict(Rules{ReadOnly: []string{ro, "/dev/null"}, ReadWrite: []string{rw, "/dev/zero"}, Exec: []string{ex, "/dev/full"}})
+	// /dev/full exec, /dev/random a terminal (read, write, ioctl).
+	st, err := Restrict(Rules{ReadOnly: []string{ro, "/dev/null"}, ReadWrite: []string{rw, "/dev/zero"}, Exec: []string{ex, "/dev/full"},
+		Terminal: []string{"/dev/random"}})
 	if errors.Is(err, syscall.ENOTSUP) {
 		fmt.Println("SKIP-CHILD: built with cgo: AllThreadsSyscall is unavailable")
 		return
@@ -182,6 +183,19 @@ func TestRestrictChild(t *testing.T) {
 			_, err = unix.IoctlGetTermios(fd, unix.TCGETS)
 			unix.Close(fd)
 			refusedIn(where, "a device ioctl (IOCTL_DEV) on "+dev, err)
+		}
+		// On a terminal rule the ioctl reaches the device, which
+		// answers it (EINVAL: /dev/random is no terminal), as TCGETS
+		// reaches /dev/tty.
+		fd, err := unix.Open("/dev/random", unix.O_RDWR|unix.O_CLOEXEC, 0)
+		if err != nil {
+			t.Errorf("open a terminal rule's device read-write: %v", err)
+		} else {
+			_, err = unix.IoctlGetTermios(fd, unix.TCGETS)
+			unix.Close(fd)
+			if err == nil || errors.Is(err, syscall.EACCES) {
+				t.Errorf("a device ioctl on a terminal rule: %v, want the device's own error", err)
+			}
 		}
 	}
 	if b, err := os.ReadFile(filepath.Join(ro, "f")); err != nil || string(b) != "content" {
@@ -271,6 +285,8 @@ func TestRestrictRefusesReadOnlyBeneathReadWrite(t *testing.T) {
 		{Exec: []string{base}, ReadWrite: []string{rw}},
 		{Exec: []string{rw}, ReadWrite: []string{filepath.Join(rw, "logs")}},
 		{ReadOnly: []string{"relative"}},
+		{Terminal: []string{filepath.Join(rw, "logs")}},
+		{Terminal: []string{rw}, ReadWrite: []string{base}},
 	} {
 		if _, err := Restrict(r); err == nil {
 			t.Fatalf("%+v accepted (and this process is now restricted)", r)

@@ -80,6 +80,11 @@ type Options struct {
 	// first is absent (docker: <id>-json.log.1, then .1.gz once Docker
 	// compressed it): never both.
 	Alternates map[string]string
+	// Guard pins the roots (nil: the source's own). A root gone or
+	// replaced since it was first read fails every call with
+	// source.ErrMountLost. The docker source shares one across its
+	// containers' sources.
+	Guard *source.RootGuard
 }
 
 // Source is a file source. It is safe for concurrent use.
@@ -130,6 +135,9 @@ func New(opts Options) (*Source, error) {
 	}
 	opts.Trusted = slices.Clone(opts.Trusted)
 	sort.Strings(opts.Trusted)
+	if opts.Guard == nil {
+		opts.Guard = &source.RootGuard{}
+	}
 	return &Source{opts: opts, gens: map[[2]uint64]gen{}, failed: map[string]bool{}}, nil
 }
 
@@ -139,8 +147,21 @@ func (s *Source) Name() string { return s.opts.Name }
 // Kind returns "file".
 func (s *Source) Kind() string { return Kind }
 
+// checkRoots checks every root against the guard.
+func (s *Source) checkRoots() error {
+	for _, r := range s.opts.Roots {
+		if err := s.opts.Guard.Check(r); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // files lists the matched files, newest first (mtime, then path).
 func (s *Source) files(ctx context.Context) ([]fileInfo, error) {
+	if err := s.checkRoots(); err != nil {
+		return nil, err
+	}
 	var ms []match
 	seen := map[string]bool{}
 	for _, p := range s.opts.Paths {
@@ -325,6 +346,9 @@ func (s *Source) lookup(ctx context.Context, stream string) (fileInfo, error) {
 
 // open opens fi's file again and checks it is still the same stream.
 func (s *Source) open(fi fileInfo) (*os.File, fileInfo, error) {
+	if err := s.opts.Guard.Check(fi.m.root); err != nil {
+		return nil, fileInfo{}, err
+	}
 	f, err := openBeneath(fi.m.root, fi.m.rel, s.opts.NoXDev)
 	if err != nil {
 		return nil, fileInfo{}, source.ErrStale

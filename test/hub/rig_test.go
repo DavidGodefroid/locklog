@@ -118,6 +118,13 @@ func (f *fakeIO) promptCount() int { f.mu.Lock(); defer f.mu.Unlock(); return f.
 type rigOpts struct {
 	extra   string // profile keys
 	hubOpts func(*console.HubOptions)
+	// cfg replaces the config (LOGS stands for the logs directory),
+	// files the logs (by name), and rules is the project's
+	// .locklog/pii.toml; now is the engine's clock (default 14:00).
+	cfg   string
+	files map[string]string
+	rules string
+	now   time.Time
 	// reconnect: the console reconnects on the policy in force once the
 	// session is dropped (a policy change), as console.Run does.
 	reconnect bool
@@ -174,18 +181,36 @@ func newRig(t *testing.T, o rigOpts) *rig {
 	r := &rig{t: t, io: &fakeIO{}, clock: &clock{}, state: t.TempDir(), token: "tok-1"}
 	root := t.TempDir()
 	logs, _ := filepath.EvalSymlinks(t.TempDir())
-	if err := os.WriteFile(filepath.Join(logs, "app.log"), []byte(appLog), 0o644); err != nil {
-		t.Fatal(err)
+	files, conf := o.files, o.cfg
+	if files == nil {
+		files = map[string]string{"app.log": appLog}
+	}
+	if conf == "" {
+		conf = cfg
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(logs, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := os.MkdirAll(filepath.Join(root, ".locklog"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	c := strings.ReplaceAll(strings.ReplaceAll(cfg, "LOGS", logs), "EXTRA", o.extra)
+	c := strings.ReplaceAll(strings.ReplaceAll(conf, "LOGS", logs), "EXTRA", o.extra)
 	r.cfg = filepath.Join(root, ".locklog", "config.toml")
 	if err := os.WriteFile(r.cfg, []byte(c), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	sessNow := func() time.Time { return time.Date(2026, 10, 30, 14, 0, 0, 0, time.UTC) }
+	if o.rules != "" {
+		if err := os.WriteFile(filepath.Join(root, ".locklog", "pii.toml"), []byte(o.rules), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := o.now
+	if now.IsZero() {
+		now = time.Date(2026, 10, 30, 14, 0, 0, 0, time.UTC)
+	}
+	sessNow := func() time.Time { return now }
 	first := true
 	open := func(ctx context.Context, oo logconsole.OpenOptions) (logconsole.Engine, error) {
 		s, err := session.Open(ctx, session.Options{OpenOptions: oo, FirstOpen: first, Now: sessNow,
