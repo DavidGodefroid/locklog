@@ -133,7 +133,21 @@ func TestGetWithHeaders(t *testing.T) {
 		t.Fatalf("GetWith: %v %+v", err, &s)
 	}
 	n := s.n.Load()
-	for _, h := range []string{"Authorization", "cookie", "X-Scope-OrgID", "Host", "User-Agent", "x-query-tags"} {
+	// Allowlisted names pass in any case.
+	for _, h := range []string{"X-Loki-Response-Encoding-Flags", "x-loki-response-encoding-flags", "X-LOKI-RESPONSE-ENCODING-FLAGS"} {
+		hdr := map[string]string{h: "categorize-labels"}
+		if _, err := New(remote(srv.URL, config.AuthBearer, kconfig.TLSVerifyFull), LokiRoutes, Credentials{Secret: "s3cret"}, Options{RootCAs: roots(srv), Headers: hdr}); err != nil {
+			t.Errorf("allowlisted header %s refused: %v", h, err)
+		}
+		if _, err := c.GetWith(context.Background(), "/loki/api/v1/labels", nil, hdr); err != nil {
+			t.Errorf("allowlisted header %s not sent: %v", h, err)
+		}
+	}
+	n = s.n.Load()
+	// Everything else is refused, whatever its case: credentials, tenant,
+	// host, query tags, and any header nobody allowlisted.
+	for _, h := range []string{"Authorization", "cookie", "X-Scope-OrgID", "Host", "User-Agent", "x-query-tags",
+		"X-Forwarded-For", "x-forwarded-host", "Forwarded", "X-Api-Key", "x-loki-other", "X-Opaque-Id", "Content-Type", "Accept-Encoding", "Transfer-Encoding", "Connection", "Te", ""} {
 		if _, err := New(remote(srv.URL, config.AuthBearer, kconfig.TLSVerifyFull), LokiRoutes, Credentials{Secret: "s3cret"}, Options{RootCAs: roots(srv), Headers: map[string]string{h: "x"}}); err == nil {
 			t.Errorf("fixed header %s accepted", h)
 		}
