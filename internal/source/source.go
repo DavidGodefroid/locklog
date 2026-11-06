@@ -10,6 +10,10 @@ package source
 import (
 	"context"
 	"errors"
+	"math/big"
+	"regexp"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/DavidGodefroid/locklog/internal/parse"
@@ -47,6 +51,70 @@ type Term struct {
 	Label  bool
 	Op     string // "=", "!=", "in"
 	Values []string
+	// Numbers are the values given as JSON numbers (a subset of
+	// Values). The engine compares a number leaf with them by exact
+	// value (200 = 200.0 = 2e2) and any other leaf by text; a source
+	// sees values as text, without their kind: see Ambiguous. Only a
+	// NumericSelector is given a term with Numbers.
+	Numbers []string
+}
+
+// Ambiguous reports whether the raw value v of t's field satisfies t or
+// not depending on the kind of the leaf it was read from, which a
+// source's index does not keep: a number equal to one of t's Numbers but
+// written otherwise (2e2 for 200) matches as a JSON number, not as a
+// string. Every other value matches t exactly as Match says. A source
+// treats an ambiguous value as unknown, as a redacted one: it may match,
+// and it is never counted by t.
+func (t Term) Ambiguous(v string) bool {
+	if len(t.Numbers) == 0 || contains(t.Values, v) {
+		return false
+	}
+	n, ok := ParseNumber(v)
+	if !ok {
+		return false
+	}
+	for _, x := range t.Numbers {
+		if m, ok := ParseNumber(x); ok && m.Cmp(n) == 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// NumericSelector is implemented by a source that honors Term.Numbers (it
+// treats Ambiguous values as unknown): the engine pushes numeric terms
+// only to such a source and evaluates them on the records for the others.
+type NumericSelector interface {
+	NumericTerms()
+}
+
+var jsonNumber = regexp.MustCompile(`^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?$`)
+
+// Number literal bounds: big.Rat's cost grows with the exponent (1e999999
+// takes milliseconds), and log content chooses it.
+const (
+	MaxNumberLen      = 400
+	MaxNumberExponent = 400
+)
+
+// ParseNumber returns the exact value of a JSON number literal within the
+// bounds; a literal beyond them is not a number to compare (equality falls
+// back to its text). It is the engine's reading of a number.
+func ParseNumber(s string) (*big.Rat, bool) {
+	// The JSON number grammar only: big.Rat also takes hex, octal and
+	// binary mantissas, p exponents (0x1p9999999), fractions and
+	// underscores.
+	if len(s) > MaxNumberLen || !jsonNumber.MatchString(s) {
+		return nil, false
+	}
+	if i := strings.IndexAny(s, "eE"); i >= 0 {
+		e, err := strconv.Atoi(s[i+1:])
+		if err != nil || e > MaxNumberExponent || e < -MaxNumberExponent {
+			return nil, false
+		}
+	}
+	return new(big.Rat).SetString(s)
 }
 
 // Selector is the conjunction of trusted-field terms of a query: the part a

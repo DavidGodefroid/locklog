@@ -111,7 +111,7 @@ func (e *Engine) Context(ctx context.Context, cq ContextQuery) (ContextResult, e
 		raws, err = src.Around(cctx, rr, cq.Before, cq.After)
 	}
 	if err != nil {
-		return ContextResult{}, sourceError(err)
+		return ContextResult{}, e.sourceFailed(ctx, rr.Source, err)
 	}
 	target := -1
 	for i, r := range raws {
@@ -128,7 +128,7 @@ func (e *Engine) Context(ctx context.Context, cq ContextQuery) (ContextResult, e
 	raws, target = raws[lo:hi], target-lo
 	recs, err := e.maskAll(cctx, rr.Source, raws)
 	if err != nil {
-		return ContextResult{}, sourceError(err)
+		return ContextResult{}, e.sourceFailed(ctx, rr.Source, err)
 	}
 	res := ContextResult{Epoch: e.o.Masker.Epoch(), Records: []json.RawMessage{}, Masking: Masking{Kinds: []string{}}, Complete: true}
 	outs := make([]json.RawMessage, len(raws))

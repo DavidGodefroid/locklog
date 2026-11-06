@@ -195,7 +195,7 @@ func (e *Engine) planUnmask(ctx context.Context, q UnmaskQuery, rr source.RawRef
 	}
 	raw, err := src.Reread(cctx, rr)
 	if err != nil {
-		return unmaskPlan{}, sourceError(err)
+		return unmaskPlan{}, e.sourceFailed(ctx, rr.Source, err)
 	}
 	if subtle.ConstantTimeCompare([]byte(e.RecordDigest(raw.Event.Raw)), []byte(digest)) != 1 {
 		return unmaskPlan{}, sourceError(source.ErrStale)

@@ -90,19 +90,29 @@ type Builder struct {
 	// memo holds sensitive's answers: trusted fields are low-cardinality
 	// (status, method, level), and asking the masker for every record
 	// dominated the backfill (R6-P1: backfill at full speed). Bounded by
-	// memoMax entries of values up to memoValueMax bytes.
-	memo    map[memoKey]bool
-	g       Granule
-	minutes map[int64]map[string]*Count
-	untimed map[string]*Count
+	// memoMax entries of values up to memoValueMax bytes. It is
+	// cleared when generation moves: a rule added while the granule is
+	// built (mask.Masker.AgentAdd) may make a memoized clear value
+	// sensitive.
+	memo       map[memoKey]bool
+	generation func() uint64
+	memoGen    uint64
+	g          Granule
+	minutes    map[int64]map[string]*Count
+	untimed    map[string]*Count
 }
 
 // NewBuilder indexes the given fields; sensitive reports values a detector
-// flags (nil: none).
-func NewBuilder(fields []string, sensitive func(field, value string) bool) *Builder {
+// flags (nil: none). generation identifies the rules sensitive applies
+// (mask.Masker.RulesGeneration): its answers are memoized only while it
+// stays the same (nil: the rules never change).
+func NewBuilder(fields []string, sensitive func(field, value string) bool, generation func() uint64) *Builder {
 	b := &Builder{fields: fields, minutes: map[int64]map[string]*Count{}, untimed: map[string]*Count{}}
 	if sensitive != nil {
 		b.memo = map[memoKey]bool{}
+		if generation != nil {
+			b.generation, b.memoGen = generation, generation()
+		}
 		b.sensitive = func(f, v string) bool {
 			if len(v) > memoValueMax {
 				return sensitive(f, v)
@@ -131,6 +141,14 @@ const (
 // Add counts one record.
 func (b *Builder) Add(ev parse.Event) {
 	b.g.Records++
+	if b.generation != nil {
+		// Read before the record is asked about: a rule added after this
+		// read moves the generation, and the next record clears the memo.
+		if g := b.generation(); g != b.memoGen {
+			clear(b.memo)
+			b.memoGen = g
+		}
+	}
 	vals := Values(ev, b.fields, b.sensitive)
 	key := tupleKey(vals)
 	var bucket map[string]*Count

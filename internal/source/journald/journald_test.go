@@ -792,3 +792,57 @@ func TestCorruptSharedObjectFailsOnceAndIsCounted(t *testing.T) {
 		t.Fatalf("scan took %v: the corrupt object is decoded again per entry", d)
 	}
 }
+
+// TestDescendingScanResumesTheWalk: a granule scanned alone (a descending
+// search reads granules last first) resumes the entry-array walk at its
+// granule instead of walking the journal from its head, and reads the same
+// records as a whole scan (#51).
+func TestDescendingScanResumesTheWalk(t *testing.T) {
+	var es []journaltest.Entry
+	base := uint64(1761800000000000)
+	for i := range 20 * GranuleEntries {
+		es = append(es, journaltest.Entry{Realtime: base + uint64(i)*1_000_000, Fields: []string{fmt.Sprintf("MESSAGE=entry %d", i), "PRIORITY=6"}})
+	}
+	s := newSource(t, Options{Roots: []string{rootWith(t, journaltest.Build(journaltest.Options{Compact: true, PerArray: 100}, es))}})
+	ctx := context.Background()
+	whole := scanAll(t, s, everything)
+	plan, err := s.Plan(ctx, everything, source.Selector{})
+	if err != nil || len(plan.Chunks) != 1 || len(plan.Chunks[0].Granules) != 20 {
+		t.Fatalf("plan %+v: %v", plan, err)
+	}
+	c := plan.Chunks[0]
+	var desc []source.RawRecord
+	scanWalked.Store(0)
+	for i := len(c.Granules) - 1; i >= 0; i-- {
+		one := c
+		one.Granules = []source.Granule{c.Granules[i]}
+		it, err := s.Scan(ctx, one)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var part []source.RawRecord
+		for {
+			rec, err := it.Next()
+			if err != nil {
+				break
+			}
+			part = append(part, rec)
+		}
+		it.Close()
+		desc = append(part, desc...)
+	}
+	if len(desc) != len(whole) {
+		t.Fatalf("%d records by granule, %d whole", len(desc), len(whole))
+	}
+	for i := range desc {
+		if desc[i].Ref != whole[i].Ref {
+			t.Fatalf("record %d differs", i)
+		}
+	}
+	// Each granule walks itself and at most the rest of the array
+	// holding its first entry (100 entries); from the head, the 20
+	// granules would walk 20*21/2 granules' worth.
+	if n := scanWalked.Load(); n > int64(len(es)+20*100) {
+		t.Fatalf("the descending scans walked %d entries for %d", n, len(es))
+	}
+}
