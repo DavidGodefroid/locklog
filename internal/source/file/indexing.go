@@ -120,7 +120,7 @@ func (s *Source) indexPlain(ctx context.Context, fi fileInfo, n int64) (int64, e
 		return 0, err
 	}
 	defer it.Close()
-	b := index.NewBuilder(s.fields(), s.opts.Sensitive)
+	b := index.NewBuilder(s.fields(), s.opts.Sensitive, s.opts.RulesGeneration)
 	var lastEnd int64
 	lastOpen := false
 	for {
@@ -163,12 +163,12 @@ func (s *Source) indexCompressed(ctx context.Context, fi fileInfo) (int64, error
 	// empty ones included, so the whole stream is covered.
 	var out []index.Granule
 	cur := int64(0)
-	b := index.NewBuilder(s.fields(), s.opts.Sensitive)
+	b := index.NewBuilder(s.fields(), s.opts.Sensitive, s.opts.RulesGeneration)
 	finish := func(upTo int64) {
 		for ; cur < upTo; cur++ {
 			start, end := granuleBounds(cur, math.MaxInt64)
 			out = append(out, b.Finish(cur, start, end, true))
-			b = index.NewBuilder(s.fields(), s.opts.Sensitive)
+			b = index.NewBuilder(s.fields(), s.opts.Sensitive, s.opts.RulesGeneration)
 		}
 	}
 	for {
@@ -260,7 +260,7 @@ func (s *Source) IndexCounts(ctx context.Context, q CountQuery) (CountResult, er
 			// A granule with a redacted or overflowing value of a
 			// counted or selected field is scanned instead.
 			by := groupKeys(q.By, q.ByLabels)
-			if granuleUnknown(ig, fields, append(termFields(q.Selector), by...)) {
+			if granuleUnknown(ig, fields, append(termFields(q.Selector), by...)) || granuleAmbiguous(ig, fields, q.Selector) {
 				rest = append(rest, g)
 				continue
 			}
@@ -323,6 +323,24 @@ func granuleUnknown(g *index.Granule, fields, names []string) bool {
 	}
 	for _, c := range g.Untimed {
 		if unknown(fields, c.Vals, names) {
+			return true
+		}
+	}
+	return false
+}
+
+// granuleAmbiguous reports whether a tuple of g holds a value of a term of
+// sel whose match depends on its kind (ambiguous).
+func granuleAmbiguous(g *index.Granule, fields []string, sel source.Selector) bool {
+	for _, m := range g.Minutes {
+		for _, c := range m.Counts {
+			if ambiguous(sel, fields, c.Vals) {
+				return true
+			}
+		}
+	}
+	for _, c := range g.Untimed {
+		if ambiguous(sel, fields, c.Vals) {
 			return true
 		}
 	}

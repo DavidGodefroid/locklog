@@ -60,6 +60,11 @@ var parserTrusted = map[string][]string{
 	"docker-json": {"stream"},
 }
 
+// framedFormat reports a format whose lines are frames (cri,
+// docker-json): their stream and attrs are labels, apart from the
+// payload's fields.
+func framedFormat(f string) bool { return f == "cri" || f == "docker-json" }
+
 // Source is one approved log source of a profile. It never holds a secret.
 type Source struct {
 	Name string `json:"name"`
@@ -295,6 +300,13 @@ func buildSource(name string, r rawSource, production bool) (Source, error) {
 		}
 		if !fieldNameRe.MatchString(f) {
 			return Source{}, errf("trusted: invalid field name %q", f)
+		}
+		// A framed format's frame keys (parse.FrameKeys) are labels: the
+		// stream is trusted by default (parserTrusted); a file source
+		// keeps no frame attrs (only a docker source does, with attrs),
+		// so trusting one would select and count nothing.
+		if head, _, _ := strings.Cut(f, "."); s.Kind == KindFile && framedFormat(s.Format) && head == "attrs" {
+			return Source{}, errf("trusted: %s: a file source keeps no frame attrs (only a docker source keeps them, named in attrs); its records never hold it", f)
 		}
 		if messageField(f) {
 			return Source{}, errf("trusted: %s is the message text of a parsed line, always served masked; it cannot be trusted", f)
@@ -562,6 +574,15 @@ func buildRemote(kind string, r rawSource, production bool, errf func(string, ..
 	}
 	if (rem.TLSCert == "") != (rem.TLSKey == "") {
 		return nil, errf("tls_cert and tls_key go together: set both, or neither")
+	}
+	// The console reads these files in its container: a relative or '~'
+	// path would resolve against whatever its working directory is (the
+	// launcher's mount plan refuses them too, but a console started
+	// without it would not).
+	for _, f := range []struct{ key, val string }{{"tls_ca", rem.TLSCA}, {"tls_cert", rem.TLSCert}, {"tls_key", rem.TLSKey}} {
+		if f.val != "" && (!path.IsAbs(f.val) || path.Clean(f.val) != f.val) {
+			return nil, errf("%s: want an absolute, clean path (no '~', '..', '.', '//' or trailing '/')", f.key)
+		}
 	}
 
 	tls := scheme == "https"

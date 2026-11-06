@@ -24,8 +24,14 @@ const (
 	maxLookupV  = 256 // engine.MaxLookupValue
 	maxToken    = 64  // a pseudonym ⟦kind:ID⟧
 	maxKind     = 32
-	maxScanArgs = 16 // the keys of a scan's query
-	maxTicket   = 26 // a hub ticket id (a ULID)
+	maxScanArgs = 16   // the keys of a scan's query
+	maxTicket   = 26   // a hub ticket id (a ULID)
+	maxText     = 256  // engine.MaxNeedle: a text needle, in bytes
+	maxCursor   = 4100 // a sealed cursor: "Lc1." and at most 4096 base64 bytes (engine.Sealer.Open)
+	maxSources  = 32   // engine.MaxSources
+	maxWhere    = 32   // engine.MaxPredicates
+	maxBy       = 2    // engine.MaxBy
+	maxFields   = 64   // engine.MaxFields
 )
 
 // ScanTools are the tools an approved scan runs.
@@ -33,26 +39,31 @@ var ScanTools = []any{"search", "count", "patterns", "trace"}
 
 var (
 	searchSchema = inputSchema[QueryIn](func(s *jsonschema.Schema) {
+		bound(s)
 		tuneRange(s)
 		s.Properties["limit"].Minimum, s.Properties["limit"].Maximum = ptr(1.0), ptr(float64(maxLimit))
 	})
-	countSchema    = inputSchema[CountIn](tuneRange)
+	countSchema    = inputSchema[CountIn](func(s *jsonschema.Schema) { tuneRange(s); bound(s) })
 	patternsSchema = inputSchema[PatternsIn](func(s *jsonschema.Schema) {
+		bound(s)
 		tuneRange(s)
 		s.Properties["top"].Minimum, s.Properties["top"].Maximum = ptr(1.0), ptr(float64(maxTop))
 		s.Properties["baseline"].MaxLength = ptr(maxDuration)
 	})
 	contextSchema = inputSchema[ContextIn](func(s *jsonschema.Schema) {
+		bound(s)
 		s.Properties["ref"].MinLength, s.Properties["ref"].MaxLength = ptr(1), ptr(maxRef)
 		for _, k := range []string{"before", "after"} {
 			s.Properties[k].Minimum, s.Properties[k].Maximum = ptr(0.0), ptr(float64(maxAround))
 		}
 	})
 	traceSchema = inputSchema[TraceIn](func(s *jsonschema.Schema) {
+		bound(s)
 		s.Properties["id"].MinLength, s.Properties["id"].MaxLength = ptr(1), ptr(maxValue)
 		s.Properties["limit"].Minimum, s.Properties["limit"].Maximum = ptr(1.0), ptr(float64(maxLimit))
 	})
 	tailSchema = inputSchema[TailIn](func(s *jsonschema.Schema) {
+		bound(s)
 		tuneRange(s)
 		s.Properties["duration"].MaxLength = ptr(maxDuration)
 		s.Properties["max"].Minimum, s.Properties["max"].Maximum = ptr(1.0), ptr(float64(maxLimit))
@@ -92,6 +103,21 @@ func tuneRange(s *jsonschema.Schema) {
 	pred.Properties["op"].Enum = Ops
 	pred.Properties["value"].MaxLength = ptr(maxValue)
 	s.Properties["regex"].MaxLength = ptr(maxRegex)
+}
+
+// bound states the console's bounds on the query parameters a schema has
+// (#78): the console checks them again, but a client sees them first.
+func bound(s *jsonschema.Schema) {
+	for name, n := range map[string]int{"text": maxText, "last": maxDuration, "cursor": maxCursor} {
+		if p := s.Properties[name]; p != nil {
+			p.MaxLength = ptr(n)
+		}
+	}
+	for name, n := range map[string]int{"sources": maxSources, "where": maxWhere, "by": maxBy, "fields": maxFields} {
+		if p := s.Properties[name]; p != nil {
+			p.MaxItems = ptr(n)
+		}
+	}
 }
 
 // inputSchema is the schema inferred from T, tuned. T is a fixed type, so

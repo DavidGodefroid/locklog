@@ -259,10 +259,10 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 	if len(q.Sources) > MaxSources || len(q.Where) > MaxPredicates || q.byCount() > MaxBy {
 		return CountResult{}, refuse(EBadQuery, "", "at most %d sources, %d predicates and %d fields and labels to count by", MaxSources, MaxPredicates, MaxBy)
 	}
-	trustedOnly := q.trustedOnly(e.o.Trusted)
+	trustedOnly := q.trustedOnly(e.o.Trusted, e.numericTerms)
 	if len(q.Sources) == 0 {
 		q.Sources = append([]string(nil), e.names...)
-		trustedOnly = q.trustedOnly(e.o.Trusted)
+		trustedOnly = q.trustedOnly(e.o.Trusted, e.numericTerms)
 	}
 	if q.ByPattern {
 		trustedOnly = false // a template is of masked text
@@ -381,7 +381,7 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 			if err == nil {
 				plan = p
 			} else if !errors.Is(err, source.ErrNotIndexable) {
-				return CountResult{}, sourceError(err)
+				return CountResult{}, e.sourceFailed(ctx, "", err)
 			} else {
 				a = newAgg()
 			}
@@ -534,7 +534,7 @@ func (e *Engine) countFailed(q *CountQuery, raw source.RawRecord, rec mask.Recor
 		}()
 		return e.o.Masker.TrustedValue(raw.Ref.Source, name, v) == v
 	}
-	sel := q.selector(raw.Ref.Source, e.o.Trusted)
+	sel := e.selector(&q.Query, raw.Ref.Source)
 	fields, labels := map[string]string{}, map[string]string{}
 	get := func(name string, label bool) (string, bool, bool) {
 		m := fields
@@ -552,8 +552,9 @@ func (e *Engine) countFailed(q *CountQuery, raw source.RawRecord, rec mask.Recor
 		return v, true, true
 	}
 	for _, t := range sel.Terms {
-		if _, _, ok := get(t.Field, t.Label); !ok {
-			return
+		v, _, ok := get(t.Field, t.Label)
+		if !ok || t.Ambiguous(v) {
+			return // unknown: a numeric term's match depends on the kind
 		}
 	}
 	if !sel.Match(fields, labels) {
@@ -627,9 +628,9 @@ func (e *Engine) indexCounts(ctx context.Context, q *CountQuery, a *agg) (source
 			cctx = source.WithLimiter(ctx, requestLimiter{l: e.ledger, src: name, metric: true})
 		}
 		r, err := ic.IndexCounts(cctx, source.CountQuery{Range: source.Range{From: q.From, To: q.To},
-			Selector: q.selector(name, e.o.Trusted), By: q.By, ByLabels: q.ByLabels, Bucket: q.bucket})
+			Selector: e.selector(&q.Query, name), By: q.By, ByLabels: q.ByLabels, Bucket: q.bucket})
 		if err != nil {
-			return source.Byteplan{}, err
+			return source.Byteplan{}, inSource(name, err)
 		}
 		by := q.groupBy()
 		for _, row := range r.Rows {

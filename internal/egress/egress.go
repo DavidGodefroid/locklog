@@ -34,6 +34,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	kconfig "github.com/DavidGodefroid/lockkit/config"
@@ -194,6 +195,24 @@ type Client struct {
 	userAgent string
 	maxBody   int64
 	headers   map[string]string
+	closed    atomic.Bool
+}
+
+// ErrClosed is the error of a request on a closed client.
+var ErrClosed = errors.New("egress: the client is closed")
+
+// IdleConnTimeout closes a pooled connection left idle that long (some
+// carry the source's credentials or client certificate).
+const IdleConnTimeout = 30 * time.Second
+
+// Close closes the client's pooled connections, the credentialed and the
+// probe's; a request after it fails with ErrClosed. A request still in
+// flight completes, and its connection is closed as it returns. Close
+// does not wait for it.
+func (c *Client) Close() {
+	c.closed.Store(true)
+	c.http.CloseIdleConnections()
+	c.probe.CloseIdleConnections()
 }
 
 // Options tune a client; tests set them.
@@ -210,8 +229,9 @@ type Options struct {
 	// MaxResponseBytes overrides MaxResponseBytes (tests).
 	MaxResponseBytes int64
 	// Headers are fixed request headers of the source (e.g. Loki's
-	// response-encoding flags). They never carry credentials: those go
-	// through the auth mode.
+	// response-encoding flags), each on the extra-header allowlist
+	// (checkHeaders). They never carry credentials: those go through the
+	// auth mode.
 	Headers map[string]string
 }
 
@@ -289,6 +309,7 @@ func New(r *config.Remote, allow *Allowlist, creds Credentials, opt Options) (*C
 				TLSClientConfig:       tc,
 				ForceAttemptHTTP2:     true,
 				MaxIdleConnsPerHost:   4,
+				IdleConnTimeout:       IdleConnTimeout,
 				ResponseHeaderTimeout: timeout,
 			},
 			Timeout: timeout,
@@ -313,15 +334,22 @@ func New(r *config.Remote, allow *Allowlist, creds Credentials, opt Options) (*C
 	return c, nil
 }
 
-// checkHeaders refuses the headers that carry credentials, a tenant or the
-// host (those go through the auth mode and the source URL only), and the
-// headers that tag locklog's queries (User-Agent, X-Query-Tags), which a
-// fixed header must not override.
+// extraHeaders is the allowlist of the extra request headers a source may
+// set, by canonical name. Everything else is refused: credentials, the
+// tenant and the host go through the auth mode and the source URL only,
+// User-Agent and X-Query-Tags tag locklog's queries, and an unknown header
+// could do either under another name (a proxy's own auth header, a
+// forwarded-for). Add a name here only for a header locklog itself needs.
+var extraHeaders = map[string]bool{
+	// Loki 3: structured metadata apart from the stream labels.
+	"X-Loki-Response-Encoding-Flags": true,
+}
+
+// checkHeaders refuses any header outside extraHeaders, whatever its case.
 func checkHeaders(h map[string]string) error {
 	for k := range h {
-		switch http.CanonicalHeaderKey(k) {
-		case "Authorization", "Proxy-Authorization", "Cookie", "X-Scope-Orgid", "Host", "User-Agent", "X-Query-Tags":
-			return fmt.Errorf("egress: header %s is not a fixed header", k)
+		if !extraHeaders[http.CanonicalHeaderKey(k)] {
+			return fmt.Errorf("egress: header %q is not an allowed extra header", k)
 		}
 	}
 	return nil
@@ -379,6 +407,9 @@ func tlsConfig(r *config.Remote, u *url.URL, opt Options) (*tls.Config, error) {
 // request builds a request for path (relative to the source URL's path)
 // with query q, checked against the allowlist.
 func (c *Client) request(ctx context.Context, method, path string, q url.Values, body io.Reader) (*http.Request, error) {
+	if c.closed.Load() {
+		return nil, ErrClosed
+	}
 	if !c.allow.AllowsQuery(method, path, q) {
 		return nil, fmt.Errorf("%w: %s %s", ErrNotAllowed, method, path)
 	}
@@ -438,8 +469,8 @@ func (c *Client) Get(ctx context.Context, path string, q url.Values) (Response, 
 }
 
 // GetWith is Get with extra request headers (e.g. Loki's response-encoding
-// flags, set by the source itself). They follow the fixed-header rule: no
-// credentials, tenant or host.
+// flags, set by the source itself). Like Options.Headers, each must be on
+// the extra-header allowlist (checkHeaders).
 func (c *Client) GetWith(ctx context.Context, path string, q url.Values, hdr map[string]string) (Response, error) {
 	if err := checkHeaders(hdr); err != nil {
 		return Response{}, err
@@ -479,6 +510,13 @@ func (c *Client) do(req *http.Request) (Response, error) {
 }
 
 func (c *Client) doWith(hc *http.Client, req *http.Request) (Response, error) {
+	// A request that was in flight when the client closed: its
+	// connection, back in the pool, is closed too.
+	defer func() {
+		if c.closed.Load() {
+			hc.CloseIdleConnections()
+		}
+	}()
 	resp, err := hc.Do(req)
 	if err != nil {
 		var ue *url.Error
@@ -520,6 +558,11 @@ func (c *Client) probeOnce(ctx context.Context, path string, hdr http.Header, re
 	for k, v := range hdr {
 		req.Header[k] = v
 	}
+	defer func() {
+		if c.closed.Load() {
+			c.probe.CloseIdleConnections()
+		}
+	}()
 	resp, err := c.probe.Do(req)
 	if resp != nil {
 		defer resp.Body.Close()

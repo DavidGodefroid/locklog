@@ -27,8 +27,12 @@ var combinedMatchSeeds = []string{
 	"\xff\xfe - - [10/Oct/2000:13:55:36 -0700] \"G\xffET\" 200 1",
 	strings.Repeat("é", 255) + ` - - [10/Oct/2000:13:55:36 -0700] "GET" 200 1`,
 	strings.Repeat("é", 256) + ` - - [10/Oct/2000:13:55:36 -0700] "GET" 200 1`,
+	strings.Repeat("\U0001F600", 255) + " " + strings.Repeat("\U0001F600", 255) + " " + strings.Repeat("\U0001F600", 255) + ` [10/Oct/2000:13:55:36 -0700] "GET" 200 1`,
 	strings.Repeat("a", 255) + ` - - [10/Oct/2000:13:55:36 +0000] "GET" 200 1`,
 	strings.Repeat("a", 256) + ` - - [10/Oct/2000:13:55:36 +0000] "GET" 200 1`,
+	strings.Repeat("\xff", 1020) + ` - - [10/Oct/2000:13:55:36 +0000] "GET" 200 1`,
+	strings.Repeat("\xff", 1021) + ` - - [10/Oct/2000:13:55:36 +0000] "GET" 200 1`,
+	strings.Repeat("\U0001F600", 256) + ` - - [10/Oct/2000:13:55:36 +0000] "GET" 200 1`,
 	`a - - [10/Oct/2000:13:55:36 -0700] "GET" 200 1 "a" "b`,
 	`a - - [10/Oct/2000:13:55:36 -0700] "GET" 200 1 "a"  "b"`,
 	`a - - [10/Oct/2000:13:55:36 -0700] "GET" 200 1 "a" "b" `,
@@ -59,4 +63,29 @@ func BenchmarkCombinedMatch(b *testing.B) {
 			combinedRe.FindStringSubmatchIndex(line)
 		}
 	})
+}
+
+// TestCombinedLongMultibyteFields: the three leading fields are at most 255
+// runes each, not 255 bytes, so the "[" of a valid line can sit far past
+// byte 800 (#85).
+func TestCombinedLongMultibyteFields(t *testing.T) {
+	f := strings.Repeat("\U0001F600", 255) // 4 bytes per rune
+	line := f + " " + f + " " + f + ` [10/Oct/2000:13:55:36 -0700] "GET / HTTP/1.0" 200 1`
+	if strings.IndexByte(line, '[') < 800 {
+		t.Fatal("the seed must put the timestamp past byte 800")
+	}
+	if combinedRe.FindStringSubmatchIndex(line) == nil {
+		t.Fatal("the expression must match the seed")
+	}
+	var c combinedFormat
+	if !c.Detect(line) {
+		t.Fatal("Detect refused a valid line")
+	}
+	ev, ok := c.Decode(line, &Options{})
+	if !ok || ev.Message != "GET / HTTP/1.0" || !ev.HasTime {
+		t.Fatalf("Decode: %v %+v", ok, ev)
+	}
+	if v, _ := Get(ev.Fields, "remote_addr"); v.Str != f {
+		t.Fatalf("remote_addr %q", v.Str)
+	}
 }
