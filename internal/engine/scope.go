@@ -16,8 +16,10 @@ type Approval struct {
 	Note     string
 	Body     []string
 	Warnings []string
-	// NeverAuto: no auto rule approves it (lox run's auto mode; the
-	// lock refuses such an approval, ticket.ErrAuto).
+	// NeverAuto marks the console's own approval screen as one no auto
+	// mode takes. In hub mode the ticket's never_auto flag is the
+	// profile's auto rule's (auto.read, auto.unmask, auto.lookup:
+	// logconsole), not this field.
 	NeverAuto bool
 	// Clear is the clear view of the screen's record (secrets and
 	// redactions kept), for the console's own terminal only: the

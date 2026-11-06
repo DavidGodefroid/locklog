@@ -404,8 +404,10 @@ func TestChecksInterfacesError(t *testing.T) {
 func TestStatus(t *testing.T) {
 	eng := &fakeEngine{}
 	b := New(Options{})
-	if got := b.Status(&session{engine: eng}); got.(map[string]string)["engine"] != "ok" {
-		t.Errorf("Status = %v", got)
+	// The engine's status, and the profile's auto rules in force (#126).
+	raw, _ := json.Marshal(b.Status(&session{engine: eng}))
+	if string(raw) != `{"auto":{"lookup":"ask","read":"ask","unmask":"ask"},"engine":"ok"}` {
+		t.Errorf("Status = %s", raw)
 	}
 	if b.Status(nil) != nil {
 		t.Error("Status of no session")
