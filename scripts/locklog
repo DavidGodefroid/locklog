@@ -12,6 +12,9 @@
 #              containers), a Compose Loki's proxy (its files in
 #              ~/.config/locklog/proxy, outside the project); the project is
 #              this one, or the one --project DIR names
+#   profile rules
+#              as the agent account, the project read-only, no network: the
+#              auto rules of the project's profiles (read by lox run)
 #   init       as you, in the image, with the project writable: the agent's
 #              project wiring
 #   doctor     as the agent account, with the host's network: what an
@@ -919,6 +922,14 @@ profile)
 	fi
 	need_docker
 	project_mount
+	if [ "${2:-}" = rules ]; then
+		# The auto rules of the project's profiles (read by lox run): as
+		# the agent account, the project read-only, no network, no volume
+		# (the rules of the config file; the console's approved ones are
+		# in its home volume).
+		exec docker run --rm --user agent --log-driver none --network none $confined \
+			-v "$project:$project:ro" -w "$workdir" "$image" "$@"
+	fi
 	exec docker run --rm "$tty" --user agent --log-driver none --network none $confined "$image" "$@"
 	;;
 init)

@@ -79,6 +79,12 @@ func Canonical(p Policy) Policy {
 	}
 	slices.SortFunc(srcs, func(a, b Source) int { return strings.Compare(a.Name, b.Name) })
 	pr.Sources = srcs
+	if pr.Auto != nil {
+		// Only what differs from the defaults: a policy approved before
+		// auto rules existed, and one that spells the defaults out, are
+		// the same policy.
+		pr.Auto = pr.Auto.sparse()
+	}
 	if pr.Limits.MaxCalls == DefaultMaxCalls {
 		// The default, set or not, is left out: the same fingerprint.
 		pr.Limits.MaxCalls = 0
@@ -136,7 +142,8 @@ func rotationRank(s string) int64 {
 // multiline mode, an added path, unit (or every unit), container, allowed
 // field, attr, trusted field or label, recursive off → on, and for a remote
 // source any change of url, selector, auth, org_id or connection
-// (kconfig.DiffBase).
+// (kconfig.DiffBase), and an auto rule moved toward auto (deny → ask →
+// auto).
 func (p Policy) Diff(approved kconfig.Policy) []kconfig.Change {
 	a, ok := approved.(Policy)
 	if !ok {
@@ -162,6 +169,7 @@ func (p Policy) Diff(approved kconfig.Policy) []kconfig.Change {
 	add("pseudonym_rotation", ap.PseudonymRotation, cp.PseudonymRotation, rotationRank(cp.PseudonymRotation) > rotationRank(ap.PseudonymRotation))
 	add("pseudonym_max_age", FormatDuration(ap.PseudonymMaxAge), FormatDuration(cp.PseudonymMaxAge), cp.PseudonymMaxAge > ap.PseudonymMaxAge)
 	out = append(out, diffLimits(ap.Limits, cp.Limits)...)
+	out = append(out, autoDiff(ap.AutoRules(), cp.AutoRules())...)
 	add("network", a.Network, c.Network, c.Network != "")
 	out = append(out, kconfig.SetDiff("extra_roots", a.ExtraRoots, c.ExtraRoots, false)...)
 
@@ -313,6 +321,7 @@ func (p Policy) Describe() []string {
 		fmt.Sprintf("output: %d records · %s · lookups %d/h (%d/h per uid) · agent rules %d/h, %d at most · %d calls at once",
 			l.MaxRecords, FormatSize(l.MaxOutputBytes), l.LookupsPerHour, l.LookupsPerHourPerUID, l.PIIAddsPerHour, l.PIIRulesMax, l.Calls()),
 		fmt.Sprintf("session: idle %s · max %s", pr.IdleTimeout, pr.MaxSession),
+		"auto mode (lox run): " + pr.AutoRules().String(),
 	}
 	if pr.Prefilter {
 		lines = append(lines, "prefilter: ON (latency reveals how many records hold a clear substring)")

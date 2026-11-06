@@ -23,6 +23,7 @@ import (
 	"github.com/DavidGodefroid/lockkit/render"
 	"github.com/DavidGodefroid/lockkit/ticket"
 
+	"github.com/DavidGodefroid/locklog/internal/config"
 	"github.com/DavidGodefroid/locklog/internal/product"
 )
 
@@ -62,8 +63,9 @@ type HubRequest struct {
 	PlanHash string
 	Inputs   map[string]string
 	Moving   []string
-	// Production and NeverAuto flag the ticket.
-	Production, NeverAuto bool
+	// Production flags the ticket. Whether it is never-auto is the
+	// profile's auto rule's (HubCall), not the request's.
+	Production bool
 }
 
 // hubBody is a plan of hub mode as the plan store keeps it: no value of
@@ -88,7 +90,13 @@ type HubCall struct {
 	// requester the params declare.
 	agent string
 	fp    string
-	rec   *Record
+	// profile is the policy's profile, the ticket's subject.
+	profile string
+	// auto: the profile's auto rule for the method is auto, and its
+	// ticket is left to lox run's auto mode; false (the zero value) signs
+	// it never-auto.
+	auto bool
+	rec  *Record
 	// noPeer: the kernel did not name the caller (no peer credentials).
 	// The call runs while it needs no approval (a free lookup); an
 	// approval is refused, never asked on the hub nor on the terminal.
@@ -188,6 +196,7 @@ const (
 	msgWrongAgent   = "the ticket was asked by another agent"
 	msgNoDevice     = "the approval was not signed by a device this console pins: refused; ask the human"
 	msgExpired      = "ticket expired, and could not be asked again: ask again without the ticket"
+	msgAutoAsked    = "an auto rule approved this ticket, but the profile's auto rules leave it to the human: nothing ran; the ticket waits for the human's decision"
 )
 
 // TokenHash is the hash of the agent's token the call's plans are bound
@@ -273,9 +282,13 @@ func (h *HubCall) submit(ctx context.Context, r HubRequest, hash string) error {
 		clearBody = append(clearBody, r.Clear...)
 	}
 	clear := &ticket.Screen{Header: r.Header, Note: r.Note, Body: clearBody, Warnings: slices.Clone(r.Warnings), Red: red}
-	t := ticket.NewTicket(ticket.Source{Lock: product.P.Name}, r.Risk, hash, h.fp, h.now(), hubTicketTTL)
+	// A version-2 ticket of kind read naming the profile, which lox
+	// run's per-profile rules match on; never-auto unless the profile's
+	// auto rule for the method is auto (deny never reaches here).
+	t := ticket.NewKindTicket(ticket.Source{Lock: product.P.Name}, ticket.KindRead, r.Risk, &ticket.Subject{Profile: h.profile},
+		hash, h.fp, h.now(), hubTicketTTL)
 	t.Requester = ticket.Requester{Agent: h.agent}
-	t.Flags = ticket.Flags{Production: r.Production, NeverAuto: r.NeverAuto}
+	t.Flags = ticket.Flags{Production: r.Production, NeverAuto: !h.auto}
 	id, err := h.hub.Client.SubmitClear(ctx, st, planID, h.caller, t, masked, clear)
 	if id == "" {
 		if err == nil {
@@ -323,6 +336,15 @@ func (h *HubCall) begin(ctx context.Context, r HubRequest, hash string) error {
 		if d != nil && (errors.Is(err, hubclient.ErrDenied) || errors.Is(err, ticket.ErrDevice)) {
 			h.auditDecision(ctx, d, audit.EventDenied, string(d.Decision), "")
 		}
+		if d != nil && errors.Is(err, ticket.ErrAuto) {
+			// An auto rule approved a ticket the profile's auto rule
+			// leaves to the human: nothing runs, the approval is dropped
+			// and the ticket waits for the human's decision.
+			h.auditDecision(ctx, d, audit.EventRefused, "refused", "an auto rule's approval of a never-auto ticket: the profile's auto rule asks the human")
+			h.env.Println(console.Paint.Warn("ticket " + h.env.Safe(h.ticket) + " (" + h.method + "): " + h.env.Safe(err.Error()) + "; it waits for the human's decision"))
+			return &Declined{Resp: refusalResp(h.id, &Refusal{Message: msgAutoAsked,
+				Info: refusal.Info{Code: "E_APPROVAL", Retry: refusal.RetryAskUser, Hint: "the ticket waits for the human: once told it is decided, call again with the ticket"}}, h.env)}
+		}
 		if errors.Is(err, ticket.ErrExpired) {
 			return &Declined{Resp: h.renew(ctx)}
 		}
@@ -345,6 +367,7 @@ func (h *HubCall) begin(ctx context.Context, r HubRequest, hash string) error {
 	}
 	h.auditDecision(ctx, d, audit.EventApproved, string(d.Decision), "")
 	h.rec.Approver, h.rec.Facade, h.rec.HubSig = &ticket.Approver{ID: d.Approver.ID, Display: d.Approver.Display}, d.Facade, d.Sig
+	h.rec.DecidedBy = decidedBy(d)
 	return nil
 }
 
@@ -352,7 +375,8 @@ func (h *HubCall) begin(ctx context.Context, r HubRequest, hash string) error {
 // agent hears pending with the new ticket.
 func (h *HubCall) renew(ctx context.Context) ipc.Response {
 	n, err := h.hub.Client.Renew(ctx, h.hub.Store, h.ticket, h.caller)
-	rec := Record{Base: audit.Base{Event: audit.EventRenew, Decision: "renewed", Approval: console.HubApproval, Ticket: h.ticket}, Method: h.method}
+	rec := Record{Base: audit.Base{Event: audit.EventRenew, Decision: "renewed", Approval: console.HubApproval, Ticket: h.ticket}, Method: h.method,
+		AutoRule: h.rec.AutoRule}
 	rec.Profile = h.rec.Profile
 	console.StampPeer(ctx, &rec.Base)
 	switch {
@@ -410,7 +434,8 @@ func (h *HubCall) refusal(err error) ipc.Response {
 // answered, on which facade, and the hub's signature.
 func (h *HubCall) auditDecision(ctx context.Context, d *ticket.Decision, event, decision, reason string) {
 	rec := Record{Base: audit.Base{Event: event, Decision: decision, Approval: console.HubApproval, Ticket: h.ticket,
-		Approver: &ticket.Approver{ID: d.Approver.ID, Display: d.Approver.Display}, Facade: d.Facade, HubSig: d.Sig}, Method: h.method}
+		Approver: &ticket.Approver{ID: d.Approver.ID, Display: d.Approver.Display}, Facade: d.Facade, HubSig: d.Sig}, Method: h.method,
+		AutoRule: h.rec.AutoRule, DecidedBy: decidedBy(d)}
 	rec.Profile = h.rec.Profile
 	rec.Reason = d.Reason
 	if reason != "" {
@@ -497,6 +522,15 @@ type HubStatus struct {
 
 // withHub adds the hub mode to the engine's status.
 func withHub(st any, h *console.Hub) any {
+	return withField(st, "hub", HubStatus{Mode: "hub", Instance: h.Instance})
+}
+
+// withAuto adds the profile's auto rules in force to the engine's status
+// (#126): what lox run may approve without a question.
+func withAuto(st any, r config.AutoRules) any { return withField(st, "auto", r.Map()) }
+
+// withField adds key to the engine's status.
+func withField(st any, key string, v any) any {
 	raw, err := json.Marshal(st)
 	if err != nil {
 		return st
@@ -505,8 +539,11 @@ func withHub(st any, h *console.Hub) any {
 	if json.Unmarshal(raw, &m) != nil || m == nil {
 		m = map[string]json.RawMessage{}
 	}
-	hs, _ := json.Marshal(HubStatus{Mode: "hub", Instance: h.Instance})
-	m["hub"] = hs
+	f, err := json.Marshal(v)
+	if err != nil {
+		return st
+	}
+	m[key] = f
 	return m
 }
 
@@ -516,12 +553,19 @@ func (b *Backend) newHubCall(h *console.Hub, env console.Env, id int64, method s
 	if !ok {
 		return nil, fmt.Errorf("no locklog policy in force")
 	}
+	// The auto rule of the very policy the ticket binds (its
+	// fingerprint): one tightened to deny since the handler checked it
+	// refuses the call.
+	rule := p.Policy.Profile.AutoRules().Get(autoAction(method))
+	if rule == config.AutoDeny {
+		return nil, fmt.Errorf("the auto rules now deny %s", method)
+	}
 	now := b.o.Now
 	if now == nil {
 		now = time.Now
 	}
 	return &HubCall{hub: h, env: env, now: now, id: id, method: method, ticket: e.Ticket, caller: plans.Caller{UID: uid, Token: e.Requester.Token},
-		agent: peerName(uid), fp: policyFP(p), rec: rec, noPeer: noPeer}, nil
+		agent: peerName(uid), fp: policyFP(p), profile: p.Policy.Profile.Name, auto: rule == config.AutoAuto, rec: rec, noPeer: noPeer}, nil
 }
 
 // peerName is who the hub shows as the requester: the kernel-verified

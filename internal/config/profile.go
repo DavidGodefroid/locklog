@@ -52,6 +52,10 @@ type Profile struct {
 	Limits            Limits        `json:"limits"`
 	// Sources are sorted by name.
 	Sources []Source `json:"sources"`
+	// Auto is the profile's auto mode for lox run (auto.go): only the
+	// actions that differ from DefaultAutoRules, nil when none does. Read
+	// it with AutoRules.
+	Auto *AutoRules `json:"auto,omitempty"`
 }
 
 // Source returns the source named n.
@@ -110,6 +114,8 @@ type rawProfile struct {
 	PseudonymMaxAge   string               `toml:"pseudonym_max_age"`
 	Limits            rawLimits            `toml:"limits"`
 	Sources           map[string]rawSource `toml:"sources"`
+	// Auto is a preset name or a table of actions (auto.go).
+	Auto *rawAuto `toml:"auto"`
 }
 
 type rawFile struct {
@@ -236,6 +242,13 @@ func buildProfile(name string, r rawProfile, detectorsSet bool) (Profile, error)
 	}
 	if p.Lookup != LookupFree && p.Lookup != LookupApproved {
 		return Profile{}, errf("unknown lookup mode (want free or approved)")
+	}
+	if r.Auto != nil {
+		rules, err := r.Auto.rules()
+		if err != nil {
+			return Profile{}, errf("%v", err)
+		}
+		p.Auto = rules.sparse()
 	}
 	if prod && p.Prefilter {
 		return Profile{}, errf("prefilter = true is refused on a production profile: with it, latency reveals how many records hold a clear substring")

@@ -183,8 +183,8 @@ Your agent CLI's own login (Anthropic, OpenAI, Google) is yours to set up.
 | `status`, `sources`, `search`, `count`, `patterns`, `context`, `trace`, `tail` within budgets | free, audited |
 | `lookup` (clear value → pseudonym, detector kinds only) | free, rate-limited, audited; or approved each time with `lookup = "approved"` |
 | `pii_list` / `pii_add` (agent masking rules, tighten only) | free, capped, audited (served once the console's PII backend lands, [#64](https://github.com/DavidGodefroid/locklog/issues/64)) |
-| `locklog_scan` (beyond a budget, approved once for its whole plan; its cursor continues free for 30 minutes) | you, a ticket at `lox run` (or the deck, a phone), never auto-approved |
-| `locklog_unmask` (the clear value of exact spans of one record, once) | you, a ticket at `lox run`, the deck or a phone, never auto-approved; **off by default on production** |
+| `locklog_scan` (beyond a budget, approved once for its whole plan; its cursor continues free for 30 minutes) | you, a ticket at `lox run` (or the deck, a phone); auto-approved only if the profile's auto rules say so (`auto.read`) |
+| `locklog_unmask` (the clear value of exact spans of one record, once) | you, a ticket at `lox run`, the deck or a phone; auto-approved only if the profile's auto rules say so (`auto.unmask`); **off by default on production** |
 | `locklog_request_change` (any loosening) | you, at the console's `:review` |
 | write, delete, admin | does not exist |
 
@@ -193,9 +193,12 @@ An unmask ticket shows the record **masked**, with the asked spans marked
 record yourself without sending anything to the agent, turn clear results
 on with Ctrl-O at the console (`lox attach <name>`): the records the
 agent's calls return are then printed in clear on the console's terminal
-(secrets kept redacted). Secrets are never unmasked. `lox run`'s auto mode
-approves no locklog ticket: scans, unmasks and approved lookups always wait
-for you.
+(secrets kept redacted). Secrets are never unmasked. By default `lox run`'s
+auto mode approves no locklog ticket: scans, unmasks and approved lookups
+wait for you. A profile's auto rules (`auto = "full-auto"`, or `read`,
+`unmask`, `lookup` set to `auto`, `ask` or `deny`) change that, as a
+policy loosening you review; see
+[docs/usage.md](docs/usage.md#what-lox-run-decides-and-what-it-asks).
 
 ## Safety model
 
