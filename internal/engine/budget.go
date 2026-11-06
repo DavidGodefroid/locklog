@@ -301,6 +301,23 @@ func (l *ledger) takeRequest(src string, metric bool) (time.Time, error) {
 	return time.Time{}, nil
 }
 
+// requestFreeAt is when a request to remote source src fits the
+// per-minute budget (now, or earlier, when it fits now).
+func (l *ledger) requestFreeAt(src string) time.Time {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := l.now()
+	at := now
+	if lim := int64(l.b.RemoteRequestsPerMinute); lim > 0 {
+		for _, k := range []string{"s:" + src, "c:remote"} {
+			if t := get(l.reqs, k, time.Minute).freeAt(now, lim); t.After(at) {
+				at = t
+			}
+		}
+	}
+	return at
+}
+
 // metricLeft is the metric queries a remote source may still send.
 func (l *ledger) metricLeft(src string) int {
 	l.mu.Lock()
@@ -358,6 +375,16 @@ func (l *ledger) lookupWin(k string) *lookupWindow {
 // takeLookups records the distinct values (keyed digests) a lookup of uid
 // resolves, if the console and uid have room for the new ones.
 func (l *ledger) takeLookups(uid int, digests []string) bool {
+	return l.lookups1(uid, digests, true)
+}
+
+// lookupsFit reports whether a lookup of uid has room for its distinct
+// values, charging nothing (an approved lookup is charged once approved).
+func (l *ledger) lookupsFit(uid int, digests []string) bool {
+	return l.lookups1(uid, digests, false)
+}
+
+func (l *ledger) lookups1(uid int, digests []string, take bool) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := l.now()
@@ -378,6 +405,9 @@ func (l *ledger) takeLookups(uid int, digests []string) bool {
 			return false
 		}
 	}
+	if !take {
+		return true
+	}
 	for _, k := range keys {
 		w := l.lookupWin(k.k)
 		for _, d := range digests {
@@ -389,14 +419,32 @@ func (l *ledger) takeLookups(uid int, digests []string) bool {
 
 // lookupsLeft is the distinct values the console may still look up.
 func (l *ledger) lookupsLeft() int {
+	return l.lookupsLeftOf("console", l.b.LookupsPerHour)
+}
+
+// lookupsLeftUID is the distinct values peer uid may still look up: its
+// own limit, within the console's.
+func (l *ledger) lookupsLeftUID(uid int) int {
+	own := l.lookupsLeftOf(fmt.Sprintf("uid:%d", uid), l.b.LookupsPerHourPerUID)
+	all := l.lookupsLeft()
+	switch {
+	case own < 0:
+		return all
+	case all < 0:
+		return own
+	}
+	return min(own, all)
+}
+
+func (l *ledger) lookupsLeftOf(k string, limit int) int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.b.LookupsPerHour <= 0 {
+	if limit <= 0 {
 		return -1
 	}
-	w := l.lookupWin("console")
+	w := l.lookupWin(k)
 	w.prune(l.now())
-	return max(l.b.LookupsPerHour-len(w.seen), 0)
+	return max(limit-len(w.seen), 0)
 }
 
 // BudgetStatus is what is left of the rolling budgets (log.status): no
@@ -407,9 +455,14 @@ type BudgetStatus struct {
 	// Sources is each source's own budget left.
 	Sources []SourceBudget `json:"sources"`
 	// LookupsLeft is the distinct values the console may still look up
-	// this hour (-1: no limit).
+	// this hour, for every peer together (-1: no limit).
 	LookupsLeft int `json:"lookups_left"`
-	// Scans is the approved scans in progress.
+	// LookupsLeftPeer is what the calling peer (its uid) may still look
+	// up this hour: its own limit within the console's (-1: no limit).
+	// Absent outside an agent's call (the console's :status).
+	LookupsLeftPeer *int `json:"lookups_left_peer,omitempty"`
+	// Scans is the approved scans in progress on the console, every
+	// peer's (at most MaxScans).
 	Scans int `json:"scans"`
 }
 
@@ -426,6 +479,17 @@ type ClassBudget struct {
 type SourceBudget struct {
 	Name      string `json:"name"`
 	BytesLeft int64  `json:"bytes_left"`
+}
+
+// BudgetStatusFor is BudgetStatus with the lookups left to the peer of
+// ctx, when one is attached.
+func (e *Engine) BudgetStatusFor(ctx context.Context) BudgetStatus {
+	st := e.BudgetStatus()
+	if p, ok := peerOf(ctx); ok {
+		n := e.ledger.lookupsLeftUID(p.UID)
+		st.LookupsLeftPeer = &n
+	}
+	return st
 }
 
 // BudgetStatus reports what is left of the rolling budgets.

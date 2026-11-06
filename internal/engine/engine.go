@@ -103,7 +103,9 @@ type Options struct {
 	// scan: its lifetime from the approval (DefaultScanTTL), the
 	// deadline of each of its calls (DefaultScanDeadline, and never past
 	// scanCallBudget from the request), the bytes and the range of its
-	// whole plan (DefaultScanBytes, DefaultScanRange).
+	// whole plan (DefaultScanBytes, DefaultScanRange). The deadline is a
+	// fixed bound, not calibrated: what a call does within it is (run
+	// admits each group of granules on the calibrated cost model).
 	ScanTTL      time.Duration
 	ScanDeadline time.Duration
 	ScanBytes    int64
@@ -680,6 +682,17 @@ func (e *Engine) run(ctx context.Context, fp **frozen, chunk, gran int, needles 
 		if err != nil {
 			return chunk, gran, sc, 0, err
 		}
+		// A remote source whose request budget has no room before the
+		// call's deadline is refused before any work, with the estimate
+		// (the pacing would otherwise stop the call at its first
+		// request).
+		for s, n := range est {
+			if n > 0 && e.remote(s) && e.ledger.requestFreeAt(s).After(deadline) {
+				res.settle(nil, e.remote)
+				return chunk, gran, sc, 0, &Error{Code: EOverBudget, Message: "the rolling budget of remote requests per minute is used up: try again in a minute, or ask for locklog_scan",
+					Estimate: &Estimate{Bytes: sumBytes(est), Granules: granules}}
+			}
+		}
 		defer func() { res.settle(per, e.remote) }()
 	} else {
 		// An approved scan processes at most its plan (remote: the scan
@@ -1084,18 +1097,31 @@ func (e *Engine) estimate(plan source.Byteplan, chunk, gran int, callBytes int64
 	return est, granules
 }
 
-// limiter is the request limiter of a call to remote source src: the
-// rolling per-minute budget of free calls, or an approved scan's own.
 // Paced returns ctx with the request limiter of a free call to the remote
-// source src: its requests outside a query (log.sources describing it) are
-// paced and charged to the rolling request budget like a query's.
-func (e *Engine) Paced(ctx context.Context, src string) context.Context {
+// source src and the call deadline: its requests outside a query
+// (log.sources describing it) are paced and charged to the rolling request
+// budget like a query's, and a request the budget leaves no room for
+// before the deadline fails at once instead of waiting for the window.
+// The caller calls cancel when done.
+func (e *Engine) Paced(ctx context.Context, src string) (context.Context, context.CancelFunc) {
 	if _, ok := e.o.Sources[src]; !ok || !e.remote(src) {
-		return ctx
+		return ctx, func() {}
 	}
-	return source.WithLimiter(ctx, e.limiter(ctx, src))
+	ctx, cancel := context.WithTimeout(ctx, e.o.Limits.Deadline)
+	return source.WithLimiter(ctx, e.limiter(ctx, src)), cancel
 }
 
+// sumBytes is the bytes of an estimate, every source's.
+func sumBytes(est map[string]int64) int64 {
+	var n int64
+	for _, b := range est {
+		n += b
+	}
+	return n
+}
+
+// limiter is the request limiter of a call to remote source src: the
+// rolling per-minute budget of free calls, or an approved scan's own.
 func (e *Engine) limiter(ctx context.Context, src string) source.Limiter {
 	if sc := scanFrom(ctx); sc != nil {
 		return sc.limiter(src)

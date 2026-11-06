@@ -632,3 +632,26 @@ func TestSelectorKeepsPseudonymisedContainers(t *testing.T) {
 		t.Errorf("unflagged name kept: %q", got)
 	}
 }
+
+// TestContainersStatus: the map's state and the served containers, a
+// removed container still mapped counted stale (counts only).
+func TestContainersStatus(t *testing.T) {
+	e := newEnv(t)
+	a, b, c := id('a'), id('b'), id('c')
+	e.write(a, a+"-json.log", frames("a", 1, t0))
+	s := e.source("shop-*")
+	if st, err := s.ContainersStatus(); err != nil || st != (ContainersStatus{Map: MapNone}) {
+		t.Fatalf("no map: %+v %v", st, err)
+	}
+	// b is mapped, its logs are gone (removed); c is not served.
+	e.writeMap(1, "locklog-map 1\nc "+a+" shop-a 1 0\nc "+b+" shop-b 1 0\nc "+c+" other 1 0\n")
+	e.now = e.now.Add(3 * time.Second)
+	if st, err := s.ContainersStatus(); err != nil || st != (ContainersStatus{Map: MapOK, Served: 2, Stale: 1}) {
+		t.Fatalf("v1: %+v %v", st, err)
+	}
+	e.writeMap(2, "broken\n")
+	e.now = e.now.Add(3 * time.Second)
+	if st, err := s.ContainersStatus(); err != nil || st != (ContainersStatus{Map: MapInvalid}) {
+		t.Fatalf("invalid: %+v %v", st, err)
+	}
+}
