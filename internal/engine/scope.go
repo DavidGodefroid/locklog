@@ -18,6 +18,11 @@ type Approval struct {
 	Warnings []string
 	// NeverAuto: auto mode never approves it.
 	NeverAuto bool
+	// Clear is the clear view of the screen's record (secrets and
+	// redactions kept), for the console's own terminal only: the
+	// console shows it when its clear-results switch (Ctrl-O) is on.
+	// It never reaches the agent, nor a hub.
+	Clear []string
 }
 
 // Approver asks the human. It returns nil once approved; any other error

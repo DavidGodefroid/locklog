@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -222,9 +223,26 @@ func TestFiveMinutes(t *testing.T) {
 
 // The own-container recipe: an agent image built from the snippet setup
 // prints, run as its non-root agent user, calls the console.
-func TestOwnContainer(t *testing.T) {
-	e, want, from, to := newEnv(t, "own")
-	out := e.locklog(t, "setup", "--yes", "--no-production", "--agent", "container", "--only", e.logs)
+func TestOwnContainer(t *testing.T) { ownContainer(t, 0) }
+
+// TestOwnContainerUID: the recipe for an agent uid the console's image
+// knows by no account prints the console line with --allowed-uids, and
+// that very line, run through the launcher, admits the agent.
+func TestOwnContainerUID(t *testing.T) { ownContainer(t, 1000) }
+
+// ownContainer runs the own-container recipe end to end, for the agent
+// uid (0: the image's agent account, 10052).
+func ownContainer(t *testing.T, agentUID int) {
+	name, uid, args := "own", "10052", []string{"setup", "--yes", "--no-production", "--agent", "container", "--only"}
+	if agentUID != 0 {
+		name, uid = "own"+strconv.Itoa(agentUID), strconv.Itoa(agentUID)
+	}
+	e, want, from, to := newEnv(t, name)
+	args = append(args, e.logs)
+	if agentUID != 0 {
+		args = append(args, "--agent-uid", uid)
+	}
+	out := e.locklog(t, args...)
 	lines := strings.Split(out, "\n")
 	first := slices.IndexFunc(lines, func(l string) bool { return strings.HasPrefix(l, "# locklog's client") })
 	last := slices.IndexFunc(lines, func(l string) bool { return strings.HasPrefix(l, "USER ") })
@@ -232,7 +250,7 @@ func TestOwnContainer(t *testing.T) {
 		t.Fatalf("no Dockerfile snippet in:\n%s", out)
 	}
 	snippet := strings.Join(lines[first:last+1], "\n")
-	for _, want := range []string{"COPY --from=" + e.image + " ", "/etc/locklog/system.toml", "USER 10052:10050"} {
+	for _, want := range []string{"COPY --from=" + e.image + " ", "/etc/locklog/system.toml", "USER " + uid + ":10050"} {
 		if !strings.Contains(snippet, want) {
 			t.Errorf("snippet lacks %q", want)
 		}
@@ -252,7 +270,7 @@ func TestOwnContainer(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(ctxDir, "Dockerfile"), []byte(dockerfile), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	tag := "locklog-e2e-agent"
+	tag := "locklog-e2e-agent-" + uid
 	if b, err := exec.Command("docker", "build", "-q", "-t", tag, ctxDir).CombinedOutput(); err != nil {
 		t.Fatalf("docker build of the agent image: %v\n%s", err, b)
 	}
@@ -263,13 +281,23 @@ func TestOwnContainer(t *testing.T) {
 	}
 	f := strings.Fields(string(id))
 	t.Logf("agent image: uid %s, groups %v, %s, system.toml %s", f[0], f[1:len(f)-2], f[len(f)-2], f[len(f)-1])
-	if f[0] != "10052" || !slices.Contains(f[1:len(f)-2], "10050") || f[len(f)-2] != "no-sudo" || f[len(f)-1] != "0:644" {
-		t.Errorf("agent image: want uid 10052 in 10050, no sudo, system.toml 0:644; got %q", id)
+	if f[0] != uid || !slices.Contains(f[1:len(f)-2], "10050") || f[len(f)-2] != "no-sudo" || f[len(f)-1] != "0:644" {
+		t.Errorf("agent image: want uid %s in 10050, no sudo, system.toml 0:644; got %q", uid, id)
+	}
+	// The console is started with the line the recipe printed.
+	var consoleArgs string
+	for _, l := range lines {
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(l), "locklog console "); ok {
+			consoleArgs = rest
+		}
+	}
+	if consoleArgs == "" || strings.Contains(consoleArgs, "--allowed-uids") != (agentUID != 0) {
+		t.Fatalf("recipe console line: %q", consoleArgs)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	e.startConsole(t, "--profile staging", [2]string{"Apply these changes? [y/N]", "y"})
+	e.startConsole(t, consoleArgs, [2]string{"Apply these changes? [y/N]", "y"})
 	cs := e.connect(t, ctx, []string{"docker", "run", "--rm", "-i", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
 		"--network", "none", "-v", "locklog-run:/run/locklog",
 		"-v", e.proj + ":" + e.proj, "-w", e.proj, tag, "locklog", "mcp"})

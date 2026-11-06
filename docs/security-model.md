@@ -44,7 +44,7 @@ the pseudonym keys and decides what leaves.
 | # | Invariant | Mechanism |
 |---|---|---|
 | 1 | No locklog container has an engine socket | launcher; goldens |
-| 2 | The console shares only `locklog-run` with agents; the home volume, the map directory and the hub network never | launcher; with the hub (v0.2.0) `lock up`; with lea (planned) its label check |
+| 2 | The console shares only `locklog-run` with agents; the home volume, the map directory and the hub network never | launcher; with the hub (v0.2.0) `lox up`; with lea (planned) its label check |
 | 3 | Nothing unmasked leaves the console except an approved unmask; secrets never | masking pipeline, typed masked responses; canary harness |
 | 4 | Agent predicates see only the masked view; every record is masked before any predicate; no text is sent to a backend; plans, charges and stopping points depend on the plan, never on matches; agent rules only tighten | engine, oracle and equivalence suites |
 | 5 | Approved operations run only on a decision bound to the plan hash (exact spans for an unmask, the whole plan for a scan) and the policy fingerprint, once; never auto-approved for `read-pii`. With the hub (v0.2.0), `read-pii` only from `tty`, `deck` or `mobile` | lockkit plans and tickets; the facade check lands with the hub |
@@ -54,7 +54,7 @@ the pseudonym keys and decides what leaves.
 | 9 | Only approved sources are opened; the policy is the approved copy; `.locklog/` is read-only for lea agents (lea placement planned) | approved store, mount plan, dev/inode checks |
 | 10 | Log content is untrusted text everywhere | JSON-escaped under an "untrusted" header, controls replaced; injection corpus |
 | 11 | Resources are bounded | plans, rolling budgets, a queue, container limits, decompression, response and journal DATA caps, a 64 MiB result cache |
-| 12 | Every call is audited, chained, without clear values | lockkit audit |
+| 12 | Every call is audited, chained, without clear values (the console's clear view, Ctrl-O, is counted as `shown_clear`, never recorded) | lockkit audit |
 | 13 | No egress except the configured backends; production backends authenticated over TLS | network none or a dedicated network; a dialer pinned to host:port; no proxy environment, no redirects off-host; an unauthenticated-read check |
 | 14 | Read-only by construction | read-only binds and root; `O_RDONLY` beneath-root opens; HTTP method and path allowlists |
 | 15 | Pseudonym keys never leave the home volume; old epoch keys are deleted | files 0600, rotation |

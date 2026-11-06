@@ -215,7 +215,7 @@ func Run(o Options) (Result, error) {
 			agents = o.Facts.Agents
 		}
 		if len(agents) == 0 {
-			fmt.Fprintln(out, "no agent found on this host (claude, codex, cursor, gemini): wire one with locklog init <agent>")
+			fmt.Fprintln(out, "no agent found on this host (claude, codex, cursor, gemini): name one with locklog setup --agent host --agents <agent>")
 		}
 		for _, a := range agents {
 			r, err := agentassets.InitProject(o.Root, a)

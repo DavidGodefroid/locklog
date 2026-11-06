@@ -268,6 +268,7 @@ type fakeEnv struct {
 func (e *fakeEnv) Level(context.Context, time.Time) { e.leveled++ }
 func (e *fakeEnv) Println(l string)                 { e.lines = append(e.lines, l) }
 func (e *fakeEnv) Safe(s string) string             { return s }
+func (e *fakeEnv) ShowResults() bool                { return false }
 
 // noAuditEnv is a console without WriteAudit.
 type noAuditEnv struct{ *fakeEnv }
@@ -484,5 +485,50 @@ func TestHandlerApprovals(t *testing.T) {
 	raw, _ := json.Marshal(r)
 	if r.Decision != "ok" || len(r.Pseudonyms) != 1 || strings.Contains(string(raw), "jane") {
 		t.Errorf("approved record: %s", raw)
+	}
+}
+
+// revealEngine is an engine with a clear view.
+type revealEngine struct {
+	fakeEngine
+	revealed int
+}
+
+func (e *revealEngine) Reveal(context.Context, any) []string {
+	e.revealed++
+	return []string{"app 2026-10-30T13:00:00Z {\"msg\":\"jane@example.com failed\"}"}
+}
+
+type showEnv struct {
+	*fakeEnv
+	show bool
+}
+
+func (e showEnv) ShowResults() bool { return e.show }
+
+// TestClearView: with clear results on (Ctrl-O), the records of a result
+// are printed on the console's terminal in clear and counted in the audit;
+// the agent's answer is the engine's masked result, unchanged. Off, nothing
+// is revealed.
+func TestClearView(t *testing.T) {
+	b := New(Options{Profile: "staging", Root: project(t, localCfg)})
+	pol, err := b.LoadPolicy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := console.WithPeer(context.Background(), ipc.Cred{UID: 1000, PID: 42})
+	for _, on := range []bool{false, true} {
+		eng := &revealEngine{fakeEngine: fakeEngine{result: map[string]any{"records": []string{"⟦email:7F3KQ2M9ZD4X⟧ failed"}}}}
+		fe := &fakeEnv{sess: &session{engine: eng, policy: pol.(Policy)}, policy: pol}
+		resp := b.Methods()[MethodSearch](ctx, ipc.Request{ID: 1, Method: MethodSearch, Params: json.RawMessage(`{}`)}, showEnv{fe, on})
+		if resp.Error != nil || strings.Contains(string(resp.Result), "jane") || !strings.Contains(string(resp.Result), "⟦email:7F3KQ2M9ZD4X⟧") {
+			t.Fatalf("on %v: answer %+v", on, resp)
+		}
+		shown := strings.Contains(strings.Join(fe.lines, "\n"), "jane@example.com")
+		rec := fe.records[len(fe.records)-1].(Record)
+		raw, _ := json.Marshal(rec)
+		if shown != on || (eng.revealed > 0) != on || (rec.ShownClear == 1) != on || strings.Contains(string(raw), "jane") {
+			t.Errorf("on %v: lines %q, revealed %d, record %s", on, fe.lines, eng.revealed, raw)
+		}
 	}
 }

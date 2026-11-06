@@ -268,7 +268,7 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 		if !q.match(rec, b) {
 			return
 		}
-		o, oerr := e.outRecord(raw, rec, q.Fields)
+		o, oerr := e.outRecord(tctx, raw, rec, q.Fields)
 		if oerr != nil {
 			outFailed = true // never a silently missing match
 			return

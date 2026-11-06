@@ -26,6 +26,9 @@ type Record struct {
 	// Pseudonyms name what an unmask revealed or a lookup resolved, by
 	// pseudonym only (never the clear values).
 	Pseudonyms []string `json:"pseudonyms,omitempty"`
+	// ShownClear counts the records shown in clear on the console's
+	// terminal (results on, Ctrl-O), never to the agent.
+	ShownClear int `json:"shown_clear,omitempty"`
 }
 
 // AuditEvent implements audit.Record.
