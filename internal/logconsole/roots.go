@@ -81,7 +81,7 @@ func PlanRoots(o Options, pr config.Profile) (Roots, error) {
 		switch l.Kind {
 		case config.KindFile:
 			if !verified(l.Dir) {
-				return Roots{}, fmt.Errorf("%s is in the mount plan of profile %q but the launcher did not bind and check it: start the console with the launcher (locklog console --profile %s), which mounts the plan of the approved sources", l.Dir, pr.Name, pr.Name)
+				return Roots{}, fmt.Errorf("%s is in the mount plan of profile %q but the launcher did not bind and check it: the console is started by lox run, which mounts the plan of the approved sources (lox run again after a change of them)", l.Dir, pr.Name)
 			}
 			if !slices.Contains(r.Dirs, l.Dir) {
 				r.Dirs = append(r.Dirs, l.Dir)

@@ -7,7 +7,7 @@ how, what it relies on, and what it does not do.
 ## What locklog protects
 
 1. **Clear values.** Nothing unmasked leaves the console, except an unmask
-   a human approves at the console (the exact spans, once). Secrets are
+   a human approves on lockhub (the exact spans, once). Secrets are
    never unmasked or pseudonymised.
 2. **Clear-text oracles.** The agent cannot learn whether a clear value it
    chooses occurs in the logs, except through the documented residuals
@@ -21,18 +21,19 @@ how, what it relies on, and what it does not do.
 
 ```
  host (the human)
-   locklog launcher (root-owned /usr/local/bin/locklog)
-     ├─ console  locklog-console-<n>  uid 10051, no capability, read-only root,
-     │    --cpus min(2,nproc) --memory 1g --pids-limit 256 --log-driver none,
-     │    --allowed-uids …; read-only
-     │    non-recursive binds of the approved roots
-     │    volume locklog-home  keys, index, audit, PII rules          (console only)
-     │    volume locklog-run   socket dir 2750 locklog:locklog-clients (10051:10050), socket 0660
-     │    network: none (local sources) | the backend's network | the hub's network (v0.2.0)
-     └─ map loop  docker events → names and ids of the approved container globs
+   lox run (lockhub), in a terminal of its own: the hub, and the decisions
+     └─ console  (compose, one per lock)  uid 10051, no capability, read-only root,
+          cpus min(2,nproc), memory 1g, pids 256, logging none,
+          --hub … --instance …, --allowed-uids …; read-only
+          non-recursive binds of the approved roots
+          volume <project>_<name>-home  keys, index, audit, PII rules      (console only)
+          volume <project>_<name>-run   socket dir 2750 locklog:locklog-clients (10051:10050), socket 0660
+          network: the hub's (local sources) | and the lock's egress network (remote sources)
+   locklog launcher (root-owned /usr/local/bin/locklog): profile add, init,
+     doctor, and the host agent's mcp on the socket volume up.json names, read-only
 
- agent (not locklog's): the user's own agent container (a lea container: planned)
-   (gid 10050, its uid in --allowed-uids when needed), or, for the trial,
+ agent (not locklog's): a lea container, the user's own agent container
+   (gid 10050, its uid in allowed_uids when needed), or, for the trial,
    the host agent through `locklog mcp`
 ```
 
@@ -43,14 +44,14 @@ the pseudonym keys and decides what leaves.
 
 | # | Invariant | Mechanism |
 |---|---|---|
-| 1 | No locklog container has an engine socket | launcher; goldens |
-| 2 | The console shares only `locklog-run` with agents; the home volume, the map directory and the hub network never | launcher; with the hub (v0.2.0) `lox up`; with lea (planned) its label check |
+| 1 | No locklog container has an engine socket | launcher; `lox run`'s compose |
+| 2 | The console shares only its socket volume with agents, read-only; the home volume, the map directory and the hub network never | `lox run`; the launcher's and lea's checks of up.json and the volume's labels |
 | 3 | Nothing unmasked leaves the console except an approved unmask; secrets never | masking pipeline, typed masked responses; canary harness |
 | 4 | Agent predicates see only the masked view; every record is masked before any predicate; no text is sent to a backend; plans, charges and stopping points depend on the plan, never on matches; agent rules only tighten | engine, oracle and equivalence suites |
-| 5 | Approved operations run only on a decision bound to the plan hash (exact spans for an unmask, the whole plan for a scan) and the policy fingerprint, once; never auto-approved for `read-pii`. With the hub (v0.2.0), `read-pii` only from `tty`, `deck` or `mobile` | lockkit plans and tickets; the facade check in the console |
+| 5 | Approved operations run only on a decision bound to the plan hash (exact spans for an unmask, the whole plan for a scan) and the policy fingerprint, once; never auto-approved: every ticket is `never_auto`, and an auto rule's approval is refused (`ErrAuto`). `read-pii` only from `tty`, `deck` or `mobile` | lockkit plans and tickets; the facade check in the console |
 | 6 | No approve or reveal method on the agent socket | lockkit |
-| 7 | With the hub (v0.2.0): hub unreachable ⇒ approvals wait; free reads continue with the local audit | hub client |
-| 8 | With the hub (v0.2.0): no hub auto-discovery | lockkit |
+| 7 | Hub unreachable ⇒ approvals wait; free reads continue with the local audit | hub client |
+| 8 | No hub auto-discovery: the console runs only with the hub flags `lox run` gives it | lockkit (`ErrNoHub`) |
 | 9 | Only approved sources are opened; the policy is the approved copy; `.locklog/` is read-only for lea agents (lea placement planned) | approved store, mount plan, dev/inode checks |
 | 10 | Log content is untrusted text everywhere | JSON-escaped under an "untrusted" header, controls replaced; injection corpus |
 | 11 | Resources are bounded | plans, rolling budgets, a queue, container limits, decompression, response and journal DATA caps, a 64 MiB result cache |
@@ -69,16 +70,16 @@ reach them by another path.
   - read the logs, the Docker socket, the backends' unauthenticated ports
     or the cloud metadata service directly;
   - become the console's account;
-  - write the human's launcher state: `$XDG_RUNTIME_DIR/locklog`, or
-    `~/.local/state/locklog` where there is no runtime directory, and the
-    environment the human starts the launcher with.
+  - write `lox run`'s state (`.lockfamily/`, its state directory) or the
+    environment the human starts `lox run` and the launcher with.
 
-  A standalone `.locklog/` outside lea is reviewed by the console. Placing
-  the agent is lea's job, or the job of your own agent container. Whether
-  agents may join `LOCKLOG_NETWORK` also falls under P1: they must not.
+  A `.locklog/` outside lea is reviewed by `lox run` and by the console.
+  Placing the agent is lea's job, or the job of your own agent container.
+  Whether agents may join the hub's or the lock's egress network also
+  falls under P1: they must not.
 - **P2** Agents of one uid are one trust domain. In the own-container
   recipe, the agent user must not have sudo. Otherwise every agent that
-  mounts one `locklog-run` is one domain.
+  mounts one lock's socket volume is one domain.
 - **P3** Backend read credentials are held only by the console. Log
   shippers use write-only tokens.
 
@@ -98,7 +99,7 @@ errors and it exits 1. It also lists residuals: whether Landlock confines
 the console, containers with `IpcMode` shareable, and swarm mode. See
 [setup.md](setup.md).
 
-The **host-agent trial** (`locklog setup --agent host`) runs the MCP server
+The **host-agent trial** (`locklog init <agent>`, `.mcp.json`'s `locklog mcp`) runs the MCP server
 as the image's `agent` account, launched from your own account. Your agent
 there can still read whatever your account can, so the trial is for
 non-production data. The launcher's `mcp` refuses production profiles.

@@ -1,12 +1,13 @@
 # locklog in Docker: every locklog command runs in this image, through the
-# launcher (scripts/locklog). The separated setup is baked in:
+# launcher (scripts/locklog), and the console as `lox run` (lockhub) starts
+# it. The separated setup is baked in:
 #
 #   locklog (uid 10051)  the console account: it alone reads the logs and
-#                        holds the keys, the policy and the audit (volume
-#                        locklog-home)
+#                        holds the keys, the policy and the audit (the
+#                        lock's home volume)
 #   agent   (uid 10052)  the agent side (locklog mcp), a member of
 #                        locklog-clients (gid 10050): it reaches the
-#                        console's socket (volume locklog-run)
+#                        console's socket (the lock's socket volume)
 #
 # The kernel checks every peer on the socket as on a host.
 #
@@ -46,7 +47,8 @@ LABEL org.opencontainers.image.source="https://github.com/DavidGodefroid/locklog
 # members of locklog-clients, for an agent in a container of its own whose
 # uid has no account here. Root (0), the console account (10051), 65534
 # (nobody) and leading zeros are refused. `locklog console --allowed-uids`
-# does the same at run time, with the release image as it is.
+# (lockfamily.yaml's allowed_uids, passed on by lox run) does the same at
+# run time, with the release image as it is.
 ARG ALLOWED_UIDS=""
 # ca-certificates: remote backends are checked with tls = "verify-full".
 RUN case "$ALLOWED_UIDS" in *[!0-9,]*|,*|*,|*,,*) echo "ALLOWED_UIDS: comma-separated uids, got '$ALLOWED_UIDS'" >&2; exit 1;; esac \
@@ -70,8 +72,8 @@ RUN case "$ALLOWED_UIDS" in *[!0-9,]*|,*|*,|*,,*) echo "ALLOWED_UIDS: comma-sepa
  && install -d -m 2750 -o locklog -g locklog-clients /run/locklog
 COPY --from=build --chown=root:root --chmod=0755 /out/locklog /usr/local/bin/locklog
 
-# Named volumes take these directories' owner and mode on first use; the
-# launcher creates locklog-run from this image and checks its owner.
+# Named volumes take these directories' owner and mode on first use: lox
+# run's socket and home volumes of the lock get them from this image.
 VOLUME ["/run/locklog", "/home/locklog"]
 WORKDIR /
 USER agent

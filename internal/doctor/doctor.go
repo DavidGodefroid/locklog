@@ -143,7 +143,7 @@ func Run(ctx context.Context, o Options) (Report, error) {
 	add(dockerItem(f))
 	for _, g := range []struct{ name, why, remedy string }{
 		{"docker", "the docker group is root on this host: it starts a container that reads every log",
-			"take the agent's account out of the docker group (sudo gpasswd -d $USER docker), or run the agent in a container of its own (locklog setup --agent container)"},
+			"take the agent's account out of the docker group (sudo gpasswd -d $USER docker), or run the agent with lea or in a container of its own (docs/setup.md)"},
 		{"adm", "the adm group reads /var/log",
 			"take the agent's account out of adm (sudo gpasswd -d $USER adm): the console reads the logs for it"},
 		{"systemd-journal", "the systemd-journal group reads the whole journal",
@@ -268,7 +268,7 @@ func dockerItem(f hostfacts.Facts) Item {
 	switch f.Docker {
 	case hostfacts.DockerReachable:
 		return Item{Finding: true, Text: "the Docker engine answers the agent's account" + host + ": it can start a container that reads every log and the console's volumes",
-			Remedy: "run the agent where the Docker socket and DOCKER_HOST are out of reach (not in the docker group, no socket mounted), or in a container of its own (locklog setup --agent container)"}
+			Remedy: "run the agent where the Docker socket and DOCKER_HOST are out of reach (not in the docker group, no socket mounted), or with lea, or in a container of its own (docs/setup.md)"}
 	case hostfacts.DockerUnreachable:
 		return Item{Text: "no Docker engine answers the agent's account" + host}
 	case hostfacts.DockerAbsent:
@@ -341,7 +341,7 @@ func backendItem(ctx context.Context, label string, s config.Source, timeout tim
 	recognised := resp.StatusCode == http.StatusOK && err == nil && len(body) <= maxProbeBody && recognize(body)
 	switch {
 	case recognised:
-		remedy := "put it behind authentication (locklog setup --loki-proxy for a Compose Loki), or out of the agent's network"
+		remedy := "put it behind authentication (locklog profile add --loki-proxy for a Compose Loki), or out of the agent's network"
 		if s.Kind != config.KindLoki {
 			remedy = "turn its security on (authentication for every read), or keep it out of the agent's network"
 		}
@@ -443,7 +443,7 @@ func Print(w io.Writer, r Report) int {
 	case n == 0:
 		fmt.Fprintln(w, "no finding")
 	case r.Production:
-		fmt.Fprintf(w, "%d %s on production profile %s: fix them, or run the agent in a container of its own (locklog setup --agent container)\n", n, plural(n, "finding"), r.Profile)
+		fmt.Fprintf(w, "%d %s on production profile %s: fix them, or run the agent with lea or in a container of its own (docs/setup.md)\n", n, plural(n, "finding"), r.Profile)
 		return 1
 	default:
 		fmt.Fprintf(w, "%d %s (no production profile: warnings)\n", n, plural(n, "finding"))

@@ -1,9 +1,9 @@
 locklog doctor: what the agent's account can reach here (advisory: a check, not a boundary)
 
   RED   the Docker engine answers the agent's account (DOCKER_HOST is set): it can start a container that reads every log and the console's volumes
-        remedy: run the agent where the Docker socket and DOCKER_HOST are out of reach (not in the docker group, no socket mounted), or in a container of its own (locklog setup --agent container)
+        remedy: run the agent where the Docker socket and DOCKER_HOST are out of reach (not in the docker group, no socket mounted), or with lea, or in a container of its own (docs/setup.md)
   RED   group docker: the agent's account is a member; the docker group is root on this host: it starts a container that reads every log
-        remedy: take the agent's account out of the docker group (sudo gpasswd -d $USER docker), or run the agent in a container of its own (locklog setup --agent container)
+        remedy: take the agent's account out of the docker group (sudo gpasswd -d $USER docker), or run the agent with lea or in a container of its own (docs/setup.md)
   RED   group adm: the agent's account is a member; the adm group reads /var/log
         remedy: take the agent's account out of adm (sudo gpasswd -d $USER adm): the console reads the logs for it
   RED   group systemd-journal: the agent's account is a member; the systemd-journal group reads the whole journal
@@ -29,4 +29,4 @@ residuals (the console's own guards; warnings, whatever the profile):
   warn  swarm mode is active: services' secrets are mounted under the containers root
         remedy: keep docker sources off a swarm node, or leave the swarm (docker swarm leave)
 
-10 findings on production profile main: fix them, or run the agent in a container of its own (locklog setup --agent container)
+10 findings on production profile main: fix them, or run the agent with lea or in a container of its own (docs/setup.md)

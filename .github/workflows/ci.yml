@@ -459,8 +459,8 @@ jobs:
           grep -x journald plan.txt
 
   # The docker source against a real engine: containers with rotated,
-  # compressed json-file logs, the map written by `locklog refresh`, and the
-  # source's test binary run in a container confined like the console.
+  # compressed json-file logs, the containers map, and the source's test
+  # binary run in a container confined like the console.
   docker-source:
     name: docker source (integration)
     runs-on: ubuntu-latest
@@ -494,23 +494,27 @@ jobs:
           mkdir -p "$RUNNER_TEMP/it/expect"
           for n in "$r-a" "$r-b"; do docker logs "$n" > "$RUNNER_TEMP/it/expect/$n" 2>&1; done
           wc -l "$RUNNER_TEMP"/it/expect/*
-      - name: locklog refresh writes the map
+      # The containers map lox run writes for a docker source (lockhub#86):
+      # the approved containers by id and name, the console's excluded.
+      - name: the containers map
         shell: bash
         run: |
           set -euxo pipefail
-          mkdir -p "$RUNNER_TEMP/proj/.locklog" && cd "$RUNNER_TEMP/proj"
-          printf '%s\n' 'version = 1' '[profiles.it.sources.web]' 'kind = "docker"' "containers = [\"$R-*\"]" > .locklog/config.toml
-          mkdir -m 0700 "$RUNNER_TEMP/xdg"
-          XDG_RUNTIME_DIR="$RUNNER_TEMP/xdg" sh "$GITHUB_WORKSPACE/scripts/locklog" refresh | tee refresh.txt
-          grep -q ': 2 mapped, 1 console containers excluded, 1 skipped' refresh.txt
-          cat "$RUNNER_TEMP"/xdg/locklog/map/locklog-console-*/map.v1
+          mkdir -m 0755 "$RUNNER_TEMP/map"
+          {
+            echo 'locklog-map 1'
+            for n in "$R-a" "$R-b"; do echo "c $(docker inspect -f '{{.Id}}' "$n") $n 3 1"; done
+            echo "x $(docker inspect -f '{{.Id}}' "locklog-console-it-$R")"
+          } > "$RUNNER_TEMP/map/map.v1"
+          chmod 0644 "$RUNNER_TEMP/map/map.v1"
+          cat "$RUNNER_TEMP/map/map.v1"
       - name: read in a container confined like the console
         shell: bash
         run: |
           set -euxo pipefail
           go test -c -tags integration -o "$RUNNER_TEMP/it/docker.test" ./internal/source/docker
           root="$(docker info --format '{{.DockerRootDir}}')/containers"
-          mapdir=$(echo "$RUNNER_TEMP"/xdg/locklog/map/locklog-console-*)
+          mapdir="$RUNNER_TEMP/map"
           console_id=$(docker inspect --format '{{.Id}}' "locklog-console-it-$R")
           docker run --rm --user 10051:10051 --group-add 0 --cap-drop ALL --security-opt no-new-privileges \
             --read-only --network none --tmpfs /tmp:rw,nosuid,nodev,noexec,size=64m \
@@ -528,7 +532,7 @@ jobs:
         run: |
           set -euxo pipefail
           root="$(docker info --format '{{.DockerRootDir}}')/containers"
-          mapdir=$(echo "$RUNNER_TEMP"/xdg/locklog/map/locklog-console-*)
+          mapdir="$RUNNER_TEMP/map"
           sync="$RUNNER_TEMP/sync"
           mkdir -m 0777 "$sync"
           # The reader restricts itself, says it is ready, then waits for
@@ -558,10 +562,12 @@ jobs:
           [ -n "${R:-}" ] || exit 0
           docker rm -f "$R-a" "$R-b" "other-$R" "locklog-console-it-$R" "$R-local" "$R-reader" "$R-shm" >/dev/null 2>&1 || true
 
-  # The P1 demo end to end: the image, the launcher's console approved at
-  # its terminal (script(1): the console refuses an input that is not
-  # one), a file source over rotated and compressed logs, and an MCP client
-  # speaking to the launcher's mcp (test/e2e, build tag e2e).
+  # The P1 demo end to end: the image, the console started hub-attached as
+  # lox run starts it (lockkit's fake hub stands in for lockhub until lox
+  # run knows locklog, lockhub#84) and approved at its terminal (script(1):
+  # the console refuses an input that is not one), a file source over
+  # rotated and compressed logs, and an MCP client speaking to the
+  # launcher's mcp on lox run's socket volume (test/e2e, build tag e2e).
   e2e-docker:
     name: e2e (docker)
     runs-on: ubuntu-latest
@@ -591,12 +597,14 @@ jobs:
         run: |
           ids=$(docker ps -aq --filter label=locklog.console=1)
           [ -z "$ids" ] || docker rm -f $ids >/dev/null
-          docker volume rm locklog-run locklog-home >/dev/null 2>&1 || true
+          vols=$(docker volume ls -q --filter label=com.docker.compose.project | grep '^lockfamily-' || true)
+          [ -z "$vols" ] || docker volume rm $vols >/dev/null 2>&1 || true
 
-  # The five-minute path, timed from setup to the first answer (the image is
-  # built before the clock starts): the launcher installed on PATH, `setup
-  # --yes --no-production --agent host`, the console, and an MCP client
-  # spawning the server the written .mcp.json names (test/e2e).
+  # The five-minute path, timed from profile add to the first answer (the
+  # image is built before the clock starts): the launcher installed on PATH,
+  # lox add's verbs (`profile add --non-interactive`, `init claude`), the
+  # console as lox run starts it, and an MCP client spawning the server the
+  # written .mcp.json names (test/e2e).
   five-minutes:
     name: five-minutes
     runs-on: ubuntu-latest
@@ -629,10 +637,12 @@ jobs:
         run: |
           ids=$(docker ps -aq --filter label=locklog.console=1)
           [ -z "$ids" ] || docker rm -f $ids >/dev/null
-          docker volume rm locklog-run locklog-home >/dev/null 2>&1 || true
+          vols=$(docker volume ls -q --filter label=com.docker.compose.project | grep '^lockfamily-' || true)
+          [ -z "$vols" ] || docker volume rm $vols >/dev/null 2>&1 || true
 
   # The own-container recipe: an agent image built on the runner from the
-  # snippet setup prints, run as its non-root agent user, calls the console.
+  # snippet of docs/setup.md, run as its non-root agent user with lox run's
+  # socket volume read-only, calls the console.
   e2e-own-container:
     name: own-container recipe (e2e)
     runs-on: ubuntu-latest
@@ -667,7 +677,8 @@ jobs:
         run: |
           ids=$(docker ps -aq --filter label=locklog.console=1)
           [ -z "$ids" ] || docker rm -f $ids >/dev/null
-          docker volume rm locklog-run locklog-home >/dev/null 2>&1 || true
+          vols=$(docker volume ls -q --filter label=com.docker.compose.project | grep '^lockfamily-' || true)
+          [ -z "$vols" ] || docker volume rm $vols >/dev/null 2>&1 || true
 
   # The host-agent guard end to end: the launcher's mcp on a production
   # profile served by a real console is refused (E_PRODUCTION_HOST_AGENT).
@@ -703,7 +714,8 @@ jobs:
         run: |
           ids=$(docker ps -aq --filter label=locklog.console=1)
           [ -z "$ids" ] || docker rm -f $ids >/dev/null
-          docker volume rm locklog-run locklog-home >/dev/null 2>&1 || true
+          vols=$(docker volume ls -q --filter label=com.docker.compose.project | grep '^lockfamily-' || true)
+          [ -z "$vols" ] || docker volume rm $vols >/dev/null 2>&1 || true
 
   # install.sh of this commit against the latest published release: the
   # signatures (checksums.txt and the images), the checksum, the launcher

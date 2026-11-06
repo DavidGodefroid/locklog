@@ -111,7 +111,7 @@ func WithHubCall(ctx context.Context, h *HubCall) context.Context {
 	return context.WithValue(ctx, hubCallKey{}, h)
 }
 
-// HubCallFrom returns the call's hub call, nil standalone.
+// HubCallFrom returns the call's hub call, nil for a free method.
 func HubCallFrom(ctx context.Context) *HubCall {
 	h, _ := ctx.Value(hubCallKey{}).(*HubCall)
 	return h
