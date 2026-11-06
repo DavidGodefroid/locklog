@@ -7,10 +7,13 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"net"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -238,9 +241,9 @@ func TestRemoteElasticMasked(t *testing.T) {
 // Off production a failed elastic Check leaves the source open, failing
 // closed, with a note that holds no detail.
 func TestRemoteElasticCheckFailsOpenOffProduction(t *testing.T) {
-	// The time field is not a date: Check refuses it.
+	// A trusted field is not a keyword field: Check refuses it.
 	fake := &elastictest.Server{Docs: esDocs(), User: "reader", Password: remoteSecret,
-		Types: map[string]string{"@timestamp": "keyword", "message": "text", "app": "keyword", "level": "keyword", "user_email": "keyword"}}
+		Types: map[string]string{"@timestamp": "date", "message": "text", "app": "text", "level": "keyword", "user_email": "keyword"}}
 	srv := httptest.NewServer(fake)
 	defer srv.Close()
 	f := newFixture(t, esCfg("elastic", srv.URL, false, ""), "")
@@ -257,6 +260,46 @@ func TestRemoteElasticCheckFailsOpenOffProduction(t *testing.T) {
 	}
 	if n := total(res.(engine.CountResult)); n != 2 {
 		t.Errorf("count = %d", n)
+	}
+}
+
+// Off production a Check failure on the scope refuses the profile: a
+// time field that is not a date, a selector on a text field, a backend
+// whose fields could not be type-checked (a wrong secret). The selector
+// and the time range are sent whatever Check found.
+func TestRemoteElasticScopeFailureRefusedOffProduction(t *testing.T) {
+	types := func(ts, env string) map[string]string {
+		return map[string]string{"@timestamp": ts, "env": env, "message": "text", "app": "keyword", "level": "keyword", "user_email": "keyword"}
+	}
+	withSelector := func(url string) func(string) string {
+		return func(l string) string { return esCfg("elastic", url, false, "")(l) + "selector = { env = \"prod\" }\n" }
+	}
+	for _, c := range []struct {
+		name     string
+		fake     *elastictest.Server
+		selector bool
+		want     string
+	}{
+		{"time field not a date", &elastictest.Server{Docs: esDocs(), User: "reader", Password: remoteSecret, Types: types("keyword", "keyword")}, false, "not a date"},
+		{"selector on a text field", &elastictest.Server{Docs: esDocs(), User: "reader", Password: remoteSecret, Types: types("date", "text")}, true, "env"},
+		{"wrong secret", &elastictest.Server{Docs: esDocs(), User: "reader", Password: "another"}, false, "status 401"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			srv := httptest.NewServer(c.fake)
+			defer srv.Close()
+			cfg := esCfg("elastic", srv.URL, false, "")
+			if c.selector {
+				cfg = withSelector(srv.URL)
+			}
+			f := newFixture(t, cfg, "")
+			_, err := Open(context.Background(), remoteOptions(f))
+			if err == nil || !strings.Contains(err.Error(), "the connection checks refuse this profile") || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("error = %v", err)
+			}
+			if strings.Contains(err.Error(), remoteSecret) || strings.Contains(err.Error(), "jane") {
+				t.Errorf("the error carries a secret or a record: %v", err)
+			}
+		})
 	}
 }
 
@@ -317,22 +360,6 @@ func TestRemoteProductionAccepted(t *testing.T) {
 	f = newFixture(t, esCfg("elastic", es.URL, true, tlsCA(t, es)), "")
 	s = open(t, remoteOptions(f))
 	checkMasked(t, s, "es")
-}
-
-// A wrong secret is refused, without the secret in the error.
-func TestRemoteWrongSecret(t *testing.T) {
-	es := httptest.NewServer(&elastictest.Server{Docs: esDocs(), User: "reader", Password: "another"})
-	defer es.Close()
-	f := newFixture(t, esCfg("elastic", es.URL, false, ""), "")
-	s := open(t, remoteOptions(f))
-	// Off production the source opens; its check failed (status 401).
-	if st := s.Status(context.Background()).(Status); len(st.Notes) != 1 {
-		t.Errorf("notes = %q", st.Notes)
-	}
-	_, ref := call(t, s, logconsole.MethodSearch, `{`+hour+`}`)
-	if ref == nil || strings.Contains(ref.Message, remoteSecret) {
-		t.Errorf("search with a wrong secret: %+v", ref)
-	}
 }
 
 // A trusted-only count on a remote source that answers counts is bounded
@@ -474,4 +501,61 @@ func TestRemoteHourlyBudgets(t *testing.T) {
 			}
 		})
 	}
+}
+
+// connCounter serves h and counts the connections open on the server.
+func connCounter(t *testing.T, h http.Handler) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var open atomic.Int32
+	srv := httptest.NewUnstartedServer(h)
+	srv.Config.ConnState = func(_ net.Conn, st http.ConnState) {
+		switch st {
+		case http.StateNew:
+			open.Add(1)
+		case http.StateClosed, http.StateHijacked:
+			open.Add(-1)
+		}
+	}
+	srv.Start()
+	t.Cleanup(srv.Close)
+	return srv, &open
+}
+
+func waitClosed(t *testing.T, open *atomic.Int32) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for open.Load() > 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if n := open.Load(); n != 0 {
+		t.Errorf("%d connections to the backend still open", n)
+	}
+}
+
+// Closing the session, or an open the connection checks refuse, closes
+// the remote sources' connections (some carry the credentials).
+func TestRemoteConnectionsClosed(t *testing.T) {
+	srv, open := connCounter(t, &lokitest.Server{Entries: lokiEntries(), User: "reader", Password: remoteSecret})
+	f := newFixture(t, lokiCfg(srv.URL, false, ""), "")
+	s, err := Open(context.Background(), remoteOptions(f))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ref := call(t, s, logconsole.MethodSearch, `{`+hour+`}`); ref != nil {
+		t.Fatalf("search refused: %+v", ref)
+	}
+	if open.Load() == 0 {
+		t.Fatal("no connection was open")
+	}
+	s.Close()
+	waitClosed(t, open)
+
+	// A refused open (the time field is not a date).
+	es, open := connCounter(t, &elastictest.Server{Docs: esDocs(), User: "reader", Password: remoteSecret,
+		Types: map[string]string{"@timestamp": "keyword", "message": "text", "app": "keyword", "level": "keyword"}})
+	f = newFixture(t, esCfg("elastic", es.URL, false, ""), "")
+	if _, err := Open(context.Background(), remoteOptions(f)); err == nil {
+		t.Fatal("opened")
+	}
+	waitClosed(t, open)
 }

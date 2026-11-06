@@ -132,8 +132,21 @@ func TestGetWithHeaders(t *testing.T) {
 	if _, err := c.GetWith(context.Background(), "/loki/api/v1/labels", q, LokiHeaders); err != nil || s.auth != "Bearer s3cret" || s.query != q.Encode() {
 		t.Fatalf("GetWith: %v %+v", err, &s)
 	}
+	// Allowlisted names pass in any case.
+	for _, h := range []string{"X-Loki-Response-Encoding-Flags", "x-loki-response-encoding-flags", "X-LOKI-RESPONSE-ENCODING-FLAGS"} {
+		hdr := map[string]string{h: "categorize-labels"}
+		if _, err := New(remote(srv.URL, config.AuthBearer, kconfig.TLSVerifyFull), LokiRoutes, Credentials{Secret: "s3cret"}, Options{RootCAs: roots(srv), Headers: hdr}); err != nil {
+			t.Errorf("allowlisted header %s refused: %v", h, err)
+		}
+		if _, err := c.GetWith(context.Background(), "/loki/api/v1/labels", nil, hdr); err != nil {
+			t.Errorf("allowlisted header %s not sent: %v", h, err)
+		}
+	}
 	n := s.n.Load()
-	for _, h := range []string{"Authorization", "cookie", "X-Scope-OrgID", "Host", "User-Agent", "x-query-tags"} {
+	// Everything else is refused, whatever its case: credentials, tenant,
+	// host, query tags, and any header nobody allowlisted.
+	for _, h := range []string{"Authorization", "cookie", "X-Scope-OrgID", "Host", "User-Agent", "x-query-tags",
+		"X-Forwarded-For", "x-forwarded-host", "Forwarded", "X-Api-Key", "x-loki-other", "X-Opaque-Id", "Content-Type", "Accept-Encoding", "Transfer-Encoding", "Connection", "Te", ""} {
 		if _, err := New(remote(srv.URL, config.AuthBearer, kconfig.TLSVerifyFull), LokiRoutes, Credentials{Secret: "s3cret"}, Options{RootCAs: roots(srv), Headers: map[string]string{h: "x"}}); err == nil {
 			t.Errorf("fixed header %s accepted", h)
 		}
@@ -471,5 +484,64 @@ func TestMetadataAddr(t *testing.T) {
 		if got := metadataAddr(net.ParseIP(ip)); got != want {
 			t.Errorf("metadataAddr(%s) = %t", ip, got)
 		}
+	}
+}
+
+// Close closes the pooled connections of both transports (the
+// credentialed one and the probe's), and the client sends nothing after
+// it. Idle connections also time out on their own.
+func TestCloseReleasesConnections(t *testing.T) {
+	var open atomic.Int32
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "" {
+			w.WriteHeader(401)
+			return
+		}
+		_, _ = w.Write([]byte(`{"status":"success","data":["app"]}`))
+	}))
+	srv.Config.ConnState = func(_ net.Conn, st http.ConnState) {
+		switch st {
+		case http.StateNew:
+			open.Add(1)
+		case http.StateClosed, http.StateHijacked:
+			open.Add(-1)
+		}
+	}
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+	c, err := New(remote(srv.URL, config.AuthBearer, kconfig.TLSVerifyFull), LokiRoutes, Credentials{Secret: "s3cret"}, Options{RootCAs: roots(srv)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tr := range []*http.Client{c.http, c.probe} {
+		if it := tr.Transport.(*http.Transport).IdleConnTimeout; it <= 0 || it > 2*time.Minute {
+			t.Errorf("IdleConnTimeout = %v", it)
+		}
+	}
+	if _, err := c.Get(context.Background(), "/loki/api/v1/labels", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Probe(context.Background(), LokiProbePath, LokiData); err != nil {
+		t.Fatal(err)
+	}
+	if open.Load() < 2 {
+		t.Fatalf("%d connections open, want the credentialed one and the probe's", open.Load())
+	}
+	c.Close()
+	deadline := time.Now().Add(5 * time.Second)
+	for open.Load() > 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if n := open.Load(); n != 0 {
+		t.Errorf("%d connections still open after Close", n)
+	}
+	if _, err := c.Get(context.Background(), "/loki/api/v1/labels", nil); !errors.Is(err, ErrClosed) {
+		t.Errorf("Get after Close: %v", err)
+	}
+	if _, err := c.Probe(context.Background(), LokiProbePath, LokiData); !errors.Is(err, ErrClosed) {
+		t.Errorf("Probe after Close: %v", err)
+	}
+	if open.Load() != 0 {
+		t.Error("a request after Close opened a connection")
 	}
 }

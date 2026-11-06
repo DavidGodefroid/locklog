@@ -47,11 +47,13 @@ type AgentRules struct {
 	mu      sync.Mutex
 	entries []agentEntry
 
-	// digests memoizes digest (keyed, pure): every leaf of every
+	// digestMemo memoizes digest (keyed, pure): every leaf of every
 	// record asks for its path's rule. Bounded (at most maxDigests,
 	// then it starts over).
 	digestMemo sync.Map // source + "\x00" + clear path -> digest
 	nDigests   atomic.Int64
+	// generation counts the rules added since the rules were opened.
+	generation atomic.Uint64
 }
 
 const maxDigests = 4096
@@ -192,7 +194,18 @@ func (a *AgentRules) add(source, clearPath, mode string, now time.Time, lim Agen
 		return err
 	}
 	a.entries = entries
+	a.generation.Add(1) // after the entries: a reader seeing it sees them
 	return nil
+}
+
+// RulesGeneration changes whenever a rule is added at runtime (an agent
+// rule, which TrustedValue applies at once): an answer of TrustedValue
+// remembered under one generation must be asked again under another.
+func (m *Masker) RulesGeneration() uint64 {
+	if m.o.Rules.Agent == nil {
+		return 0
+	}
+	return m.o.Rules.Agent.generation.Load()
 }
 
 // AgentAdd adds an agent rule (locklog_pii_add): the field named by its

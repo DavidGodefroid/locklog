@@ -53,7 +53,9 @@ jobs:
   # The engine and the sources under the race detector (cgo, -short: the
   # heaviest equivalence cases run in full in the test job above). The
   # engine's read-around tests (tail, context, trace) run in a shard of
-  # their own: under -race they take as long as the rest.
+  # their own: under -race they take as long as the rest. The sources run
+  # apart: -skip applies to every package of an invocation, so a source
+  # test named TestTail* would otherwise be skipped silently.
   race:
     name: race (${{ matrix.shard }})
     runs-on: ubuntu-latest
@@ -64,8 +66,10 @@ jobs:
         include:
           - shard: engine read-around
             args: -run '^(TestTail|TestContext|TestTrace)' ./internal/engine/
-          - shard: engine, sources
-            args: -skip '^(TestTail|TestContext|TestTrace)' ./internal/engine/ ./internal/source/...
+          - shard: engine
+            args: -skip '^(TestTail|TestContext|TestTrace)' ./internal/engine/
+          - shard: sources
+            args: ./internal/source/...
     env:
       CGO_ENABLED: "1"
     steps:

@@ -130,6 +130,16 @@ func TestSuiteEquivalenceIndex(t *testing.T) {
 			c.By = []string{"level"}
 			c.Bucket = "10m"
 		}),
+		cq("index count where status (numeric)", func(c *CountQuery) {
+			c.Where = []Pred{{Field: "status", Op: OpIn, Value: raw([]any{200, 5e2})}}
+			c.By = []string{"status"}
+			c.Bucket = "10m"
+		}),
+		cq("index count where status != (numeric)", func(c *CountQuery) {
+			c.Where = []Pred{{Field: "status", Op: OpNe, Value: raw(300)}}
+			c.By = []string{"level"}
+			c.Bucket = "1h"
+		}),
 		cq("index count by container", func(c *CountQuery) {
 			c.Sources = []string{srcDocker}
 			c.ByLabels = []string{docker.ContainerField}

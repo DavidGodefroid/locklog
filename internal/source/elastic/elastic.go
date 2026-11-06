@@ -759,10 +759,6 @@ func (it *iter) Next() (source.RawRecord, error) {
 		}
 		r := <-it.results[it.cur]
 		it.results[it.cur] = nil
-		if r.err == nil {
-			// The state may have changed while the slice was buffered.
-			r.err = it.s.stillServed(it.f, it.s.state())
-		}
 		if r.err != nil {
 			it.err = fmt.Errorf("elasticsearch source: %w", r.err)
 			it.hits, it.pos = nil, 0
@@ -771,6 +767,14 @@ func (it *iter) Next() (source.RawRecord, error) {
 		it.hits, it.pos = r.hits, 0
 		it.cur++
 		it.fill()
+	}
+	// Every record, not only every slice: after a re-Check that keeps a
+	// pushed field local (or a failed one), the rest of the buffered
+	// slice is stale too (#93).
+	if err := it.s.stillServed(it.f, it.s.state()); err != nil {
+		it.err = fmt.Errorf("elasticsearch source: %w", err)
+		it.hits, it.pos = nil, 0
+		return source.RawRecord{}, it.err
 	}
 	h := it.hits[it.pos]
 	it.pos++
