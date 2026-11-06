@@ -75,8 +75,14 @@ type countingSource struct {
 	n *int
 }
 
+// countingMu guards the counts of countingSource: calls may run at once
+// (TestBusy). Readers read once the calls are done.
+var countingMu sync.Mutex
+
 func (c countingSource) Scan(ctx context.Context, ch source.Chunk) (source.Iterator, error) {
+	countingMu.Lock()
 	*c.n++
+	countingMu.Unlock()
 	return c.Source.Scan(ctx, ch)
 }
 
