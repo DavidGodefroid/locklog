@@ -3,7 +3,6 @@ package logconsole
 import (
 	"context"
 	"encoding/json"
-	"regexp"
 	"slices"
 	"time"
 
@@ -21,6 +20,12 @@ type Record struct {
 	Sources []string `json:"sources,omitempty"`
 	From    string   `json:"from,omitempty"`
 	To      string   `json:"to,omitempty"`
+	// Last is a relative range (the last duration up to the call), and
+	// Baseline a patterns call's offset: it also reads the same window
+	// that much earlier. Both in Go's canonical form ("2h0m0s"), parsed
+	// from the call, never the agent's text.
+	Last     string `json:"last,omitempty"`
+	Baseline string `json:"baseline,omitempty"`
 	// Tool is the tool an approved scan runs (log.scan).
 	Tool string `json:"tool,omitempty"`
 	// Pseudonyms name what an unmask revealed or a lookup resolved, by
@@ -47,9 +52,11 @@ func newRecord(ctx context.Context, env console.Env, method string, params json.
 	}
 	console.StampPeer(ctx, &r.Base)
 	var scope struct {
-		Sources []string `json:"sources"`
-		From    string   `json:"from"`
-		To      string   `json:"to"`
+		Sources  []string `json:"sources"`
+		From     string   `json:"from"`
+		To       string   `json:"to"`
+		Last     string   `json:"last"`
+		Baseline string   `json:"baseline"`
 		// A scan's tool and its parameters (the same scope inside).
 		Tool  string          `json:"tool"`
 		Query json.RawMessage `json:"query"`
@@ -67,7 +74,7 @@ func newRecord(ctx context.Context, env console.Env, method string, params json.
 			r.Tool = scope.Tool
 		}
 		inner := scope.Query
-		scope.Sources, scope.From, scope.To = nil, "", ""
+		scope.Sources, scope.From, scope.To, scope.Last, scope.Baseline = nil, "", "", "", ""
 		ok = json.Unmarshal(inner, &scope) == nil
 	}
 	if ok {
@@ -84,19 +91,29 @@ func newRecord(ctx context.Context, env console.Env, method string, params json.
 		if validTime(scope.To) {
 			r.To = scope.To
 		}
+		r.Last, r.Baseline = canonicalDuration(scope.Last), canonicalDuration(scope.Baseline)
 	}
 	return r
 }
 
-// relativeRe is a relative range: a number and a unit.
-var relativeRe = regexp.MustCompile(`^[0-9]{1,6}[smhd]$`)
-
-// validTime is an RFC 3339 time or a relative range ("1h", "7d"): never
-// any other text the agent typed.
+// validTime is an RFC 3339 time (the only form the engine takes for from
+// and to): never any other text the agent typed.
 func validTime(s string) bool {
-	if relativeRe.MatchString(s) {
-		return true
-	}
 	_, err := time.Parse(time.RFC3339Nano, s)
 	return err == nil
+}
+
+// canonicalDuration is a positive duration as the engine parses it
+// (time.ParseDuration: units up to h, no d), in Go's canonical form; ""
+// for anything else. The text recorded is made from the parsed value, not
+// copied from the call.
+func canonicalDuration(s string) string {
+	if s == "" || len(s) > 32 {
+		return ""
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d <= 0 {
+		return ""
+	}
+	return d.String()
 }

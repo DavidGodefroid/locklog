@@ -142,6 +142,33 @@ trusted fields.
 - A predicate value the detectors flag as personal is refused with
   `E_PII_IN_QUERY`. Use `locklog_lookup` to get its pseudonym.
 
+### Context, trace and tail: known limits
+
+These never give `complete: true` with a lost or repeated new record; some
+cases are pessimistic on purpose.
+
+- `locklog_tail` says `complete: false` (it cannot vouch for every new
+  record) when a file was empty at the start and then grows (common right
+  after a logrotate `create`), when a rotated copy is compressed during the
+  tail (`.1` to `.1.gz`), when two unrelated streams hold the same records
+  at the same offsets (a copy cannot be told from them), or when streams
+  keep changing for many polls.
+- A file truncated and rewritten with the same first 64 KiB keeps its
+  stream identity, as for the file source.
+- A multi-line record still receiving continuation lines when the tail
+  ends is evaluated as it stands then.
+- A tail plans every local stream at each poll; that work is not charged
+  to the rolling budgets. While a tail runs (up to 50 s), the other tool
+  calls of the same profile wait for it.
+- `locklog_context` on a file reads back at most 16 granules before its
+  record: it can return fewer `before` records than asked with
+  `complete: true` (the start of what it read). The target record is
+  always returned, even alone over the output cap. A ref from before a
+  policy change is refused with `E_POLICY_CHANGED`, one from an older
+  pseudonym epoch with `E_STALE`.
+- `locklog_trace` matches a pseudonym in values, not in a masked field
+  name (`⟦key:ID⟧`).
+
 ## Budgets
 
 | Per call | Local (files, journald, Docker) | Remote (Loki) | Ceiling |
@@ -158,6 +185,10 @@ trusted fields.
 | server-side metric queries per hour | — | 120 / 60 |
 | `lookup` distinct values per hour | 50 per console, 20 per uid (production: 10 per console) | same |
 | agent `pii.add` | 10 per hour, 50 rules | same |
+
+The connection checks of a remote source are not charged to these
+budgets: they run once per connection, before the agent can call (up to 2
+requests for Loki, up to 8 for Elasticsearch or OpenSearch).
 
 A call over a budget is refused with `E_OVER_BUDGET` and the estimate,
 before it touches any data. `locklog_scan` is the only way past. A call
