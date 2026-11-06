@@ -115,6 +115,10 @@ type runOpts struct {
 	// maxGroup bounds the planned bytes of a group of an uncompressed
 	// stream's granules (0: no bound but the time and the call's bytes).
 	maxGroup int64
+	// need, when set, selects the records to mask; the others reach
+	// visit unmasked (mask.Record.Valid is false): a trusted-only count
+	// counts them by their trusted values (#94).
+	need func(source.RawRecord) bool
 }
 
 // browseGroups is how many groups of a browsing search's local granules

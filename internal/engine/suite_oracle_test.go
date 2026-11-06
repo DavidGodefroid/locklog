@@ -4,12 +4,15 @@ package engine
 
 import (
 	"fmt"
+	"io"
 	"maps"
 	"math"
 	"os"
+	"os/exec"
 	"runtime"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -133,7 +136,7 @@ func TestSuiteOracle(t *testing.T) {
 		// length: different lengths are compared on the sources whose
 		// records carry the padding in a secret-named field.
 		{"same length", true, suiteSources()},
-		{"different length", false, []string{"json", "logfmt", "cri", "docker-json", srcJournal, srcDocker}},
+		{"different length", false, []string{"json", "logfmt", "cri", "docker-json", srcJournal, srcDocker, srcLoki}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a, b := oraclePair(t, tc.sameLen)
@@ -177,7 +180,7 @@ func TestSuiteOracle(t *testing.T) {
 // mask-all (the default everywhere: no pre-filter), every record of the
 // plan is masked whatever the predicates, so a needle found only in the
 // clear form of one set of values costs the same on both. Timing cases run
-// with LOCKLOG_SUITE_TIMING=1 (the CI suites job) and never with -short.
+// with LOCKLOG_SUITE_TIMING=1 (the CI suites-latency job) and never with -short.
 
 func timingCase(t *testing.T) {
 	t.Helper()
@@ -185,7 +188,7 @@ func timingCase(t *testing.T) {
 		t.Skip("timing case: skipped with -short")
 	}
 	if os.Getenv("LOCKLOG_SUITE_TIMING") != "1" {
-		t.Skip("timing case: set LOCKLOG_SUITE_TIMING=1 (run by the CI suites job)")
+		t.Skip("timing case: set LOCKLOG_SUITE_TIMING=1 (run by the CI suites-latency job)")
 	}
 }
 
@@ -208,6 +211,58 @@ func cpuHog() (stop func()) {
 		}()
 	}
 	return func() { done.Store(true); wg.Wait() }
+}
+
+// processHog slows the host about 3× for this test process until stop is
+// called: busy threads in a process of their own (this test binary run as
+// TestCPUHogProcess), 3 per CPU less this process's GOMAXPROCS, so that
+// each of its threads gets about a third of a CPU. The operating system
+// shares the CPUs, as with a busy neighbour. Busy goroutines in the test's
+// own process (cpuHog) also delay its network goroutines in Go's run queue:
+// each loopback round trip of a remote source (the suites' fake Loki) then
+// waits behind them, which slows a remote source far more than a loaded
+// host does (the oracle's latency cases measure the engine's work).
+func processHog(t testing.TB) (stop func()) {
+	t.Helper()
+	n := max(3*runtime.NumCPU()-runtime.GOMAXPROCS(0), 1)
+	cmd := exec.Command(os.Args[0], "-test.run=^TestCPUHogProcess$")
+	cmd.Env = append(os.Environ(), "LOCKLOG_CPU_HOG=1", "GOMAXPROCS="+strconv.Itoa(n))
+	// The hog exits when its stdin closes: when stopped, and when this
+	// process dies whatever the way.
+	in, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	return func() {
+		in.Close()
+		cmd.Process.Kill()
+		cmd.Wait()
+	}
+}
+
+// TestCPUHogProcess is processHog's process: GOMAXPROCS busy goroutines
+// until its stdin closes.
+func TestCPUHogProcess(t *testing.T) {
+	if os.Getenv("LOCKLOG_CPU_HOG") != "1" {
+		t.Skip("the CPU hog's own process (processHog)")
+	}
+	var done atomic.Bool
+	for range runtime.GOMAXPROCS(0) {
+		go func() {
+			x := 0
+			for !done.Load() {
+				for i := range 1 << 14 {
+					x += i
+				}
+			}
+			_ = x
+		}()
+	}
+	io.Copy(io.Discard, os.Stdin)
+	done.Store(true)
 }
 
 // timeCall returns the wall time of a call run to completion.
@@ -267,7 +322,8 @@ func latencySamples(sa, sb *suite, c agentCall, n int) ([]time.Duration, []time.
 // TestSuiteOracleLatency compares the time of calls whose needle is found
 // in the clear form of one set of planted values only (in every record),
 // on the production defaults (redact-unknown) and the non-production ones
-// (detect), both with mask-all, idle and under a CPU hog, over 25
+// (detect), both with mask-all, idle and under a CPU hog (processHog: the
+// host slowed about 3×), over 25
 // interleaved runs each: a call fails when its medians are more than 5% +
 // 5 ms apart and a Mann-Whitney test finds a difference (|z| > 4). The
 // opt-in pre-filter
@@ -284,7 +340,7 @@ func TestSuiteOracleLatency(t *testing.T) {
 	}
 	corpus := func(v string) map[string][]suiteRecord {
 		out := map[string][]suiteRecord{}
-		for _, src := range []string{"json", srcJournal, srcDocker} {
+		for _, src := range []string{"json", srcJournal, srcDocker, srcLoki} {
 			for j := range 6000 {
 				msg := fmt.Sprintf("render pdf for %s failed: upstream timed out (order %d)", v, j)
 				out[src] = append(out[src], suiteRecord{TS: suiteBase.Add(time.Duration(j) * time.Second), Kind: "json",
@@ -318,7 +374,7 @@ func TestSuiteOracleLatency(t *testing.T) {
 			sa := newSuite(t, corpus(a["email"]), cfg)
 			sb := newSuite(t, corpus(b["email"]), cfg)
 			if tc.hog {
-				defer cpuHog()()
+				defer processHog(t)()
 			}
 			for _, c := range calls {
 				xa, xb := latencySamples(sa, sb, c, n)

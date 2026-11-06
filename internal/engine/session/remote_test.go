@@ -403,8 +403,9 @@ func remoteBudget(t *testing.T, s *Session) engine.ClassBudget {
 
 // One remote request takes exactly one token of the per-minute request
 // budget (the engine's, Engine.Paced and the query path: no double
-// pacing), log.sources included; a server-side count's requests are each
-// one metric query too.
+// pacing), log.sources included; a server-side count's metric queries are
+// each one metric query too (Loki's boundary log fetches are requests
+// only, #112).
 func TestRemoteRequestsPaced(t *testing.T) {
 	lk := &lokitest.Server{Entries: lokiEntries(), User: "reader", Password: remoteSecret}
 	ls := httptest.NewServer(lk)
@@ -416,9 +417,11 @@ func TestRemoteRequestsPaced(t *testing.T) {
 		name string
 		cfg  func(string) string
 		reqs func() int
+		// metrics: the metric queries the backend served.
+		metrics func() int
 	}{
-		{"loki", lokiCfg(ls.URL, false, ""), func() int { return len(lk.Requests()) }},
-		{"elastic", esCfg("elastic", ess.URL, false, ""), func() int { return len(es.Requests()) }},
+		{"loki", lokiCfg(ls.URL, false, ""), func() int { return len(lk.Requests()) }, lk.MetricQueries},
+		{"elastic", esCfg("elastic", ess.URL, false, ""), func() int { return len(es.Requests()) }, func() int { return len(es.Requests()) }},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			f := newFixture(t, c.cfg, "")
@@ -431,7 +434,7 @@ func TestRemoteRequestsPaced(t *testing.T) {
 				{logconsole.MethodSearch, `{` + hour + `}`, false},
 				{logconsole.MethodCount, `{` + hour + `,"where":[{"label":"level","op":"=","value":"error"}]}`, true},
 			} {
-				before, b := c.reqs(), remoteBudget(t, s)
+				before, mbefore, b := c.reqs(), c.metrics(), remoteBudget(t, s)
 				if _, ref := call(t, s, m.method, m.params); ref != nil {
 					t.Fatalf("%s refused: %+v", m.method, ref)
 				}
@@ -440,8 +443,9 @@ func TestRemoteRequestsPaced(t *testing.T) {
 				if reqs == 0 || took != reqs {
 					t.Errorf("%s: %d requests, %d tokens", m.method, reqs, took)
 				}
-				if metric := *b.MetricLeft - *a.MetricLeft; m.metric && metric != reqs || !m.metric && metric != 0 {
-					t.Errorf("%s: %d requests, %d metric queries", m.method, reqs, metric)
+				served := c.metrics() - mbefore
+				if metric := *b.MetricLeft - *a.MetricLeft; m.metric && (metric != served || metric == 0) || !m.metric && metric != 0 {
+					t.Errorf("%s: %d requests, %d metric queries served, %d charged", m.method, reqs, served, metric)
 				}
 			}
 		})

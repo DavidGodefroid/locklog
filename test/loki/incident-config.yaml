@@ -1,0 +1,77 @@
+# Loki 3.5.7 for TestLokiIncident (internal/engine/suite_loki_incident_test.go):
+# the image's single-binary local configuration plus the overrides a test
+# corpus with past timestamps needs. docs/loki.md explains each override.
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+  log_level: warn
+  http_server_read_timeout: 5m
+  http_server_write_timeout: 5m
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /tmp/loki
+  storage:
+    filesystem:
+      chunks_directory: /tmp/loki/chunks
+      rules_directory: /tmp/loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: 2020-10-24
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+# Entries pushed now with old timestamps are not read while they sit in
+# the ingester's memory: the tests flush the ingester (POST /flush) after
+# their push and wait until Loki counts every entry (docs/loki.md).
+
+limits_config:
+  # Ingestion rate: the default 4 MB/s (burst 6 MB) per tenant and 3 MB/s
+  # per stream would make the push of the corpus take most of an hour.
+  ingestion_rate_mb: 1024
+  ingestion_burst_size_mb: 2048
+  per_stream_rate_limit: 512MB
+  per_stream_rate_limit_burst: 1024MB
+  # Old samples: the 7-day background is older than the default 1-week
+  # window (reject_old_samples_max_age 168h), and the suites job pushes
+  # its fixed-date corpus (late October 2026) here too.
+  reject_old_samples: true
+  reject_old_samples_max_age: 8760h
+  # Out-of-order writes: on (Loki's default since 2.4); the test pushes
+  # each stream in time order, so the window (max_chunk_age / 2 behind the
+  # stream's newest entry) is never reached.
+  unordered_writes: true
+  # The "no level label" streams must not gain a detected_level either
+  # (docs/loki.md).
+  discover_log_levels: false
+  allow_structured_metadata: true
+  # The suites give each entry an untrusted label of its own (one stream
+  # per entry): no cap on streams (default 5000 per tenant).
+  max_global_streams_per_user: 0
+  max_streams_per_user: 0
+  max_query_series: 100000
+  query_timeout: 5m
+
+query_range:
+  results_cache:
+    cache:
+      embedded_cache:
+        enabled: true
+        max_size_mb: 100
+
+pattern_ingester:
+  enabled: false
+
+analytics:
+  reporting_enabled: false

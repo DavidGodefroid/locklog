@@ -6,8 +6,9 @@ package engine
 // multi-source fixture: a file source per format (json, logfmt, plain,
 // syslog, combined, cri, docker-json), a journald source and a docker
 // json-file source, all fed the same records, each rendered in its source's
-// own format. Every agent call goes through Handle (the IPC methods) and is
-// followed through its continuation pages.
+// own format, and a Loki source (a fake Loki over HTTP, suite_loki_test.go).
+// Every agent call goes through Handle (the IPC methods) and is followed
+// through its continuation pages.
 
 import (
 	"crypto/rand"
@@ -65,7 +66,9 @@ func heavySuite(t testing.TB) {
 }
 
 // suiteSources are every source of the fixture.
-func suiteSources() []string { return append(slices.Clone(suiteFileFormats), srcJournal, srcDocker) }
+func suiteSources() []string {
+	return append(slices.Clone(suiteFileFormats), srcJournal, srcDocker, srcLoki)
+}
 
 // The suite clock: records start at suiteBase; queries cover the day.
 var (
@@ -76,10 +79,10 @@ var (
 )
 
 // Trusted names of the fixture: line fields, and labels (docker's
-// container and stream).
+// container and stream, Loki's app).
 var (
 	suiteTrustedFields = []string{"level", "status", "status_class", "method", "PRIORITY", "_SYSTEMD_UNIT", "SYSLOG_IDENTIFIER"}
-	suiteTrustedLabels = []string{docker.ContainerField, "stream"}
+	suiteTrustedLabels = []string{docker.ContainerField, "stream", "app"}
 	suiteIndexed       = []string{"level", "status", "status_class", "method"}
 )
 
@@ -173,6 +176,11 @@ type suiteConfig struct {
 	RealCost bool
 	Workers  int
 	Limits   func(*Limits)
+	// Budgets changes the rolling budgets (the defaults, the remote
+	// request pacing and metric queries unbounded); Engine changes any
+	// other option.
+	Budgets func(*Budgets)
+	Engine  func(*Options)
 	// Epoch shares a pseudonym epoch between fixtures.
 	Epoch *pii.Pseudonymizer
 	// Index builds the local index of the indexable sources.
@@ -183,6 +191,12 @@ type suiteConfig struct {
 	// stand in for the records of those sources (the volume incident).
 	Files       map[string][]string
 	JournalRoot string
+	// Sources are sources built by the test (a Loki source over a real
+	// Loki); Trusted, when set, replaces the fixture's trusted names.
+	Sources map[string]source.Source
+	Trusted func(src, name string, label bool) bool
+	// Now replaces the suite clock.
+	Now func() time.Time
 }
 
 type suite struct {
@@ -331,6 +345,12 @@ func newSuite(t testing.TB, recs map[string][]suiteRecord, cfg suiteConfig) *sui
 		srcs[srcDocker] = ds
 		s.indexers = append(s.indexers, ds)
 	}
+	if rs, ok := recs[srcLoki]; ok {
+		srcs[srcLoki] = newSuiteLoki(t, rs)
+	}
+	for name, src := range cfg.Sources {
+		srcs[name] = src
+	}
 	// The agent rule the corpus's "meta" positions assume, per source.
 	if !cfg.NoAgentMeta {
 		p, _ := parse.New(parse.Options{})
@@ -352,6 +372,10 @@ func newSuite(t testing.TB, recs map[string][]suiteRecord, cfg suiteConfig) *sui
 	case cost == nil:
 		cost = fixedCost(1)
 	}
+	now := cfg.Now
+	if now == nil {
+		now = func() time.Time { return suiteNow }
+	}
 	o := Options{
 		Sources: srcs,
 		Trusted: func(_, name string, label bool) bool {
@@ -367,10 +391,24 @@ func newSuite(t testing.TB, recs map[string][]suiteRecord, cfg suiteConfig) *sui
 		Limits:     DefaultLimits(),
 		Prefilter:  cfg.Prefilter,
 		Workers:    cfg.Workers,
-		Now:        func() time.Time { return suiteNow },
+		Now:        now,
+		Budgets:    DefaultBudgets(),
+	}
+	// The suites are not about the request pacing (budget_test.go is):
+	// the fake Loki's requests are not paced, and its metric counts not
+	// capped per hour.
+	o.Budgets.RemoteRequestsPerMinute, o.Budgets.MetricQueriesPerHour = 1<<30, 1<<30
+	if cfg.Budgets != nil {
+		cfg.Budgets(&o.Budgets)
+	}
+	if cfg.Trusted != nil {
+		o.Trusted = cfg.Trusted
 	}
 	if cfg.Limits != nil {
 		cfg.Limits(&o.Limits)
+	}
+	if cfg.Engine != nil {
+		cfg.Engine(&o)
 	}
 	if s.eng, err = New(o); err != nil {
 		t.Fatal(err)
@@ -545,7 +583,8 @@ func suiteCalls() []agentCall {
 		cq("count text", func(c *CountQuery) { c.Text = "timed out"; c.Bucket = "5m"; c.By = []string{"status"} }),
 		pq("patterns", func(p *PatternsQuery) { p.Top = MaxTop }),
 		pq("patterns text", func(p *PatternsQuery) { p.Text = "for"; p.Top = 10 }),
-		pq("patterns baseline", func(p *PatternsQuery) { p.Top = 50; p.Baseline = "24h" }),
+		// The window and its baseline within a remote source's range.
+		pq("patterns baseline", func(p *PatternsQuery) { p.To = suiteFrom.Add(12 * time.Hour); p.Top = 50; p.Baseline = "12h" }),
 	}
 }
 
@@ -689,8 +728,7 @@ func firstDiff(a, b []string) string {
 		return fmt.Sprintf("%d pages vs %d", len(a), len(b))
 	}
 	for i := range a {
-		if a[i] != b[i] {
-			x, y := a[i], b[i]
+		if x, y := a[i], b[i]; x != y {
 			j := 0
 			for j < len(x) && j < len(y) && x[j] == y[j] {
 				j++

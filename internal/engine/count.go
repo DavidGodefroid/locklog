@@ -277,11 +277,12 @@ func (q *CountQuery) bucketOf(t time.Time) time.Time {
 
 // Count runs a count. A trusted-field-only count is answered from the local
 // index where it holds the range, and from a plan-based scan of the rest
-// (continued free); every other count scans its plan, masking every record
-// first. A record masking fails on is reported in masked_failures; a
-// trusted-only count still counts it by its trusted values, as the index
-// does (countFailed), while any other count leaves it out, since its masked
-// predicates cannot be evaluated on it.
+// (continued free) that masks only the records holding a trusted value the
+// masker would change (countTrusted); every other count scans its plan,
+// masking every record first. A record masking fails on is reported in
+// masked_failures; a trusted-only count still counts it by its trusted
+// values, as the index does, while any other count leaves it out, since
+// its masked predicates cannot be evaluated on it.
 func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr error) {
 	ctx = startCall(ctx)
 	// The caller's predicates are not shared: validation and evaluation
@@ -458,6 +459,18 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 	if q.ByPattern {
 		factor++ // templating reads every matching message
 	}
+	// A trusted-only count evaluates no masked value: a record whose
+	// trusted values are all known is counted by them, unmasked, as the
+	// index counts it (#94); only one holding a value the masker would
+	// change is masked, and counted by its masked values.
+	var need func(source.RawRecord) bool
+	memo := trustedMemo{}
+	if trustedOnly {
+		need = func(raw source.RawRecord) bool {
+			_, _, ok := e.trustedKey(&q, raw, memo)
+			return !ok
+		}
+	}
 	// Records count by the minute they start in when the index answers
 	// part of the count (rangeContains): a slice keeps the minutes
 	// around the range.
@@ -465,14 +478,14 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 	if a.indexed {
 		keepFrom, keepTo = q.From.Truncate(time.Minute), q.To.Truncate(time.Minute).Add(time.Minute)
 	}
-	chunk, gran, sc, failures, err = e.run(ctx, &f, chunk, gran, nil, e.callBytes(ctx, q.Sources), factor, runOpts{keep: inRange(keepFrom, keepTo)}, func(raw source.RawRecord, rec mask.Record, b *budget) {
-		if rec.Failed() && trustedOnly {
+	chunk, gran, sc, failures, err = e.run(ctx, &f, chunk, gran, nil, e.callBytes(ctx, q.Sources), factor, runOpts{keep: inRange(keepFrom, keepTo), need: need}, func(raw source.RawRecord, rec mask.Record, b *budget) {
+		if trustedOnly && (!rec.Valid() || rec.Failed()) {
 			// The index counts every record by its trusted values;
 			// a scan of a trusted-only count does the same for a
-			// record masking failed on (still withheld from any
-			// output and reported in masked_failures), so index and
-			// scan answers agree.
-			e.countFailed(&q, raw, rec, a)
+			// record it did not mask and for one masking failed on
+			// (still withheld from any output and reported in
+			// masked_failures), so index and scan answers agree.
+			e.countTrusted(&q, raw, a, memo)
 			return
 		}
 		if !q.match(rec, b) {
@@ -585,22 +598,44 @@ func (q *Query) rangeContains(t time.Time, minuteResolution bool) bool {
 	return !t.Before(q.From) && t.Before(q.To)
 }
 
-// countFailed counts a record masking failed on, in a trusted-only count, by
-// the values the index holds for it: its raw trusted values (index.Lookup),
-// shown through the masker's text path. A value the masker would change is
-// unknown, as in the index (index.Redacted): the record then cannot be
-// counted and is left out, which the index path does too (such a granule
-// goes to the residual scan).
-func (e *Engine) countFailed(q *CountQuery, raw source.RawRecord, rec mask.Record, a *agg) {
-	known := func(name, v string) (ok bool) {
-		defer func() {
-			if recover() != nil {
-				ok = false
-			}
-		}()
-		return e.o.Masker.TrustedValue(raw.Ref.Source, name, v) == v
+// trustedMemo memoizes, within one call, which trusted values the masker
+// leaves unchanged (Masker.TrustedValue): trusted fields hold few distinct
+// values, and each is checked once.
+type trustedMemo map[string]bool
+
+// maxTrustedMemo bounds a call's memo (entries; values of at most 1 KiB).
+const maxTrustedMemo = 1 << 14
+
+// known reports whether the masker shows v, the raw value of trusted name
+// in a record of src, unchanged.
+func (e *Engine) known(memo trustedMemo, src, name, v string) (ok bool) {
+	k := src + "\x00" + name + "\x00" + v
+	if ok, hit := memo[k]; hit {
+		return ok
 	}
-	sel := e.selector(&q.Query, raw.Ref.Source)
+	defer func() {
+		if recover() != nil {
+			ok = false
+		}
+		if len(v) <= 1<<10 && len(memo) < maxTrustedMemo {
+			memo[k] = ok
+		}
+	}()
+	return e.o.Masker.TrustedValue(src, name, v) == v
+}
+
+// trustedKey reads a record of a trusted-only count by the values the
+// index holds for it: its raw trusted values (index.Value), each shown
+// through the masker's trusted-value path. ok is false when one of them is
+// unknown: a value the masker would change, or none the index can read
+// (index.Redacted); the index scans such a granule, so the record is
+// masked and counted by its masked values instead. Otherwise counted
+// reports whether the record matches the count's terms, and key is its
+// group key: what the masked record would give, a known value being shown
+// as it is.
+func (e *Engine) trustedKey(q *CountQuery, raw source.RawRecord, memo trustedMemo) (key []*string, counted, ok bool) {
+	src := raw.Ref.Source
+	sel := e.selector(&q.Query, src)
 	fields, labels := map[string]string{}, map[string]string{}
 	get := func(name string, label bool) (string, bool, bool) {
 		m := fields
@@ -611,7 +646,7 @@ func (e *Engine) countFailed(q *CountQuery, raw source.RawRecord, rec mask.Recor
 		switch {
 		case v == index.Absent:
 			return "", false, true
-		case v == index.Redacted || !known(name, v):
+		case v == index.Redacted || !e.known(memo, src, name, v):
 			return "", false, false // unknown, as in the index
 		}
 		m[name] = v
@@ -620,24 +655,40 @@ func (e *Engine) countFailed(q *CountQuery, raw source.RawRecord, rec mask.Recor
 	for _, t := range sel.Terms {
 		v, _, ok := get(t.Field, t.Label)
 		if !ok || t.Ambiguous(v) {
-			return // unknown: a numeric term's match depends on the kind
+			// Unknown: a numeric term's match depends on the kind.
+			return nil, false, false
 		}
 	}
 	if !sel.Match(fields, labels) {
-		return
+		return nil, false, true
 	}
 	by := q.groupBy()
-	key := make([]*string, len(by))
+	key = make([]*string, len(by))
 	for i, p := range by {
 		v, present, ok := get(p.name(), p.Label != "")
 		if !ok {
-			return
+			return nil, false, false
 		}
 		if present {
 			key[i] = &v
 		}
 	}
-	t, timed := rec.Time()
+	return key, true, true
+}
+
+// countTrusted counts a record of a trusted-only count by its trusted
+// values (trustedKey), as the index does: one not masked (its values are
+// all known, #94), or one masking failed on (still withheld from any
+// output and reported in masked_failures). A record with an unknown value
+// cannot be counted so and is left out, which the index path does too
+// (such a granule goes to the residual scan, where masking it failed).
+func (e *Engine) countTrusted(q *CountQuery, raw source.RawRecord, a *agg, memo trustedMemo) {
+	key, counted, ok := e.trustedKey(q, raw, memo)
+	if !ok || !counted {
+		return
+	}
+	// The record's time, as the masker reads it (mask.Record.Time).
+	t, timed := raw.Event.Time, raw.Event.HasTime || raw.Event.Inherited
 	if !timed {
 		a.untimed++
 		return

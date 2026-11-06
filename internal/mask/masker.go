@@ -7,8 +7,10 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"unicode"
 	"unicode/utf8"
 
@@ -138,7 +140,74 @@ type Masker struct {
 
 	mu    sync.Mutex
 	names nameBook
+
+	// cleanKeys caches the field names that mask to themselves (no
+	// secret, no personal value), per source, once noted in the name
+	// book: every record of a source repeats the same few names, and
+	// their detection is a large part of masking (#104). Bounded by
+	// maxCleanKeys (past it, the cache starts over); a name not cached
+	// is masked as before. Not for the source "" (the cost model's
+	// calibration, whose worst-case corpus must be masked in full).
+	cleanKeys sync.Map // source + "\x00" + raw name -> cleanKey
+	nClean    atomic.Int64
+	// cleanTrusted caches the values of trusted fields that mask to
+	// themselves (no secret, nothing a detector or a value rule finds),
+	// by JSON kind: trusted fields hold few distinct values, as the
+	// index's memoized sensitivity has it. Untrusted values are never
+	// cached: their masking cost must not tell whether a value was seen
+	// before. Bounded as cleanKeys.
+	cleanTrusted sync.Map // kind + "\x00" + value -> struct{}
+	nTrusted     atomic.Int64
+	// leafNames caches what a leaf's source, path and name decide
+	// (leafName): pure functions of them under the masker's fixed rules,
+	// checked on every leaf of every record. Agent rules, which change
+	// at runtime, are not in it. Bounded as cleanKeys.
+	leafNames sync.Map // source + "\x00" + clear path + "\x00" + name -> leafName
+	nLeaf     atomic.Int64
 }
+
+// leafName is what a leaf's source, clear path and name decide.
+type leafName struct {
+	secretName bool // SecretName(name)
+	rule       Rule // the human mask rule, if hasRule
+	hasRule    bool
+	personal   bool // LooksPersonal or LooksQuasi
+	allowed    bool // an allow rule (redact-unknown)
+}
+
+// leafName returns what source, clearPath and name decide for a leaf.
+func (m *Masker) leafName(source, clearPath, name string) leafName {
+	k := source + "\x00" + clearPath + "\x00" + name
+	cache := len(k) <= 2*maxCleanKeyLen
+	if cache {
+		if v, ok := m.leafNames.Load(k); ok {
+			return v.(leafName)
+		}
+	}
+	var ln leafName
+	ln.secretName = m.o.SecretName != nil && m.o.SecretName(name)
+	ln.rule, ln.hasRule = m.o.Rules.human(source, clearPath)
+	ln.personal = pii.LooksPersonal(name) || pii.LooksQuasi(name)
+	ln.allowed = m.o.Rules.allowed(source, clearPath)
+	if cache {
+		if m.nLeaf.Add(1) > maxCleanKeys {
+			m.leafNames.Clear()
+			m.nLeaf.Store(1)
+		}
+		m.leafNames.Store(k, ln)
+	}
+	return ln
+}
+
+// cleanKey is a cached field name: its clear name and the name shown.
+type cleanKey struct{ clear, shown string }
+
+// maxCleanKeys bounds the cache of clean field names (entries; names of at
+// most maxCleanKeyLen bytes).
+const (
+	maxCleanKeys   = 4096
+	maxCleanKeyLen = 256
+)
 
 // New returns a masker; Pseudonyms is required.
 func New(o Options) (*Masker, error) {
@@ -356,12 +425,29 @@ func (w *walk) members(ms []parse.Member, clearPath, shownPath string, trusted b
 // shown as ⟦key:ID⟧, kept (clear) in the console's name book only. It
 // returns the clear name (after U+FFFD replacement) and the shown name.
 func (w *walk) key(k string) (string, string) {
+	cache := w.source != "" && len(k) <= maxCleanKeyLen
+	ck := w.source + "\x00" + k
+	if cache {
+		if c, ok := w.m.cleanKeys.Load(ck); ok {
+			c := c.(cleanKey)
+			return c.clear, c.shown
+		}
+	}
 	k = cleanSource(k)
 	step1, hadSecret := w.redactSecrets(k)
 	values := w.values(k)
 	if !hadSecret && len(values) == 0 {
-		w.m.noteClear(w.source, k)
-		return k, outputSafe(k)
+		shown := outputSafe(k)
+		// Cached once the name book holds it: a cached name then
+		// skips a note that would change nothing.
+		if w.m.noteClear(w.source, k) && cache {
+			if w.m.nClean.Add(1) > maxCleanKeys {
+				w.m.cleanKeys.Clear()
+				w.m.nClean.Store(1)
+			}
+			w.m.cleanKeys.Store(ck, cleanKey{clear: k, shown: shown})
+		}
+		return k, shown
 	}
 	id, err := w.m.o.Pseudonyms.ID(KeyKind, step1)
 	if err != nil {
@@ -460,16 +546,40 @@ func (w *walk) scoped(f func() (withheld bool)) {
 }
 
 func (w *walk) leafMasked(v parse.Value, name, clearPath string, trusted bool, inh inherited, hadSecret *bool) Value {
+	ln := w.m.leafName(w.source, clearPath, name)
+	// (1) Secrets, first and final.
+	if ln.secretName {
+		*hadSecret = true
+		return Value{kind: String, text: Secret}
+	}
+	// The field's own rule and an inherited one: the strongest wins
+	// (redact, then pseudonym, then allow).
+	rule, hasRule := ln.rule, ln.hasRule
+	if inh.pseudo != nil && (!hasRule || rule.Mode == ModeAllow) {
+		rule, hasRule = *inh.pseudo, true
+	}
+	personal := !trusted && (inh.personal || ln.personal)
+	// A value withheld whatever it holds (a human redact rule, or an
+	// untrusted field under redact-unknown) is withheld before any
+	// detection, the secret step's included: its result would be
+	// dropped, and Kinds must not tell what the value held. Its cost
+	// then does not depend on its content either.
+	if hasRule && rule.Mode == ModeRedact ||
+		!hasRule && !personal && !trusted && w.m.o.Structured == StructuredRedactUnknown && !ln.allowed {
+		w.kinds["redacted"] = true
+		return Value{kind: String, text: Redacted}
+	}
 	s := cleanSource(v.Str)
 	if len(s) > pii.DetectLimit {
 		s = pii.CutAt(s, pii.DetectLimit)
 	}
-	// (1) Secrets, first and final.
-	if w.m.o.SecretName != nil && w.m.o.SecretName(name) {
-		*hadSecret = true
-		return Value{kind: String, text: Secret}
+	// A trusted value known to mask to itself skips the secret step and
+	// the detectors (cleanTrusted).
+	memo := trusted && w.m.isCleanTrusted(v.Kind, s)
+	stepSecret := false
+	if !memo {
+		s, stepSecret = w.redactSecrets(s)
 	}
-	s, stepSecret := w.redactSecrets(s)
 	if stepSecret {
 		*hadSecret = true
 	}
@@ -480,29 +590,20 @@ func (w *walk) leafMasked(v parse.Value, name, clearPath string, trusted bool, i
 		}
 	}()
 	// Steps 2-5 work on s, the string step 1 produced.
-	rule, hasRule := w.m.o.Rules.human(w.source, clearPath)
-	// The strongest of the field's own rule and an inherited one wins
-	// (redact, then pseudonym, then allow).
-	if inh.pseudo != nil && (!hasRule || rule.Mode == ModeAllow) {
-		rule, hasRule = *inh.pseudo, true
-	}
 	var out Value
 	switch {
-	case hasRule && rule.Mode == ModeAllow:
-		out = w.detected(v.Kind, s, stepSecret)
-	case hasRule && rule.Mode == ModeRedact:
-		w.kinds["redacted"] = true
-		return Value{kind: String, text: Redacted}
 	case hasRule && rule.Mode == ModePseudonym:
 		out = w.whole(s, rule.Kind)
-	case !trusted && (inh.personal || pii.LooksPersonal(name) || pii.LooksQuasi(name)):
+	case personal && !hasRule: // an allow rule shows a personal name's value
 		out = w.whole(s, "")
-	case !trusted && w.m.o.Structured == StructuredRedactUnknown && !w.m.o.Rules.allowed(w.source, clearPath):
-		// Withheld before detection: Kinds must not tell what it held.
-		w.kinds["redacted"] = true
-		return Value{kind: String, text: Redacted}
-	default:
-		out = w.detected(v.Kind, s, stepSecret)
+	case memo:
+		out = plainValue(v.Kind, s)
+	default: // an allow rule, or no rule
+		var found bool
+		out, found = w.detect(v.Kind, s, stepSecret)
+		if trusted && !found && !stepSecret {
+			w.m.noteCleanTrusted(v.Kind, s)
+		}
 	}
 	// An agent rule only tightens: redact always wins; a pseudonym masks a
 	// value nothing masked whole.
@@ -559,25 +660,52 @@ func (w *walk) message(s, key string) string {
 	return w.text(s)
 }
 
-// detected masks the personal values the detectors find in s (step 4).
-func (w *walk) detected(k parse.Kind, s string, hadSecret bool) Value {
+// detect masks the personal values the detectors find in s (step 4).
+// It also reports whether the detectors or the value rules found anything.
+func (w *walk) detect(k parse.Kind, s string, hadSecret bool) (Value, bool) {
 	if k == parse.KindNumber {
 		// A number in exponent or decimal form ("4.111111111111111E15",
 		// Jackson's doubles) is read as the integer it is.
 		if it, ok := integralText(s); ok && it != s {
 			if ms := w.values(it); len(ms) > 0 {
-				return Value{kind: String, text: outputSafe(w.pseudonymise(it, ms))}
+				return Value{kind: String, text: outputSafe(w.pseudonymise(it, ms))}, true
 			}
 		}
 	}
 	ms := w.values(s)
 	if len(ms) == 0 && !hadSecret {
-		if (k == parse.KindBool || k == parse.KindNumber) && !validLiteral(k, s) {
-			return Value{kind: String, text: outputSafe(s)} // never written raw
-		}
-		return Value{kind: kindOf(k), text: outputSafeScalar(k, s)}
+		return plainValue(k, s), false
 	}
-	return Value{kind: String, text: outputSafe(w.pseudonymise(s, ms))}
+	return Value{kind: String, text: outputSafe(w.pseudonymise(s, ms))}, len(ms) > 0
+}
+
+// plainValue is a scalar nothing was found in, as shown.
+func plainValue(k parse.Kind, s string) Value {
+	if (k == parse.KindBool || k == parse.KindNumber) && !validLiteral(k, s) {
+		return Value{kind: String, text: outputSafe(s)} // never written raw
+	}
+	return Value{kind: kindOf(k), text: outputSafeScalar(k, s)}
+}
+
+// isCleanTrusted reports a trusted value of kind k known to mask to itself.
+func (m *Masker) isCleanTrusted(k parse.Kind, s string) bool {
+	if len(s) > maxCleanKeyLen {
+		return false
+	}
+	_, ok := m.cleanTrusted.Load(strconv.Itoa(int(k)) + "\x00" + s)
+	return ok
+}
+
+// noteCleanTrusted notes a trusted value of kind k that masked to itself.
+func (m *Masker) noteCleanTrusted(k parse.Kind, s string) {
+	if len(s) > maxCleanKeyLen {
+		return
+	}
+	if m.nTrusted.Add(1) > maxCleanKeys {
+		m.cleanTrusted.Clear()
+		m.nTrusted.Store(1)
+	}
+	m.cleanTrusted.Store(strconv.Itoa(int(k))+"\x00"+s, struct{}{})
 }
 
 // whole pseudonymises s whole: of the kind a detector finds it to be

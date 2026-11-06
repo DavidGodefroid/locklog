@@ -11,6 +11,17 @@ takes the launcher verbs every lock of the Lock Family takes (#117).
 
 ### Added
 
+- Tests (LL-16b): the leak, oracle, equivalence and injection suites run
+  over a Loki source too (a fake Loki in unit runs, a real one in the CI
+  `suites` job), and over the approval tools (approved scans and their
+  continuations, unmask, lookup, change requests): no canary in any
+  answer, refusal or approval screen (the clear view of an unmask screen,
+  the human's own, holds no secret), and an unmask reveals only the span
+  approved. `TestLokiIncident` (CI job `loki-incident`) runs job 1 against
+  a real Loki with a dense incident hour over a 7-day background, with and
+  without a `level` label, behind a latency proxy and on a slowed host;
+  the ingest overrides it needs are in `docs/loki.md`. The approved-scan
+  test (CI job `scan-volume`) scans 20 GiB of local files on one approval.
 - A leak harness over the bytes leaving the console: the canary corpus
   served by a hub-attached console, its IPC socket replies, audit file, MCP
   outputs and hub ticket screens scanned in every encoding: 0 hits
@@ -134,6 +145,26 @@ takes the launcher verbs every lock of the Lock Family takes (#117).
 
 ### Fixed
 
+- A Loki call's `scanned.bytes` (and the bytes the rolling budget charges)
+  leave out the `stats` block of Loki's answers, whose timings changed
+  them from run to run (#111).
+- A Loki count's boundary log fetches are charged as requests, not as
+  server-side metric queries: a 7-day count by a trusted label costs 4 of
+  the 120 hourly metric queries instead of up to 132 (#112).
+- A count with only trusted fields and labels masks no record whose
+  trusted values the masker leaves unchanged when it scans what the index
+  does not hold: it counts them by those values, as the index does, at
+  parsing speed (#94). Such records are no longer masked failures.
+- Masking is about 2 to 2.5 times faster on JSON application logs: clean
+  field names, clean trusted values and the decisions a leaf's name and
+  path take are cached, values withheld whole (redact-unknown, redact
+  rules) skip detection, agent-rule digests are memoized, and a group of
+  records is masked while it is read (#104). Job 1 of the Loki incident
+  without a `level` label answers within its 5 minutes (#110).
+- An approved scan whose plan is long lives as long as its plan's bound
+  (twice its time at the cost model's worst-case rate) instead of 30
+  minutes, at most 4 hours; its approval screen and `expires_at` say so.
+  A 20 GiB scan of local files then completes on its one approval (#104).
 - The confined console resolves host names again: Landlock now grants
   `/etc/hosts`, `/etc/resolv.conf` and `/etc/nsswitch.conf`, which Go's
   resolver reads at every lookup (remote sources and the hub were dialled

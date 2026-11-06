@@ -67,6 +67,9 @@ type fakeLoki struct {
 	offGrid bool
 	// onRange, when set, is called before a log query_range is answered.
 	onRange func(start, end int64)
+	// stats, when set, is the stats block of each log query_range answer
+	// (Loki 3.5's timing and volume statistics).
+	stats func() any
 }
 
 func matches(ms [][3]string, l map[string]string) bool {
@@ -254,6 +257,9 @@ func (f *fakeLoki) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		data := map[string]any{"resultType": "streams", "result": result}
 		if categorize {
 			data["encodingFlags"] = []string{"categorize-labels"}
+		}
+		if f.stats != nil {
+			data["stats"] = f.stats()
 		}
 		json.NewEncoder(w).Encode(map[string]any{"status": "success", "data": data})
 	default:
@@ -626,9 +632,15 @@ func TestStreamLabelShadowingMetadata(t *testing.T) {
 	}
 }
 
-type countLimiter struct{ n int32 }
+type countLimiter struct{ n, logFetches int32 }
 
-func (c *countLimiter) Wait(context.Context) error { atomic.AddInt32(&c.n, 1); return nil }
+func (c *countLimiter) Wait(ctx context.Context) error {
+	atomic.AddInt32(&c.n, 1)
+	if source.IsLogFetch(ctx) {
+		atomic.AddInt32(&c.logFetches, 1)
+	}
+	return nil
+}
 
 func TestRequestsGoThroughTheCallLimiter(t *testing.T) {
 	f := &fakeLoki{entries: dataset(100)}
@@ -654,6 +666,33 @@ func TestProcessedCountsFetchedBytes(t *testing.T) {
 	}
 	if it.Processed() <= int64(lines) {
 		t.Fatalf("processed %d bytes for %d bytes of lines", it.Processed(), lines)
+	}
+}
+
+// TestProcessedLeavesOutLokiStats: Loki's stats block (its execution
+// times, rates) is not log content: the bytes fetched leave it out, so
+// the same query over the same data counts the same bytes (#111).
+func TestProcessedLeavesOutLokiStats(t *testing.T) {
+	processed := func(stats func() any) (int64, int) {
+		f := &fakeLoki{entries: dataset(100), stats: stats}
+		s := newSource(t, f, nil)
+		plan, _ := s.Plan(ctx, source.Range{From: t0, To: t0.Add(time.Hour)}, source.Selector{})
+		it, _ := s.Scan(ctx, plan.Chunks[0])
+		drain(t, it)
+		return it.Processed(), len(f.requests)
+	}
+	none, pages := processed(nil)
+	var calls atomic.Int64 // requests are served concurrently
+	timing := func() any {
+		n := calls.Add(1)
+		return map[string]any{"summary": map[string]any{"execTime": 0.001 * float64(n*n*7919%1000), "queueTime": 1.25e-05 * float64(n),
+			"bytesProcessedPerSecond": 123456789 * n, "totalEntriesReturned": 100}, "querier": map[string]any{"store": map[string]any{"chunkRefsFetchTime": 7 * n}}}
+	}
+	a, _ := processed(timing)
+	b, _ := processed(func() any { calls.Add(1000); return timing() })
+	// What is left of the stats is their key, `,"stats":` on each page.
+	if a != b || a-none != int64(len(`,"stats":`)*pages) {
+		t.Fatalf("processed %d and %d bytes with stats, %d without (%d pages): the stats are counted", a, b, none, pages)
 	}
 }
 
@@ -1078,6 +1117,11 @@ func TestBoundaryFetchLimits(t *testing.T) {
 	}
 	if int(l.n) != len(f.requests) {
 		t.Fatalf("limiter saw %d of %d requests", l.n, len(f.requests))
+	}
+	// The boundary fetches are log requests, told apart from the metric
+	// queries (#112): 11 boundaries, fetched before and after.
+	if l.logFetches != 22 || l.n-l.logFetches > 4 {
+		t.Fatalf("%d requests, %d marked as log fetches", l.n, l.logFetches)
 	}
 	// A page or more of entries at a boundary nanosecond (Limit 7): not
 	// served (the engine scans), not an error.

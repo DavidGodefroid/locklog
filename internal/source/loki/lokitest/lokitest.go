@@ -41,6 +41,15 @@ type Server struct {
 
 	mu       sync.Mutex
 	requests []string
+	metrics  int
+}
+
+// MetricQueries returns the number of metric queries served (the
+// count_over_time sums locklog sends), log queries excluded.
+func (f *Server) MetricQueries() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.metrics
 }
 
 // Requests returns the path of every request served.
@@ -147,6 +156,9 @@ func ok(w http.ResponseWriter, data any) {
 func (f *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	f.requests = append(f.requests, r.URL.Path)
+	if metricRe.MatchString(r.URL.Query().Get("query")) {
+		f.metrics++
+	}
 	f.mu.Unlock()
 	if !f.authorized(r) {
 		http.Error(w, "no org id or credentials", http.StatusUnauthorized)

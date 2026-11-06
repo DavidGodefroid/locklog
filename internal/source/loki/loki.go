@@ -327,6 +327,10 @@ type queryResponse struct {
 			Metric map[string]string   `json:"metric"`
 			Values [][]json.RawMessage `json:"values"`
 		} `json:"result"`
+		// Stats are Loki's statistics of the query (execution and
+		// queue times, rates): not log content, and different from one
+		// run to the next (#111).
+		Stats json.RawMessage `json:"stats"`
 	} `json:"data"`
 }
 
@@ -353,30 +357,36 @@ var errUncategorized = errors.New("loki source: the response is not in the categ
 // whole, capped at egress.MaxResponseBytes (64 MiB), and it is decoded in
 // one json.Unmarshal, so a page costs its body plus its entries in memory.
 // Lines are cut at parse.MaxLineBytes (256 KiB) when parsed (record).
-func decodeStreams(body []byte) ([]entry, error) {
+//
+// It also returns the bytes of the body that are log content (entries,
+// labels, metadata and the envelope): the body without the value of its
+// stats block, whose timings vary from run to run (#111).
+func decodeStreams(body []byte) ([]entry, int64, error) {
 	var r queryResponse
-	if err := json.Unmarshal(body, &r); err != nil || r.Status != "success" || r.Data.ResultType != "streams" {
-		return nil, errResponse
+	err := json.Unmarshal(body, &r)
+	content := int64(len(body) - len(r.Data.Stats))
+	if err != nil || r.Status != "success" || r.Data.ResultType != "streams" {
+		return nil, int64(len(body)), errResponse
 	}
 	// Without the flag applied, metadata sits among the stream labels,
 	// where an untrusted field could pass for a trusted label: fail closed.
 	if !slices.Contains(r.Data.EncodingFlags, encodingFlag) {
-		return nil, errUncategorized
+		return nil, content, errUncategorized
 	}
 	var out []entry
 	for _, st := range r.Data.Result {
 		key := labelsKey(st.Stream)
 		for _, v := range st.Values {
 			if len(v) < 2 {
-				return nil, errResponse
+				return nil, content, errResponse
 			}
 			var tsStr, line string
 			if json.Unmarshal(v[0], &tsStr) != nil || json.Unmarshal(v[1], &line) != nil {
-				return nil, errResponse
+				return nil, content, errResponse
 			}
 			ts, err := strconv.ParseInt(tsStr, 10, 64)
 			if err != nil {
-				return nil, errResponse
+				return nil, content, errResponse
 			}
 			e := entry{ts: ts, line: line, stream: st.Stream, key: key}
 			if len(v) >= 3 {
@@ -391,7 +401,7 @@ func decodeStreams(body []byte) ([]entry, error) {
 		}
 	}
 	sortEntries(out)
-	return out, nil
+	return out, content, nil
 }
 
 func sortEntries(es []entry) {
@@ -436,9 +446,10 @@ func (m *meter) add(n int64) error {
 // returned at that timestamp are skipped. A full page that brings nothing
 // new at one timestamp is an error (errCrowded), never a silent cut.
 //
-// Each page's bytes are counted on m (nil: not counted) as it arrives; past
-// m's limit the slice fails with source.ErrByteLimit before decoding the
-// page, so a slice never buffers more than the limit and one page.
+// Each page's bytes are counted on m (nil: not counted) as it arrives, once
+// decoded: the body but for its stats block (decodeStreams, #111). Past
+// m's limit the slice fails with source.ErrByteLimit, so a slice never
+// buffers more than the limit and one page.
 func (s *Source) fetchSlice(ctx context.Context, q string, from, to int64, m *meter) ([]entry, int64, error) {
 	var out []entry
 	var fetched int64
@@ -456,11 +467,11 @@ func (s *Source) fetchSlice(ctx context.Context, q string, from, to int64, m *me
 		if err != nil {
 			return nil, fetched, err
 		}
-		fetched += int64(len(body))
-		if err := m.add(int64(len(body))); err != nil {
+		page, content, err := decodeStreams(body)
+		fetched += content
+		if err := m.add(content); err != nil {
 			return nil, fetched, err
 		}
-		page, err := decodeStreams(body)
 		if err != nil {
 			return nil, fetched, err
 		}
@@ -825,7 +836,9 @@ var maxBoundaryBytes int64 = 8 << 20
 // Cost: one metric query per by-label combination (up to 4), two guard
 // queries, and twice one log request per boundary to correct (at most
 // MaxBoundaryFetches, at most 8 MiB of responses in all), every request
-// under the call's limiter. The boundary lines never leave the source.
+// under the call's limiter; the boundary fetches are marked as log fetches
+// (source.AsLogFetch): requests, not metric queries. The boundary lines
+// never leave the source.
 //
 // Not served (source.ErrNotIndexable): a Loki limit refusal (too many
 // series, too long a range, too many outstanding requests, a timeout); a
@@ -918,10 +931,13 @@ func (s *Source) IndexCounts(ctx context.Context, q source.CountQuery) (source.C
 		return bounds, nil
 	}
 	var boundaryBytes int64
+	// The boundary fetches are log requests: paced as requests, never
+	// charged as metric queries (#112).
+	fctx := source.AsLogFetch(ctx)
 	fetch := func(bounds []int64) (map[int64][]entry, error) {
 		out := map[int64][]entry{}
 		for _, b := range bounds {
-			es, n, err := s.fetchSlice(ctx, sel, b, b+1, nil)
+			es, n, err := s.fetchSlice(fctx, sel, b, b+1, nil)
 			if boundaryBytes += n; boundaryBytes > maxBoundaryBytes {
 				return nil, source.ErrNotIndexable
 			}

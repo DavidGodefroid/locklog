@@ -183,7 +183,7 @@ Your agent CLI's own login (Anthropic, OpenAI, Google) is yours to set up.
 | `status`, `sources`, `search`, `count`, `patterns`, `context`, `trace`, `tail` within budgets | free, audited |
 | `lookup` (clear value → pseudonym, detector kinds only) | free, rate-limited, audited; or approved each time with `lookup = "approved"` |
 | `pii_list` / `pii_add` (agent masking rules, tighten only) | free, capped, audited |
-| `locklog_scan` (beyond a budget, approved once for its whole plan; its cursor continues free for 30 minutes) | you, a ticket at `lox run` (or the deck, a phone); auto-approved only if the profile's auto rules say so (`auto.read`) |
+| `locklog_scan` (beyond a budget, approved once for its whole plan; its cursor continues free for 30 minutes, or its plan's bound when longer, at most 4 hours) | you, a ticket at `lox run` (or the deck, a phone); auto-approved only if the profile's auto rules say so (`auto.read`) |
 | `locklog_unmask` (the clear value of exact spans of one record, once) | you, a ticket at `lox run`, the deck or a phone; auto-approved only if the profile's auto rules say so (`auto.unmask`); **off by default on production** |
 | `locklog_request_change` (any loosening) | you, at the console's `:review` |
 | write, delete, admin | does not exist |

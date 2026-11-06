@@ -389,6 +389,22 @@ func LimiterFrom(ctx context.Context) Limiter {
 	return l
 }
 
+type logFetchKey struct{}
+
+// AsLogFetch marks the requests sent under ctx as log fetches made to
+// answer a count (Loki's entries at bucket boundaries): a limiter that
+// charges a count's requests as server-side metric queries charges these
+// as requests only.
+func AsLogFetch(ctx context.Context) context.Context {
+	return context.WithValue(ctx, logFetchKey{}, true)
+}
+
+// IsLogFetch reports a request marked by AsLogFetch.
+func IsLogFetch(ctx context.Context) bool {
+	v, _ := ctx.Value(logFetchKey{}).(bool)
+	return v
+}
+
 type byteLimitKey struct{}
 
 // WithByteLimit attaches to ctx the bytes a scan may process (Iterator's
