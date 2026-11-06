@@ -25,6 +25,7 @@ const (
 	maxToken    = 64  // a pseudonym ⟦kind:ID⟧
 	maxKind     = 32
 	maxScanArgs = 16 // the keys of a scan's query
+	maxTicket   = 26 // a hub ticket id (a ULID)
 )
 
 // ScanTools are the tools an approved scan runs.
@@ -63,17 +64,20 @@ var (
 		s.Properties["tool"].Enum = ScanTools
 		s.Properties["query"].MaxProperties = ptr(maxScanArgs)
 		s.Properties["reason"].MaxLength = ptr(maxReason)
+		s.Properties["ticket"].MaxLength = ptr(maxTicket)
 	})
 	unmaskSchema = inputSchema[UnmaskIn](func(s *jsonschema.Schema) {
 		s.Properties["ref"].MinLength, s.Properties["ref"].MaxLength = ptr(1), ptr(maxRef)
 		s.Properties["pseudonyms"].MinItems, s.Properties["pseudonyms"].MaxItems = ptr(1), ptr(maxUnmask)
 		s.Properties["pseudonyms"].Items.MaxLength = ptr(maxToken)
+		s.Properties["ticket"].MaxLength = ptr(maxTicket)
 		s.Properties["reason"].MinLength, s.Properties["reason"].MaxLength = ptr(1), ptr(maxReason)
 	})
 	lookupSchema = inputSchema[LookupIn](func(s *jsonschema.Schema) {
 		s.Properties["kind"].MinLength, s.Properties["kind"].MaxLength = ptr(1), ptr(maxKind)
 		s.Properties["values"].MinItems, s.Properties["values"].MaxItems = ptr(1), ptr(maxLookup)
 		s.Properties["values"].Items.MinLength, s.Properties["values"].Items.MaxLength = ptr(1), ptr(maxLookupV)
+		s.Properties["ticket"].MaxLength = ptr(maxTicket)
 		s.Properties["reason"].MaxLength = ptr(maxReason)
 	})
 	changeSchema = inputSchema[ChangeIn](func(s *jsonschema.Schema) {

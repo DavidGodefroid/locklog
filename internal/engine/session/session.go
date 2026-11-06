@@ -31,6 +31,7 @@ import (
 	"github.com/DavidGodefroid/lockkit/console"
 	"github.com/DavidGodefroid/lockkit/pii"
 	"github.com/DavidGodefroid/lockkit/refusal"
+	"github.com/DavidGodefroid/lockkit/ticket"
 
 	"github.com/DavidGodefroid/locklog/internal/config"
 	"github.com/DavidGodefroid/locklog/internal/egress"
@@ -621,6 +622,10 @@ func (s *Session) Handle(ctx context.Context, method string, params json.RawMess
 // approver asks the human at the console for the call's approval: nil when
 // the call came without one (no console).
 func (s *Session) approver(ctx context.Context) engine.Approver {
+	if hc := logconsole.HubCallFrom(ctx); hc != nil {
+		// Hub mode: decided on lockhub (a ticket), never on this terminal.
+		return func(ctx context.Context, a engine.Approval) error { return hc.Approve(ctx, s.hubRequest(a)) }
+	}
 	ap := logconsole.ApproveFrom(ctx)
 	if ap == nil {
 		return nil
@@ -644,6 +649,17 @@ func (s *Session) approver(ctx context.Context) engine.Approver {
 		}
 		return &logconsole.Declined{Resp: r.Refusal}
 	}
+}
+
+// hubRequest is an engine approval as the hub gets it: the agent's
+// reason masked, the record in clear only in the clear screen.
+func (s *Session) hubRequest(a engine.Approval) logconsole.HubRequest {
+	risk := ticket.RiskRead
+	if a.Class == "read-pii" {
+		risk = ticket.RiskReadPII
+	}
+	return logconsole.HubRequest{Risk: risk, Header: a.Header, Note: s.maskers.base.Text(a.Note), Body: a.Body, HubBody: a.HubBody,
+		Warnings: a.Warnings, Clear: a.Clear, PlanHash: a.Hash, Inputs: a.Inputs, Moving: a.Moving, Production: s.prod, NeverAuto: a.NeverAuto}
 }
 
 // noParams refuses parameters to a method that takes none.

@@ -23,6 +23,7 @@ type fakeConn struct {
 	calls      []string
 	production bool
 	status     []byte // replaces the status answer when set
+	answer     []byte // replaces the answer of a log method when set
 	err        error
 }
 
@@ -46,6 +47,10 @@ func (f *fakeConn) Call(_ context.Context, method string, params, result any) er
 	}
 	if f.err != nil {
 		return f.err
+	}
+	if r, ok := result.(*json.RawMessage); ok && f.answer != nil {
+		*r = f.answer
+		return nil
 	}
 	if r, ok := result.(*json.RawMessage); ok {
 		*r = json.RawMessage(`{"records":[{"msg":"render pdf for ⟦email:7F3KQ2M9ZD4X⟧ failed","order_id":9007199254740993,"retried":false,"user":null}],"complete":true}`)

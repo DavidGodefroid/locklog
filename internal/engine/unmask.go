@@ -94,6 +94,7 @@ type unmaskPlan struct {
 	spans  []span
 	clear  map[string]string
 	hash   string
+	inputs map[string]string
 	policy string
 	// secret: a named value held a secret span. It is refused only after
 	// the approval, never naming which: before it, the refusal would tell
@@ -237,6 +238,8 @@ func (e *Engine) planUnmask(ctx context.Context, q UnmaskQuery, rr source.RawRef
 		fmt.Fprintf(&b, "%s\x00%s\x00%d\x00%d\x00", kind, s.token, s.start, s.end)
 	}
 	p.hash = e.o.Sealer.Digest("locklog/unmask/v1", []byte(q.Ref), []byte(digest), []byte(e.o.Masker.Epoch()), []byte(b.String()))
+	p.inputs = map[string]string{"ref": e.inputDigest("ref", []byte(q.Ref)), "record": e.inputDigest("record", []byte(digest)),
+		"epoch": e.inputDigest("epoch", []byte(e.o.Masker.Epoch())), "spans": e.inputDigest("spans", []byte(b.String()))}
 	return p, nil
 }
 
@@ -261,7 +264,7 @@ func (e *Engine) unmaskScreen(q UnmaskQuery, p unmaskPlan) Approval {
 	body := []string{"source: " + p.src, "record: " + when, "reveal: " + strings.Join(q.Pseudonyms, ", "),
 		fmt.Sprintf("spans: %d in this record (marked » «)", len(p.spans)), string(marked)}
 	return Approval{Class: "read-pii", Header: "unmask · read-pii", Note: e.o.Masker.Text(q.Reason), Body: body, NeverAuto: true,
-		Clear: []string{e.clearView(p)},
+		Clear: []string{e.clearView(p)}, Hash: p.hash, Inputs: p.inputs, Moving: []string{"epoch", "record"},
 		Warnings: []string{"the agent receives these clear values, once",
 			"the agent can link this value to every record with this pseudonym (in this epoch)"}}
 }
@@ -335,10 +338,22 @@ func (e *Engine) Lookup(ctx context.Context, q LookupQuery) (LookupResult, error
 			return LookupResult{}, &Error{Code: EApproval, Message: "no human console to approve a lookup"}
 		}
 		body := []string{"kind: " + q.Kind, fmt.Sprintf("values: %d", len(q.Values))}
-		for _, v := range q.Values {
+		hub := slices.Clone(body)
+		for i, v := range q.Values {
 			body = append(body, "  "+v)
+			// The hub's screen names the values by position only: the
+			// clear values go sealed to the devices.
+			hub = append(hub, fmt.Sprintf("  value %d: ⟦%s⟧", i+1, q.Kind))
 		}
+		// The plan hash binds the kind, the values (keyed digests, in
+		// order) and the epoch the pseudonyms are of.
+		epoch := e.o.Masker.Epoch()
+		vals := []byte(strings.Join(digests, "\x00"))
+		hash := e.o.Sealer.Digest("locklog/lookup-plan/v1", []byte(q.Kind), vals, []byte(epoch))
+		inputs := map[string]string{"kind": e.inputDigest("kind", []byte(q.Kind)), "values": e.inputDigest("values", vals),
+			"epoch": e.inputDigest("epoch", []byte(epoch))}
 		if err := peer.Approve(ctx, Approval{Class: "read-pii", Header: "lookup · read-pii", Note: e.o.Masker.Text(q.Reason), Body: body, NeverAuto: true,
+			HubBody: hub, Hash: hash, Inputs: inputs, Moving: []string{"epoch"},
 			Warnings: []string{"the agent learns the pseudonym of each value, and so every record holding it"}}); err != nil {
 			return LookupResult{}, err
 		}

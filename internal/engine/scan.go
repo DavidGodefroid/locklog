@@ -302,7 +302,11 @@ func (e *Engine) admitPlan(ctx context.Context, tool, digest string, plan source
 	if e.scans.live(e.o.Now()) >= MaxScans {
 		return nil, "", &Error{Code: EOverBudget, Message: fmt.Sprintf("%d approved scans are in progress already: finish one, or wait for it to expire", MaxScans)}
 	}
-	if err := sc.peer.Approve(ctx, e.scanScreen(tool, plan, scope(), sc.note)); err != nil {
+	screen := e.scanScreen(tool, plan, scope(), sc.note)
+	screen.Hash = hash
+	screen.Inputs = map[string]string{"tool": e.inputDigest("tool", []byte(tool)), "query": e.inputDigest("query", []byte(digest)),
+		"budget": e.inputDigest("budget", []byte(strconv.FormatInt(e.o.ScanBytes, 10))), "policy": e.inputDigest("policy", []byte(fp))}
+	if err := sc.peer.Approve(ctx, screen); err != nil {
 		return nil, "", err
 	}
 	// Time of check, time of use: the plan the human approved runs under
