@@ -25,6 +25,10 @@ type Policy struct {
 	// ExtraRoots is LOCKLOG_EXTRA_ROOTS: mount roots beyond the built-in
 	// allowlist, sorted.
 	ExtraRoots []string `json:"extra_roots"`
+	// PIIAllow are the allow rules of the project's .locklog/pii.toml in
+	// their canonical form (mask.Rule.Text), sorted: an allow rule loosens
+	// the masking, so it applies only once part of an approved policy.
+	PIIAllow []string `json:"pii_allow,omitempty"`
 }
 
 var _ kconfig.Policy = Policy{}
@@ -85,6 +89,7 @@ func Canonical(p Policy) Policy {
 		roots[i] = path.Clean(r)
 	}
 	p.ExtraRoots = kconfig.SortedSet(roots)
+	p.PIIAllow = sortedOrNil(p.PIIAllow)
 	return p
 }
 
@@ -128,7 +133,8 @@ func rotationRank(s string) int64 {
 // detect, a removed detector, unmask never → approved, lookup approved →
 // free, strict on → off, prefilter or user_journals off → on, a longer
 // pseudonym rotation or max age, any larger limit, another network, an
-// added extra root, and for sources: a new source, another kind, format or
+// added extra root, an added allow rule of .locklog/pii.toml, and for
+// sources: a new source, another kind, format or
 // multiline mode, an added path, unit (or every unit), container, allowed
 // field, attr, trusted field or label, recursive off → on, and for a remote
 // source any change of url, selector, auth, org_id or connection
@@ -160,6 +166,9 @@ func (p Policy) Diff(approved kconfig.Policy) []kconfig.Change {
 	out = append(out, diffLimits(ap.Limits, cp.Limits)...)
 	add("network", a.Network, c.Network, c.Network != "")
 	out = append(out, kconfig.SetDiff("extra_roots", a.ExtraRoots, c.ExtraRoots, false)...)
+	// An allow rule added (or widened: another text) shows more; one
+	// removed only tightens.
+	out = append(out, kconfig.SetDiff("pii.allow", a.PIIAllow, c.PIIAllow, false)...)
 
 	for _, cs := range cp.Sources {
 		as, found := ap.Source(cs.Name)
@@ -320,6 +329,9 @@ func (p Policy) Describe() []string {
 	}
 	for _, r := range c.ExtraRoots {
 		lines = append(lines, "extra root: "+r)
+	}
+	for _, r := range c.PIIAllow {
+		lines = append(lines, "pii allow: "+r)
 	}
 	for _, s := range pr.Sources {
 		lines = append(lines, describeSource(s)...)
