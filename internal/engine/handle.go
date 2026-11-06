@@ -20,7 +20,21 @@ const (
 // Handle decodes the params of an agent method and runs it. A refusal is
 // the agent's error (structured, no log content); err is the engine's own
 // failure. Unknown fields in params are refused.
+//
+// A call takes one of the engine's call slots (Options.MaxCalls) for its
+// whole run, or is refused at once with E_BUSY. Calls a human approves take
+// none while they wait: a scan takes its slot once approved (run); an
+// unmask or a lookup reads one record and takes none.
 func (e *Engine) Handle(ctx context.Context, method string, params json.RawMessage) (any, *Error, error) {
+	switch method {
+	case MethodSearch, MethodCount, MethodContext, MethodTrace, MethodTail, MethodPatterns:
+		cctx, release, r := e.enter(ctx)
+		if r != nil {
+			return nil, r, nil
+		}
+		defer release()
+		ctx = cctx
+	}
 	decode := func(v any) *Error {
 		d := json.NewDecoder(bytes.NewReader(params))
 		d.DisallowUnknownFields()

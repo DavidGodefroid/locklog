@@ -51,6 +51,9 @@ const (
 	RecordsCeiling  = 1000
 	OutputCeiling   = 1 * MiB
 	PIIRulesCeiling = 500
+	// CallsCeiling bounds limits.max_calls: each call may hold its
+	// per-call budgets at once.
+	CallsCeiling = 64
 	// Rolling budgets: ceilings no profile can go past either.
 	BytesPerHourCeiling = 1 * TiB
 	RateCeiling         = 6000
@@ -99,6 +102,23 @@ type Limits struct {
 	// PIIAddsPerHour and PIIRulesMax cap the agent's own masking rules.
 	PIIAddsPerHour int `json:"pii_adds_per_hour"`
 	PIIRulesMax    int `json:"pii_rules_max"`
+	// MaxCalls caps the agent calls the console runs at once; a call over
+	// it is refused with E_BUSY. 0 is the default (DefaultMaxCalls), and
+	// is left out of the policy's JSON so that a profile that does not
+	// set it keeps its fingerprint.
+	MaxCalls int `json:"max_calls,omitempty"`
+}
+
+// DefaultMaxCalls is the agent calls a console runs at once when the
+// profile does not set limits.max_calls (engine.DefaultMaxCalls).
+const DefaultMaxCalls = 4
+
+// Calls is the agent calls the console runs at once.
+func (l Limits) Calls() int {
+	if l.MaxCalls > 0 {
+		return l.MaxCalls
+	}
+	return DefaultMaxCalls
 }
 
 // DefaultLimits returns the limits of a profile that sets none.
