@@ -566,7 +566,22 @@ func lokiJob(t *testing.T, s *suite, p lokiPlan, level bool) (int, time.Duration
 		TS  time.Time `json:"ts"`
 		Msg string    `json:"msg"`
 	}
-	for _, pg := range a.mustFree(agentCall{"search the order", MethodSearch, sq}, 3) {
+	// A call that matches more records than it can page through is
+	// refused, asking for a shorter range: the agent halves it, as the
+	// skill says, from the incident's start.
+	var found []json.RawMessage
+	for i := 0; ; i++ {
+		pages, r := a.free(agentCall{"search the order", MethodSearch, sq}, 3)
+		if r == nil {
+			found = pages
+			break
+		}
+		if r.Code != EOverBudget || !strings.Contains(r.Message, "narrow") || i == 6 {
+			a.mustFree(agentCall{"search the order", MethodSearch, sq}, 3) // fails, with the log
+		}
+		sq.To = sq.From.Add(sq.To.Sub(sq.From) / 2).Truncate(time.Second)
+	}
+	for _, pg := range found {
 		var sr SearchResult
 		json.Unmarshal(pg, &sr)
 		for _, r := range sr.Records {
