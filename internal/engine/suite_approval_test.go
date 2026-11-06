@@ -63,7 +63,7 @@ func (s *screens) take() []Approval {
 }
 
 func (s *screens) ctx(uid int) context.Context {
-	return WithPeer(context.Background(), Peer{UID: uid, Known: true, Approve: s.approve})
+	return WithPeer(context.Background(), Peer{UID: uid, Approve: s.approve})
 }
 
 // approvalAnswer is one approval-tool call through Handle: its answer, the
@@ -671,7 +671,7 @@ func scanLeakRefusals(t *testing.T, mode string, recs map[string][]suiteRecord, 
 
 func suiteFull() bool { return os.Getenv("LOCKLOG_SUITE_FULL") == "1" }
 
-func mustJSON(t testing.TB, v any) json.RawMessage {
+func suiteJSON(t testing.TB, v any) json.RawMessage {
 	b, err := json.Marshal(v)
 	if err != nil {
 		t.Fatal(err)
@@ -912,7 +912,7 @@ func TestSuiteApprovalInjection(t *testing.T) {
 					}
 					checkInjection(t, fmt.Sprintf("lookup %q", v), b)
 				}
-				a := s.handle(ctx, MethodScan, ScanQuery{Tool: ScanSearch, Query: mustJSON(t, suiteQuery(func(q *Query) { q.Text = "failed" })), Reason: inj})
+				a := s.handle(ctx, MethodScan, ScanQuery{Tool: ScanSearch, Query: suiteJSON(t, suiteQuery(func(q *Query) { q.Text = "failed" })), Reason: inj})
 				checkScreens("scan reason")
 				if a.refusal != nil {
 					b, _ := json.Marshal(a.refusal)

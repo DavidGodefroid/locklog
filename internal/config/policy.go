@@ -79,6 +79,10 @@ func Canonical(p Policy) Policy {
 	}
 	slices.SortFunc(srcs, func(a, b Source) int { return strings.Compare(a.Name, b.Name) })
 	pr.Sources = srcs
+	if pr.Limits.MaxCalls == DefaultMaxCalls {
+		// The default, set or not, is left out: the same fingerprint.
+		pr.Limits.MaxCalls = 0
+	}
 	p.Profile = pr
 	roots := make([]string, len(p.ExtraRoots))
 	for i, r := range p.ExtraRoots {
@@ -203,6 +207,7 @@ func diffLimits(a, c Limits) []kconfig.Change {
 	num("lookups_per_hour_per_uid", int64(a.LookupsPerHourPerUID), int64(c.LookupsPerHourPerUID), itoa)
 	num("pii_adds_per_hour", int64(a.PIIAddsPerHour), int64(c.PIIAddsPerHour), itoa)
 	num("pii_rules_max", int64(a.PIIRulesMax), int64(c.PIIRulesMax), itoa)
+	num("max_calls", int64(a.Calls()), int64(c.Calls()), itoa)
 	return out
 }
 
@@ -305,8 +310,8 @@ func (p Policy) Describe() []string {
 		fmt.Sprintf("remote budgets: range %s · count range %s · %s per call · %s per hour · %d metric queries per hour · %d requests per minute",
 			FormatDuration(l.Remote.Range), FormatDuration(l.Remote.CountRange), FormatSize(l.Remote.MaxBytes), FormatSize(l.Remote.BytesPerHour),
 			l.Remote.MetricQueriesPerHour, l.Remote.RequestsPerMinute),
-		fmt.Sprintf("output: %d records · %s · lookups %d/h (%d/h per uid) · agent rules %d/h, %d at most",
-			l.MaxRecords, FormatSize(l.MaxOutputBytes), l.LookupsPerHour, l.LookupsPerHourPerUID, l.PIIAddsPerHour, l.PIIRulesMax),
+		fmt.Sprintf("output: %d records · %s · lookups %d/h (%d/h per uid) · agent rules %d/h, %d at most · %d calls at once",
+			l.MaxRecords, FormatSize(l.MaxOutputBytes), l.LookupsPerHour, l.LookupsPerHourPerUID, l.PIIAddsPerHour, l.PIIRulesMax, l.Calls()),
 		fmt.Sprintf("session: idle %s · max %s", pr.IdleTimeout, pr.MaxSession),
 	}
 	if pr.Prefilter {

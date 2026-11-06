@@ -49,12 +49,15 @@ func (e *Engine) inputDigest(name string, v []byte) string {
 // back unchanged as the engine's error.
 type Approver func(ctx context.Context, a Approval) error
 
-// Peer is the caller of a call: its kernel-verified uid and the console's
-// approver.
+// Peer is the caller of a call: its kernel-verified uid, the agent's
+// token it binds an approval to, and the console's approver.
 type Peer struct {
 	UID int
-	// Known: the uid was verified by the kernel (peer credentials).
-	Known   bool
+	// Token is the hash of the agent's token in hub mode (lea's requester
+	// token, plans.HashToken), "" standalone. An approved scan is bound to
+	// it as to the uid: another agent of the same uid, with another token,
+	// neither re-attaches to it nor continues it.
+	Token   string
 	Approve Approver
 }
 
@@ -68,10 +71,16 @@ func WithPeer(ctx context.Context, p Peer) context.Context {
 // peerFrom returns the caller of a call (the zero peer, with no approver,
 // when none was attached).
 func peerFrom(ctx context.Context) Peer {
+	p, _ := peerOf(ctx)
+	return p
+}
+
+// peerOf returns the caller of a call and whether one was attached.
+func peerOf(ctx context.Context) (Peer, bool) {
 	if p, ok := ctx.Value(peerKey{}).(*Peer); ok {
-		return *p
+		return *p, true
 	}
-	return Peer{}
+	return Peer{}, false
 }
 
 // scanKey carries the approved scan a call runs under (Scan).

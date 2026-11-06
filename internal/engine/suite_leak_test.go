@@ -488,6 +488,42 @@ func leakRefusals(t *testing.T, whole *suite, mode string, l *leakScanner, recs 
 		t.Fatalf("over budget: %+v", r)
 	}
 	l.refusal("over budget", r.refusal, nil)
+	// Busy: every slot held.
+	busy := *whole
+	o = whole.eng.o
+	o.MaxCalls = 1
+	busy.eng, _ = New(o)
+	release, _ := busy.eng.calls.acquire()
+	r = busy.run(agentCall{"busy", MethodSearch, suiteQuery(func(q *Query) { q.Text = "upstream" })})
+	release()
+	if r.refusal == nil || r.refusal.Code != EBusy {
+		t.Fatalf("busy: %+v", r)
+	}
+	l.refusal("busy", r.refusal, nil)
+	// A small output cap: records shown as oversized stubs, counts
+	// truncated, and too many matches for the page cache.
+	tiny := *whole
+	o = whole.eng.o
+	o.Limits.MaxOutput = 600
+	tiny.eng, _ = New(o)
+	for _, c := range []agentCall{
+		{"search all tiny output", MethodSearch, suiteQuery(func(q *Query) { q.Limit = 200 })},
+		{"count by masked field tiny output", MethodCount, CountQuery{Query: suiteQuery(nil), By: []string{"detail"}, FirstLast: true}},
+	} {
+		r := tiny.runPages(c, 50)
+		if r.refusal != nil {
+			t.Fatalf("%s: %v", c.name, r.refusal)
+		}
+		for i, p := range r.pages {
+			l.page(fmt.Sprintf("%s page %d", c.name, i), p)
+		}
+	}
+	tiny.eng.cache = newResultCache(4 << 10)
+	r = tiny.run(agentCall{"too many matches", MethodSearch, suiteQuery(func(q *Query) { q.Text = "upstream"; q.Limit = 5 })})
+	if r.refusal == nil || r.refusal.Code != EOverBudget {
+		t.Fatalf("too many matches: %+v", r)
+	}
+	l.refusal("too many matches", r.refusal, nil)
 }
 
 var (

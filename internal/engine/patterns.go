@@ -172,6 +172,7 @@ var (
 // records' masked messages by Template. Admission, stopping points and
 // cursors are those of a count: functions of the plan, never of matches.
 func (e *Engine) Patterns(ctx context.Context, q PatternsQuery) (_ PatternsResult, retErr error) {
+	ctx = startCall(ctx)
 	q.Where = slices.Clone(q.Where)
 	cursor := q.Cursor
 	q.Cursor = ""
@@ -257,15 +258,17 @@ func (e *Engine) Patterns(ctx context.Context, q PatternsQuery) (_ PatternsResul
 	} else {
 		pq := q.Query
 		pq.Order = "asc"
-		plan, err := e.planQuery(ctx, &pq, lim.RemoteBytes, lim.LocalBytes)
-		if err != nil {
+		pctx, cancel := e.planContext(ctx)
+		defer cancel()
+		plan, err := e.planQuery(pctx, &pq, lim.RemoteBytes, lim.LocalBytes)
+		if err = planError(ctx, pctx, err); err != nil {
 			return PatternsResult{}, err
 		}
 		if q.offset > 0 {
 			bq := base
 			bq.Order = "asc"
-			bp, err := e.planQuery(ctx, &bq, lim.RemoteBytes, lim.LocalBytes)
-			if err != nil {
+			bp, err := e.planQuery(pctx, &bq, lim.RemoteBytes, lim.LocalBytes)
+			if err = planError(ctx, pctx, err); err != nil {
 				return PatternsResult{}, err
 			}
 			a.winChunks = len(plan.Chunks)
@@ -287,14 +290,28 @@ func (e *Engine) Patterns(ctx context.Context, q PatternsQuery) (_ PatternsResul
 			a.winChunks = len(plan.Chunks)
 		}
 		var aerr error
-		if f, digest, aerr = e.admitPlan(ctx, "patterns", digest, plan, false, func() []string { return scopeLines(q.Query) }); aerr != nil {
+		scope := func() []string {
+			lines := scopeLines(q.Query)
+			if q.offset > 0 {
+				// The plan reads the baseline window too: the screen
+				// names both ranges (the size line counts both).
+				lines = slices.Insert(lines, 2, "baseline: "+rangeText(base.From, base.To)+" (the same window "+q.Baseline+" earlier)")
+			}
+			return lines
+		}
+		if f, digest, aerr = e.admitPlan(ctx, "patterns", digest, plan, false, scope); aerr != nil {
 			return PatternsResult{}, aerr
 		}
 	}
 
 	sc, failures := Scanned{}, 0
 	var err *Error
-	chunk, gran, sc, failures, err = e.run(ctx, &f, chunk, gran, nil, e.callBytes(ctx, q.Sources), q.evalFactor()+1, nil, func(raw source.RawRecord, rec mask.Record, b *budget) {
+	// A slice is kept when it holds records of the window or of the
+	// baseline (a window chunk's records may count in the baseline).
+	keep := func(chunk int, g source.Granule) bool {
+		return chunk < a.winChunks && overlaps(g, q.From, q.To) || q.offset > 0 && overlaps(g, base.From, base.To)
+	}
+	chunk, gran, sc, failures, err = e.run(ctx, &f, chunk, gran, nil, e.callBytes(ctx, q.Sources), q.evalFactor()+1, runOpts{keep: keep}, func(raw source.RawRecord, rec mask.Record, b *budget) {
 		t, timed := rec.Time()
 		var bucket time.Time
 		switch {

@@ -103,7 +103,9 @@ type Options struct {
 	// scan: its lifetime from the approval (DefaultScanTTL), the
 	// deadline of each of its calls (DefaultScanDeadline, and never past
 	// scanCallBudget from the request), the bytes and the range of its
-	// whole plan (DefaultScanBytes, DefaultScanRange).
+	// whole plan (DefaultScanBytes, DefaultScanRange). The deadline is a
+	// fixed bound, not calibrated: what a call does within it is (run
+	// admits each group of granules on the calibrated cost model).
 	ScanTTL      time.Duration
 	ScanDeadline time.Duration
 	ScanBytes    int64
@@ -118,6 +120,9 @@ type Options struct {
 	LookupApproved bool
 	// Production marks the approval screens of a production profile.
 	Production bool
+	// MaxCalls bounds the agent calls the engine runs at once
+	// (DefaultMaxCalls when 0); a call over it is refused with E_BUSY.
+	MaxCalls int
 	// tailPolls (tests) counts each tail's baseline and completed polls,
 	// so that a test acts on the logs between polls instead of sleeping.
 	tailPolls *atomic.Int64
@@ -143,6 +148,8 @@ type Engine struct {
 
 	ledger *ledger
 	scans  scanStore
+	// calls bounds the agent calls running at once (Options.MaxCalls).
+	calls slots
 	// scanLedgers pace the remote requests of each approved scan
 	// (ScanRequestsPerMinute), under scans.mu.
 	scanLedgers map[string]*ledger
@@ -195,7 +202,7 @@ func New(o Options) (*Engine, error) {
 		o.ScanRange = DefaultScanRange
 	}
 	e := &Engine{o: o, plans: map[string]*frozen{}, cache: newResultCache(64 << 20), ledger: newLedger(o.Budgets, time.Now),
-		scans: scanStore{m: map[string]*scanState{}}, scanLedgers: map[string]*ledger{}}
+		scans: scanStore{m: map[string]*scanState{}}, scanLedgers: map[string]*ledger{}, calls: newSlots(o.MaxCalls)}
 	for n := range o.Sources {
 		e.names = append(e.names, n)
 	}
@@ -252,6 +259,9 @@ type cursorState struct {
 	// Scan is the approved scan the cursor continues (log.scan), bound
 	// to its peer uid; "" for a free call.
 	Scan string `json:"s,omitempty"`
+	// Groups is where the next page of a whole count's groups starts
+	// (Count).
+	Groups int `json:"n,omitempty"`
 }
 
 // refState is sealed into a record ref.
@@ -656,17 +666,30 @@ func errSliceOver() *Error {
 // has a whole budget for it). One the source cannot split is refused. The
 // split points are a function of the slice only; whether a slice is split
 // depends on the bytes the selector's records take (the byte cap) or, when
-// that cap is the time left to mask, on the cost model.
+// that cap is the time left to mask, on the cost model. The narrower
+// slices that ro.keep reports outside the call's range are dropped from the
+// split: they hold no record the call returns (#73).
+//
+// ro.maxGroup, when set, bounds the planned bytes of a group of an
+// uncompressed stream's granules.
+//
+// visit may set b.drop on a group (never the call's first): the group is
+// then dropped and the call stops before it, as when it would not fit.
+//
+// The call's deadline runs from its start (startCall), its planning
+// included: a call whose planning used it up stops before any work, with
+// its cursor.
 func (e *Engine) run(ctx context.Context, fp **frozen, chunk, gran int, needles []string, callBytes, factor int64,
-	need func(source.RawRecord) bool, visit func(raw source.RawRecord, rec mask.Record, b *budget)) (_, _ int, sc Scanned, failures int, _ *Error) {
+	ro runOpts, visit func(raw source.RawRecord, rec mask.Record, b *budget)) (_, _ int, sc Scanned, failures int, _ *Error) {
 	plan := (*fp).plan
 	factor = max(factor, 1)
 	// Deadlines are wall-clock (Options.Now is the query clock).
-	start := time.Now()
+	start := callStart(ctx)
 	limit := e.limits(ctx).Deadline
-	if limit <= 0 {
+	if limit <= 0 || time.Since(start) >= limit {
 		// A call of an approved scan whose request has no time left (a
-		// long approval wait): it stops before any work, with its cursor.
+		// long approval wait), or a free call whose planning used its
+		// deadline: it stops before any work, with its cursor.
 		return chunk, gran, sc, 0, nil
 	}
 	deadline := start.Add(limit)
@@ -676,11 +699,30 @@ func (e *Engine) run(ctx context.Context, fp **frozen, chunk, gran int, needles 
 	// A call of an approved scan draws on its own plan instead.
 	per := map[string]int64{}
 	scan := scanFrom(ctx)
+	if scan != nil && ctx.Value(slotKey{}) == nil {
+		// A call of an approved scan takes its slot once approved.
+		release, err := e.calls.acquire()
+		if err != nil {
+			return chunk, gran, sc, 0, err
+		}
+		defer release()
+	}
 	if scan == nil {
 		est, granules := e.estimate(plan, chunk, gran, callBytes)
 		res, err := e.ledger.admit(est, e.remote, granules, 0)
 		if err != nil {
 			return chunk, gran, sc, 0, err
+		}
+		// A remote source whose request budget has no room before the
+		// call's deadline is refused before any work, with the estimate
+		// (the pacing would otherwise stop the call at its first
+		// request).
+		for s, n := range est {
+			if n > 0 && e.remote(s) && e.ledger.requestFreeAt(s).After(deadline) {
+				res.settle(nil, e.remote)
+				return chunk, gran, sc, 0, &Error{Code: EOverBudget, Message: "the rolling budget of remote requests per minute is used up: try again in a minute, or ask for locklog_scan",
+					Estimate: &Estimate{Bytes: sumBytes(est), Granules: granules}}
+			}
 		}
 		defer func() { res.settle(per, e.remote) }()
 	} else {
@@ -704,7 +746,7 @@ func (e *Engine) run(ctx context.Context, fp **frozen, chunk, gran int, needles 
 	defer func() { pipe.stop() }()
 	newPipe := func(ctx context.Context, src string) *maskPipe {
 		pipe.stop()
-		pipe = e.newMaskPipe(ctx, src, need)
+		pipe = e.newMaskPipe(ctx, src, ro.need)
 		return pipe
 	}
 	// unknownEst is the bytes the last group of unknown bytes fetched,
@@ -729,6 +771,9 @@ func (e *Engine) run(ctx context.Context, fp **frozen, chunk, gran int, needles 
 		groupBytes := max(e.o.Cost.Budget(remaining)/factor, 1)
 		if callBytes > 0 && !compressed(c) {
 			groupBytes = min(groupBytes, max((callBytes-sc.Bytes)/2, 1))
+		}
+		if ro.maxGroup > 0 && !compressed(c) {
+			groupBytes = min(groupBytes, ro.maxGroup)
 		}
 		groups := granuleGroups(c, gran, groupBytes)
 		if len(groups) == 0 {
@@ -843,6 +888,11 @@ func (e *Engine) run(ctx context.Context, fp **frozen, chunk, gran int, needles 
 				if len(parts) < 2 {
 					return chunk, gran, sc, failures, errSliceOver()
 				}
+				if ro.keep != nil {
+					// Narrower slices outside the call's range
+					// hold none of its records: never read.
+					parts = slices.DeleteFunc(parts, func(p source.Granule) bool { return !ro.keep(chunk, p) })
+				}
 				n, ok := e.splitSlice(*fp, chunk, gran, parts)
 				if !ok {
 					// A concurrent call on the same cursor split
@@ -915,6 +965,7 @@ func (e *Engine) run(ctx context.Context, fp **frozen, chunk, gran int, needles 
 			account(c.Source, planned)
 		}
 		b := &budget{stop: func() bool { return ctx.Err() != nil || time.Now().After(hard) }}
+		groupFailures := failures
 		for i := range raws {
 			// A record masking failed on is withheld whole (it
 			// never matches nor counts by masked values) and
@@ -941,6 +992,16 @@ func (e *Engine) run(ctx context.Context, fp **frozen, chunk, gran int, needles 
 			if b.exceeded() {
 				return chunk, gran, sc, failures, overEval(ctx)
 			}
+			if b.drop && sc.Granules > 0 {
+				break
+			}
+		}
+		if b.drop && sc.Granules > 0 {
+			// The visitor cannot keep this group's results: the call
+			// stops before it, the group's work charged (it was
+			// done) but not its granules; the next call reads it
+			// again.
+			return chunk, gran, sc, groupFailures, nil
 		}
 		sc.Records += int64(total) // before the pre-filter
 		sc.Granules += len(sub.Granules)
@@ -1100,18 +1161,31 @@ func (e *Engine) estimate(plan source.Byteplan, chunk, gran int, callBytes int64
 	return est, granules
 }
 
-// limiter is the request limiter of a call to remote source src: the
-// rolling per-minute budget of free calls, or an approved scan's own.
 // Paced returns ctx with the request limiter of a free call to the remote
-// source src: its requests outside a query (log.sources describing it) are
-// paced and charged to the rolling request budget like a query's.
-func (e *Engine) Paced(ctx context.Context, src string) context.Context {
+// source src and the call deadline: its requests outside a query
+// (log.sources describing it) are paced and charged to the rolling request
+// budget like a query's, and a request the budget leaves no room for
+// before the deadline fails at once instead of waiting for the window.
+// The caller calls cancel when done.
+func (e *Engine) Paced(ctx context.Context, src string) (context.Context, context.CancelFunc) {
 	if _, ok := e.o.Sources[src]; !ok || !e.remote(src) {
-		return ctx
+		return ctx, func() {}
 	}
-	return source.WithLimiter(ctx, e.limiter(ctx, src))
+	ctx, cancel := context.WithTimeout(ctx, e.o.Limits.Deadline)
+	return source.WithLimiter(ctx, e.limiter(ctx, src)), cancel
 }
 
+// sumBytes is the bytes of an estimate, every source's.
+func sumBytes(est map[string]int64) int64 {
+	var n int64
+	for _, b := range est {
+		n += b
+	}
+	return n
+}
+
+// limiter is the request limiter of a call to remote source src: the
+// rolling per-minute budget of free calls, or an approved scan's own.
 func (e *Engine) limiter(ctx context.Context, src string) source.Limiter {
 	if sc := scanFrom(ctx); sc != nil {
 		return sc.limiter(src)
@@ -1221,12 +1295,53 @@ func (e *Engine) maskAll(ctx context.Context, src string, raws []source.RawRecor
 	return recs, ctx.Err()
 }
 
+// pageOverhead is what a page holds besides its records (epoch, cursor,
+// scanned, masking).
+const pageOverhead = 256
+
 // outRecord renders a masked record for the agent: the masker's JSON plus
-// the source and the sealed ref; with fields, only those paths.
+// the source and the sealed ref; with fields, only those paths. A record
+// whose rendering alone would not fit a page (Limits.MaxOutput) is shown as
+// a stub: its source, ref and timestamp, "oversized": true and the bytes of
+// its masked rendering; the agent asks for some of its fields (fields), or
+// for its context.
 func (e *Engine) outRecord(ctx context.Context, raw source.RawRecord, rec mask.Record, fields []string) (json.RawMessage, error) {
-	clearSinkFrom(ctx).keep(raw)
-	ref := e.seal("Lr1", refState{Source: raw.Ref.Source, Stream: raw.Ref.Stream, Offset: raw.Ref.Offset,
+	out, err := e.renderRecord(ctx, raw, rec, fields)
+	if err != nil || len(out)+1+pageOverhead <= e.o.Limits.MaxOutput {
+		return out, err
+	}
+	return e.oversized(raw, rec, len(out)), nil
+}
+
+// oversized is the stub of a record too large for a page: no content but
+// its source, ref and time (which every rendering shows).
+func (e *Engine) oversized(raw source.RawRecord, rec mask.Record, n int) json.RawMessage {
+	var b bytes.Buffer
+	b.WriteString(`{"source":`)
+	js, _ := json.Marshal(raw.Ref.Source)
+	b.Write(js)
+	b.WriteString(`,"ref":`)
+	js, _ = json.Marshal(e.ref(raw))
+	b.Write(js)
+	if t, ok := rec.Time(); ok {
+		b.WriteString(`,"ts":`)
+		js, _ = json.Marshal(t.UTC().Format(time.RFC3339Nano))
+		b.Write(js)
+	}
+	fmt.Fprintf(&b, `,"oversized":true,"bytes":%d}`, n)
+	return b.Bytes()
+}
+
+// ref is the sealed ref of a record.
+func (e *Engine) ref(raw source.RawRecord) string {
+	return e.seal("Lr1", refState{Source: raw.Ref.Source, Stream: raw.Ref.Stream, Offset: raw.Ref.Offset,
 		Length: raw.Ref.Length, Digest: e.RecordDigest(raw.Event.Raw), Epoch: e.o.Masker.Epoch(), PolicyFP: e.o.PolicyFP()})
+}
+
+// renderRecord is outRecord's rendering, whatever its size.
+func (e *Engine) renderRecord(ctx context.Context, raw source.RawRecord, rec mask.Record, fields []string) (json.RawMessage, error) {
+	clearSinkFrom(ctx).keep(raw)
+	ref := e.ref(raw)
 	var b bytes.Buffer
 	b.WriteString(`{"source":`)
 	js, _ := json.Marshal(raw.Ref.Source)
@@ -1311,6 +1426,7 @@ func (e *Engine) Search(ctx context.Context, q Query) (SearchResult, error) {
 // search runs a search or a trace (q.trace set); kind binds cursors to
 // their method (a trace cursor never continues a search).
 func (e *Engine) search(ctx context.Context, q Query, kind string) (_ SearchResult, retErr error) {
+	ctx = startCall(ctx)
 	// The caller's predicates are not shared: validation and evaluation
 	// write into them.
 	q.Where = slices.Clone(q.Where)
@@ -1385,8 +1501,10 @@ func (e *Engine) search(ctx context.Context, q Query, kind string) (_ SearchResu
 			}()
 		}
 	} else {
-		plan, err := e.planQuery(ctx, &q, lim.RemoteBytes, lim.LocalBytes)
-		if err != nil {
+		pctx, cancel := e.planContext(ctx)
+		plan, err := e.planQuery(pctx, &q, lim.RemoteBytes, lim.LocalBytes)
+		cancel()
+		if err = planError(ctx, pctx, err); err != nil {
 			return SearchResult{}, err
 		}
 		var aerr error
@@ -1408,13 +1526,35 @@ func (e *Engine) search(ctx context.Context, q Query, kind string) (_ SearchResu
 	// tooMany refuses a call whose matches the cache cannot keep for the
 	// next pages (never cut: that would lose matches). Collecting stops
 	// there, bounding the call's memory.
-	tooMany := &Error{Code: EOverBudget, Message: "too many matching records in one call to page through: narrow the query (a shorter range, fewer sources, a more selective predicate)"}
+	tooMany := &Error{Code: EOverBudget, Message: "too many matching records in one call to page through: narrow the query (a shorter range, fewer sources, a more selective predicate, fewer fields)"}
+	// A query without predicates (browsing) matches every record of its
+	// range: when its matches outgrow the cache, the call stops before the
+	// group that did (stopping on the records' size, never on a predicate)
+	// and the next call goes on from there. Its groups of local granules
+	// are a fraction of the cache (browseGroups), so that the call's first
+	// one fits it. Any other query's matches never decide where a call
+	// stops: it is refused (design §3.3).
+	browse := q.Text == "" && q.Regex == "" && len(q.Where) == 0 && q.trace == nil
 	if len(pending) < q.Limit {
 		var sc Scanned
 		var err *Error
 		var found []match
 		size, over, outFailed := matchesSize(pending), false, false
-		chunk, gran, sc, failures, err = e.run(ctx, &f, chunk, gran, needles, e.callBytes(ctx, q.Sources), q.evalFactor(), nil, func(raw source.RawRecord, rec mask.Record, b *budget) {
+		// The group being visited, and the matches before it.
+		var group *budget
+		groups, mark, markSize := 0, 0, size
+		ro := runOpts{keep: inRange(q.From, q.To)}
+		if browse {
+			// Groups whose matches the cache can hold several of.
+			ro.maxGroup = int64(e.cache.max / browseGroups)
+		}
+		chunk, gran, sc, failures, err = e.run(ctx, &f, chunk, gran, needles, e.callBytes(ctx, q.Sources), q.evalFactor(), ro, func(raw source.RawRecord, rec mask.Record, b *budget) {
+			if b != group {
+				group, groups, mark, markSize = b, groups+1, len(found), size
+			}
+			if b.drop {
+				return
+			}
 			// Granules hold records around the range: keep the
 			// range's (and the untimed ones).
 			if t, ok := rec.Time(); ok && !q.rangeContains(t, false) {
@@ -1434,6 +1574,10 @@ func (e *Engine) search(ctx context.Context, q Query, kind string) (_ SearchResu
 			t, ok := rec.Time()
 			m := match{ts: t, timed: ok, out: out, kinds: rec.Kinds()}
 			if size += matchesSize([]match{m}); !e.cache.fits(size) {
+				if browse && groups > 1 {
+					found, size, b.drop = found[:mark], markSize, true
+					return
+				}
 				over, found = true, nil
 				return
 			}
@@ -1455,7 +1599,7 @@ func (e *Engine) search(ctx context.Context, q Query, kind string) (_ SearchResu
 	}
 	// Fill the page within the record and output caps; the rest is kept
 	// for the next page.
-	size := 256
+	size := pageOverhead
 	kinds := map[string]bool{}
 	n := 0
 	for n < len(pending) && n < q.Limit {

@@ -59,6 +59,10 @@ type ScanInfo struct {
 	ID         string    `json:"id"`
 	ExpiresAt  time.Time `json:"expires_at"`
 	Reattached bool      `json:"reattached,omitempty"`
+	// Resumed: the re-attached scan went on after the last page it
+	// answered. A page whose answer the agent did not get is not sent
+	// again.
+	Resumed bool `json:"resumed,omitempty"`
 	// Done: the plan is exhausted and the scan ended.
 	Done bool `json:"done"`
 }
@@ -74,8 +78,11 @@ type ScanResult struct {
 // scanState is one approved scan. Its plan hash is keyed (HMAC under
 // K_ref) and never leaves the console; the agent knows the scan by its id.
 type scanState struct {
-	id       string
-	uid      int
+	id  string
+	uid int
+	// token is the agent's token hash in hub mode (Peer.Token): with the
+	// uid, who may re-attach to the scan and continue it.
+	token    string
 	hash     string
 	policyFP string
 	tool     string
@@ -90,6 +97,10 @@ type scanState struct {
 	// returned ("" before the first answer). Only it continues the scan,
 	// and a reissued scan resumes there.
 	cursor string
+	// prev is the cursor the last answered call started from: a
+	// continuation with it asks again for a page answered already (whose
+	// answer the agent may have lost), refused with that reason.
+	prev string
 	// busy: a call of the scan runs (one at a time).
 	busy bool
 }
@@ -119,11 +130,16 @@ type scanCall struct {
 	note  string
 	peer  Peer
 	s     *scanState
-	// reattached: the first call found the plan approved already.
-	reattached bool
-	lim        source.Limiter
-	// claimed: this call holds the scan (scanState.busy).
+	// reattached: the first call found the plan approved already;
+	// resumed: and went on from the scan's live position (after the last
+	// page it answered).
+	reattached, resumed bool
+	// lims are the scan's request limiters, by source.
+	lims map[string]source.Limiter
+	// claimed: this call holds the scan (scanState.busy); from is the
+	// cursor it started from ("" at the start of the plan).
 	claimed bool
+	from    string
 }
 
 // errScanBusy refuses a second call of a scan while one runs.
@@ -139,9 +155,12 @@ func (sc *scanCall) claim(s *scanState, cursor string, check bool) *Error {
 		return errScanBusy
 	}
 	if check && subtle.ConstantTimeCompare([]byte(s.cursor), []byte(cursor)) != 1 {
+		if s.prev != "" && subtle.ConstantTimeCompare([]byte(s.prev), []byte(cursor)) == 1 {
+			return &Error{Code: EStale, Span: "cursor", Message: "this page of the approved scan was answered already (its answer may have been lost) and is not sent again: continue with the cursor of its answer, or run locklog_scan again without a cursor to resume after it"}
+		}
 		return &Error{Code: EStale, Span: "cursor", Message: "only the last cursor of an approved scan continues it (or run locklog_scan again without a cursor to resume it)"}
 	}
-	s.busy, sc.s, sc.claimed = true, s, true
+	s.busy, sc.s, sc.claimed, sc.from = true, s, true, cursor
 	return nil
 }
 
@@ -156,7 +175,7 @@ func (sc *scanCall) release(ok bool, cursor string) {
 	defer st.mu.Unlock()
 	sc.s.busy, sc.claimed = false, false
 	if ok {
-		sc.s.cursor = cursor
+		sc.s.prev, sc.s.cursor = sc.from, cursor
 	}
 }
 
@@ -202,22 +221,27 @@ func (sc *scanCall) charge(per map[string]int64) {
 // rate (ScanRequestsPerMinute, none by default beyond the source's
 // in-flight cap), never the rolling per-minute budget of free calls.
 func (sc *scanCall) limiter(src string) source.Limiter {
-	if sc.lim == nil {
-		if sc.e.o.ScanRequestsPerMinute <= 0 {
-			sc.lim = noLimiter{}
-		} else {
-			// One pacing for the scan, shared by its calls.
-			sc.e.scans.mu.Lock()
-			l := sc.e.scanLedgers[sc.s.id]
-			if l == nil {
-				l = newLedger(Budgets{RemoteRequestsPerMinute: sc.e.o.ScanRequestsPerMinute}, time.Now)
-				sc.e.scanLedgers[sc.s.id] = l
-			}
-			sc.e.scans.mu.Unlock()
-			sc.lim = requestLimiter{l: l, src: src}
-		}
+	if sc.e.o.ScanRequestsPerMinute <= 0 {
+		return noLimiter{}
 	}
-	return sc.lim
+	sc.e.scans.mu.Lock()
+	defer sc.e.scans.mu.Unlock()
+	if l, ok := sc.lims[src]; ok {
+		return l
+	}
+	// One pacing for the scan, shared by its calls: each source its
+	// own pace (and the scan's sources together, the ledger's console
+	// key, the same).
+	l := sc.e.scanLedgers[sc.s.id]
+	if l == nil {
+		l = newLedger(Budgets{RemoteRequestsPerMinute: sc.e.o.ScanRequestsPerMinute}, time.Now)
+		sc.e.scanLedgers[sc.s.id] = l
+	}
+	if sc.lims == nil {
+		sc.lims = map[string]source.Limiter{}
+	}
+	sc.lims[src] = requestLimiter{l: l, src: src}
+	return sc.lims[src]
 }
 
 type noLimiter struct{}
@@ -278,7 +302,7 @@ func (e *Engine) admitPlan(ctx context.Context, tool, digest string, plan source
 	}
 	fp := e.o.PolicyFP()
 	hash := e.planHash(tool, digest, fp)
-	if s := e.scans.reattach(sc.peer.UID, hash, e.o.Now()); s != nil {
+	if s := e.scans.reattach(sc.peer, hash, e.o.Now()); s != nil {
 		e.scans.mu.Lock()
 		live := s.cursor
 		e.scans.mu.Unlock()
@@ -307,6 +331,10 @@ func (e *Engine) admitPlan(ctx context.Context, tool, digest string, plan source
 	screen.Hash = hash
 	screen.Inputs = map[string]string{"tool": e.inputDigest("tool", []byte(tool)), "query": e.inputDigest("query", []byte(digest)),
 		"budget": e.inputDigest("budget", []byte(strconv.FormatInt(e.o.ScanBytes, 10))), "policy": e.inputDigest("policy", []byte(fp))}
+	// A renewal holds no query to plan again: it checks the policy only,
+	// and names the others unchecked (the run plans again and refuses a
+	// stale scan), never "unchanged".
+	screen.Moving = []string{"tool", "query", "budget"}
 	if err := sc.peer.Approve(ctx, screen); err != nil {
 		return nil, "", err
 	}
@@ -317,7 +345,7 @@ func (e *Engine) admitPlan(ctx context.Context, tool, digest string, plan source
 	}
 	var b [12]byte
 	rand.Read(b[:])
-	s := &scanState{id: hex.EncodeToString(b[:]), uid: sc.peer.UID, hash: hash, policyFP: fp, tool: tool, plan: plan, desc: desc,
+	s := &scanState{id: hex.EncodeToString(b[:]), uid: sc.peer.UID, token: sc.peer.Token, hash: hash, policyFP: fp, tool: tool, plan: plan, desc: desc,
 		expires: e.o.Now().Add(ttl), state: scanExecuting, busy: true}
 	sc.claimed = true
 	s.query = e.boundDigest(digest, s.id)
@@ -379,17 +407,23 @@ func sizeText(n int64) string {
 	return fmt.Sprintf("%d B", n)
 }
 
-// reattach returns the executing scan of uid with plan hash hash.
-func (st *scanStore) reattach(uid int, hash string, now time.Time) *scanState {
+// reattach returns the executing scan of peer p with plan hash hash.
+func (st *scanStore) reattach(p Peer, hash string, now time.Time) *scanState {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	for _, s := range st.m {
 		st.expireLocked(s, now)
-		if s.state == scanExecuting && s.uid == uid && subtle.ConstantTimeCompare([]byte(s.hash), []byte(hash)) == 1 {
+		if s.state == scanExecuting && s.owner(p) && subtle.ConstantTimeCompare([]byte(s.hash), []byte(hash)) == 1 {
 			return s
 		}
 	}
 	return nil
+}
+
+// owner reports whether p is the peer the scan was approved for: its uid,
+// and in hub mode its agent's token.
+func (s *scanState) owner(p Peer) bool {
+	return s.uid == p.UID && subtle.ConstantTimeCompare([]byte(s.token), []byte(p.Token)) == 1
 }
 
 func (st *scanStore) expireLocked(s *scanState, now time.Time) {
@@ -420,13 +454,13 @@ func (e *Engine) liveScans() int {
 	return n
 }
 
-// resolve returns the executing scan id for peer uid: refused when it ended,
+// resolve returns the executing scan id for peer p: refused when it ended,
 // expired, belongs to another peer or to another policy.
-func (st *scanStore) resolve(id string, uid int, fp string, now time.Time) (*scanState, *Error) {
+func (st *scanStore) resolve(id string, p Peer, fp string, now time.Time) (*scanState, *Error) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	s := st.m[id]
-	if s == nil || s.uid != uid {
+	if s == nil || !s.owner(p) {
 		return nil, errScanStale
 	}
 	st.expireLocked(s, now)
@@ -498,7 +532,9 @@ func (e *Engine) Scan(ctx context.Context, q ScanQuery) (ScanResult, error) {
 	if len(q.Reason) > MaxReason {
 		return ScanResult{}, refuse(EBadQuery, "reason", "at most %d bytes", MaxReason)
 	}
-	sc := &scanCall{e: e, start: time.Now(), tool: q.Tool, note: q.Reason, peer: peer}
+	// The reason is the agent's text: masked like an unmask's or a
+	// lookup's before any screen shows it (the console escapes it).
+	sc := &scanCall{e: e, start: time.Now(), tool: q.Tool, note: e.o.Masker.Text(q.Reason), peer: peer}
 	decode := func(v any) *Error {
 		if len(bytes.TrimSpace(q.Query)) == 0 {
 			return refuse(EBadQuery, "query", "the tool's parameters are required")
@@ -572,7 +608,7 @@ func (e *Engine) Scan(ctx context.Context, q ScanQuery) (ScanResult, error) {
 		if st.Scan == "" {
 			return ScanResult{}, errScanStale
 		}
-		s, rerr := e.scans.resolve(st.Scan, peer.UID, e.o.PolicyFP(), e.o.Now())
+		s, rerr := e.scans.resolve(st.Scan, peer, e.o.PolicyFP(), e.o.Now())
 		if rerr != nil {
 			if rerr.Code != EPolicyChanged {
 				e.dropEndedScanPlans()
@@ -588,7 +624,7 @@ func (e *Engine) Scan(ctx context.Context, q ScanQuery) (ScanResult, error) {
 	if errors.As(err, &ra) {
 		// A reissue of a scan in progress: its next part, from its live
 		// position (the cursor its last call returned).
-		sc.s, sc.reattached = nil, true
+		sc.s, sc.reattached, sc.resumed = nil, true, true
 		s := ra.s
 		e.scans.mu.Lock()
 		cursor = s.cursor
@@ -605,7 +641,7 @@ func (e *Engine) Scan(ctx context.Context, q ScanQuery) (ScanResult, error) {
 	if sc.s == nil {
 		return ScanResult{}, &Error{Code: ESource, Message: "the scan was not admitted; try again"}
 	}
-	info := ScanInfo{ID: sc.s.id, ExpiresAt: sc.s.expires.UTC(), Reattached: sc.reattached}
+	info := ScanInfo{ID: sc.s.id, ExpiresAt: sc.s.expires.UTC(), Reattached: sc.reattached, Resumed: sc.resumed}
 	if complete {
 		e.finishScan(sc.s)
 		info.Done = true
@@ -621,8 +657,7 @@ func scopeLines(q Query) []string {
 	if len(q.Sources) > 0 {
 		srcs = strings.Join(q.Sources, ", ")
 	}
-	out := []string{"sources: " + srcs,
-		"range: " + q.From.UTC().Format(time.RFC3339) + " → " + q.To.UTC().Format(time.RFC3339) + " (" + q.To.Sub(q.From).String() + ")"}
+	out := []string{"sources: " + srcs, "range: " + rangeText(q.From, q.To)}
 	for i, p := range q.Where {
 		name := p.Field
 		if p.Label != "" {
@@ -640,4 +675,9 @@ func scopeLines(q Query) []string {
 		out = append(out, "trace id: "+strconv.Quote(q.trace.id))
 	}
 	return out
+}
+
+// rangeText is an absolute range on an approval screen.
+func rangeText(from, to time.Time) string {
+	return from.UTC().Format(time.RFC3339) + " → " + to.UTC().Format(time.RFC3339) + " (" + to.Sub(from).String() + ")"
 }

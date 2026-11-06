@@ -50,7 +50,7 @@ func (a *approver) count() int {
 }
 
 func peerCtx(uid int, a *approver) context.Context {
-	p := Peer{UID: uid, Known: true}
+	p := Peer{UID: uid}
 	if a != nil {
 		p.Approve = a.approve
 	}
@@ -394,5 +394,139 @@ func TestApprovedScanReissuesBounded(t *testing.T) {
 	before := *f.scans
 	if _, err := f.eng.Scan(c, sq); code(err) != EOverBudget || *f.scans != before {
 		t.Fatalf("past its plan: %v", err)
+	}
+}
+
+func tokenCtx(uid int, tok string, a *approver) context.Context {
+	p := Peer{UID: uid, Token: tok}
+	if a != nil {
+		p.Approve = a.approve
+	}
+	return WithPeer(context.Background(), p)
+}
+
+// TestApprovedScanTokenBinding: in hub mode a scan is bound to the agent's
+// token as to its uid: another agent of the same uid neither re-attaches
+// to it nor continues it with its cursor.
+func TestApprovedScanTokenBinding(t *testing.T) {
+	f := newFixture(t, genLog(t0, 30000, "canary@example.org"), func(o *Options) {
+		oneGranulePerCall(o)
+		o.ScanDeadline = o.Limits.Deadline
+	})
+	qq := q(func(q *Query) { q.Text = "timed out"; q.Limit = 10 })
+	sq := scanQ(t, ScanCount, CountQuery{Query: qq})
+	a := &approver{}
+	res, err := f.eng.Scan(tokenCtx(1, "tok-a", a), sq)
+	if err != nil || a.count() != 1 {
+		t.Fatalf("first: %v %d", err, a.count())
+	}
+	// The same agent re-attaches.
+	if re, err := f.eng.Scan(tokenCtx(1, "tok-a", a), sq); err != nil || !re.Scan.Reattached || a.count() != 1 {
+		t.Fatalf("same token: %v %+v", err, re.Scan)
+	}
+	// Another agent of the same uid is asked for its own approval.
+	b := &approver{deny: true}
+	if _, err := f.eng.Scan(tokenCtx(1, "tok-b", b), sq); !errors.Is(err, errDenied) || b.count() != 1 {
+		t.Fatalf("other token reissue: %v %d", err, b.count())
+	}
+	// Nor does its cursor continue it.
+	// (its live position: the reissue went on from the first page)
+	next := qq
+	f.eng.scans.mu.Lock()
+	next.Cursor = f.eng.scans.m[res.Scan.ID].cursor
+	f.eng.scans.mu.Unlock()
+	if _, err := f.eng.Scan(tokenCtx(1, "tok-b", a), scanQ(t, ScanCount, CountQuery{Query: next})); code(err) != EStale {
+		t.Fatalf("other token continuation: %v", err)
+	}
+	if _, err := f.eng.Scan(tokenCtx(1, "tok-a", a), scanQ(t, ScanCount, CountQuery{Query: next})); err != nil {
+		t.Fatalf("own continuation: %v", err)
+	}
+}
+
+// TestApprovedScanLostAnswer: a continuation with the cursor of a page
+// answered already (its answer lost) is refused saying so; a reissue
+// resumes after it and says it resumed.
+func TestApprovedScanLostAnswer(t *testing.T) {
+	f := newFixture(t, genLog(t0, 30000, "canary@example.org"), func(o *Options) {
+		oneGranulePerCall(o)
+		o.ScanDeadline = o.Limits.Deadline
+	})
+	qq := q(func(q *Query) { q.Text = "timed out"; q.Limit = 10 })
+	a := &approver{}
+	c := peerCtx(1, a)
+	res, err := f.eng.Scan(c, scanQ(t, ScanCount, CountQuery{Query: qq}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := qq
+	first.Cursor = res.Result.(CountResult).Cursor
+	if _, err := f.eng.Scan(c, scanQ(t, ScanCount, CountQuery{Query: first})); err != nil {
+		t.Fatal(err)
+	}
+	// The answer of that call was lost: the agent asks with its cursor
+	// again.
+	_, err = f.eng.Scan(c, scanQ(t, ScanCount, CountQuery{Query: first}))
+	var e *Error
+	if !errors.As(err, &e) || e.Code != EStale || !strings.Contains(e.Message, "answered already") {
+		t.Fatalf("lost answer: %v", err)
+	}
+	re, err := f.eng.Scan(c, scanQ(t, ScanCount, CountQuery{Query: qq}))
+	if err != nil || !re.Scan.Reattached || !re.Scan.Resumed {
+		t.Fatalf("reissue: %v %+v", err, re.Scan)
+	}
+	// A reissue before any answer starts its plan: not resumed.
+	g := newFixture(t, genLog(t0, 30000, "canary@example.org"), func(o *Options) {
+		oneGranulePerCall(o)
+		o.ScanDeadline = o.Limits.Deadline
+	})
+	if r, err := g.eng.Scan(c, scanQ(t, ScanCount, CountQuery{Query: qq})); err != nil || r.Scan.Resumed || r.Scan.Reattached {
+		t.Fatalf("first call: %v %+v", err, r.Scan)
+	}
+}
+
+// TestScanScreen: the reason is masked like an unmask's; a renewal names
+// the scan's inputs unchecked (it holds no query to plan again); a
+// patterns scan against a baseline names the baseline window too.
+func TestScanScreen(t *testing.T) {
+	f := newFixture(t, genLog(t0, 30000, "canary@example.org"), func(o *Options) {
+		oneGranulePerCall(o)
+		o.ScanDeadline = o.Limits.Deadline
+		o.Limits.LocalRange = time.Hour
+	})
+	a := &approver{}
+	sq := scanQ(t, ScanCount, CountQuery{Query: q(func(q *Query) { q.Text = "timed out" })})
+	sq.Reason = "why did canary@example.org fail"
+	if _, err := f.eng.Scan(peerCtx(1, a), sq); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(a.last.Note, "canary@example.org") || !strings.Contains(a.last.Note, "⟦email:") {
+		t.Fatalf("note %q", a.last.Note)
+	}
+	if strings.Join(a.last.Moving, ",") != "tool,query,budget" {
+		t.Fatalf("moving %v", a.last.Moving)
+	}
+	pq := PatternsQuery{Query: q(func(q *Query) { q.To = q.From.Add(2 * time.Hour) }), Baseline: "6h"}
+	if _, err := f.eng.Scan(peerCtx(1, a), scanQ(t, ScanPatterns, pq)); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"tool: patterns", "sources: app", "range: 2026-10-30T12:00:00Z → 2026-10-30T14:00:00Z (2h0m0s)",
+		"baseline: 2026-10-30T06:00:00Z → 2026-10-30T08:00:00Z (2h0m0s) (the same window 6h earlier)"}
+	if len(a.last.Body) < len(want) {
+		t.Fatalf("body %q", a.last.Body)
+	}
+	for i, w := range want {
+		if a.last.Body[i] != w {
+			t.Errorf("line %d: %q, want %q", i, a.last.Body[i], w)
+		}
+	}
+}
+
+// A scan over several remote sources paces each under its own name.
+func TestScanLimiterPerSource(t *testing.T) {
+	f := newFixture(t, "x\n", func(o *Options) { o.ScanRequestsPerMinute = 10 })
+	sc := &scanCall{e: f.eng, s: &scanState{id: "s1"}}
+	a, b := sc.limiter("a").(requestLimiter), sc.limiter("b").(requestLimiter)
+	if a.src != "a" || b.src != "b" || a.l != b.l || sc.limiter("a").(requestLimiter) != a {
+		t.Fatalf("limiters %+v %+v", a, b)
 	}
 }
