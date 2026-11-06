@@ -694,12 +694,23 @@ confined="--cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /t
 # write_facts FILE [logs]: the facts of this host and account that profile
 # add and doctor read in the image (internal/hostfacts): ids, group names,
 # states, paths and container names, never a log line or a secret. With
-# "logs", the files under the log roots follow, one per line, last.
+# "logs", the files under the log roots follow, NUL-delimited, last.
 write_facts() {
 	{
 		echo 'locklog-facts 1'
 		echo "euid $(id -u)"
 		echo "groups $(id -Gn 2>/dev/null || :)"
+		# id -Gn splits a group name with a space (SSSD, AD): each gid's
+		# whole name, when getent has it, settles the names.
+		gids=$(id -G 2>/dev/null) || gids=
+		echo "gids $gids"
+		if command -v getent >/dev/null 2>&1; then
+			for g in $gids; do
+				case "$g" in '' | *[!0-9]*) continue ;; esac
+				ent=$(getent group "$g" 2>/dev/null) || ent=
+				if [ -n "$ent" ]; then printf 'group %s %s\n' "$g" "${ent%%:*}"; fi
+			done
+		fi
 		if ! command -v sudo >/dev/null 2>&1; then
 			echo 'sudo absent'
 		elif sudo -n true >/dev/null 2>&1; then
@@ -743,10 +754,11 @@ write_facts() {
 			case "$sw" in '' | *[!a-z-]*) ;; *) echo "swarm $sw" ;; esac
 		fi
 		if [ "${2:-}" = logs ]; then
-			echo logs
+			# NUL-delimited, last: a newline in a name cannot forge a path.
+			echo logs0
 			set -f
 			# shellcheck disable=SC2086 # the roots are split on purpose
-			find $roots -maxdepth 3 -type f 2>/dev/null || :
+			find $roots -maxdepth 3 -type f -print0 2>/dev/null || :
 			set +f
 		fi
 	} >"$1"

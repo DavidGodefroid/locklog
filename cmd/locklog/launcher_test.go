@@ -24,7 +24,7 @@ type launcherFixture struct {
 
 var launcherTools = []string{"sh", "dirname", "mkdir", "id", "cat", "printf", "awk", "sha256sum", "shasum", "tar",
 	"gzip", "install", "mktemp", "rm", "uname", "sed", "tr", "tail", "grep", "stat", "cksum", "getconf", "nproc", "cut", "ls",
-	"mv", "chmod", "date", "sleep", "find", "rmdir", "cp", "pwd", "wc", "sort"}
+	"mv", "chmod", "date", "sleep", "find", "rmdir", "cp", "pwd", "wc", "sort", "getent"}
 
 func newLauncherFixture(t *testing.T) *launcherFixture {
 	t.Helper()
@@ -96,6 +96,20 @@ exit 0
 	// The workspace is root: lox run runs its locklog lock "logs".
 	f.loxRun(t, root, map[string]string{"logs": "locklog"})
 	return f
+}
+
+// allGroupsNamed reports whether getent names every gid of this account.
+func allGroupsNamed() bool {
+	out, err := exec.Command("id", "-G").Output()
+	if err != nil {
+		return false
+	}
+	for _, g := range strings.Fields(string(out)) {
+		if exec.Command("getent", "group", g).Run() != nil {
+			return false
+		}
+	}
+	return true
 }
 
 func writeExec(t *testing.T, path, body string) {
@@ -180,6 +194,15 @@ func confined(t *testing.T, run []string) {
 func TestLauncherProfileDoctorInit(t *testing.T) {
 	f := newLauncherFixture(t)
 	writeExec(t, filepath.Join(f.bin, "claude"), "#!/bin/sh\n")
+	// A directory whose name holds a newline (#87): with NUL-delimited
+	// facts its file cannot read as another path ("/a.log").
+	nl := filepath.Join(f.logs, "x\n")
+	if err := os.Mkdir(nl, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nl, "a.log"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	_, calls, err := f.run(t, f.project, []string{"DOCKER_PS=web nginx:1 web shop shop_default\\n"}, "profile", "add", "--non-interactive", "--json")
 	if err != nil {
 		t.Fatal(err)
@@ -220,6 +243,16 @@ func TestLauncherProfileDoctorInit(t *testing.T) {
 		!slices.Contains(fs.Agents, "claude") || len(fs.Containers) != 1 || fs.Containers[0].Project != "shop" ||
 		!slices.Contains(fs.Logs, filepath.Join(f.logs, "app", "app.log")) {
 		t.Errorf("facts = %+v\n%s", fs, facts)
+	}
+	if !strings.Contains(string(facts), "\nlogs0\n") || slices.Contains(fs.Logs, "/a.log") || slices.ContainsFunc(fs.Logs, func(p string) bool { return strings.Contains(p, "\n") }) {
+		t.Errorf("log paths not NUL-delimited, or a forged one: %q", fs.Logs)
+	}
+	// The gids, and their whole names where getent has them.
+	if !strings.Contains(string(facts), "\ngids ") || len(fs.Groups) == 0 {
+		t.Errorf("groups: %q\n%s", fs.Groups, facts)
+	}
+	if allGroupsNamed() && fs.GroupsAmbiguous {
+		t.Errorf("groups ambiguous although getent names every gid: %q\n%s", fs.Groups, facts)
 	}
 
 	// --project DIR: that project, absolute.
