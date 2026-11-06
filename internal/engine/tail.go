@@ -171,7 +171,7 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 			}
 			p, err := e.o.Sources[s].Plan(tctx, source.Range{From: time.Unix(0, 0).UTC(), To: tailFarFuture}, source.Selector{})
 			if err != nil {
-				return nil, err
+				return nil, inSource(s, err)
 			}
 			for _, c := range p.Chunks {
 				k := streamKey{c.Source, c.Stream}
@@ -187,7 +187,7 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 		if ctx.Err() != nil {
 			return TailResult{}, cancelled
 		}
-		return TailResult{}, sourceError(err)
+		return TailResult{}, e.sourceFailed(ctx, "", err)
 	}
 	for k, end := range base {
 		if end != math.MaxInt64 {
@@ -330,6 +330,7 @@ func (e *Engine) Tail(ctx context.Context, tq TailQuery) (TailResult, error) {
 			if ctx.Err() != nil {
 				return TailResult{}, cancelled
 			}
+			e.sourceFailed(ctx, "", lerr) // reported; the tail ends uncovered
 			covered = false
 			break
 		}

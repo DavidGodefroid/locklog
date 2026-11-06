@@ -60,6 +60,9 @@ type Options struct {
 	// trusted leaf (mask.Masker.TrustedValue): it is indexed as
 	// index.Redacted, never held clear.
 	Sensitive func(field, value string) bool
+	// RulesGeneration changes when the rules behind Sensitive change
+	// (mask.Masker.RulesGeneration); nil: they never do.
+	RulesGeneration func() uint64
 	// Now is the clock (tests).
 	Now func() time.Time
 	// NoXDev refuses to open a file across a mount point under its root
@@ -457,7 +460,7 @@ func granuleMayMatch(g *index.Granule, fields []string, r source.Range, sel sour
 		for _, c := range cs {
 			// A redacted or overflowing value is unknown: it may
 			// match.
-			if unknown(fields, c.Vals, names) || sel.Match(tupleMap(fields, c.Vals)) {
+			if unknown(fields, c.Vals, names) || ambiguous(sel, fields, c.Vals) || sel.Match(tupleMap(fields, c.Vals)) {
 				return true
 			}
 		}
@@ -491,6 +494,26 @@ func termFields(sel source.Selector) []string {
 	}
 	return out
 }
+
+// ambiguous reports whether a tuple holds, for a term of sel, a value whose
+// match depends on its kind, which the index does not keep
+// (source.Term.Ambiguous): it is unknown for that term, as a redacted
+// value is.
+func ambiguous(sel source.Selector, fields, vals []string) bool {
+	for _, t := range sel.Terms {
+		if len(t.Numbers) == 0 {
+			continue
+		}
+		if i := slices.Index(fields, index.TermKey(t.Field, t.Label)); i >= 0 && t.Ambiguous(vals[i]) {
+			return true
+		}
+	}
+	return false
+}
+
+// NumericTerms implements source.NumericSelector: the index treats an
+// ambiguous value of a numeric term as unknown.
+func (s *Source) NumericTerms() {}
 
 // unknown reports whether a tuple holds, for one of names, a value the index
 // does not know (index.Redacted: a detector flagged it; index.Other: the

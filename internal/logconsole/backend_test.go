@@ -510,6 +510,42 @@ func (e showEnv) ShowResults() bool { return e.show }
 // are printed on the console's terminal in clear and counted in the audit;
 // the agent's answer is the engine's masked result, unchanged. Off, nothing
 // is revealed.
+// logEngine reports a source failure through the call's operator log.
+type logEngine struct {
+	fakeEngine
+	line string
+}
+
+func (e *logEngine) Handle(ctx context.Context, m string, p json.RawMessage, c Caller) (any, *Refusal, error) {
+	if l := OperatorLogFrom(ctx); l != nil {
+		l(e.line)
+	}
+	return e.fakeEngine.Handle(ctx, m, p, c)
+}
+
+// TestOperatorLog: what the engine reports for the operator is printed on
+// the console's terminal, sanitised, named by the method; never in the
+// audit (#54).
+func TestOperatorLog(t *testing.T) {
+	b := New(Options{Profile: "staging", Root: project(t, localCfg)})
+	pol, err := b.LoadPolicy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng := &logEngine{fakeEngine: fakeEngine{refuse: &Refusal{Message: "the source failed to read its logs", Info: refusal.Info{Code: "E_SOURCE"}}},
+		line: "source nginx: the source failed to read its logs: dial https://reader:hunter2@loki.example.com: refused"}
+	env := &fakeEnv{sess: &session{engine: eng, policy: pol.(Policy)}, policy: pol}
+	ctx := console.WithPeer(context.Background(), ipc.Cred{UID: 1000, PID: 42})
+	b.Methods()[MethodSearch](ctx, ipc.Request{ID: 1, Method: MethodSearch, Params: json.RawMessage(`{}`)}, env)
+	if len(env.lines) != 1 || !strings.HasPrefix(env.lines[0], MethodSearch+": source nginx: ") || strings.Contains(env.lines[0], "hunter2") {
+		t.Errorf("console lines %q", env.lines)
+	}
+	raw, _ := json.Marshal(env.records)
+	if strings.Contains(string(raw), "loki.example.com") || strings.Contains(string(raw), "nginx: the source") {
+		t.Errorf("the audit holds the operator's line: %s", raw)
+	}
+}
+
 func TestClearView(t *testing.T) {
 	b := New(Options{Profile: "staging", Root: project(t, localCfg)})
 	pol, err := b.LoadPolicy()

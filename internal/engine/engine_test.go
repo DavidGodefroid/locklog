@@ -773,8 +773,8 @@ func TestCalibrationInBackground(t *testing.T) {
 }
 
 // TestNumericTermsColdEqualsIndexed: numbers compare by exact value in the
-// evaluator; the index holds raw literals, so numeric terms are never pushed
-// down nor served from it, and cold and indexed answers agree.
+// evaluator while the index holds raw literals: cold and indexed answers
+// agree whatever literal the term is written with.
 func TestNumericTermsColdEqualsIndexed(t *testing.T) {
 	heavyRace(t)
 	content := genLog(t0, 10000, "c@example.org") // 3 granules
@@ -825,6 +825,113 @@ func TestNumericTermsColdEqualsIndexed(t *testing.T) {
 		if cold[c.name] != [2]int{c.want, c.want} || indexed[c.name] != cold[c.name] {
 			t.Errorf("%s: cold %v, indexed %v, want %d", c.name, cold[c.name], indexed[c.name], c.want)
 		}
+	}
+}
+
+// TestNumericTermsServedFromIndex: a numeric term is pushed down to the
+// local index and served from it, except where an indexed value matches
+// it or not depending on its kind (2e2 as a number is 200, as a string it
+// is not): such granules are scanned. Answers equal the cold ones and the
+// evaluator's (#52).
+func TestNumericTermsServedFromIndex(t *testing.T) {
+	heavyRace(t)
+	// Two parts: the first only writes 200 and 500 as numbers and "500"
+	// as a string; the second also writes 200 otherwise (2e2, 200.0 as
+	// numbers and as strings).
+	const clean, n = 15000, 30000
+	other := []string{`2e2`, `200.0`, `"2e2"`, `"200.0"`, `"200"`}
+	var b strings.Builder
+	want := map[string]int{}
+	for i := range n {
+		st := []string{`200`, `500`, `"500"`}[i%3]
+		if i >= clean && i%2 == 0 {
+			st = other[(i/2)%len(other)]
+		}
+		fmt.Fprintf(&b, `{"time":"%s","level":"info","status":%s,"msg":"m%d"}`+"\n", t0.Add(time.Duration(i)*time.Second).Format(time.RFC3339), st, i)
+		// The evaluator's equality: a number leaf by exact value
+		// against a number, any other leaf by text.
+		num := !strings.HasPrefix(st, `"`)
+		v := strings.Trim(st, `"`)
+		eq := func(lit string) bool {
+			x, xok := source.ParseNumber(v)
+			y, yok := source.ParseNumber(lit)
+			if num && xok && yok && !strings.HasPrefix(lit, `"`) {
+				return x.Cmp(y) == 0
+			}
+			return v == strings.Trim(lit, `"`)
+		}
+		if eq(`200`) {
+			want["= 200"]++
+		}
+		if eq(`500`) {
+			want["= 500"]++
+		}
+		if !eq(`2e2`) {
+			want["!= 2e2"]++
+		}
+		if eq(`200.0`) || eq(`"500"`) {
+			want["in"]++
+		}
+		if eq(`"2e2"`) {
+			want["= str"]++
+		}
+	}
+	cases := map[string]Pred{
+		"= 200":  {Field: "status", Op: "=", Value: json.RawMessage(`200`)},
+		"= 500":  {Field: "status", Op: "=", Value: json.RawMessage(`500`)},
+		"!= 2e2": {Field: "status", Op: "!=", Value: json.RawMessage(`2e2`)},
+		"in":     {Field: "status", Op: "in", Value: json.RawMessage(`[200.0, "500"]`)},
+		"= str":  {Field: "status", Op: "=", Value: json.RawMessage(`"2e2"`)},
+	}
+	f := newFixture(t, b.String(), nil)
+	type ans struct {
+		search, count int
+		scans         int // granules scanned by the count
+		fromIndex     bool
+	}
+	answers := func() map[string]ans {
+		out := map[string]ans{}
+		for name, p := range cases {
+			recs, _ := allRecords(t, f.eng, q(func(q *Query) { q.Where = []Pred{p}; q.Limit = 200; q.Fields = []string{"status"} }))
+			res, err := f.eng.Count(ctx, CountQuery{Query: q(func(q *Query) { q.Where = []Pred{p} })})
+			if err != nil || !res.Complete {
+				t.Fatalf("%s: count %v %v", name, res.Complete, err)
+			}
+			c := 0
+			for _, g := range res.Groups {
+				c += int(g.N)
+			}
+			out[name] = ans{len(recs), c, res.Scanned.Granules, res.FromIndex}
+		}
+		return out
+	}
+	cold := answers()
+	for i := 0; ; i++ {
+		_, done, err := f.src.IndexStep(ctx, 64<<20, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if done || i > 20 {
+			break
+		}
+	}
+	indexed := answers()
+	for name := range cases {
+		c, x := cold[name], indexed[name]
+		if c.search != want[name] || c.count != want[name] || x.search != c.search || x.count != c.count {
+			t.Errorf("%s: cold %+v, indexed %+v, want %d", name, c, x, want[name])
+		}
+		if !x.fromIndex || c.scans == 0 {
+			t.Errorf("%s: cold %+v, indexed %+v: not served from the index", name, c, x)
+		}
+	}
+	// 500 is written one way only: answered without a scan; 200 in the
+	// first part only: the granules of the second are scanned.
+	if s := indexed["= 500"].scans; s != 0 {
+		t.Errorf("= 500: %d scans", s)
+	}
+	if s := indexed["= 200"].scans; s == 0 || s >= cold["= 200"].scans {
+		t.Errorf("= 200: %d scans indexed, %d cold", s, cold["= 200"].scans)
 	}
 }
 
@@ -902,6 +1009,56 @@ func TestSourceErrorsAreContentFree(t *testing.T) {
 		b, _ := json.Marshal(e)
 		if strings.Contains(string(b), "customer-acme") || strings.Contains(e.Error(), "/srv") {
 			t.Errorf("%s: path in the agent's error: %s", name, b)
+		}
+	}
+}
+
+// TestSourceErrorsLogged: a source's failure is reported to the operator
+// (the console's terminal) with the source's name, its class and the
+// error masked; a stale stream, a normal outcome, is not (#54).
+func TestSourceErrorsLogged(t *testing.T) {
+	pathErr := func() error {
+		return fmt.Errorf("file source: %w", &fs.PathError{Op: "open", Path: "/var/log/app/app.log", Err: syscall.EIO})
+	}
+	personal := func() error { return errors.New("loki source: unexpected response for jane.doe@example.com") }
+	staleErr := func() error { return fmt.Errorf("x: %w", source.ErrStale) }
+	for name, tc := range map[string]struct {
+		es    func(*errSource)
+		count bool
+		want  string // "" when nothing is logged
+	}{
+		"plan":     {func(s *errSource) { s.plan = pathErr }, false, "source app: the source failed to read its logs: file source: open /var/log/app/app.log"},
+		"scan":     {func(s *errSource) { s.scan = pathErr }, false, "source app: the source failed to read its logs: file source: open /var/log/app/app.log"},
+		"index":    {func(s *errSource) { s.count = pathErr }, true, "the source failed to read its logs: file source: open"},
+		"personal": {func(s *errSource) { s.scan = personal }, false, "source app: the source failed to read its logs: loki source: unexpected response for "},
+		"stale":    {func(s *errSource) { s.scan = staleErr }, false, ""},
+	} {
+		f := newFixture(t, genLog(t0, 100, "c@example.org"), nil)
+		es := errSource{countingSource: f.eng.o.Sources["app"].(countingSource)}
+		tc.es(&es)
+		f.eng.o.Sources["app"] = es
+		var lines []string
+		cctx := WithSourceLog(ctx, func(line string) { lines = append(lines, line) })
+		var err error
+		if tc.count {
+			_, err = f.eng.Count(cctx, CountQuery{Query: q(nil), By: []string{"level"}})
+		} else {
+			_, err = f.eng.Search(cctx, q(nil))
+		}
+		if err == nil {
+			t.Errorf("%s: no error", name)
+			continue
+		}
+		switch {
+		case tc.want == "" && len(lines) != 0:
+			t.Errorf("%s: logged %q", name, lines)
+		case tc.want != "" && (len(lines) != 1 || !strings.Contains(lines[0], tc.want)):
+			t.Errorf("%s: logged %q, want one line holding %q", name, lines, tc.want)
+		}
+		for _, l := range lines {
+			if strings.Contains(l, "jane.doe") {
+				t.Errorf("%s: a personal value logged clear: %q", name, l)
+			}
 		}
 	}
 }

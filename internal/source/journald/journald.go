@@ -22,6 +22,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -288,8 +289,11 @@ func (s *Source) open(ctx context.Context, stream string) (*os.File, *journal.Fi
 // entries, with the offset of its first entry and the true time bounds of
 // all its entries.
 type granule struct {
-	index    int64
-	first    uint64 // offset of its first entry
+	index int64
+	first uint64 // offset of its first entry
+	// pos is the entry array holding its first entry: Scan resumes the
+	// walk there instead of walking the chain from its head.
+	pos      journal.ArrayPos
 	n        int64
 	min, max uint64 // realtime bounds of its entries (µs)
 	anyTime  bool   // an entry's time could not be read: any range may match
@@ -311,10 +315,10 @@ type fileGranules struct {
 // or still-written file) yields its readable prefix.
 func granules(jf *journal.File) ([]granule, bool) {
 	var out []granule
-	err := jf.EntryOffsets(func(i, off uint64) bool {
+	err := jf.EntryOffsetsFrom(journal.ArrayPos{}, func(i, off uint64, at journal.ArrayPos) bool {
 		rt, err := jf.Realtime(off)
 		if i%GranuleEntries == 0 {
-			out = append(out, granule{index: int64(i / GranuleEntries), first: off, min: math.MaxUint64})
+			out = append(out, granule{index: int64(i / GranuleEntries), first: off, pos: at, min: math.MaxUint64})
 		}
 		g := &out[len(out)-1]
 		g.n++
@@ -340,12 +344,33 @@ type granKey struct {
 	state         uint8
 }
 
+func keyOf(jf *journal.File, size int64) granKey {
+	h := jf.Header()
+	return granKey{size: size, entries: h.NEntries, tail: h.TailObjectOffset, tailRT: h.TailRealtime, state: h.State}
+}
+
+// resumeAt returns where the walk to entry start of the open file of
+// stream may begin: the entry array of its granule, from the granules
+// cached for this very state of the file (keyOf), else the chain's head.
+func (s *Source) resumeAt(stream string, jf *journal.File, size, start int64) journal.ArrayPos {
+	if start <= 0 || start%GranuleEntries != 0 {
+		return journal.ArrayPos{}
+	}
+	s.mu.Lock()
+	c, ok := s.grans[stream]
+	s.mu.Unlock()
+	n := start / GranuleEntries
+	if !ok || c.key != keyOf(jf, size) || n >= int64(len(c.gs)) || c.gs[n].index != n {
+		return journal.ArrayPos{}
+	}
+	return c.gs[n].pos
+}
+
 func (s *Source) granulesOf(fi fileInfo, jf *journal.File, size int64) fileGranules {
 	s.mu.Lock()
 	c, ok := s.grans[fi.stream]
 	s.mu.Unlock()
-	h := jf.Header()
-	key := granKey{size: size, entries: h.NEntries, tail: h.TailObjectOffset, tailRT: h.TailRealtime, state: h.State}
+	key := keyOf(jf, size)
 	if ok && c.key == key {
 		return c
 	}
@@ -439,9 +464,16 @@ func (s *Source) Scan(ctx context.Context, c source.Chunk) (source.Iterator, err
 	var offs []uint64
 	start, end := c.Start(), c.End()
 	var cerr error
-	// The walk runs from the file's first entry (a granule late in the
-	// file walks all before it): cancellable.
-	err = jf.EntryOffsets(func(i, off uint64) bool {
+	// The walk resumes at the entry array of the chunk's first granule
+	// when the file is as planned (a descending search reads granules
+	// last first: from the head, each would walk all before it), else it
+	// runs from the file's first entry: cancellable.
+	var from journal.ArrayPos
+	if st, err := f.Stat(); err == nil {
+		from = s.resumeAt(c.Stream, jf, st.Size(), start)
+	}
+	err = jf.EntryOffsetsFrom(from, func(i, off uint64, _ journal.ArrayPos) bool {
+		scanWalked.Add(1)
 		if i%4096 == 0 {
 			if cerr = ctx.Err(); cerr != nil {
 				return false
@@ -475,6 +507,9 @@ func (s *Source) Scan(ctx context.Context, c source.Chunk) (source.Iterator, err
 	}
 	return &iter{ctx: ctx, src: s, f: f, jf: jf, stream: c.Stream, offs: offs, base: start}, nil
 }
+
+// scanWalked counts the entries Scan's walks visit (tests).
+var scanWalked atomic.Int64
 
 type iter struct {
 	ctx       context.Context
