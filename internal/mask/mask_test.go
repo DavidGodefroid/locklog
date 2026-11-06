@@ -1049,3 +1049,15 @@ func TestCleanTrustedCache(t *testing.T) {
 		t.Fatalf("cached %q, want the clean trusted values only", cached)
 	}
 }
+
+// TestAllowRuleBeforePersonalName: an allow rule on a field whose name
+// looks personal or quasi-identifying shows its value (after the secret
+// step and the detectors), under redact-unknown too.
+func TestAllowRuleBeforePersonalName(t *testing.T) {
+	rules := Rules{Allow: []Rule{{Field: "city", Mode: ModeAllow}}}
+	m := newMasker(t, Options{Structured: StructuredRedactUnknown, Rules: &rules})
+	out, _ := json.Marshal(m.Mask("api", event(t, `{"city":"Lyon","town":"Lyon"}`)))
+	if !strings.Contains(string(out), `"city":"Lyon"`) || strings.Contains(string(out), `"town":"Lyon"`) {
+		t.Fatalf("%s", out)
+	}
+}

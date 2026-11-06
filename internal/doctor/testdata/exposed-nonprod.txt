@@ -1,9 +1,9 @@
 locklog doctor: what the agent's account can reach here (advisory: a check, not a boundary)
 
   warn  the Docker engine answers the agent's account (DOCKER_HOST is set): it can start a container that reads every log and the console's volumes
-        remedy: run the agent where the Docker socket and DOCKER_HOST are out of reach (not in the docker group, no socket mounted), or in a container of its own (locklog setup --agent container)
+        remedy: run the agent where the Docker socket and DOCKER_HOST are out of reach (not in the docker group, no socket mounted), or with lea, or in a container of its own (docs/setup.md)
   warn  group docker: the agent's account is a member; the docker group is root on this host: it starts a container that reads every log
-        remedy: take the agent's account out of the docker group (sudo gpasswd -d $USER docker), or run the agent in a container of its own (locklog setup --agent container)
+        remedy: take the agent's account out of the docker group (sudo gpasswd -d $USER docker), or run the agent with lea or in a container of its own (docs/setup.md)
   warn  group adm: the agent's account is a member; the adm group reads /var/log
         remedy: take the agent's account out of adm (sudo gpasswd -d $USER adm): the console reads the logs for it
   warn  group systemd-journal: the agent's account is a member; the systemd-journal group reads the whole journal
@@ -19,7 +19,7 @@ locklog doctor: what the agent's account can reach here (advisory: a check, not 
   warn  cloud credentials file ~/.aws/credentials is present: the agent can use them to read logs at the provider
         remedy: keep cloud credentials out of the agent's account (another account, or short-lived credentials the agent cannot reach)
   warn  backend main/lokia (http://HOST) answers a Loki read without credentials (status 200): the agent can read it directly
-        remedy: put it behind authentication (locklog setup --loki-proxy for a Compose Loki), or out of the agent's network
+        remedy: put it behind authentication (locklog profile add --loki-proxy for a Compose Loki), or out of the agent's network
   ok    backend main/lokib (http://HOST) needs credentials (status 401)
   warn  AWS metadata credentials answer (status 200): the agent can take the instance's cloud identity
         remedy: block the metadata service for the agent (a firewall rule, IMDSv2 with hop limit 1, no instance identity) or run it where it is not reachable

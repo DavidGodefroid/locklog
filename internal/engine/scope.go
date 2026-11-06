@@ -16,7 +16,8 @@ type Approval struct {
 	Note     string
 	Body     []string
 	Warnings []string
-	// NeverAuto: auto mode never approves it.
+	// NeverAuto: no auto rule approves it (lox run's auto mode; the
+	// lock refuses such an approval, ticket.ErrAuto).
 	NeverAuto bool
 	// Clear is the clear view of the screen's record (secrets and
 	// redactions kept), for the console's own terminal only: the
@@ -53,8 +54,8 @@ type Approver func(ctx context.Context, a Approval) error
 // token it binds an approval to, and the console's approver.
 type Peer struct {
 	UID int
-	// Token is the hash of the agent's token in hub mode (lea's requester
-	// token, plans.HashToken), "" standalone. An approved scan is bound to
+	// Token is the hash of the agent's token (lea's requester token,
+	// plans.HashToken), "" when the agent sends none. An approved scan is bound to
 	// it as to the uid: another agent of the same uid, with another token,
 	// neither re-attaches to it nor continues it.
 	Token   string

@@ -16,7 +16,7 @@ structured-metadata field to each entry that does not already carry one, as foll
   or logfmt line, or a level word in the text. These are normalised to one of `trace`, `debug`,
   `info`, `warn`, `error`, `critical`, `fatal` or `unknown` (`pkg/util/constants/levels.go`).
 
-`locklog setup` proposes `level` and `detected_level` among the default trusted fields, and the
+`locklog profile add` proposes `level` and `detected_level` among the default trusted fields, and the
 human reviews them. Once trusted, `detected_level` is selectable with `=`/`!=`/`in`. It is matched
 **locally**, on the metadata Loki returns apart from the stream labels, and is never sent to Loki
 as a filter: a LogQL `| detected_level="error"` filter would also match a stream label of that

@@ -1,7 +1,8 @@
-# locklog: the project's log sources, written by `locklog setup` from what
-# it found on this host. Nothing here is read until the console shows it to
-# you: `locklog console` reviews the profile, and every later change that
-# loosens it, before any log is opened. Remove what the agent should not see.
+# locklog: the project's log sources, written by `locklog profile add` from
+# what it found on this host. Nothing here is read until the console shows
+# it to you: the console `lox run` starts reviews the profile, and every
+# later change that loosens it, before any log is opened. Remove what the
+# agent should not see.
 version = 1
 
 # No log file or journal was found here. Add a source, e.g.:
@@ -19,8 +20,7 @@ version = 1
 # here. Give it a read-only key: read and view_index_metadata on the indices
 # (monitor on the cluster); a production profile refuses any write or manage
 # privilege, and a backend that answers without credentials. Trusted fields
-# are keyword fields. The console reaches it on a Docker network:
-# LOCKLOG_NETWORK=<network> locklog console --profile staging-search
+# are keyword fields. The console reaches it on its lock's egress network.
 # [profiles.staging-search]
 # production = false
 #

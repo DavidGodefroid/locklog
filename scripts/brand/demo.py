@@ -4,14 +4,15 @@
 Claude Code (left) investigates PDF errors on a staging profile. locklog_count shows the step at
 14:02, locklog_patterns the new pattern (the email and the IP masked to their kinds), and
 locklog_trace the order behind it, with the email's pseudonym: all free, all masked. The agent then asks locklog_unmask for
-the email. The locklog console (right, its own account and container) shows the read-pii approval
-screen: the masked record with the exact span marked » «, the agent's reason and what revealing it
-lets the agent do. The human answers "n". The agent gets "denied by the human" and carries on
-without the address. The console's audit (bottom) keeps every call, with no clear value. Pure SVG + CSS keyframes, so it plays on
+the email. lox run (right, lockhub's terminal, outside the agent) shows the read-pii ticket of the
+locklog lock: the masked record with the exact span marked » «, the agent's reason and what
+revealing it lets the agent do; it is never auto-approved. The human answers "n". The agent gets
+"denied by the human" and carries on without the address. The console's audit (bottom) keeps every
+call, with no clear value. Pure SVG + CSS keyframes, so it plays on
 GitHub, on the site and in any browser; every animation shares one clock of LOOP seconds, and
 prefers-reduced-motion shows the final frame.
 
-The tool names, the pseudonym format and the refusal text follow the code (the approval screen is a simplified rendering of the console's); the demo test
+The tool names, the pseudonym format and the refusal text follow the code (the ticket card is a simplified rendering of lox run's); the demo test
 (scripts/brand/check_demo.py) checks the committed SVG is this script's output and that its
 strings stay in step. The demo profile is labelled staging: unmask is off by default on
 production.
@@ -127,7 +128,7 @@ agent = [
 for i, (t, parts) in enumerate(agent):
     body.append(spans(ax, ay + i * LH, parts, cls=show(t)))
 row = len(agent)
-body.append(spans(ax, ay + row * LH, [("  └ ", D), ("Waiting for approval in the locklog console…", Y)],
+body.append(spans(ax, ay + row * LH, [("  └ ", D), ("Pending: ticket on lox run, waiting for you…", Y)],
                   cls=show(6.1, 11.4)))
 reply = [
     (11.6, [("  └ ", D), ("Error: denied by the human; do not retry", T)]),
@@ -142,20 +143,20 @@ for i, (t, parts) in enumerate(reply):
 
 # --- Console pane (right) -----------------------------------------------------------------
 CX, CY, CW, CH = 604, 24, 572, 408
-pane(CX, CY, CW, CH, "locklog console", "account locklog · its own container")
+pane(CX, CY, CW, CH, "lox run", "lockhub · a terminal of its own, outside the agent")
 cx, cy = CX + 16, CY + 52
 CS = 11
 CHW = CS * 0.602  # one character is 0.602 em wide
 con = [
-    [("$ ", D), ("locklog console", T)],
-    [("✓ ", G), ("profile ", T), ("staging", Y), (" · sources api, nginx, system", T)],
-    [("› ", C["accent"]), ("socket /run/locklog/<project>-staging.sock", T)],
+    [("$ ", D), ("lox run", T)],
+    [("✓ ", G), ("hub up · lock ", T), ("logs", Y), (" (locklog) · profile staging", T)],
+    [("› ", C["accent"]), ("free calls: masked and audited, no ticket", T)],
 ]
 for i, parts in enumerate(con):
     body.append(spans(cx, cy + i * LH, parts, size=CS))
-# Free calls print nothing on the console: they go to the audit only.
+# Free calls make no ticket: they go to the console's audit only.
 screen = [
-    [("╭─ ", V), ("STAGING", Y), (" · unmask · read-pii ", T), ("──────────────────────────────", V)],
+    [("╭─ ", V), ("STAGING", Y), (" · logs · unmask · read-pii · never auto ", T), ("─────────────", V)],
     [("│ ", V), ("uid 10052 (agent) · reason ", D), ('"contact the customer"', T)],
     [("│ ", V), ("source: api · record: 2026-10-30T14:02:11.204Z", T)],
     [("│ ", V), ("reveal: ", T), (EMAIL, Y)],
@@ -167,7 +168,7 @@ for i, parts in enumerate(screen):
     g.append(spans(cx, cy + (srow + i) * LH, parts, size=CS))
 g.append("</g>")
 body.append("".join(g))
-# The record stays masked on the approval screen, with the asked span marked.
+# The record stays masked on the ticket, with the asked span marked.
 ry = cy + (srow + len(screen)) * LH
 pre = "│   render pdf for »"
 marked_rec = [("│   ", V), ("render pdf for ", T), ("»", C["amber"]), (EMAIL, Y), ("«", C["amber"]),
@@ -188,8 +189,8 @@ for i, parts in enumerate(tail):
 g.append("</g>")
 body.append("".join(g))
 py = ry + (2 + len(tail)) * LH
-ask = "╰─ Approve? [y/N] "
-body.append(spans(cx, py, [("╰─ ", V), ("Approve? [y/N] ", T)], cls=show(6.8), size=CS))
+ask = "╰─ y approve · n deny · d details  "
+body.append(spans(cx, py, [("╰─ ", V), ("y approve · n deny · d details  ", T)], cls=show(6.8), size=CS))
 body.append(text(cx + CHW * len(ask), py, "n", cls=show(10.6, fade=0.03), size=CS, col=R, weight=700))
 blink = anim([(0, "opacity:0"), (6.9, "opacity:0"), (6.91, "opacity:1"), (7.4, "opacity:1"),
               (7.41, "opacity:0"), (7.8, "opacity:0"), (7.81, "opacity:1"), (8.29, "opacity:1"),
@@ -260,7 +261,7 @@ body.append(spans(BX + 16, BY + 68, denied, cls=show(11.4), size=10))
 
 # Captions.
 caps = [(0.0, 5.7, "Counts, patterns and traces are free, and masked before the model sees them."),
-        (5.7, 11.2, "Unmasking a value waits for you, in a console the agent can't reach."),
+        (5.7, 11.2, "Unmasking a value waits for you, in lox run, outside the agent's reach."),
         (11.2, END, "You said no. The agent never saw the address, and the audit kept the call.")]
 for t0, t1, s in caps:
     body.append(text(W / 2, 580, s, cls=show(t0 + 0.05, t1 - 0.2), size=23, weight=650,
@@ -269,8 +270,8 @@ for t0, t1, s in caps:
 label = ("locklog: Claude Code asks when the PDF errors started on a staging profile. locklog_count "
          "shows the step at 14:02, locklog_patterns finds the new pattern with the email and the IP "
          "masked, and locklog_trace follows order 4812: all free and masked. The agent "
-         "then asks locklog_unmask for the email. The locklog console, in its own account and "
-         "container, shows the read-pii approval screen with the masked record and the span marked; "
+         "then asks locklog_unmask for the email. lox run, lockhub's terminal outside the agent, "
+         "shows the read-pii ticket with the masked record and the span marked, never auto-approved; "
          "the human answers n. The agent gets denied and "
          "carries on without the address; the audit records every call with pseudonyms only.")
 print(f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W}" height="{H}" '

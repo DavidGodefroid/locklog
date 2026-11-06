@@ -197,7 +197,7 @@ func TLSFiles(p config.Profile, project string) error {
 				return fmt.Errorf("source %s: tls_ca %s is not readable by the console: copy the CA certificate into %s/ (the console sees only the project's .locklog/, its home volume %s and the image's %s)",
 					s.Name, c, ll, home, imageCAs)
 			default:
-				return fmt.Errorf("source %s: %s %s is not readable by the console, or would be readable by agents: put the client certificate and key in the console's home volume (%s/..., the locklog-home volume), never in the project",
+				return fmt.Errorf("source %s: %s %s is not readable by the console, or would be readable by agents: put the client certificate and key in the console's home volume (%s/..., the lock's home volume), never in the project",
 					s.Name, f.key, c, home)
 			}
 		}

@@ -594,7 +594,7 @@ func (w *walk) leafMasked(v parse.Value, name, clearPath string, trusted bool, i
 	switch {
 	case hasRule && rule.Mode == ModePseudonym:
 		out = w.whole(s, rule.Kind)
-	case personal:
+	case personal && !hasRule: // an allow rule shows a personal name's value
 		out = w.whole(s, "")
 	case memo:
 		out = plainValue(v.Kind, s)

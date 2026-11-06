@@ -79,24 +79,26 @@ less install.sh &amp;&amp; sh install.sh</code></pre>
 
 <section aria-labelledby="trial">
   <h2 id="trial">Trial, on a non-production profile</h2>
-  <p class="prose">About five minutes. Run it on a <strong>non-production</strong> profile: your agent runs on your own account, where it could still read the logs directly.</p>
-  <pre tabindex="0" class="term"><code><span class="cmt"># Describe your logs: setup detects files, journald and containers,
-# asks whether the profile is production (answer "no" for the trial),
-# and wires the detected agents (Claude Code, Codex, Cursor, Gemini CLI)</span>
-locklog setup --agent host
+  <p class="prose">Run it on a <strong>non-production</strong> profile: a host agent runs on your own account, where it could still read the logs directly. <code>lox add locklog</code> runs locklog’s launcher verbs from the project: <code>locklog profile add --non-interactive</code> (a profile from the logs this host has; never a secret), <code>locklog init claude</code> and <code>locklog doctor --fix --yes</code>.</p>
+  <pre tabindex="0" class="term"><code><span class="cmt"># The Lock Family: lox and every lock's launcher (cosign verifies each image)</span>
+brew trust davidgodefroid/tap
+brew install davidgodefroid/tap/lockfamily
 
-<span class="cmt"># The console, in a terminal you keep in view (setup prints the line;</span>
-<span class="cmt"># containers get a profile of their own, &lt;profile&gt;-docker)</span>
-locklog console --profile &lt;profile&gt;</code></pre>
-  <p class="prose">Then, in another terminal, ask your agent: <em>“when did the 502s start?”</em>. It calls <code>locklog_count</code>, <code>locklog_patterns</code> and <code>locklog_trace</code>; the console audits every call and asks you only when the agent wants more than the free budgets or a value in clear. In this trial the MCP server runs as the image’s <code>agent</code> account, launched from your account, and the launcher’s <code>mcp</code> refuses production profiles.</p>
+<span class="cmt"># From the project: lox add runs locklog profile add, init claude and doctor;
+# lox run, in a terminal of its own, starts the hub and the console and
+# decides the tickets</span>
+cd ~/projects/shop
+lox add locklog logs
+lox run</code></pre>
+  <p class="prose">Then, in another terminal, ask your agent: <em>“when did the 502s start?”</em>. It calls <code>locklog_count</code>, <code>locklog_patterns</code> and <code>locklog_trace</code>: free, masked, audited; a scan or a value in clear becomes a ticket that <code>lox run</code> shows you and never approves on its own. Attach to the console (<code>lox attach logs</code>) for its own questions: the policy review at its first start. In this trial the MCP server runs as the image’s <code>agent</code> account, launched from your account, and the launcher’s <code>mcp</code> refuses production profiles.</p>
 </section>
 
 <section aria-labelledby="production">
   <h2 id="production">For production</h2>
   <p class="prose">On production the agent must not be able to read the logs, the Docker socket or the backends itself (precondition <a href="../security/#p1">P1</a>). Run it:</p>
   <ul class="cards">
-    <li><h3>In lea</h3><p>Planned: no <a href="https://github.com/DavidGodefroid/lea">lea</a> release supports locklog yet (<code>locklog setup --agent lea</code> says so). Use your own container meanwhile.</p></li>
-    <li><h3>In its own container</h3><p><code>locklog setup --agent container</code> prints a tested Dockerfile snippet for your agent image and the <code>docker run</code> line. The agent user must not have sudo.</p></li>
+    <li><h3>In lea</h3><p><a href="https://github.com/DavidGodefroid/lea">lea</a> runs the agent in a container of its own, with the lock’s socket mounted.</p></li>
+    <li><h3>In its own container</h3><p><a href="https://github.com/DavidGodefroid/locklog/blob/main/docs/setup.md#the-own-container-recipe">docs/setup.md</a> has a tested Dockerfile snippet for your agent image and the <code>docker run</code> line. The agent user must not have sudo.</p></li>
   </ul>
   <p class="prose">Your agent CLI’s own login (Anthropic, OpenAI, Google) is yours to set up. Then run <code>locklog doctor</code> where the agent runs: it checks the common ways P1 fails, and on a production profile its findings are errors.</p>
 </section>

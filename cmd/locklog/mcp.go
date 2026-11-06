@@ -12,11 +12,14 @@ import (
 	"syscall"
 
 	"github.com/DavidGodefroid/lockkit/agentwire"
+	"github.com/DavidGodefroid/lockkit/client"
 	"github.com/DavidGodefroid/lockkit/mcpkit"
+	"github.com/DavidGodefroid/lockkit/sanitize"
 
 	"github.com/DavidGodefroid/locklog/internal/agentassets"
 	"github.com/DavidGodefroid/locklog/internal/config"
 	"github.com/DavidGodefroid/locklog/internal/mcptools"
+	"github.com/DavidGodefroid/locklog/internal/product"
 )
 
 // profileNames lists the configured profiles of cwd's project, sorted.
@@ -33,15 +36,27 @@ func profileNames(cwd string) ([]string, error) {
 	return names, nil
 }
 
-// mcpCmd is `locklog mcp [--profile P]`: the agent's MCP server on stdin
-// and stdout. LOCKLOG_HOST_AGENT (set by the launcher's mcp) makes it the
-// host agent's: production profiles are refused.
+const mcpUsage = "usage: locklog mcp [--profile P] [--instance NAME]"
+
+// mcpCmd is `locklog mcp [--profile P] [--instance NAME]`: the agent's MCP
+// server on stdin and stdout, for the lock instance --instance names (else
+// LOCKLOG_INSTANCE, else the one lock lea lists). LOCKLOG_HOST_AGENT (set
+// by the launcher's mcp) makes it the host agent's: production profiles
+// are refused.
 func mcpCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	profile := fs.String("profile", "", "pin the server to one profile")
+	inst := fs.String(client.FlagInstance, "", "the lock instance, one among several locklog locks")
 	if err := fs.Parse(args); err != nil || fs.NArg() > 0 {
-		fmt.Fprintln(stderr, "usage: locklog mcp [--profile P]")
+		fmt.Fprintln(stderr, mcpUsage)
+		return 2
+	}
+	// Its error names the flag or the variable, never the value.
+	instance, err := client.ResolveInstance(product.P, *inst)
+	if err != nil {
+		fmt.Fprintln(stderr, "locklog mcp:", sanitize.Terminal(err.Error(), false))
+		fmt.Fprintln(stderr, mcpUsage)
 		return 2
 	}
 	cwd, err := os.Getwd()
@@ -52,7 +67,7 @@ func mcpCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	s := mcptools.New(mcptools.Options{
 		Pinned:    *profile,
 		Profiles:  func() ([]string, error) { return profileNames(cwd) },
-		Dial:      mcptools.DialClient(cwd, version),
+		Dial:      mcptools.DialClient(cwd, instance, version),
 		Version:   version,
 		HostAgent: os.Getenv("LOCKLOG_HOST_AGENT") == "1",
 		Requester: mcpkit.RequesterFromEnv(),

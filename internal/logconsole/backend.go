@@ -30,6 +30,7 @@ import (
 
 	"github.com/DavidGodefroid/locklog/internal/config"
 	"github.com/DavidGodefroid/locklog/internal/egress"
+	"github.com/DavidGodefroid/locklog/internal/mask"
 	"github.com/DavidGodefroid/locklog/internal/product"
 )
 
@@ -227,7 +228,7 @@ type Backend struct {
 	o Options
 
 	mu sync.Mutex
-	// hub is the console's hub mode (OnHub), nil standalone.
+	// hub is the console's hub (OnHub), nil until console.Run opened it.
 	hub *console.Hub
 	// fp is the policy in force (the last session's), in a ticket's form:
 	// what a renewal is checked against.
@@ -235,6 +236,15 @@ type Backend struct {
 	// exp counts the records with each pseudonym returned to agents in
 	// the epoch (the unmask screen shows it), across sessions.
 	exp *Exposure
+	// cur is the open session (pii.list and pii.add reach its engine),
+	// nil once closed.
+	cur *session
+	// env is the console, as the first call met it: pii.add's refusals
+	// are audited through it.
+	env console.Env
+	// pendingAdd is the canonical form of the agent rule SaveMask just
+	// stored, until the console's record of it (AuditRecord).
+	pendingAdd string
 }
 
 var _ console.Backend = (*Backend)(nil)
@@ -348,13 +358,25 @@ func (b *Backend) LoadPolicy() (console.Policy, error) {
 	if err != nil {
 		return nil, err
 	}
-	return Policy{p}, nil
+	// The allow rules of .locklog/pii.toml loosen the masking: they are
+	// part of the policy, reviewed as any loosening, and the engine
+	// applies only those of the approved policy.
+	rules, err := mask.LoadProjectRules(filepath.Join(b.o.Root, ".locklog", "pii.toml"))
+	if err != nil {
+		return nil, err
+	}
+	for _, a := range rules.Allow {
+		p.PIIAllow = append(p.PIIAllow, a.Text())
+	}
+	return Policy{config.Canonical(p)}, nil
 }
 
 // session is one open engine.
 type session struct {
 	engine Engine
 	policy Policy
+	// closing is called once the session closes.
+	closing func(*session)
 
 	// done is closed when the session closes: the calls in flight are
 	// cancelled (callContext).
@@ -372,6 +394,9 @@ func (s *session) Close() error {
 	s.once.Do(func() {
 		if s.done != nil {
 			close(s.done)
+		}
+		if s.closing != nil {
+			s.closing(s)
 		}
 		err = s.engine.Close()
 	})
@@ -431,10 +456,22 @@ func (b *Backend) Connect(ctx context.Context, c console.Credentials) (console.S
 	if err != nil {
 		return nil, err
 	}
+	ls := newSession(e, pol)
+	ls.closing = b.closed
 	b.mu.Lock()
 	b.fp = policyFP(pol)
+	b.cur = ls
 	b.mu.Unlock()
-	return newSession(e, pol), nil
+	return ls, nil
+}
+
+// closed forgets s once it closes, if it is the open session.
+func (b *Backend) closed(s *session) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.cur == s {
+		b.cur = nil
+	}
 }
 
 // Checks implements console.Backend: a console with no remote source and
@@ -456,15 +493,15 @@ func (b *Backend) Checks(ctx context.Context, s console.Session) []console.Findi
 	b.mu.Lock()
 	hub := b.hub != nil
 	b.mu.Unlock()
-	// In hub mode the console is on the network it reaches lockhub on
-	// (lox up's internal network): that one interface, and no other. The
+	// The console is on the network it reaches lockhub on (lox run's
+	// internal network): that one interface, and no other. The
 	// engine of a local-only profile dials nothing; the hub client dials
 	// the pinned hub only.
 	if hub && len(ifs) == 1 {
 		return nil
 	}
 	if len(ifs) > 0 {
-		what := "but its profile reads only local logs: start it with the launcher (no network)"
+		what := "but its profile reads only local logs, and it has no hub yet: no network"
 		if hub {
 			what = "but in hub mode a profile that reads only local logs has the hub's network only: one interface"
 		}
@@ -514,6 +551,11 @@ func (b *Backend) handler(method string) console.Handler {
 		if len(params) == 0 {
 			params = json.RawMessage("{}")
 		}
+		b.mu.Lock()
+		if b.env == nil {
+			b.env = env
+		}
+		b.mu.Unlock()
 		// Recorded first: a call refused before the engine runs (no
 		// session, a failed reopen) is audited too.
 		rec := newRecord(ctx, env, method, params)
@@ -801,8 +843,8 @@ const SystemFile = "/etc/locklog/system.toml"
 
 // InImage reports whether this process runs in locklog's image: as the
 // console account, or with the image's system file present.
-// The console runs only in the launcher's container (or `lox up`'s), which
-// always passes LOCKLOG_EXPECT_DIR: a host holding the system file but
+// The console runs only in the container `lox run` starts, which always
+// passes LOCKLOG_EXPECT_DIR: a host holding the system file but
 // started without the launcher is refused, by design.
 func InImage(uid int, stat func(string) (os.FileInfo, error)) bool {
 	if uid == product.ConsoleUID {

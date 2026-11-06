@@ -513,7 +513,7 @@ func buildRemote(kind string, r rawSource, production bool, errf func(string, ..
 			if rem.OrgID != "" {
 				hint = " (an org_id alone is not authentication)"
 			}
-			return nil, errf("auth = \"none\" is refused on a production profile%s: put the backend behind an authenticating proxy (locklog setup prints one)", hint)
+			return nil, errf("auth = \"none\" is refused on a production profile%s: put the backend behind an authenticating proxy (locklog profile add --loki-proxy generates one for a Compose Loki)", hint)
 		}
 		if rem.User != "" || rem.Credentials != "" || rem.VaultPath != "" {
 			return nil, errf("auth = \"none\" takes no user, credentials or vault_path")
