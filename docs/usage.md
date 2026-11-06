@@ -236,13 +236,15 @@ The output cap applies to every answer:
 
 ## Starting: `lox run`
 
-The console is started by `lox run` only (lockhub v0.9.0 or later), hub
+The console is started by `lox run` only (the first lockhub release that
+knows the locklog type: lockhub#84, #86, #87, after v0.9.0), hub
 attached: `locklog console` without its hub flags refuses with lockkit's
 "the console is launched by `lox up` only" (lockkit's text predates the
 `lox run` name). The journey:
 
 ```sh
-brew install davidgodefroid/tap/lockfamily
+brew trust davidgodefroid/tap
+brew install davidgodefroid/tap/lockfamily   # or: brew install davidgodefroid/tap/locklog
 lox init                      # or: lox add locklog logs
 lox run                       # in a terminal of its own, kept open
 ```

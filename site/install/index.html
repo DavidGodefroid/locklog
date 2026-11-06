@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Install — locklog</title>
-  <meta name="description" content="Install the locklog launcher with curl -fsSL https://locklog.dev/install.sh | sh, try it on a non-production profile, and place the agent for production.">
+  <meta name="description" content="Install locklog with Homebrew (brew install davidgodefroid/tap/lockfamily) and lox add locklog, or the launcher alone with install.sh; try it on a non-production profile, and place the agent for production.">
   <meta name="color-scheme" content="light dark">
   <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
   <meta name="theme-color" content="#0b1120" media="(prefers-color-scheme: dark)">
@@ -12,12 +12,12 @@
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="locklog">
   <meta property="og:title" content="Install — locklog">
-  <meta property="og:description" content="Install the locklog launcher with curl -fsSL https://locklog.dev/install.sh | sh, try it on a non-production profile, and place the agent for production.">
+  <meta property="og:description" content="Install locklog with Homebrew (brew install davidgodefroid/tap/lockfamily) and lox add locklog, or the launcher alone with install.sh; try it on a non-production profile, and place the agent for production.">
   <meta property="og:url" content="https://locklog.dev/install/">
   <meta property="og:locale" content="en_US">
   <meta name="twitter:card" content="summary">
   <meta name="twitter:title" content="Install — locklog">
-  <meta name="twitter:description" content="Install the locklog launcher with curl -fsSL https://locklog.dev/install.sh | sh, try it on a non-production profile, and place the agent for production.">
+  <meta name="twitter:description" content="Install locklog with Homebrew (brew install davidgodefroid/tap/lockfamily) and lox add locklog, or the launcher alone with install.sh; try it on a non-production profile, and place the agent for production.">
   <link rel="icon" href="../assets/logo.svg" type="image/svg+xml">
   <link rel="stylesheet" href="../assets/style.css">
   <script src="../assets/anchors.js" defer></script>
@@ -46,11 +46,11 @@
   <p class="lead">A launcher on the host, the console in its own container, and your agent placed where it cannot read the logs itself.</p>
 </div>
 
-<div class="notice" role="note"><p><strong>Early release.</strong> v0.1.0 is the first release of locklog (see the <a href="https://github.com/DavidGodefroid/locklog/blob/main/CHANGELOG.md">CHANGELOG</a>). It is built on <a href="https://github.com/DavidGodefroid/lockkit">lockkit</a>, and its design is public in <a href="https://github.com/DavidGodefroid/locklog/blob/main/docs/security-model.md">docs/security-model.md</a>.</p></div>
+<div class="notice" role="note"><p><strong>Early release.</strong> locklog is in early releases (see the <a href="https://github.com/DavidGodefroid/locklog/blob/main/CHANGELOG.md">CHANGELOG</a>). It is built on <a href="https://github.com/DavidGodefroid/lockkit">lockkit</a>, and its design is public in <a href="https://github.com/DavidGodefroid/locklog/blob/main/docs/security-model.md">docs/security-model.md</a>.</p></div>
 
 <section aria-labelledby="status">
   <h2 id="status">Status</h2>
-  <p class="prose"><code>install.sh</code> installs the latest <strong>published</strong> release (v0.2.0 at this writing); <code>LOCKLOG_VERSION=vX.Y.Z</code> pins a tag. Follow the <a href="https://github.com/DavidGodefroid/locklog/blob/main/CHANGELOG.md">CHANGELOG</a> and the <a href="https://github.com/DavidGodefroid/locklog/releases">releases page</a>.</p>
+  <p class="prose"><code>lox add locklog</code> and the locklog console in <code>lox run</code> come with the lockhub release that adds the locklog type (<a href="https://github.com/DavidGodefroid/lockhub/issues/84">lockhub#84</a>, <a href="https://github.com/DavidGodefroid/lockhub/issues/86">#86</a>, <a href="https://github.com/DavidGodefroid/lockhub/issues/87">#87</a>; lockhub v0.9.0 does not know it yet), and the tap’s <code>locklog</code> formula, and locklog in <code>lockfamily</code>, with it. <code>install.sh</code> installs the latest <strong>published</strong> release (v0.2.0 at this writing); <code>LOCKLOG_VERSION=vX.Y.Z</code> pins a tag. Follow the <a href="https://github.com/DavidGodefroid/locklog/blob/main/CHANGELOG.md">CHANGELOG</a> and the <a href="https://github.com/DavidGodefroid/locklog/releases">releases page</a>.</p>
 </section>
 
 <section aria-labelledby="prerequisites">
@@ -59,13 +59,20 @@
     <li>A Linux host with the logs.</li>
     <li>Docker ≥ 19.03.</li>
     <li><a href="https://docs.sigstore.dev/cosign/system_config/installation/">cosign</a>, to verify the release and the image.</li>
-    <li>sudo for <code>/usr/local/bin</code>.</li>
+    <li>Homebrew, or (for <code>install.sh</code>) sudo for <code>/usr/local/bin</code>.</li>
     <li>A terminal you keep in view, where the console stays open.</li>
   </ul>
 </section>
 
 <section aria-labelledby="install">
-  <h2 id="install">Install the launcher</h2>
+  <h2 id="install">Install</h2>
+  <p class="prose">The shortest path is the Lock Family’s: install it with Homebrew, then let <code>lox add locklog</code> (or <code>lox init</code>) set up the lock from the project and <code>lox run</code> start it, in a terminal of its own, outside the agent.</p>
+  <pre tabindex="0" class="term"><code>brew trust davidgodefroid/tap                <span class="cmt"># Homebrew asks you to trust a third-party tap once</span>
+brew install davidgodefroid/tap/lockfamily   <span class="cmt"># or only this tool: brew install davidgodefroid/tap/locklog</span>
+cd ~/projects/shop
+lox add locklog logs                          <span class="cmt"># or: lox init</span>
+lox run                                       <span class="cmt"># approvals live there</span></code></pre>
+  <h3 id="install-sh">Or the launcher alone</h3>
   <pre tabindex="0" class="term"><code>curl -fsSL https://locklog.dev/install.sh | sh</code></pre>
   <div class="prose">
     <p><code>install.sh</code> installs the latest published release, or <code>LOCKLOG_VERSION=vX.Y.Z</code>. It verifies the release with cosign before it installs a root-owned <code>/usr/local/bin/locklog</code>, and the launcher runs the image by its signed digest.</p>
@@ -82,7 +89,7 @@ less install.sh &amp;&amp; sh install.sh</code></pre>
   <p class="prose">Run it on a <strong>non-production</strong> profile: a host agent runs on your own account, where it could still read the logs directly. <code>lox add locklog</code> runs locklog’s launcher verbs from the project: <code>locklog profile add --non-interactive</code> (a profile from the logs this host has; never a secret), <code>locklog init claude</code> and <code>locklog doctor --fix --yes</code>.</p>
   <pre tabindex="0" class="term"><code><span class="cmt"># The Lock Family: lox and every lock's launcher (cosign verifies each image)</span>
 brew trust davidgodefroid/tap
-brew install davidgodefroid/tap/lockfamily
+brew install davidgodefroid/tap/lockfamily   <span class="cmt"># or: brew install davidgodefroid/tap/locklog</span>
 
 <span class="cmt"># From the project: lox add runs locklog profile add, init claude and doctor;
 # lox run, in a terminal of its own, starts the hub and the console and

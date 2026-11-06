@@ -112,7 +112,7 @@
   <p class="prose">locklog is one lock of the Lock Family: <code>lox run</code> (lockhub) starts its console, in a terminal you keep open, outside the agent. Try it on a <strong>non-production</strong> profile: a host agent runs on your own account, where it could still read the logs directly.</p>
   <pre tabindex="0" class="term"><code><span class="cmt"># The Lock Family: lox and every lock's launcher (cosign verifies each image)</span>
 brew trust davidgodefroid/tap
-brew install davidgodefroid/tap/lockfamily
+brew install davidgodefroid/tap/lockfamily   <span class="cmt"># or: brew install davidgodefroid/tap/locklog</span>
 
 <span class="cmt"># From the project: lox add runs locklog profile add, init claude and doctor;
 # lox run, in a terminal of its own, starts the hub and the console and
