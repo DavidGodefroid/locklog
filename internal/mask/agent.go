@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -45,7 +46,15 @@ type AgentRules struct {
 
 	mu      sync.Mutex
 	entries []agentEntry
+
+	// digests memoizes digest (keyed, pure): every leaf of every
+	// record asks for its path's rule. Bounded (at most maxDigests,
+	// then it starts over).
+	digestMemo sync.Map // source + "\x00" + clear path -> digest
+	nDigests   atomic.Int64
 }
+
+const maxDigests = 4096
 
 type agentEntry struct {
 	Digest string    `json:"digest"`
@@ -103,12 +112,30 @@ func OpenAgentRules(dir string) (*AgentRules, error) {
 }
 
 func (a *AgentRules) digest(source, clearPath string) string {
+	k := source + "\x00" + clearPath
+	if d, ok := a.digestMemo.Load(k); ok {
+		return d.(string)
+	}
 	m := hmac.New(sha256.New, a.key)
-	m.Write([]byte(digestLabel + source + "\x00" + clearPath))
-	return hex.EncodeToString(m.Sum(nil))
+	m.Write([]byte(digestLabel + k))
+	d := hex.EncodeToString(m.Sum(nil))
+	if len(k) <= 512 {
+		if a.nDigests.Add(1) > maxDigests {
+			a.digestMemo.Clear()
+			a.nDigests.Store(1)
+		}
+		a.digestMemo.Store(k, d)
+	}
+	return d
 }
 
 func (a *AgentRules) lookup(source, clearPath string) (string, bool) {
+	a.mu.Lock()
+	none := len(a.entries) == 0
+	a.mu.Unlock()
+	if none {
+		return "", false // no rule: no digest to compute (every leaf asks)
+	}
 	d := a.digest(source, clearPath)
 	a.mu.Lock()
 	defer a.mu.Unlock()

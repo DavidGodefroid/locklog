@@ -682,14 +682,14 @@ func TestProcessedLeavesOutLokiStats(t *testing.T) {
 		return it.Processed(), len(f.requests)
 	}
 	none, pages := processed(nil)
-	n := 0
+	var calls atomic.Int64 // requests are served concurrently
 	timing := func() any {
-		n++
+		n := calls.Add(1)
 		return map[string]any{"summary": map[string]any{"execTime": 0.001 * float64(n*n*7919%1000), "queueTime": 1.25e-05 * float64(n),
 			"bytesProcessedPerSecond": 123456789 * n, "totalEntriesReturned": 100}, "querier": map[string]any{"store": map[string]any{"chunkRefsFetchTime": 7 * n}}}
 	}
 	a, _ := processed(timing)
-	b, _ := processed(func() any { n += 1000; return timing() })
+	b, _ := processed(func() any { calls.Add(1000); return timing() })
 	// What is left of the stats is their key, `,"stats":` on each page.
 	if a != b || a-none != int64(len(`,"stats":`)*pages) {
 		t.Fatalf("processed %d and %d bytes with stats, %d without (%d pages): the stats are counted", a, b, none, pages)

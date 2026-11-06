@@ -190,7 +190,7 @@ agent does through locklog writes or unmasks without the human.
 | Data | Where | Kept |
 |---|---|---|
 | Audit (one chained line per call, plus one per approval decision) | home volume | until you delete it. It holds the method, the source names, the time range, the decision, the peer and the pseudonyms an unmask revealed or a lookup resolved; not the predicates. The **reason the agent typed** for an approval is kept, masked by the detectors: a personal value in a form the detectors miss stays there |
-| Plans and approved scans | console memory | until used or expired (an approved scan: 30 minutes); gone when the session ends |
+| Plans and approved scans | console memory | until used or expired (an approved scan: 30 minutes, or its plan's bound when longer, at most 4 hours, shown on its approval screen); gone when the session ends |
 | Result cache | console memory | ≤ 64 MiB, gone when the session ends (a policy change, the console's exit) |
 | Local index | home volume | per file identity, rebuilt when a file changes; trusted field values masked at answer time |
 | Pseudonym keys | home volume | the current epoch's key; a replaced key until it has been replaced for `pseudonym_max_age` (30 days by default), deleted when the console opens the profile |

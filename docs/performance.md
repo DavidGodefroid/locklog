@@ -166,6 +166,22 @@ busy.
 | reading and parsing, one goroutine, before masking started | 15 % (a core idle meanwhile) | a group's records are masked while it is read |
 | the message: secret step and detectors | 30 % | unchanged (the work masking exists for) |
 
-After: 15.1 MiB/s on the same host and setup, 2.5 times faster. The cost
-model still calibrates on its worst-case corpus without the caches (its
-masker's source is `""`), so call sizing stays conservative.
+A second profile at 1-2 GiB found the per-leaf name checks (agent-rule
+digest, secret, personal and quasi names, human and allow rules: about 15 %)
+and cached them too. After: 11-15 MiB/s on the same host and setup (2 to
+2.5 times faster); on a CI runner (`GOMAXPROCS=2`), about 5 MiB/s after the
+first changes, up from 4.0. What is left is the message's detection (about
+37 %) and the JSON parser (about 28 %, `encoding/json`'s token decoder,
+which builds an error value at the end of every scalar).
+
+The cost model still calibrates on its worst-case corpus without the caches
+(its masker's source is `""`), so call sizing stays conservative.
+
+**Approved-scan TTL** (#104). 20 GiB in 30 minutes needs 11.38 MiB/s, out
+of reach on a 2-core runner. The gate is kept (20 GiB, one approval); the
+TTL becomes the bound of the approved plan, as R5-P3 and R6-P2 have it for
+long scans (one approval for the whole plan, continuations free until it
+ends): `max(30 min, 2 × the plan's time at the worst-case rate)`, at most
+4 hours (lockkit's grant TTL), shown on the approval screen. A worst-case
+bound is long (about 1.5 h per GiB of this corpus on the development
+host), so a 20 GiB plan gets the 4-hour ceiling.

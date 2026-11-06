@@ -172,7 +172,7 @@ Your agent CLI's own login (Anthropic, OpenAI, Google) is yours to set up.
 | `status`, `sources`, `search`, `count`, `patterns`, `context`, `trace`, `tail` within budgets | free, audited |
 | `lookup` (clear value → pseudonym, detector kinds only) | free, rate-limited, audited; or approved each time with `lookup = "approved"` |
 | `pii_list` / `pii_add` (agent masking rules, tighten only) | free, capped, audited (served once the console's PII backend lands, [#64](https://github.com/DavidGodefroid/locklog/issues/64)) |
-| `locklog_scan` (beyond a budget, approved once for its whole plan; its cursor continues free for 30 minutes) | you, at the console |
+| `locklog_scan` (beyond a budget, approved once for its whole plan; its cursor continues free for 30 minutes, or its plan's bound when longer, at most 4 hours) | you, at the console |
 | `locklog_unmask` (the clear value of exact spans of one record, once) | you, at the console, never auto-approved; **off by default on production** |
 | `locklog_request_change` (any loosening) | you, at the console's `:review` |
 | write, delete, admin | does not exist |

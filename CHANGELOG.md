@@ -32,10 +32,16 @@ uses [Semantic Versioning](https://semver.org/).
   trusted values the masker leaves unchanged when it scans what the index
   does not hold: it counts them by those values, as the index does, at
   parsing speed (#94). Such records are no longer masked failures.
-- Masking is about 2.5 times faster on JSON application logs: clean field
-  names and clean trusted values are cached, values withheld whole
-  (redact-unknown, redact rules) skip detection, and a group of records is
-  masked while it is read (#104, #110).
+- Masking is about 2 to 2.5 times faster on JSON application logs: clean
+  field names, clean trusted values and the decisions a leaf's name and
+  path take are cached, values withheld whole (redact-unknown, redact
+  rules) skip detection, agent-rule digests are memoized, and a group of
+  records is masked while it is read (#104). Job 1 of the Loki incident
+  without a `level` label answers within its 5 minutes (#110).
+- An approved scan whose plan is long lives as long as its plan's bound
+  (twice its time at the cost model's worst-case rate) instead of 30
+  minutes, at most 4 hours; its approval screen and `expires_at` say so.
+  A 20 GiB scan of local files then completes on its one approval (#104).
 
 ## [0.1.0] - 2026-11-06
 

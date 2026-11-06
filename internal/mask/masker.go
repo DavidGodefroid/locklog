@@ -158,6 +158,45 @@ type Masker struct {
 	// before. Bounded as cleanKeys.
 	cleanTrusted sync.Map // kind + "\x00" + value -> struct{}
 	nTrusted     atomic.Int64
+	// leafNames caches what a leaf's source, path and name decide
+	// (leafName): pure functions of them under the masker's fixed rules,
+	// checked on every leaf of every record. Agent rules, which change
+	// at runtime, are not in it. Bounded as cleanKeys.
+	leafNames sync.Map // source + "\x00" + clear path + "\x00" + name -> leafName
+	nLeaf     atomic.Int64
+}
+
+// leafName is what a leaf's source, clear path and name decide.
+type leafName struct {
+	secretName bool // SecretName(name)
+	rule       Rule // the human mask rule, if hasRule
+	hasRule    bool
+	personal   bool // LooksPersonal or LooksQuasi
+	allowed    bool // an allow rule (redact-unknown)
+}
+
+// leafName returns what source, clearPath and name decide for a leaf.
+func (m *Masker) leafName(source, clearPath, name string) leafName {
+	k := source + "\x00" + clearPath + "\x00" + name
+	cache := len(k) <= 2*maxCleanKeyLen
+	if cache {
+		if v, ok := m.leafNames.Load(k); ok {
+			return v.(leafName)
+		}
+	}
+	var ln leafName
+	ln.secretName = m.o.SecretName != nil && m.o.SecretName(name)
+	ln.rule, ln.hasRule = m.o.Rules.human(source, clearPath)
+	ln.personal = pii.LooksPersonal(name) || pii.LooksQuasi(name)
+	ln.allowed = m.o.Rules.allowed(source, clearPath)
+	if cache {
+		if m.nLeaf.Add(1) > maxCleanKeys {
+			m.leafNames.Clear()
+			m.nLeaf.Store(1)
+		}
+		m.leafNames.Store(k, ln)
+	}
+	return ln
 }
 
 // cleanKey is a cached field name: its clear name and the name shown.
@@ -507,25 +546,26 @@ func (w *walk) scoped(f func() (withheld bool)) {
 }
 
 func (w *walk) leafMasked(v parse.Value, name, clearPath string, trusted bool, inh inherited, hadSecret *bool) Value {
+	ln := w.m.leafName(w.source, clearPath, name)
 	// (1) Secrets, first and final.
-	if w.m.o.SecretName != nil && w.m.o.SecretName(name) {
+	if ln.secretName {
 		*hadSecret = true
 		return Value{kind: String, text: Secret}
 	}
 	// The field's own rule and an inherited one: the strongest wins
 	// (redact, then pseudonym, then allow).
-	rule, hasRule := w.m.o.Rules.human(w.source, clearPath)
+	rule, hasRule := ln.rule, ln.hasRule
 	if inh.pseudo != nil && (!hasRule || rule.Mode == ModeAllow) {
 		rule, hasRule = *inh.pseudo, true
 	}
-	personal := !trusted && (inh.personal || pii.LooksPersonal(name) || pii.LooksQuasi(name))
+	personal := !trusted && (inh.personal || ln.personal)
 	// A value withheld whatever it holds (a human redact rule, or an
 	// untrusted field under redact-unknown) is withheld before any
 	// detection, the secret step's included: its result would be
 	// dropped, and Kinds must not tell what the value held. Its cost
 	// then does not depend on its content either.
 	if hasRule && rule.Mode == ModeRedact ||
-		!hasRule && !personal && !trusted && w.m.o.Structured == StructuredRedactUnknown && !w.m.o.Rules.allowed(w.source, clearPath) {
+		!hasRule && !personal && !trusted && w.m.o.Structured == StructuredRedactUnknown && !ln.allowed {
 		w.kinds["redacted"] = true
 		return Value{kind: String, text: Redacted}
 	}

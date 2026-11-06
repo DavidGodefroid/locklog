@@ -4,7 +4,8 @@ package engine
 
 // The approved-scan test (design §9.1, §3.3, R5-P3): a 20 GiB approved
 // scan on local files completes across continuations within one approval
-// and its 30-minute TTL. The CI scan-volume job generates the files on
+// and its TTL: 30 minutes, or its plan's bound when longer (scanTTL, #104),
+// at most MaxScanTTL. The CI scan-volume job generates the files on
 // the runner (LOCKLOG_SCAN_VOLUME=20GiB, LOCKLOG_SCAN_DIR on its larger
 // disk); locally, LOCKLOG_SUITES=1 runs a scaled-down variant (128 MiB),
 // or LOCKLOG_SCAN_VOLUME sets the volume.
@@ -126,6 +127,7 @@ func TestApprovedScanVolume(t *testing.T) {
 	con := &screens{}
 	ctx := con.ctx(1000)
 	start = time.Now()
+	approved := time.Now().Truncate(time.Second)
 	var (
 		calls   int
 		scanned int64
@@ -142,26 +144,8 @@ func TestApprovedScanVolume(t *testing.T) {
 		calls++
 		if a.refusal != nil || a.err != nil {
 			took := time.Since(start)
-			rate := float64(scanned) / took.Seconds()
-			t.Logf("scan ended after %d calls, %v: %v %v", calls, took.Round(time.Second), a.refusal, a.err)
-			t.Logf("scanned %.2f GiB of %.2f GiB at %.2f MiB/s; %v would need %.2f MiB/s", float64(scanned)/(1<<30), float64(total)/(1<<30),
-				rate/(1<<20), DefaultScanTTL, float64(total)/DefaultScanTTL.Seconds()/(1<<20))
-			expired := a.refusal != nil && a.refusal.Code == EStale && strings.Contains(a.refusal.Message, "expired") && took >= DefaultScanTTL
-			if !expired {
-				t.Fatalf("the approved scan did not complete on its approval (%d approvals)", con.count())
-			}
-			// The known gap (#104): the TTL ends the scan. What holds
-			// is still asserted: one approval for the whole plan, a
-			// steady rate, no personal value in any answer.
-			if con.count() != 1 {
-				t.Errorf("%d approvals, want 1 for the whole plan", con.count())
-			}
-			checkSteady(t, rates)
-			if t.Failed() {
-				return
-			}
-			t.Skipf("known gap, https://github.com/DavidGodefroid/locklog/issues/104: the TTL (%v) expired after %.2f of %.2f GiB at %.2f MiB/s on one approval (%.2f MiB/s needed)",
-				DefaultScanTTL, float64(scanned)/(1<<30), float64(total)/(1<<30), rate/(1<<20), float64(total)/DefaultScanTTL.Seconds()/(1<<20))
+			t.Fatalf("the approved scan ended after %d calls, %v, %.2f of %.2f GiB (%d approvals): %v %v", calls, took.Round(time.Second),
+				float64(scanned)/(1<<30), float64(total)/(1<<30), con.count(), a.refusal, a.err)
 		}
 		if strings.Contains(string(a.res), "@shop.example") || strings.Contains(string(a.res), "user1") {
 			t.Fatalf("call %d: a personal value reached the agent: %.300s", calls, a.res)
@@ -201,8 +185,15 @@ func TestApprovedScanVolume(t *testing.T) {
 		t.Errorf("%d approvals, want 1 for the whole plan", con.count())
 	}
 	checkSteady(t, rates)
-	if took > DefaultScanTTL || time.Now().After(infos[len(infos)-1].ExpiresAt) {
-		t.Errorf("the scan took %v, past its TTL %v", took, DefaultScanTTL)
+	// The scan's lifetime is its plan's bound (scanTTL, #104): at least
+	// 30 minutes, at most MaxScanTTL, stated on its approval screen.
+	ttl := infos[0].ExpiresAt.Sub(approved)
+	t.Logf("TTL %v (the plan's bound; 30 minutes would need %.2f MiB/s)", ttl.Round(time.Second), float64(total)/DefaultScanTTL.Seconds()/(1<<20))
+	if ttl < DefaultScanTTL || ttl > MaxScanTTL+time.Minute {
+		t.Errorf("TTL %v, want between %v and %v", ttl, DefaultScanTTL, MaxScanTTL)
+	}
+	if time.Now().After(infos[len(infos)-1].ExpiresAt) {
+		t.Errorf("the scan took %v, past its TTL %v", took, ttl)
 	}
 	if want := (lines + 999) / 1000; n != want {
 		t.Errorf("counted %d time-outs, want %d", n, want)

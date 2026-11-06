@@ -302,7 +302,8 @@ func (e *Engine) admitPlan(ctx context.Context, tool, digest string, plan source
 	if e.scans.live(e.o.Now()) >= MaxScans {
 		return nil, "", &Error{Code: EOverBudget, Message: fmt.Sprintf("%d approved scans are in progress already: finish one, or wait for it to expire", MaxScans)}
 	}
-	screen := e.scanScreen(tool, plan, scope(), sc.note)
+	ttl := e.scanTTL(plan)
+	screen := e.scanScreen(tool, plan, scope(), sc.note, ttl)
 	screen.Hash = hash
 	screen.Inputs = map[string]string{"tool": e.inputDigest("tool", []byte(tool)), "query": e.inputDigest("query", []byte(digest)),
 		"budget": e.inputDigest("budget", []byte(strconv.FormatInt(e.o.ScanBytes, 10))), "policy": e.inputDigest("policy", []byte(fp))}
@@ -317,7 +318,7 @@ func (e *Engine) admitPlan(ctx context.Context, tool, digest string, plan source
 	var b [12]byte
 	rand.Read(b[:])
 	s := &scanState{id: hex.EncodeToString(b[:]), uid: sc.peer.UID, hash: hash, policyFP: fp, tool: tool, plan: plan, desc: desc,
-		expires: e.o.Now().Add(e.o.ScanTTL), state: scanExecuting, busy: true}
+		expires: e.o.Now().Add(ttl), state: scanExecuting, busy: true}
 	sc.claimed = true
 	s.query = e.boundDigest(digest, s.id)
 	e.scans.mu.Lock()
@@ -328,10 +329,30 @@ func (e *Engine) admitPlan(ctx context.Context, tool, digest string, plan source
 	return f, s.query, nil
 }
 
+// MaxScanTTL bounds the lifetime of an approved scan however long its plan
+// (lockkit's grant: one approval for a bounded read scope, 4 h).
+const MaxScanTTL = 4 * time.Hour
+
+// scanTTL is an approved scan's lifetime from its approval (design R5-P3,
+// R6-P2: one approval for the whole plan, continuations free until it
+// ends): ScanTTL, or the bound of its plan when that is longer: twice the
+// plan's time at the cost model's worst-case rate (the calls stop before a
+// group that would not fit, so they use part of their deadlines), at most
+// MaxScanTTL. A plan's remote slices count their planned bytes (none
+// before the fetch): such a scan has ScanTTL unless its local part is long.
+// The approval screen states it (#104).
+func (e *Engine) scanTTL(plan source.Byteplan) time.Duration {
+	ttl := e.o.ScanTTL
+	if bound := (2 * e.o.Cost.Time(plan.Bytes())).Round(time.Second); bound > ttl {
+		ttl = min(bound, max(MaxScanTTL, e.o.ScanTTL))
+	}
+	return ttl
+}
+
 // scanScreen is the approval screen of a scan: what it reads (sources,
 // absolute range, predicates as the agent wrote them, escaped by the
 // console) and the plan's size.
-func (e *Engine) scanScreen(tool string, plan source.Byteplan, scope []string, note string) Approval {
+func (e *Engine) scanScreen(tool string, plan source.Byteplan, scope []string, note string, ttl time.Duration) Approval {
 	body := []string{"tool: " + tool}
 	body = append(body, scope...)
 	size := fmt.Sprintf("plan: %d granules, %s", plan.Granules(), sizeText(plan.Bytes()))
@@ -341,7 +362,7 @@ func (e *Engine) scanScreen(tool string, plan source.Byteplan, scope []string, n
 			break
 		}
 	}
-	body = append(body, size, fmt.Sprintf("approved for its whole plan: continuations need no new approval, until it ends or %s from now", e.o.ScanTTL))
+	body = append(body, size, fmt.Sprintf("approved for its whole plan: continuations need no new approval, until it ends or %s from now", ttl))
 	return Approval{Class: "read", Header: "scan · read", Note: note, Body: body,
 		Warnings: []string{"the agent receives the masked records of the whole plan"}}
 }

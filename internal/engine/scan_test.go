@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"regexp"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -199,6 +200,46 @@ func TestApprovedScanTTL(t *testing.T) {
 	}
 	if f.eng.BudgetStatus().Scans != 0 {
 		t.Fatal("an expired scan is live")
+	}
+}
+
+// TestApprovedScanTTLOfALongPlan (#104): a scan whose plan takes longer
+// than ScanTTL at the cost model's worst-case rate lives as long as its
+// plan's bound (twice that time: the calls stop before a group that would
+// not fit), at most MaxScanTTL; the approval screen says so.
+func TestApprovedScanTTLOfALongPlan(t *testing.T) {
+	now := t0.Add(48 * time.Hour)
+	for _, c := range []struct {
+		ns   float64 // worst-case cost per byte
+		want func(plan int64) time.Duration
+	}{
+		{1, func(int64) time.Duration { return DefaultScanTTL }}, // a short plan
+		{1e6, func(plan int64) time.Duration { return 2 * time.Duration(float64(plan)*1e6) }},
+		{1e9, func(int64) time.Duration { return MaxScanTTL }},
+	} {
+		f := newFixture(t, genLog(t0, 30000, "c@example.org"), func(o *Options) {
+			oneGranulePerCall(o)
+			o.ScanDeadline = o.Limits.Deadline
+			o.Now = func() time.Time { return now }
+		})
+		f.eng.o.Cost = fixedCost(c.ns)
+		a := &approver{}
+		qq := q(func(q *Query) { q.Text = "timed out"; q.Limit = 10 })
+		res, err := f.eng.Scan(peerCtx(1, a), scanQ(t, ScanCount, CountQuery{Query: qq}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		plan := f.eng.scans.m[res.Scan.ID].plan.Bytes()
+		want := c.want(plan)
+		if want > DefaultScanTTL && want < MaxScanTTL {
+			want = want.Round(time.Second)
+		}
+		if got := res.Scan.ExpiresAt.Sub(now); got != want {
+			t.Fatalf("cost %v ns/B, plan %d B: expires in %v, want %v", c.ns, plan, got, want)
+		}
+		if !strings.Contains(strings.Join(a.last.Body, "\n"), "until it ends or "+want.String()+" from now") {
+			t.Fatalf("the screen does not say %v: %q", want, a.last.Body)
+		}
 	}
 }
 
