@@ -11,6 +11,11 @@ takes the launcher verbs every lock of the Lock Family takes (#117).
 
 ### Added
 
+- docs/recipes/holmesgpt.md: HolmesGPT's CLI in its own container with the
+  locklog client and only the lock's socket volume from `up.json`, locklog
+  as its stdio MCP server, `MCP_TOOL_CALL_TIMEOUT_SEC=600`; a test checks
+  that the recipes' tools, ids and volume match the code
+  ([#37](https://github.com/DavidGodefroid/locklog/issues/37)).
 - `locklog_pii_list` and `locklog_pii_add` are served: an agent rule
   (`[pseudonym ]source:field`, a masked key by its `⟦key:ID⟧`) masks a
   field the agent was shown, from the next call on; it is capped by
