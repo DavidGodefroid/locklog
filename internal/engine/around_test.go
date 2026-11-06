@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -299,11 +300,22 @@ func TestTraceNoOracle(t *testing.T) {
 	}
 }
 
+// appendLines appends lines to the file at path.
+//
+// It runs on a writer goroutine: once the test has ended, or on an error,
+// it ends that goroutine (runtime.Goexit) instead of t.Fatal, which is only
+// for the test's own goroutine and would hide the test's real message.
 func appendLines(t *testing.T, path string, lines ...string) {
 	t.Helper()
+	if t.Context().Err() != nil {
+		runtime.Goexit()
+	}
 	fh, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
 	if err != nil {
-		t.Fatal(err)
+		if t.Context().Err() == nil {
+			t.Error(err)
+		}
+		runtime.Goexit()
 	}
 	defer fh.Close()
 	for _, l := range lines {
@@ -322,11 +334,16 @@ func nextSecond() {
 // settle waits until two more tail polls of f's engine have completed: the
 // second was planned after the call, so it saw what was written before it.
 // A test acts on the logs between polls instead of sleeping.
+//
+// When the tail has ended (the test is over, or no poll came for a
+// minute) it ends the writer goroutine (runtime.Goexit): nothing it would
+// write next reaches a finished test, and the tail's assertions report the
+// failure (#92).
 func settle(t *testing.T, e *Engine) {
 	n := e.o.tailPolls.Load() + 2
 	for end := time.Now().Add(time.Minute); e.o.tailPolls.Load() < n; {
-		if time.Now().After(end) {
-			return // the tail ended: its assertions fail, not this goroutine
+		if time.Now().After(end) || t.Context().Err() != nil {
+			runtime.Goexit()
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
