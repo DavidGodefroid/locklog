@@ -21,7 +21,9 @@ import (
 func latencyPair(t testing.TB, kind string) (string, string) {
 	g := masktest.New(1616)
 	a := g.Value(kind)
-	shape := func(v string) string { return strings.TrimRightFunc(v[:min(len(v), 8)], func(r rune) bool { return r != '_' && r != '-' }) }
+	shape := func(v string) string {
+		return strings.TrimRightFunc(v[:min(len(v), 8)], func(r rune) bool { return r != '_' && r != '-' })
+	}
 	for range 100000 {
 		b := g.Value(kind)
 		if b != a && len(b) == len(a) && (kind != "secret" || shape(b) == shape(a)) {
