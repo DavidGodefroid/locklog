@@ -1,7 +1,8 @@
-# locklog: the project's log sources, written by `locklog setup` from what
-# it found on this host. Nothing here is read until the console shows it to
-# you: `locklog console` reviews the profile, and every later change that
-# loosens it, before any log is opened. Remove what the agent should not see.
+# locklog: the project's log sources, written by `locklog profile add` from
+# what it found on this host. Nothing here is read until the console shows
+# it to you: the console `lox run` starts reviews the profile, and every
+# later change that loosens it, before any log is opened. Remove what the
+# agent should not see.
 version = 1
 
 [profiles.prod]
@@ -20,7 +21,7 @@ paths = ["/var/log/nginx/access.log*"]
 kind = "journald"
 
 # The running containers. A docker source runs in a console of its own:
-# locklog console --profile prod-docker
+# a locklog lock of its own (lox add locklog <name>) serving prod-docker.
 [profiles.prod-docker]
 production = true
 
@@ -28,9 +29,9 @@ production = true
 kind = "docker"
 containers = ["api", "web"]
 
-# The Compose Loki, behind the authenticating proxy setup generated (its
-# files are outside the project). The console reaches it on the Compose
-# network: LOCKLOG_NETWORK=shop_default locklog console --profile prod-loki
+# The Compose Loki, behind the authenticating proxy profile add generated
+# (its files are outside the project). The console of a lock serving prod-loki
+# reaches it on the Compose network shop_default.
 # Uncomment it once it names the streams to serve: selector = { app = "api" }.
 # [profiles.prod-loki]
 # production = true
@@ -49,8 +50,7 @@ containers = ["api", "web"]
 # here. Give it a read-only key: read and view_index_metadata on the indices
 # (monitor on the cluster); a production profile refuses any write or manage
 # privilege, and a backend that answers without credentials. Trusted fields
-# are keyword fields. The console reaches it on a Docker network:
-# LOCKLOG_NETWORK=<network> locklog console --profile prod-search
+# are keyword fields. The console reaches it on its lock's egress network.
 # [profiles.prod-search]
 # production = true
 #

@@ -6,6 +6,9 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+Hub only: the console is started by `lox run` (lockhub) only, and locklog
+takes the launcher verbs every lock of the Lock Family takes (#117).
+
 ### Added
 
 - `locklog_pii_list` and `locklog_pii_add` are served: an agent rule
@@ -35,6 +38,53 @@ uses [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **Breaking.** lockkit v0.13.0 (from v0.8.1). `locklog console` without
+  `--hub`, `--hub-key-file` and `--instance` refuses before it touches the
+  terminal, the project or the config, with lockkit's "the console is
+  launched by `lox up` only" (lockkit's text predates the `lox run` name).
+  There is no standalone console and no auto mode.
+- **Breaking.** The launcher runs no console: `locklog console` and
+  `locklog hub-key` through it say that `lox run` runs them and exit 2.
+  Its console path (the mount plan, the containers map and its `docker
+  events` loop, `refresh`, the hub-file copies of #114) is gone: `lox run`
+  mounts the plan (lockhub#86).
+- **Breaking.** The launcher's `mcp` reaches the lock `lox run` runs: it
+  finds `.lockfamily/up.json` up from the current directory (the user's, no
+  link, not writable by group or others, at most 1 MiB, version 1, this
+  workspace's), checks the socket volume's labels and the containers that
+  mount it with Docker, and mounts it read-only on `/run/locklog`; with
+  none it says to run `lox run` first and exits 2. `--instance NAME` picks
+  one of several locklog locks (without it the error names them).
+  `doctor` mounts the same volume when there is one.
+- **Breaking.** `locklog setup` is replaced by the launcher verbs of
+  lockkit's GUIDE.md §14: `locklog profile add [--non-interactive] [--json]
+  [--project DIR] [--profile NAME] [--production] [--only DIR,...]
+  [--loki-proxy SERVICE ...] [--credentials ask|vault [--vault-path P]]`
+  (a profile from the host's logs, appended to an existing config, never
+  rewriting one: `exists`; never a secret: lockkit's `verbs` checks),
+  `locklog init <agent>` (now run as you, the project writable), and
+  `locklog doctor [--fix [--yes]] [--json]` (also checks the agents' wiring;
+  `--fix` wires the ones installed here). The own-container recipe and the
+  lea placement are no longer printed: the recipe is in docs/setup.md.
+- An approved scan's ticket is `never_auto` (still risk `read`, one
+  approval for its whole plan), like an unmask's and an approved lookup's:
+  `lox run`'s auto mode approves no locklog ticket, and the console refuses
+  an auto rule's approval of one (lockkit's `ErrAuto`).
+- `locklog mcp --instance NAME` (else `LOCKLOG_INSTANCE`, else the one lock
+  lea lists in `LEA_LOCKLOG_INSTANCES`) dials one lock among several
+  (lockkit's `client.DialInstance`).
+- From lockkit v0.11 to v0.13: the console asks the Vault token at its start
+  for a `credentials = "vault"` source (never `VAULT_TOKEN` or
+  `~/.vault-token`); a production profile's widenings at the console (the
+  policy review, a loosening at `:review`, `:unmask`) take the profile name
+  typed exactly; the idle timeout counts only the human's input and the
+  backend's methods.
+- Remote sources still connect at the console's start (no `connect` ticket,
+  lockkit's `lazyconn`, yet).
+- CI: the five-minute, own-container, production-guard and e2e jobs start
+  the console as `lox run` does, against lockkit's fake hub, until `lox run`
+  knows locklog (lockhub#84, #86, #87); the docker-source job writes the
+  containers map itself.
 - In hub mode an approved scan is bound to the agent's token as well as
   its uid: another agent of the same uid neither re-attaches to it nor
   continues it ([#115](https://github.com/DavidGodefroid/locklog/issues/115)).
@@ -53,6 +103,19 @@ uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- The engine runs at most `limits.max_calls` agent calls at once (default
+  4); one more is refused at once with `E_BUSY` (#50). A call's deadline
+  covers its planning: a plan cut by it is refused as over budget, and a
+  call left no time stops before any work with its cursor (#49).
+- The output cap bounds every answer: a record larger than it comes back
+  as an `oversized` stub with its ref (#48), and a count whose groups do
+  not fit is paged with a cursor (a partial one is marked `truncated`)
+  (#47). A search without predicates whose matches outgrow the page cache
+  continues with its cursor instead of being refused (#46).
+- The split of an over-budget remote slice drops its narrower slices
+  outside the query's range (a window's and its baseline's for patterns)
+  before reading them: a dense second just outside the range no longer
+  refuses it (#73).
 - The combined (access log) format no longer refuses a valid line whose
   three leading fields, up to 255 runes of up to 4 bytes each, put the
   timestamp past byte 800 (#85).
@@ -82,6 +145,9 @@ uses [Semantic Versioning](https://semver.org/).
   needs an approval is refused with `E_APPROVAL`.
 - An approved scan over several remote sources paces each source under its
   own name.
+
+Not in this release: per-profile auto rules for `lox run`
+([#126](https://github.com/DavidGodefroid/locklog/issues/126)).
 
 ## [0.1.0] - 2026-11-06
 

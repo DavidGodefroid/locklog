@@ -1,9 +1,10 @@
 //go:build e2e
 
-// Package e2e runs locklog as a user does: the image, the launcher's
-// console (approved at its terminal) and the launcher's mcp, driven by an
-// MCP client. It needs Docker and the image built as `locklog`: it runs in
-// CI (job "e2e (docker)"), never on a developer machine. Run with:
+// Package e2e runs locklog as a user does: the image, the console started
+// hub-attached as lox run starts it (approved at its terminal), and the
+// launcher's mcp, driven by an MCP client. It needs Docker and the image
+// built as `locklog`: it runs in CI (job "e2e (docker)"), never on a
+// developer machine. Run with:
 //
 //	LOCKLOG_E2E_DIR=<empty directory of yours> go test -tags e2e ./test/e2e
 package e2e
@@ -14,9 +15,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -233,36 +232,8 @@ func count(t *testing.T, ctx context.Context, cs *mcp.ClientSession, args map[st
 }
 
 func TestCountRotatedGz(t *testing.T) {
-	base := os.Getenv("LOCKLOG_E2E_DIR")
-	if base == "" {
-		t.Skip("LOCKLOG_E2E_DIR is not set: this test runs in CI (job e2e (docker))")
-	}
-	image := os.Getenv("LOCKLOG_IMAGE")
-	if image == "" {
-		image = "locklog"
-	}
-	launcher, err := filepath.Abs("../../scripts/locklog")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.ContainsAny(launcher, "'\n") {
-		t.Fatalf("the launcher path %q cannot be quoted for script(1)", launcher)
-	}
-	if base, err = filepath.EvalSymlinks(base); err != nil {
-		t.Fatal(err)
-	}
-	logs := filepath.Join(base, "logs")
-	proj := filepath.Join(base, "proj")
-	for _, d := range []string{base, logs, proj, filepath.Join(proj, ".locklog")} {
-		mkdir(t, d)
-	}
-
-	// Records from 30 minutes ago, one every 10 s: about 23 minutes.
-	start := time.Now().UTC().Add(-30 * time.Minute).Truncate(time.Second)
-	want := writeLogs(t, logs, start)
-	end := start.Add(time.Duration(want-1) * step)
-	from, to := start.Add(-time.Minute).Format(time.RFC3339), end.Add(time.Minute).Format(time.RFC3339)
-	t.Logf("%d records in %d files, %s to %s", want, len(files), start.Format(time.RFC3339), end.Format(time.RFC3339))
+	e, want, from, to := newEnv(t, "count")
+	t.Logf("%d records in %d files, %s to %s", want, len(files), from, to)
 
 	cfg := strings.Join([]string{
 		"version = 1",
@@ -270,68 +241,28 @@ func TestCountRotatedGz(t *testing.T) {
 		"production = false",
 		"[profiles.e2e.sources.app]",
 		`kind = "file"`,
-		fmt.Sprintf("paths = [%q]", logs+"/app.log*"),
+		fmt.Sprintf("paths = [%q]", e.logs+"/app.log*"),
 		`format = "logfmt"`,
 		"",
 	}, "\n")
-	cfgPath := filepath.Join(proj, ".locklog", "config.toml")
+	mkdir(t, filepath.Join(e.proj, ".locklog"))
+	cfgPath := filepath.Join(e.proj, ".locklog", "config.toml")
 	if err := os.WriteFile(cfgPath, []byte(cfg), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(cfgPath, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	env := append(os.Environ(), "LOCKLOG_EXTRA_ROOTS="+logs, "LOCKLOG_IMAGE="+image)
 
-	// The console, in a terminal of its own (script(1)): it refuses an
-	// input that is not one. The answers are typed on that terminal only
-	// once their prompt shows: the console drops type-ahead.
+	// The console, as lox run starts it, hub-attached; first start: the
+	// policy review, approved as a human does at its terminal.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
-	console := exec.Command("script", "-q", "-f", "-e", "-c", "exec sh '"+launcher+"' console", "/dev/null")
-	console.Dir, console.Env = proj, env
-	keys, err := console.StdinPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	var screen buffer
-	console.Stdout, console.Stderr = &screen, &screen
-	if err := console.Start(); err != nil {
-		t.Fatal(err)
-	}
-	exited := make(chan struct{})
-	go func() { _ = console.Wait(); close(exited) }()
-	var mcpErr buffer
-	t.Cleanup(func() {
-		if t.Failed() {
-			t.Logf("console output (masked):\n%s", plain(screen.String()))
-			t.Logf("mcp server stderr:\n%s", mcpErr.String())
-		}
-		_, _ = io.WriteString(keys, ":quit\r")
-		select {
-		case <-exited:
-		case <-time.After(20 * time.Second):
-			_ = console.Process.Kill()
-			<-exited
-		}
-	})
+	lr := startLoxRun(t, e, "e2e", "", [2]string{"Apply these changes? [y/N]", "y"})
 
-	// First start: the policy review, approved as a human does.
-	waitFor(t, &screen, "Apply these changes? [y/N]", 3*time.Minute, exited)
-	if _, err := io.WriteString(keys, "y\r"); err != nil {
-		t.Fatal(err)
-	}
-	waitFor(t, &screen, "Listening on ", 2*time.Minute, exited)
-
-	// The agent: the launcher's mcp over stdin and stdout.
-	srv := exec.Command("sh", launcher, "mcp")
-	srv.Dir, srv.Env, srv.Stderr = proj, env, &mcpErr
-	client := mcp.NewClient(&mcp.Implementation{Name: "locklog-e2e", Version: "0"}, nil)
-	cs, err := client.Connect(ctx, &mcp.CommandTransport{Command: srv}, nil)
-	if err != nil {
-		t.Fatalf("mcp connect: %v", err)
-	}
-	defer cs.Close()
+	// The agent: the launcher's mcp over stdin and stdout, on lox run's
+	// socket volume.
+	cs := e.connect(t, ctx, []string{"locklog", "mcp"})
 
 	tl, err := cs.ListTools(ctx, nil)
 	if err != nil {
@@ -361,7 +292,7 @@ func TestCountRotatedGz(t *testing.T) {
 	countCalls += calls
 	t.Logf("locklog_count bucket 5m: %d buckets summing to %d (%d calls)", groups, bucketed, calls)
 	if groups < 2 {
-		t.Errorf("locklog_count bucket 5m: %d buckets, want several over %s", groups, end.Sub(start))
+		t.Errorf("locklog_count bucket 5m: %d buckets, want several over %s..%s", groups, from, to)
 	}
 	if bucketed != int64(want) {
 		t.Errorf("locklog_count bucket 5m sums to %d, want %d", bucketed, want)
@@ -395,12 +326,7 @@ func TestCountRotatedGz(t *testing.T) {
 	}
 
 	// The console's audit: one log.call record per call that reached it.
-	auditOut, err := exec.CommandContext(ctx, "docker", "run", "--rm", "--network", "none", "--user", "locklog",
-		"--entrypoint", "cat", "-v", "locklog-home:/home/locklog:ro", image,
-		"/home/locklog/.local/state/locklog/audit.log").CombinedOutput()
-	if err != nil {
-		t.Fatalf("reading the audit log: %v: %s", err, auditOut)
-	}
+	auditOut := lr.auditLog(t, e.image)
 	methods := map[string]int{}
 	for _, line := range strings.Split(strings.TrimSpace(string(auditOut)), "\n") {
 		var rec struct {

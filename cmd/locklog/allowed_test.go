@@ -48,15 +48,16 @@ func TestAllowUIDs(t *testing.T) {
 }
 
 func TestConsoleArgs(t *testing.T) {
+	hub := []string{"--hub", "https://hub.example.com", "--hub-key-file", "hub.pub", "--instance", "logs"}
 	for _, args := range [][]string{{"extra"}, {"--allowed-uids", "0"}, {"--allowed-uids", "1000", "--allowed-uids", "1001"}, {"--bogus"}} {
 		var out, errb bytes.Buffer
-		if code := run(append([]string{"console"}, args...), &out, &errb); code != 2 {
+		if code := run(append(append([]string{"console"}, hub...), args...), &out, &errb); code != 2 {
 			t.Errorf("console %v = %d (%s)", args, code, errb.String())
 		}
 	}
 	// Not a terminal (go test's stdin): refused.
 	var out, errb bytes.Buffer
-	if code := run([]string{"console"}, &out, &errb); code != 2 || !strings.Contains(errb.String(), "must run in a terminal") {
+	if code := run(append([]string{"console"}, hub...), &out, &errb); code != 2 || !strings.Contains(errb.String(), "must run in a terminal") {
 		t.Errorf("console without a terminal = %d %s", code, errb.String())
 	}
 }

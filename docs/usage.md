@@ -5,8 +5,9 @@ budgets. The security model is in [security-model.md](security-model.md).
 
 ## The profile file
 
-`locklog setup` writes `.locklog/config.toml` in your project. The console
-reviews it at its first start. After that it serves only the **approved**
+`locklog profile add` (which `lox add locklog <name>` calls) writes
+`.locklog/config.toml` in your project. `lox run` reviews the profile
+directory, and the console reviews the policy at its first start. After that it serves only the **approved**
 copy. A change that loosens the policy waits for you at the console's
 `:review`.
 
@@ -14,7 +15,7 @@ copy. A change that loosens the policy waits for you at the console's
 version = 1
 
 [profiles.staging]
-production = false          # setup asks; an unanswered question means true
+production = false          # profile add asks; an unanswered question means true
 
 [profiles.staging.sources.nginx]
 kind = "file"
@@ -26,7 +27,7 @@ kind = "journald"
 units = ["nginx.service", "shop-*.service"]
 
 # A docker source cannot share a profile with file or journald sources: it runs in a
-# console of its own (setup writes it as <profile>-docker).
+# console of its own, so a lock of its own (profile add writes it as <profile>-docker).
 [profiles.staging-docker]
 production = false
 
@@ -52,7 +53,7 @@ credentials = "ask"          # typed at the console, never written to disk
 
 | Key | Default | Meaning |
 |---|---|---|
-| `production` | `false` when the key is absent; `locklog setup` asks, and an unanswered question means `true` | Turns on the production rules: `redact-unknown`, unmask `never` by default, authenticated backends over TLS, tighter rolling budgets, `prefilter` refused, the host-agent trial refused |
+| `production` | `false` when the key is absent; `locklog profile add` asks (or takes `--production`), and an unanswered question means `true` | Turns on the production rules: `redact-unknown`, unmask `never` by default, authenticated backends over TLS, tighter rolling budgets, `prefilter` refused, the host-agent trial refused |
 | `structured` | `redact-unknown` on production, else `detect` | How structured leaves are masked: `redact-unknown` redacts every leaf that is neither trusted nor allowed |
 | `text` | `detect` | Free text: `detect`, or `template`. Accepted and reviewed, but not applied yet: free text is masked by the detectors in both |
 | `detectors` | all default detectors | Value detectors to run |
@@ -79,13 +80,13 @@ countable), plus per kind:
 
 ## Wiring an agent
 
-`locklog setup --agent host` wires the agents it detects in the project
-(`--agents claude,codex` to choose). It runs `locklog init <agent>` for each,
-in a container that writes the project as you. In an agent's own container,
-where the recipe copies the `locklog` binary in, run `locklog init <agent>`
-there. The launcher on the host does not run `init` itself: it mounts the
-project read-only. Every init also creates a commented `.locklog/config.toml` when the
-project has none.
+`locklog init <agent>` wires an agent in the project (`lox add locklog`
+runs `locklog init claude`; `locklog doctor --fix` wires every agent
+installed here that is not wired yet). The launcher runs it in the image as
+you, with the project writable. In an agent's own container, where the
+recipe copies the `locklog` binary in, run `locklog init <agent>` there.
+Every init also creates a commented `.locklog/config.toml` when the project
+has none.
 
 | Agent | What `locklog init` writes |
 |---|---|
@@ -199,32 +200,99 @@ requests for Loki, up to 8 for Elasticsearch or OpenSearch).
 
 A call over a budget is refused with `E_OVER_BUDGET` and the estimate,
 before it touches any data. `locklog_scan` is the only way past. A call
-also stops at its deadline (30 s) and returns `complete: false` with a
-cursor. The numbers behind these defaults are in
+also stops at its deadline (30 s, its planning included) and returns
+`complete: false` with a cursor. The numbers behind these defaults are in
 [performance.md](performance.md).
+
+The console runs at most `limits.max_calls` agent calls at once (default
+4, ceiling 64): parallel calls would otherwise multiply the per-call
+budgets. One more is refused at once with `E_BUSY`, before any work; the
+agent sends it again once one of its calls answered. A tail holds its slot
+for its whole duration. A scan waits for its approval without a slot and
+takes one once approved; an unmask or a lookup takes none.
+
+The output cap applies to every answer:
+
+- A record whose masked rendering alone exceeds it comes back as a stub:
+  its `source`, `ref` and `ts`, `"oversized": true` and the `bytes` of its
+  rendering. Ask for some of its fields (`fields`), or for its context.
+- A whole count whose groups do not fit is paged: each page holds the next
+  groups in order (`groups_from` of `groups_total`) and a `cursor` to the
+  rest, for free; the last page is `complete`. A partial count (its scan
+  continues) shows the first groups that fit, with `"truncated": true`,
+  `omitted_groups` and `omitted_n` (the records in the groups left out for
+  now).
+- A search keeps the matches its page cannot hold for the next pages.
+  When one call's matches outgrow that cache (64 MiB for the console), a
+  query without predicates (browsing a range) stops before the part that
+  did and continues from there with its cursor (it reads local logs in
+  parts small enough for this; a single remote slice whose matches alone
+  outgrow the cache is still refused). A query with predicates is
+  refused with `E_OVER_BUDGET` ("too many matching records in one call to
+  page through"): where a call stops never depends on what its predicates
+  match. Narrow its range, sources or `fields`, or make a predicate more
+  selective.
+
+## Starting: `lox run`
+
+The console is started by `lox run` only (lockhub v0.9.0 or later), hub
+attached: `locklog console` without its hub flags refuses with lockkit's
+"the console is launched by `lox up` only" (lockkit's text predates the
+`lox run` name). The journey:
+
+```sh
+brew install davidgodefroid/tap/lockfamily
+lox init                      # or: lox add locklog logs
+lox run                       # in a terminal of its own, kept open
+```
+
+`lox add locklog <name>` runs the three launcher verbs ([setup.md](setup.md))
+from the project, `lox run` starts the hub and the console, with the log
+directories of the profile's mount plan bound read-only, and shows every
+ticket and decides it, by its rules or by you. A host agent (Claude Code,
+Codex...) reaches the console through the launcher's `locklog mcp`, which
+`.mcp.json` names: the launcher finds `.lockfamily/up.json` up from the
+current directory and mounts the socket volume of the locklog lock it
+names, read-only. Without `up.json`, or without a locklog lock in it, it
+says to run `lox run` first and exits 2. With several locklog locks,
+`--instance NAME` picks one (`"args": ["mcp", "--instance", "NAME"]` in
+`.mcp.json`); without it the error names them. lea's agents reach the
+socket the same way, mounted by lea.
+
+### What `lox run` decides, and what it asks
+
+A scan, an unmask or an approved lookup becomes a ticket on lockhub. Each
+is `never_auto`: `lox run`'s auto mode never approves one, and the console
+refuses an auto rule's approval of one (lockkit's `ErrAuto`); the ticket
+waits for you, at `lox run`, the deck or a paired phone. A scan is risk
+`read` (one approval covers its whole plan, its continuations need no
+ticket); an unmask and an approved lookup are `read-pii`, which only the
+terminal, the deck or a phone approve, never a chat facade. The free tools
+need no ticket. Per-profile auto rules (`auto`/`ask`/`deny`, as locksql and
+lockmq have) are not there yet: every locklog ticket is asked.
 
 ## The console
 
-`locklog console` prints nothing for a free call (the audit records it),
-unless clear results are on (Ctrl-O, below) or a source fails: then it
-prints one line with the method, the source, the class of failure the
-agent gets (`E_SOURCE`) and the error, masked and sanitised (a file path,
-a backend's status; never a record). A stale stream, which the agent just
-runs again, is not printed. It
-opens an approval screen for scans, unmasks, approved lookups and change
-requests: you answer `y` (on production, the profile's name) or `n`. An
-unanswered screen times out after 5 minutes and the agent is told not to
-retry unless asked.
+The console prints nothing for a free call (the audit records it), unless
+clear results are on (Ctrl-O, below) or a source fails: then it prints one
+line with the method, the source, the class of failure the agent gets
+(`E_SOURCE`) and the error, masked and sanitised (a file path, a backend's
+status; never a record). A stale stream, which the agent just runs again,
+is not printed. It never asks about an agent's request: those are tickets
+on lockhub. It still decides its own widenings at its terminal (`lox attach
+<name>`): the policy review at its first start and every loosening at
+`:review` (`y`; on a production profile, the profile's name typed exactly),
+and `:unmask`.
 
 | Command | What it does |
 |---|---|
-| `:status` | the profile, mode, session, pending changes, sources and budgets |
+| `:status` | the profile, session, pending changes, sources, budgets and hub |
 | `:review` | the policy change and change requests waiting for you |
-| `:mode` (Shift+Tab) | manual or auto mode; auto approves scans on a non-production profile, never an unmask or a lookup; production stays manual |
+| `:unmask` | allow clients to ask for unmasked output (`y`; on production, the profile's name) |
 | Ctrl-O (`:results`) | clear results on or off: the records each agent call returns are printed in clear on this terminal only, never to the agent (see below) |
 | `:quit` | end the console |
 
-The unmask screen shows the record masked, the asked spans marked `» «`,
+An unmask ticket's screen shows the record masked, the asked spans marked `» «`,
 the agent's reason, how many records holding each pseudonym agents were
 given in this epoch (counted by the console from the calls it answered and
 audited, by pseudonym only, since the console started), and two warnings:
@@ -244,39 +312,13 @@ desktop levels 1 and 2 and warns on a production profile. On a production
 profile, where `unmask = "never"`, this is how you read a record the agent
 points you to.
 
-## Hub mode
+## Tickets on lockhub
 
-With lockhub, `lox up` starts the console with the hub flags, and you
-decide on lockhub (its terminal, the deck or a paired phone) instead of
-this terminal. By hand, through the launcher:
-
-```sh
-locklog hub-key --instance logs     # once: prints the key lockhub pins for this console
-LOCKLOG_NETWORK=lockfamily locklog console --profile staging \
-  --hub http://lockhub:8443 --hub-plain-http --hub-key-file ./hub.pub --instance logs \
-  [--devices-file ./devices.json [--require-device read-pii] [--seal-clear]] [--facade-keys-file ./facades.json]
-```
-
-The launcher binds the files read-only into the console and passes the
-hub flags to the console only. It copies each file into a private
-directory of yours (0700, under `$XDG_RUNTIME_DIR/locklog/hub/` or
-`~/.local/state/locklog/hub/`) and binds the copy, so the console reads
-the bytes the launcher checked. Each file must be a regular file owned
-by you or root, with no ACL, writable by its owner only; no symbolic link
-may be on its path, and every directory above it must be yours or root's,
-with no ACL and writable by no one else (unless sticky, as `/tmp`). The
-path holds no space, glob character, comma, `=`, `:`, `;`, quote,
-backslash or control character. `--hub`, `--hub-key-file`,
-`--devices-file` and `--facade-keys-file` take two dashes. `--hub`,
-`--hub-key-file` and `--instance` go together; there is no hub discovery. With `--devices-file` and no
-`--require-device`, a `read-pii` approval (an unmask, an approved lookup)
-must be signed by a pinned device.
-
-- A scan, an unmask or an approved lookup becomes a ticket on lockhub:
-  the hub shows its screen masked; with `--seal-clear` the clear screen
-  (the record in clear, secrets still redacted) goes sealed to your pinned
-  devices only. The agent hears `pending` with the ticket id, nothing
-  else, and calls the same tool again with the ticket once you decided.
+- The hub shows a ticket's screen masked; with `--seal-clear` (lox run
+  passes it from `hub.mobile`) the clear screen (the record in clear,
+  secrets still redacted) goes sealed to your pinned devices only. The
+  agent hears `pending` with the ticket id, nothing else, and calls the
+  same tool again with the ticket once you decided.
 - The run plans the call again: another record, other pseudonyms or spans,
   another scan or a changed policy is refused (`E_STALE`), and asking
   again is a new ticket. A ticket runs once; a scan's ticket covers its
@@ -290,6 +332,6 @@ must be signed by a pinned device.
 - A ticket waits 24 hours; its run after that asks again (a renewal, which
   says the record could not be checked before the run).
 - With the hub down, free reads go on; approvals stay pending and go out
-  when it answers. `locklog_status` shows the hub mode and the instance.
+  when it answers. `locklog_status` shows the hub and the instance.
 - Decisions (who, on which facade, the hub's signature), renewals and
   reveals are audited.

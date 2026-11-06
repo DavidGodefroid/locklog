@@ -6,8 +6,8 @@ import (
 	"bytes"
 	"crypto/ecdsa"
 	"crypto/x509"
-	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -15,7 +15,6 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/DavidGodefroid/locklog/internal/agentassets"
 	"github.com/DavidGodefroid/locklog/internal/config"
 	"github.com/DavidGodefroid/locklog/internal/hostfacts"
 )
@@ -51,19 +50,19 @@ func project(t *testing.T) (root, home string) {
 	return root, home
 }
 
-func boolp(b bool) *bool { return &b }
-
-// --yes --no-production --agent host: a non-production profile, the trusted
-// .locklog/ and its config, and the Claude Code wiring at project scope
-// (the allow list in .claude/settings.local.json, nothing at user scope).
-func TestRunHostScripted(t *testing.T) {
+// --non-interactive: a non-production profile, the trusted .locklog/ and
+// its config; nothing wired, nothing at user scope. A second run of the
+// same profile is refused (exists) and writes nothing; another profile is
+// appended.
+func TestAddProfileScripted(t *testing.T) {
 	root, home := project(t)
 	var out bytes.Buffer
-	res, err := Run(Options{Root: root, Facts: hostFacts(), Production: boolp(false), Yes: true, Agent: AgentHost, Out: &out})
+	res, err := AddProfile(Options{Root: root, Facts: hostFacts(), ProductionSet: true, Out: &out})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Production || res.Profile != "staging" || res.Agent != AgentHost || !res.ConfigWritten || res.Proxy != nil {
+	if res.Production || res.Profile != "staging" || !res.Created || res.Proxy != nil || res.Credentials != "" ||
+		strings.Join(res.Profiles, ",") != "staging,staging-docker" || res.Config != filepath.Join(root, ".locklog", "config.toml") {
 		t.Errorf("result = %+v", res)
 	}
 	st, err := os.Lstat(filepath.Join(root, ".locklog"))
@@ -78,95 +77,92 @@ func TestRunHostScripted(t *testing.T) {
 	if err != nil || ps["staging"].Production || len(ps["staging"].Sources) != 2 || len(ps["staging-docker"].Sources) != 1 {
 		t.Errorf("config = %+v, %v", ps, err)
 	}
-	var s struct {
-		Permissions struct{ Allow []string } `json:"permissions"`
-	}
-	b, err := os.ReadFile(filepath.Join(root, ".claude", "settings.local.json"))
-	if err != nil || json.Unmarshal(b, &s) != nil || strings.Join(s.Permissions.Allow, ",") != strings.Join(agentassets.ClaudeAllow(), ",") {
-		t.Errorf("settings.local.json = %s (%v)", b, err)
-	}
-	if _, err := os.Lstat(filepath.Join(root, ".claude", "settings.json")); err == nil {
-		t.Error("the shared settings.json was written")
+	if _, err := os.Lstat(filepath.Join(root, ".mcp.json")); err == nil {
+		t.Error("profile add wired an agent")
 	}
 	if es, _ := os.ReadDir(home); len(es) != 0 {
-		t.Errorf("setup wrote at user scope: %v", es)
+		t.Errorf("profile add wrote at user scope: %v", es)
 	}
 	for _, want := range []string{"created .locklog/config.toml: profile staging (non-production), 1 log file families, the journal, 1 containers in staging-docker\n",
-		"claude (project scope):\ncreated .mcp.json\n", "added to permissions.allow in .claude/settings.local.json: mcp__locklog__locklog_search\n",
-		"next: locklog console --profile staging"} {
+		"next: lox add locklog <name> serving profile staging, then lox run"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("output lacks %q:\n%s", want, out.String())
 		}
 	}
-	if strings.Contains(out.String(), "warning: a host agent is refused") {
-		t.Error("non-production warned about the host agent")
+	before, _ := os.ReadFile(filepath.Join(root, ".locklog", "config.toml"))
+
+	// The same profile again: exists, nothing written.
+	if _, err := AddProfile(Options{Root: root, Facts: hostFacts(), ProductionSet: true, Out: &bytes.Buffer{}}); !errors.Is(err, ErrExists) {
+		t.Errorf("re-run: %v", err)
+	}
+	// A profile whose side profile exists: exists too.
+	if _, err := AddProfile(Options{Root: root, Profile: "staging-docker", Facts: hostfacts.Facts{Logs: []string{"/var/log/app.log"}}, ProductionSet: true, Out: &bytes.Buffer{}}); !errors.Is(err, ErrExists) {
+		t.Errorf("side profile: %v", err)
+	}
+	if after, _ := os.ReadFile(filepath.Join(root, ".locklog", "config.toml")); !bytes.Equal(before, after) {
+		t.Error("a refused run changed the config")
 	}
 
-	// A second run keeps the config (the human's now).
+	// Another profile is appended; the first is untouched.
 	out.Reset()
-	res, err = Run(Options{Root: root, Facts: hostFacts(), Production: boolp(false), Yes: true, Agent: AgentHost, Out: &out})
-	if err != nil || res.ConfigWritten || !strings.Contains(out.String(), "kept .locklog/config.toml (yours)") {
-		t.Errorf("re-run: %+v %v\n%s", res, err, out.String())
+	res, err = AddProfile(Options{Root: root, Profile: "prod", Production: true, ProductionSet: true, Only: []string{"/var/log"}, Facts: hostFacts(), Out: &out})
+	if err != nil || res.Created || !res.Production || strings.Join(res.Profiles, ",") != "prod" {
+		t.Fatalf("append: %+v %v", res, err)
+	}
+	after, _ := os.ReadFile(filepath.Join(root, ".locklog", "config.toml"))
+	if !bytes.HasPrefix(after, before) || !strings.Contains(out.String(), "added to .locklog/config.toml: profile prod (production)") {
+		t.Errorf("append changed the existing profiles, or says so wrong:\n%s\n%s", after, out.String())
+	}
+	ps, err = config.LoadFile(filepath.Join(root, ".locklog", "config.toml"))
+	if err != nil || !ps["prod"].Production || len(ps["prod"].Sources) != 1 || len(ps["staging"].Sources) != 2 {
+		t.Errorf("appended config = %+v, %v", ps, err)
+	}
+	if cst, err := os.Lstat(filepath.Join(root, ".locklog", "config.toml")); err != nil || cst.Mode().Perm() != 0o644 {
+		t.Errorf("config.toml after the append: %v %v", cst, err)
 	}
 }
 
-// Unanswered questions: production is yes, the profile is prod, and the
-// agent goes to a container of its own (a host agent is refused there).
-func TestRunDefaults(t *testing.T) {
+// Asked (the interactive form): unanswered, production is yes and the
+// profile is prod; a Compose Loki's proxy is offered, and no is the
+// default. Not asked: non-production unless --production.
+func TestAddProfileAsks(t *testing.T) {
 	for _, in := range []string{"", "\n\n\n", "maybe\nwhat\n"} {
 		root, _ := project(t)
 		var out bytes.Buffer
-		res, err := Run(Options{Root: root, Facts: hostFacts(), In: strings.NewReader(in), Out: &out, Recipe: RecipeOptions{Image: digestRef}})
+		res, err := AddProfile(Options{Root: root, Facts: hostFacts(), Ask: true, In: strings.NewReader(in), Out: &out})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !res.Production || res.Profile != "prod" || res.Agent != AgentContainer || res.Proxy != nil {
+		if !res.Production || res.Profile != "prod" || res.Proxy != nil {
 			t.Errorf("in %q: result = %+v", in, res)
 		}
-		for _, q := range []string{"Is this a production profile (real people's data in the logs)? [Y/n] ", "[container] ", "generate an authenticating proxy for it? [y/N] ", "COPY --from=" + digestRef} {
+		for _, q := range []string{"Is this a production profile (real people's data in the logs)? [Y/n] ", "generate an authenticating proxy for it? [y/N] "} {
 			if !strings.Contains(out.String(), q) {
 				t.Errorf("in %q: output lacks %q", in, q)
 			}
 		}
-		if _, err := os.Lstat(filepath.Join(root, ".mcp.json")); err == nil {
-			t.Error("the container placement wired the host agent")
-		}
 	}
-	// --yes: production too.
-	root, _ := project(t)
-	res, err := Run(Options{Root: root, Facts: hostFacts(), Yes: true, Out: &bytes.Buffer{}})
-	if err != nil || !res.Production || res.Agent != AgentContainer {
-		t.Errorf("--yes: %+v %v", res, err)
-	}
-}
-
-func TestRunAnswers(t *testing.T) {
 	root, _ := project(t)
 	var out bytes.Buffer
-	res, err := Run(Options{Root: root, Facts: hostFacts(), Agents: []string{}, In: strings.NewReader("n\nh\nn\n"), Out: &out})
-	if err != nil || res.Production || res.Profile != "staging" || res.Agent != AgentHost {
-		t.Fatalf("%+v %v", res, err)
+	res, err := AddProfile(Options{Root: root, Facts: hostFacts(), Ask: true, In: strings.NewReader("n\nn\n"), Out: &out})
+	if err != nil || res.Production || res.Profile != "staging" {
+		t.Fatalf("answers: %+v %v", res, err)
 	}
-	if !strings.Contains(out.String(), "no agent found on this host") {
-		t.Errorf("output:\n%s", out.String())
-	}
-	// A production profile with a host agent warns.
+	// --production given: not asked.
 	root, _ = project(t)
 	out.Reset()
-	if _, err := Run(Options{Root: root, Facts: hostFacts(), Production: boolp(true), Yes: true, Agent: AgentHost, Out: &out}); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(out.String(), "E_PRODUCTION_HOST_AGENT") {
-		t.Errorf("output:\n%s", out.String())
+	res, err = AddProfile(Options{Root: root, Facts: hostFacts(), Production: true, ProductionSet: true, Out: &out})
+	if err != nil || !res.Production || strings.Contains(out.String(), "production profile (") {
+		t.Errorf("--production: %+v %v\n%s", res, err, out.String())
 	}
 }
 
-func TestRunRefuses(t *testing.T) {
+func TestAddProfileRefuses(t *testing.T) {
 	root, _ := project(t)
 	if err := os.Chmod(root, 0o777); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Run(Options{Root: root, Yes: true, Out: &bytes.Buffer{}}); err == nil || !strings.Contains(err.Error(), "writable by someone else") {
+	if _, err := AddProfile(Options{Root: root, Out: &bytes.Buffer{}}); err == nil || !strings.Contains(err.Error(), "writable by someone else") {
 		t.Errorf("world-writable root: %v", err)
 	}
 	root, _ = project(t)
@@ -176,27 +172,46 @@ func TestRunRefuses(t *testing.T) {
 	if err := os.Chmod(filepath.Join(root, ".locklog"), 0o777); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Run(Options{Root: root, Yes: true, Out: &bytes.Buffer{}}); err == nil {
+	if _, err := AddProfile(Options{Root: root, Out: &bytes.Buffer{}}); err == nil {
 		t.Error("a writable .locklog/ was accepted")
 	}
 	root, _ = project(t)
 	if err := os.Symlink(t.TempDir(), filepath.Join(root, ".locklog")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Run(Options{Root: root, Yes: true, Out: &bytes.Buffer{}}); err == nil {
+	if _, err := AddProfile(Options{Root: root, Out: &bytes.Buffer{}}); err == nil {
 		t.Error("a symlinked .locklog/ was accepted")
 	}
 	root, _ = project(t)
-	if _, err := Run(Options{Root: root, Yes: true, Profile: "y", Production: boolp(true), Out: &bytes.Buffer{}}); err == nil {
-		t.Error("production profile named y accepted")
+	if _, err := AddProfile(Options{Root: root, Profile: "y", Production: true, ProductionSet: true, Out: &bytes.Buffer{}}); !errors.Is(err, ErrUsage) {
+		t.Errorf("production profile named y: %v", err)
 	}
+	// No log file or journal found: refused, nothing written.
 	root, _ = project(t)
-	if _, err := Run(Options{Root: root, Yes: true, Agent: "vm", Out: &bytes.Buffer{}}); err == nil {
-		t.Error("unknown placement accepted")
+	if _, err := AddProfile(Options{Root: root, Facts: hostfacts.Facts{Containers: hostFacts().Containers}, Out: &bytes.Buffer{}}); !errors.Is(err, ErrNoSource) {
+		t.Errorf("no source: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, ".locklog")); err == nil {
+		t.Error("a profile with no source wrote .locklog/")
+	}
+	// A config that does not load is not appended to.
+	root, _ = project(t)
+	if err := os.Mkdir(filepath.Join(root, ".locklog"), 0o755); err != nil || os.Chmod(filepath.Join(root, ".locklog"), 0o755) != nil {
+		t.Fatal(err)
+	}
+	bad := []byte("version = 1\n[profiles.x]\nnope = 1\n")
+	if err := os.WriteFile(filepath.Join(root, ".locklog", "config.toml"), bad, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AddProfile(Options{Root: root, Facts: hostFacts(), Out: &bytes.Buffer{}}); err == nil || !strings.Contains(err.Error(), "does not load") {
+		t.Errorf("broken config: %v", err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(root, ".locklog", "config.toml")); !bytes.Equal(got, bad) {
+		t.Error("the broken config was rewritten")
 	}
 	// The proxy needs a terminal for its token.
 	root, home := project(t)
-	if _, err := Run(Options{Root: root, Facts: hostFacts(), Yes: true, LokiProxy: "loki", ProxyBase: filepath.Join(home, "proxy"), Out: &bytes.Buffer{}}); err == nil ||
+	if _, err := AddProfile(Options{Root: root, Facts: hostFacts(), LokiProxy: "loki", ProxyBase: filepath.Join(home, "proxy"), Out: &bytes.Buffer{}}); !errors.Is(err, ErrUsage) ||
 		!strings.Contains(err.Error(), "needs a terminal") {
 		t.Errorf("proxy without a terminal: %v", err)
 	}
@@ -227,8 +242,8 @@ func TestRunLokiProxyLeak(t *testing.T) {
 	t.Setenv("HOME", home)
 	base := filepath.Join(home, ".config", "locklog", "proxy")
 	var out, tty bytes.Buffer
-	res, err := Run(Options{Root: root, Facts: hostFacts(), Production: boolp(true), Yes: true, Agent: AgentContainer,
-		LokiProxy: "loki", LokiSelector: "app=shop", ProxyBase: base, Out: &out, TTY: &tty, Recipe: RecipeOptions{Image: digestRef}})
+	res, err := AddProfile(Options{Root: root, Facts: hostFacts(), Production: true, ProductionSet: true,
+		LokiProxy: "loki", LokiSelector: "app=shop", ProxyBase: base, Out: &out, TTY: &tty})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -322,20 +337,20 @@ func TestRunLokiProxyLeak(t *testing.T) {
 	if got, _ := os.ReadFile(s.Remote.TLSCA); !bytes.Equal(got, caPEM) {
 		t.Error("tls_ca is not the CA certificate")
 	}
-	if !strings.Contains(out.String(), "LOCKLOG_NETWORK=shop_default") || !strings.Contains(out.String(), "image: caddy") {
+	if res.Credentials != "ask" || !strings.Contains(out.String(), "Compose network shop_default") || !strings.Contains(out.String(), "image: caddy") {
 		t.Errorf("output:\n%s", out.String())
 	}
 	// A second proxy for the same service is refused (the directory is
 	// not empty), before anything is written.
-	if _, err := Run(Options{Root: root, Facts: hostFacts(), Yes: true, LokiProxy: "loki", ProxyBase: base, Out: &bytes.Buffer{}, TTY: &bytes.Buffer{}}); err == nil {
-		t.Error("a second proxy run over an existing config was accepted")
+	if _, err := AddProfile(Options{Root: root, Profile: "other", Facts: hostFacts(), LokiProxy: "loki", ProxyBase: base, Out: &bytes.Buffer{}, TTY: &bytes.Buffer{}}); err == nil {
+		t.Error("a second proxy for the same service was accepted")
 	}
 }
 
 // Your home directory is never a project, even of yours.
 func TestRunRefusesHome(t *testing.T) {
 	root, _ := project(t)
-	if _, err := Run(Options{Root: root, Home: root, Yes: true, Out: &bytes.Buffer{}}); err == nil || !strings.Contains(err.Error(), "home directory") {
+	if _, err := AddProfile(Options{Root: root, Home: root, Out: &bytes.Buffer{}}); err == nil || !strings.Contains(err.Error(), "home directory") {
 		t.Errorf("home as the project: %v", err)
 	}
 	if _, err := os.Lstat(filepath.Join(root, ".locklog")); err == nil {
@@ -345,7 +360,7 @@ func TestRunRefusesHome(t *testing.T) {
 	if err := os.Mkdir(sub, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Run(Options{Root: sub, Home: root, Yes: true, Out: &bytes.Buffer{}}); err != nil {
+	if _, err := AddProfile(Options{Root: sub, Home: root, Facts: hostFacts(), Out: &bytes.Buffer{}}); err != nil {
 		t.Errorf("a project under home: %v", err)
 	}
 }

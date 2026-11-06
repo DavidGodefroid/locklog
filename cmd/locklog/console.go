@@ -28,7 +28,7 @@ import (
 // is opened.
 func openEngine(inContainer bool) logconsole.Opener { return newOpener(inContainer).Open }
 
-const consoleUsage = "usage: locklog console [--profile P] [--allowed-uids UID,...] [--hub URL --hub-key-file FILE --instance NAME [--hub-plain-http] [--devices-file FILE [--require-device CLASSES] [--seal-clear]] [--facade-keys-file FILE]]"
+const consoleUsage = "usage: locklog console [--profile P] --hub URL --hub-key-file FILE --instance NAME [--hub-plain-http] [--devices-file FILE [--require-device CLASSES] [--seal-clear]] [--facade-keys-file FILE] [--allowed-uids UID,...] (started by lox run only)"
 
 // hubDefaults completes the hub flags: with pinned devices and no
 // --require-device, a read-pii approval (an unmask, an approved lookup)
@@ -41,7 +41,7 @@ func hubDefaults(h console.HubOptions) console.HubOptions {
 }
 
 // consoleCmd is `locklog console`: the console of one profile, in the
-// human's terminal, in the launcher's container.
+// human's terminal, hub-attached, in the container `lox run` starts.
 func consoleCmd(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("console", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -51,6 +51,13 @@ func consoleCmd(args []string, stdout, stderr io.Writer) int {
 	var hub console.HubOptions
 	hub.Register(fs)
 	if err := fs.Parse(args); err != nil || fs.NArg() > 0 {
+		fmt.Fprintln(stderr, consoleUsage)
+		return 2
+	}
+	if hub.URL == "" || hub.KeyFile == "" || hub.Instance == "" {
+		// Hub-attached only: refused before the terminal, the project or
+		// the config is touched.
+		fmt.Fprintln(stderr, "locklog console:", console.ErrNoHub)
 		fmt.Fprintln(stderr, consoleUsage)
 		return 2
 	}
@@ -93,7 +100,7 @@ func consoleCmd(args []string, stdout, stderr io.Writer) int {
 	} else {
 		var ok bool
 		if root, ok = kconfig.FindProjectRoot(product.P, cwd); !ok {
-			fmt.Fprintln(stderr, "locklog console: no .locklog/ here or above: run locklog setup first")
+			fmt.Fprintln(stderr, "locklog console: no .locklog/ here or above: run locklog profile add first")
 			return 1
 		}
 		o.Root = root
@@ -110,7 +117,7 @@ func consoleCmd(args []string, stdout, stderr io.Writer) int {
 	}
 	t := console.NewTerminal(os.Stdin, stdout)
 	if err := t.Interactive(); err != nil {
-		fmt.Fprintln(stderr, "locklog console: warning:", err, "(the mode keys and the status line are off)")
+		fmt.Fprintln(stderr, "locklog console: warning:", err, "(the control keys and the status line are off)")
 	}
 	defer t.Restore()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -120,21 +127,16 @@ func consoleCmd(args []string, stdout, stderr io.Writer) int {
 	o.Profile = p.Name
 	be := logconsole.New(o)
 	hub = hubDefaults(hub)
-	var onHub func(*console.Hub)
-	if hub.Enabled() {
-		onHub = be.OnHub
-	}
 	var iso *console.IsolationEnv
 	if len(uids) > 0 {
-		// Set by whoever starts the console (the human, the launcher, lock
-		// up), never by a client.
+		// Set by whoever starts the console (lox run), never by a client.
 		env := allowUIDs(console.RealIsolationEnv(kp, os.Stdin), uids)
 		iso = &env
 		t.Println("allowed uids besides locklog-clients (--allowed-uids): " + joinUIDs(uids))
 	}
 	err = console.Run(ctx, kp, be, console.Options{
 		Profile: p.Name, ProjectRoot: root, IO: t, TTY: os.Stdin, Isolation: iso, StateDir: stateBase,
-		Sanitizer: logconsole.Sanitizer(), Hub: hub, OnHub: onHub,
+		Sanitizer: logconsole.Sanitizer(), Hub: hub, OnHub: be.OnHub,
 	})
 	if err != nil {
 		fmt.Fprintln(stderr, "locklog console:", err)

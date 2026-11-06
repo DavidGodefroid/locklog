@@ -1,74 +1,51 @@
 #!/bin/sh
 # locklog: the launcher. locklog runs in Docker; this script, installed as
 # `locklog` on the host by scripts/install.sh, runs every command in the
-# image, each with the account, the mounts and the network it needs:
+# image, each with the account, the mounts and the network it needs. The
+# console is not one of them: it is started by `lox run` only (lockhub),
+# hub-attached, with the log directories of the profile's mount plan; the
+# launcher refuses `console`.
 #
-#   console    as the console account (locklog, uid 10051), in a container
-#              of its own per project (locklog-console-<n>, labelled
-#              locklog.console=1): no capability, read-only root, bounded
-#              CPU, memory and processes, no log driver, no network unless
-#              LOCKLOG_NETWORK names one; the log directories of the
-#              profile's mount plan bound read-only and non-recursive; the
-#              socket and home volumes. With a docker source: the Docker
-#              containers root bound read-only and non-recursive with gid 0,
-#              and the containers map (below) kept current by a `docker
-#              events` loop for the console's lifetime. gid 0 applies to the
-#              whole console, not to one mount: a docker source therefore
-#              runs in a console of its own, with no file or journald
-#              source beside it (remote sources are fine). In hub mode
-#              (--hub URL --hub-key-file FILE --instance NAME, and
-#              --devices-file, --facade-keys-file), those files are bound
-#              read-only under /run/locklog-hub and the console joins
-#              LOCKLOG_NETWORK, the network lockhub is on; the hub flags
-#              go to the console only, never to `locklog mounts`
-#   hub-key    as the console account, with the home volume only and no
-#              network: the instance key for lockhub to pin
-#              (hub-key --instance NAME prints its public key)
-#   refresh    rewrite the containers map of this project's console once
-#   setup      as you, in the image: the trusted .locklog/ and its
+#   profile add
+#              as you, in the image: a profile of the trusted .locklog/
 #              config.toml from this host's facts (log files, journal,
-#              containers, agents), the agent's project wiring or the
-#              own-container recipe, a Compose Loki's proxy (its files in
-#              ~/.config/locklog/proxy, outside the project)
+#              containers), a Compose Loki's proxy (its files in
+#              ~/.config/locklog/proxy, outside the project); the project is
+#              this one, or the one --project DIR names
+#   init       as you, in the image, with the project writable: the agent's
+#              project wiring
 #   doctor     as the agent account, with the host's network: what an
-#              agent here can reach (advisory)
-#   mcp       as the image's agent account (uid 10052): the MCP server of
+#              agent here can reach (advisory), and the agents' wiring; with
+#              the socket volume of the workspace's locklog lock that `lox
+#              run` runs, read-only, when there is one (else it says why).
+#              doctor --fix runs as you, with the project writable: it
+#              wires the agents not wired yet
+#   mcp        as the image's agent account (uid 10052): the MCP server of
 #              a host agent (the non-production trial; the server refuses
-#              production profiles), with the socket volume and the
-#              project (read-only)
+#              production profiles), with the socket volume of the
+#              workspace's locklog lock that `lox run` runs (read from
+#              .lockfamily/up.json and checked with Docker; --instance NAME
+#              picks one of several), read-only, and the project
+#              (read-only); none without `lox run`
 #   update     replace this launcher with a release's, then pull its image
 #   version    this launcher's and the image's versions
-#   anything else  as the agent account, with the socket volume
+#   anything else  as the agent account, with the project (read-only) and
+#              no volume: mounts, help...
 #
 # The project (the nearest directory up from here that holds .locklog/, or
 # this directory) is mounted read-only at its own path.
-#
-# The containers map: the name -> id map of the containers the approved
-# globs of the profile's docker sources name, written here (the console has
-# no engine socket to ask). One file per version, map.v<N> (0644, in a 0755
-# directory), in $XDG_RUNTIME_DIR/locklog/map/<console>/, else in
-# ~/.local/state/locklog/map/<console>/, bound read-only at /run/locklog-map:
-#
-#   locklog-map 1
-#   c <64-hex id> <name> <max-file 1..100> <compress 0|1>   a json-file container
-#   x <64-hex id>                                           a console container: never served
-#
-# Names and ids only, never log content. The console checks the globs again
-# when it reads, and skips console containers whatever the map says.
 #
 # Environment:
 #   LOCKLOG_IMAGE        image to run (default: the release image of this
 #                        launcher's version; `locklog` for a launcher run
 #                        from a clone, the tag of `docker build -t locklog .`)
 #   LOCKLOG_VAULT=1      the image with the vault CLI (credentials = "vault")
-#   LOCKLOG_NETWORK      a Docker network the console joins to reach a remote
-#                        backend (default: none; required by a remote source).
-#                        Agents must not join it.
 #   LOCKLOG_EXTRA_ROOTS  log directories beyond the built-in allowlist
-#                        (/var/log, /run/log/journal), separated by spaces
-#   VAULT_ADDR, VAULT_NAMESPACE  passed to the console
-#   XDG_RUNTIME_DIR      where the containers map is written, when it is a
-#                        directory of yours
+#                        (/var/log, /run/log/journal), separated by spaces:
+#                        profile add detects the log files under them too
+#   XDG_STATE_HOME       where `lox run` keeps its state (its compose
+#                        project), checked against the containers that mount
+#                        the socket volume
 set -eu
 
 # scripts/install.sh and locklog update write the release version here,
@@ -130,44 +107,12 @@ physical() {
 	[ -d "$1" ] && [ ! -L "$1" ] && [ "$(cd "$1" 2>/dev/null && pwd -P)" = "$1" ]
 }
 
-# Portable stat: the device:inode, the numeric group, the group name and
-# the octal mode of PATH.
+# Portable stat: the octal mode of PATH.
 if [ "$(uname -s)" = Darwin ]; then
-	devino() { stat -f '%d:%i' "$1"; }
-	fgid() { stat -f '%g' "$1"; }
-	fgroup() { stat -f '%Sg' "$1"; }
 	fmode() { stat -f '%Mp%Lp' "$1"; }
 else
-	devino() { stat -c '%d:%i' "$1"; }
-	fgid() { stat -c '%g' "$1"; }
-	fgroup() { stat -c '%G' "$1"; }
 	fmode() { stat -c '%a' "$1"; }
 fi
-
-# bits PATH WHO WANT: whether the mode of PATH grants WANT (r, x or rx) to
-# WHO (g or o).
-bits() {
-	m=000$(fmode "$1")
-	m=${m#"${m%???}"} # the last three octal digits
-	case "$2" in
-	g) v=$(printf '%s' "$m" | cut -c2) ;;
-	o) v=$(printf '%s' "$m" | cut -c3) ;;
-	esac
-	case "$3" in
-	r) [ $((v & 4)) -ne 0 ] ;;
-	x) [ $((v & 1)) -ne 0 ] ;;
-	rx) [ $((v & 5)) -eq 5 ] ;;
-	esac
-}
-
-# The groups the console may join to read logs: never a group outside this
-# list (gid 0 is not on it: no root-owned log is read through it here).
-group_allowed() {
-	case "$1" in
-	adm | systemd-journal) return 0 ;;
-	esac
-	return 1
-}
 
 # fowner PATH: the numeric owner of PATH.
 if [ "$(uname -s)" = Darwin ]; then
@@ -241,14 +186,10 @@ trusted_config() {
 # config.toml likewise. The walk never goes above your home directory (when
 # here is in it), never past a directory others can write or a sticky one
 # (/tmp), and never takes / itself: a .locklog/ someone else planted there
-# would choose the logs the console serves.
-#
-# project_trusted is set only when the walk accepted a .locklog/: console
-# refuses to start without it. Other commands run with this directory as
-# the project then (mounted read-only).
+# would choose the logs the console serves. Without one, the commands run
+# with this directory as the project (mounted read-only).
 here="$(pwd -P)"
 project="$here"
-project_trusted=
 home_dir=
 if [ -n "${HOME:-}" ]; then home_dir="$(cd "$HOME" 2>/dev/null && pwd -P)" || home_dir=; fi
 d="$here"
@@ -258,14 +199,13 @@ while :; do
 	# the logs of every directory below it.
 	if [ -n "$home_dir" ] && [ "$d" = "$home_dir" ]; then
 		if [ -e "$d/.locklog" ] || [ -L "$d/.locklog" ]; then
-			say "warning: ignoring $d/.locklog: your home directory is not a project (run locklog setup in a project directory)"
+			say "warning: ignoring $d/.locklog: your home directory is not a project (run locklog profile add in a project directory)"
 		fi
 		break
 	fi
 	if [ -e "$d/.locklog" ] || [ -L "$d/.locklog" ]; then
 		if ! shared "$d" && trusted_config "$d"; then
 			project="$d"
-			project_trusted=1
 		else
 			say "warning: ignoring $d/.locklog: it, its config.toml or $d is a link, has an ACL, or is owned or writable by someone else than you"
 		fi
@@ -279,7 +219,7 @@ case "$here" in
 *) workdir=$project ;;
 esac
 
-# The roots log directories may be bound from.
+# The log roots profile add detects log files under.
 roots="/var/log /run/log/journal"
 # Split on spaces, never globbed.
 set -f
@@ -296,561 +236,326 @@ for r in ${LOCKLOG_EXTRA_ROOTS:-}; do
 done
 set +f
 
-under_root() {
-	for r in $roots; do
-		case "$1" in
-		"$r" | "$r"/*) return 0 ;;
-		esac
-	done
-	return 1
+# Locks started by `lox run` (lockhub's docs/lox-run.md, "up.json (version
+# 1)" and "Host agents: the locks' launchers"): `lox run` runs each lock's
+# console under compose, with its socket in the volume
+# lockfamily-<sha256 of the workspace, 8 hex>_<instance>-run, and names it
+# in <workspace>/.lockfamily/up.json. The agent commands mount that volume
+# read-only on /run/locklog (connecting needs no write), never a fixed one:
+# the consoles run hub-attached only, started by `lox run`. The checks are
+# those of lea, which mounts the same volumes for its agents: up.json is
+# the user's own regular file (no link) that no one else can write, in a
+# .lockfamily of the same kind, of this very workspace; then Docker must
+# confirm the volume: lox run's labels (project, role socket, instance,
+# type, workspace), and every container that mounts it is lox run's (run by
+# compose from lox run's own state directory) or mounts it read-only.
+# These checks catch mistakes and files others can write; an agent that
+# runs as you with Docker access gets past any of them (lockhub's threat
+# model). up.json only names the instance: what is mounted is what Docker's
+# labels prove, read as JSON, compared whole; anything else fails closed.
+
+# json_safe S: S holds nothing JSON escapes (a quote, a backslash, a
+# control character, U+2028, U+2029): "S" is then its JSON encoding.
+json_safe() {
+	case "$1" in *'"'* | *'\'* | *"$(printf '\342\200\250')"* | *"$(printf '\342\200\251')"*) return 1 ;; esac
+	[ "$(printf '%s' "$1" | LC_ALL=C tr -d '\001-\037')" = "$1" ]
 }
 
-# The mount plan, filled by plan_line: the --mount and --group-add
-# arguments, the dev:inode of each root, and the plan text printed before
-# docker run.
-mount_args=
-gids=
-expect=
-plan_text=
-seen_dirs=
-
-add_gid() {
-	case " $gids " in
-	*" $1 "*) ;;
-	*) gids="$gids $1" ;;
-	esac
+# private PATH: PATH is no link, is the user's, and neither its group nor
+# others may write it.
+private() {
+	[ ! -L "$1" ] && [ "$(ls -nd "$1" | awk '{ print $3 }')" = "$(id -u)" ] &&
+		[ -z "$(find "$1" -prune \( -perm -0020 -o -perm -0002 \) -print)" ]
 }
 
-# bind DIR: bind DIR read-only and non-recursive at its own path, once.
-bind() {
-	case " $seen_dirs " in
-	*" $1 "*) return 0 ;;
-	esac
-	seen_dirs="$seen_dirs $1"
-	mount_args="$mount_args --mount type=bind,src=$1,dst=$1,readonly,$nonrecursive"
-	expect="$expect$(devino "$1") $1;"
-	plan_text="$plan_text  bind $1 (read-only, non-recursive)
-"
-}
-
-# reach DIR [FILE]: the gid the console needs to list DIR (no FILE), or to
-# search DIR and read FILE, added when it is an allowed group; nothing when
-# the others' bits suffice; a warning otherwise.
-reach() {
-	dir=$1
-	file=${2:-}
-	if [ -z "$file" ]; then
-		bits "$dir" o rx && return 0
-		gn=$(fgroup "$dir")
-		if group_allowed "$gn" && bits "$dir" g rx; then
-			add_gid "$(fgid "$dir")"
-			return 0
-		fi
-		say "warning: the console cannot list $dir (group $gn is not one it may join: adm, systemd-journal)"
-		return 0
-	fi
-	bits "$dir" o x && bits "$file" o r && return 0
-	fg=$(fgid "$file")
-	gn=$(fgroup "$file")
-	# Through the file's group: it must also let that group search the
-	# directory, unless the others may.
-	if group_allowed "$gn" && bits "$file" g r &&
-		{ bits "$dir" o x || { [ "$(fgid "$dir")" = "$fg" ] && bits "$dir" g x; }; }; then
-		add_gid "$fg"
-		return 0
-	fi
-	say "warning: the console cannot read $file (group $gn is not one it may join: adm, systemd-journal)"
-}
-
-# plan_line LINE: one line of `locklog mounts`.
-plan_line() {
-	set -f
-	# shellcheck disable=SC2086 # split on purpose
-	set -- $1
-	set +f
-	case "${1:-}" in
-	file)
-		[ $# -eq 3 ] || die "mount plan: malformed line: file $*"
-		local_lines=1
-		dir=$2
-		glob=$3
-		safe "$dir" && safe "$glob" || die "mount plan: $dir holds a character a mount cannot carry"
-		case "$dir" in /) die "mount plan: / cannot be bound" ;; /*) ;; *) die "mount plan: $dir is not absolute" ;; esac
-		case "$glob" in "$dir"/*) ;; *) die "mount plan: $glob is not under $dir" ;; esac
-		case "$glob/" in *//* | */./* | */../*) die "mount plan: $glob is not a clean path" ;; esac
-		physical "$dir" || die "mount plan: $dir is not a directory with no symbolic link on its path"
-		under_root "$dir" || die "mount plan: $dir is not under an allowed log root ($roots); a human can add one with LOCKLOG_EXTRA_ROOTS"
-		bind "$dir"
-		reach "$dir"
-		# The files the glob names today (not ** globs, which sh does not
-		# expand): each one readable through an allowed group.
-		case "$glob" in
-		*'**'*) ;;
-		*)
-			for f in $glob; do
-				[ -f "$f" ] && [ ! -L "$f" ] || continue
-				fd=$(dirname "$f")
-				reach "$fd" "$f"
-			done
-			;;
-		esac
-		;;
-	docker)
-		[ $# -eq 2 ] || die "mount plan: malformed line: $*"
-		add_docker_glob "$2"
-		;;
-	journald)
-		[ $# -eq 1 ] || die "mount plan: malformed line: $*"
-		local_lines=1
-		found=
-		for j in /var/log/journal /run/log/journal; do
-			physical "$j" || continue
-			found=1
-			bind "$j"
-			reach "$j"
-		done
-		[ -n "$found" ] || say "warning: no journal directory (/var/log/journal, /run/log/journal) on this host"
-		;;
-	remote)
-		[ $# -eq 1 ] || die "mount plan: malformed line: $*"
-		remote_lines=1
-		;;
-	*)
-		die "mount plan: unknown line: $*"
-		;;
-	esac
-}
-
-# The approved container globs of the docker sources (one per line, from the
-# plan's docker lines), the containers root once bound, and whether the plan
-# binds other log directories (file, journald lines).
-docker_globs=
-docker_root=
-local_lines=
-# Set by a remote line: the profile reads a remote source (Loki,
-# Elasticsearch, OpenSearch), which the console reaches only on the network
-# LOCKLOG_NETWORK names.
-remote_lines=
-
-# add_docker_glob GLOB: a container name glob ([A-Za-z0-9_.*?-], as the
-# config allows), once.
-add_docker_glob() {
-	case "$1" in
-	'' | -* | *[!A-Za-z0-9_.*?-]*) die "mount plan: invalid container glob $1" ;;
-	esac
-	case "
-$docker_globs" in
-	*"
-$1
-"*) ;;
-	*) docker_globs="$docker_globs$1
-" ;;
-	esac
-}
-
-# docker_root_bind: bind the Docker containers root (docker info
-# .DockerRootDir + /containers) read-only and non-recursive at its own path,
-# and add gid 0 (its directories are 0710 root:root, the json logs 0640,
-# and rotated files appear later: no narrower grant works). A supplementary
-# gid applies to the whole console process, not to one mount: with gid 0 the
-# console could read any file readable by group root in any of its mounts.
-# So gid 0 is added only when nothing else is bound: no file or journald
-# line (refused beside a docker line, here and by `locklog mounts`), only
-# the project's .locklog/ (read-only, yours), the locklog volumes and the
-# map directory (0644 files you wrote). The daemon is trusted for this path.
-# You usually cannot reach it (/var/lib/docker is 0710 root), so its
-# dev:inode is passed to the console only when you can stat it.
-docker_root_bind() {
-	[ -z "$local_lines" ] && [ -z "$mount_args" ] && [ -z "$seen_dirs" ] && [ -z "$gids" ] ||
-		die "a docker source cannot share a console with file or journald sources: the containers root is read with group 0, which would apply to every bound log directory; put the container logs in a profile of their own and run a separate console for them"
-	dr=$(docker info --format '{{.DockerRootDir}}' 2>/dev/null) || die "could not read the Docker root directory (docker info)"
-	r="${dr%/}/containers"
-	case "$r" in /?*) ;; *) die "the Docker root directory $dr is not an absolute path" ;; esac
-	case "$r/" in *//* | */./* | */../*) die "the Docker root directory $dr is not a clean path" ;; esac
-	case "$r" in *[*?[\ ]*) die "the Docker root directory $dr holds a space or a glob character" ;; esac
-	safe "$r" || die "the Docker root directory $dr holds a character a mount cannot carry"
-	docker_root=$r
-	mount_args="$mount_args --mount type=bind,src=$r,dst=$r,readonly,$nonrecursive"
-	add_gid 0
-	if di=$(devino "$r" 2>/dev/null) && [ -n "$di" ]; then
-		expect="$expect$di $r;"
-		plan_text="$plan_text  bind $r (read-only, non-recursive; the Docker containers root, group 0 for it only)
-"
+# sha8 S: the first 8 hex digits of the sha256 of S (lox run's project).
+sha8() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		printf '%s' "$1" | sha256sum
 	else
-		plan_text="$plan_text  bind $r (read-only, non-recursive; the Docker containers root, group 0 for it only; owned by root: not checked from the host)
-"
-	fi
+		printf '%s' "$1" | shasum -a 256
+	fi | awk '{ print substr($1, 1, 8) }'
 }
 
-valid_id() {
-	[ ${#1} -eq 64 ] || return 1
-	case "$1" in *[!0-9a-f]*) return 1 ;; esac
-	return 0
+# lockup_parse < up.json: lox run's state (version 1, written by Go's
+# json.MarshalIndent with a two-space indent): a line Pproject, a line
+# Wworkspace, then a line Lname socket_volume client_gid per lock of type
+# locklog. Fails on anything else, or on a value it would have to unescape.
+lockup_parse() {
+	awk -v want=locklog '
+	function str(v) {
+		if (v !~ /^"[^"\\]*"$/ || v ~ /[\001-\037]/) { bad = 1; return "" }
+		return substr(v, 2, length(v) - 2)
+	}
+	{ line = $0 }
+	NR == 1 { if (line != "{") bad = 1; next }
+	{ last = line; match(line, /^ */); ind = RLENGTH; rest = substr(line, ind + 1) }
+	rest == "}" || rest == "}," {
+		if (inlocks && ind == 4) cur = ""
+		else if (inlocks && ind == 2) inlocks = 0
+		next
+	}
+	rest !~ /^"[^"\\]*": / { next }
+	{
+		k = substr(rest, 2, index(rest, "\":") - 2)
+		v = substr(rest, length(k) + 5)
+		sub(/,$/, "", v)
+	}
+	!inlocks && ind == 2 {
+		if (k == "version") version = v
+		else if (k == "project") project = str(v)
+		else if (k == "workspace") workspace = str(v)
+		else if (k == "locks") { if (v == "{") inlocks = 1; else if (v != "{}") bad = 1; locks = 1 }
+		next
+	}
+	inlocks && ind == 4 {
+		if (v != "{" || (k in seen)) bad = 1
+		seen[k] = 1; cur = k; n++; name[n] = k
+		next
+	}
+	inlocks && ind == 6 && cur != "" {
+		if (k == "type" || k == "socket_volume" || k == "client_gid") f[cur, k] = str(v)
+	}
+	END {
+		if (bad || last != "}" || inlocks || !locks || version != "1") exit 1
+		print "P" project
+		print "W" workspace
+		for (i = 1; i <= n; i++) {
+			c = name[i]
+			if (f[c, "type"] != want) continue
+			if (c !~ /^[a-z0-9][a-z0-9-]*$/ || length(c) > 63 || f[c, "socket_volume"] !~ /^[a-z0-9][a-z0-9_.-]*$/ || f[c, "client_gid"] !~ /^[0-9]*$/) exit 1
+			print "L" c " " f[c, "socket_volume"] " " f[c, "client_gid"]
+		}
+	}'
 }
 
-valid_name() {
-	[ ${#1} -le 128 ] || return 1
-	case "$1" in '' | [!A-Za-z0-9]* | *[!A-Za-z0-9_.-]*) return 1 ;; esac
-	return 0
-}
-
-is_console() {
-	case "$1" in locklog-console*) return 0 ;; esac
-	return 1
-}
-
-# glob_match NAME: NAME matches one of docker_globs (as sh patterns: the
-# globs hold no special character but '*' and '?').
-glob_match() {
-	while IFS= read -r g; do
-		[ -n "$g" ] || continue
-		# shellcheck disable=SC2254 # the glob is a pattern on purpose
-		case "$1" in $g) return 0 ;; esac
-	done <<EOF
-$docker_globs
-EOF
-	return 1
-}
-
-# map_base: the directory of the containers maps.
-map_base() {
-	x=${XDG_RUNTIME_DIR:-}
-	if [ -n "$x" ] && [ -d "$x" ] && [ ! -L "$x" ] && [ "$(fowner "$x")" = "$(id -u)" ]; then
-		printf '%s/locklog/map\n' "$x"
-		return 0
-	fi
-	[ -n "${HOME:-}" ] || die "neither XDG_RUNTIME_DIR nor HOME is set: no place for the containers map"
-	printf '%s/.local/state/locklog/map\n' "$HOME"
-}
-
-# ensure_map_dir NAME: set map_dir, the containers map directory of the
-# console NAME: yours, 0755, no symbolic link, created (its parents 0700)
-# when missing.
-ensure_map_dir() {
-	base=$(map_base)
-	(umask 077 && mkdir -p "$base") || die "could not create $base"
-	d="$base/$1"
-	[ ! -L "$d" ] || die "$d is a symbolic link"
-	mkdir -p "$d" || die "could not create $d"
-	chmod 0755 "$d"
-	map_dir=$(cd "$d" && pwd -P) || die "could not enter $d"
-	case "$map_dir" in *" "*) die "$map_dir holds a space: a mount cannot carry it" ;; esac
-	safe "$map_dir" || die "$map_dir holds a character a mount cannot carry"
-	trusted "$map_dir" || die "$map_dir is a link, has an ACL, or is owned or writable by someone else than you"
-}
-
-# write_map: write the next version of the containers map into map_dir,
-# atomically (a temporary file in the same directory, then mv), under the
-# directory's writer lock, and keep the last two versions. Sets map_version, map_c (containers mapped), map_x
-# (console containers excluded) and map_skip (matching containers skipped:
-# not json-file, or a record that does not parse).
-#
-# Nothing the engine prints is split on a separator a name, a label or a log
-# option could hold: the ids come from `docker ps -q` (validated, each once;
-# an id listed twice is excluded), and each container is inspected alone,
-# the label as a fixed token from a template conditional, the free-text
-# fields validated token by token, the name last; a record of another line
-# or field count, or another id, is excluded too (fail closed: an x line).
-lock_held=
-
-# map_lock: take the map directory's writer lock (mkdir is atomic), so that
-# refresh and the loop never race on N or on each other's temporary file.
-# A lock older than a minute is a killed writer's: broken. Waits up to 15 s.
-map_lock() {
-	i=0
-	while ! mkdir "$map_dir/.lock" 2>/dev/null; do
-		if [ -n "$(find "$map_dir/.lock" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
-			rmdir "$map_dir/.lock" 2>/dev/null || :
-			continue
+# lockup_volume [INSTANCE]: the socket volume of the locklog lock (INSTANCE,
+# the only one without it) that `lox run` runs for the workspace of this
+# directory, in $lockup_vol; when there is none the agents can trust, why,
+# with what to do, in $lockup_why.
+lockup_volume() {
+	lockup_vol='' lockup_why=''
+	lu_inst=${1:-}
+	# The workspace: the nearest directory up from here whose .lockfamily
+	# holds up.json (a sub-project's own .lockfamily may hold none).
+	lu_ws=
+	lu_d=$here
+	while :; do
+		if [ -e "$lu_d/.lockfamily/up.json" ] || [ -L "$lu_d/.lockfamily/up.json" ] || [ -L "$lu_d/.lockfamily" ]; then
+			lu_ws=$lu_d
+			break
 		fi
-		i=$((i + 1))
-		[ "$i" -le 15 ] || return 1
-		sleep 1
+		[ "$lu_d" = / ] && break
+		lu_d=$(dirname "$lu_d")
 	done
-	lock_held=1
-}
-
-map_unlock() {
-	rmdir "$map_dir/.lock" 2>/dev/null || :
-	lock_held=
-}
-
-# lock_traps: release the writer lock when this shell exits or is
-# signalled while holding it.
-lock_traps() {
-	trap '[ -z "$lock_held" ] || rmdir "$map_dir/.lock" 2>/dev/null || :' EXIT
-	trap 'exit 129' HUP
-	trap 'exit 130' INT
-	trap 'exit 143' TERM
-}
-
-write_map() {
-	if [ ! -d "$map_dir" ]; then
-		{ mkdir -p "$map_dir" && chmod 0755 "$map_dir"; } || return 1
-	fi
-	map_lock || return 1
-	wm_rc=0
-	write_map_locked || wm_rc=$?
-	map_unlock
-	return "$wm_rc"
-}
-
-write_map_locked() {
-	set +f
-	# Temporary files a killed writer left behind (older than a minute).
-	find "$map_dir" -maxdepth 1 -name '.map.tmp.*' -type f -mmin +1 -exec rm -f {} + 2>/dev/null || :
-	ids=$(docker ps -a -q --no-trunc) || return 1
-	cs=
-	xs=
-	map_c=0
-	map_x=0
-	map_skip=0
-	seen=
-	dups=
-	while IFS= read -r cid; do
-		valid_id "$cid" || continue
-		case " $seen " in
-		*" $cid "*) dups="$dups $cid" ;;
-		*) seen="$seen $cid" ;;
-		esac
-	done <<EOF
-$ids
-EOF
-	set -f
-	for cid in $seen; do
-		case " $dups " in
-		*" $cid "*)
-			xs="${xs}x $cid
-"
-			map_x=$((map_x + 1))
-			continue
-			;;
-		esac
-		rec=$(docker inspect --type container --format '{{.Id}} {{if index .Config.Labels "locklog.console"}}1{{else}}0{{end}} {{.HostConfig.LogConfig.Type}} {{with index .HostConfig.LogConfig.Config "max-file"}}{{.}}{{else}}-{{end}} {{with index .HostConfig.LogConfig.Config "compress"}}{{.}}{{else}}-{{end}} {{.Name}}' "$cid" 2>/dev/null) || continue # gone since the listing
-		bad=
-		case "$rec" in *"
-"*) bad=1 ;; esac
-		if [ -z "$bad" ]; then
-			# shellcheck disable=SC2086 # split on purpose (set -f)
-			set -- $rec
-			[ $# -eq 6 ] && [ "$1" = "$cid" ] || bad=1
-		fi
-		if [ -z "$bad" ]; then
-			label=$2
-			ctype=$3
-			mf=$4
-			cmp=$5
-			cname=${6#/}
-			case "$label" in 0 | 1) ;; *) bad=1 ;; esac
-			valid_name "$cname" || bad=1
-		fi
-		if [ -n "$bad" ] || [ "$label" = 1 ] || is_console "$cname"; then
-			xs="${xs}x $cid
-"
-			map_x=$((map_x + 1))
-			[ -z "$bad" ] || map_skip=$((map_skip + 1))
-			continue
-		fi
-		glob_match "$cname" || continue
-		case "$ctype" in
-		json-file) ;;
-		*)
-			map_skip=$((map_skip + 1))
-			continue
-			;;
-		esac
-		case "$mf" in
-		-) mf=1 ;;
-		'' | *[!0-9]*)
-			map_skip=$((map_skip + 1))
-			continue
-			;;
-		esac
-		while :; do
-			case "$mf" in 0?*) mf=${mf#0} ;; *) break ;; esac
-		done
-		if [ ${#mf} -gt 3 ] || [ "$mf" -gt 100 ]; then mf=100; fi
-		[ "$mf" -ge 1 ] || mf=1
-		case "$cmp" in
-		true) cmp=1 ;;
-		false | -) cmp=0 ;;
-		*)
-			map_skip=$((map_skip + 1))
-			continue
-			;;
-		esac
-		cs="${cs}c $cid $cname $mf $cmp
-"
-		map_c=$((map_c + 1))
-	done
-	set +f
-	# A name given to two ids in one snapshot (the engine forbids it):
-	# both ids are excluded, neither is mapped.
-	dupnames=$(printf '%s' "$cs" | awk '{ n[$3]++ } END { for (k in n) if (n[k] > 1) print k }')
-	if [ -n "$dupnames" ]; then
-		kept=
-		while IFS=' ' read -r _ cid cname mf cmp; do
-			[ -n "${cid:-}" ] || continue
-			if printf '%s\n' "$dupnames" | grep -Fqx -- "$cname"; then
-				xs="${xs}x $cid
-"
-				map_x=$((map_x + 1))
-				map_c=$((map_c - 1))
-			else
-				kept="${kept}c $cid $cname $mf $cmp
-"
-			fi
-		done <<EOF
-$cs
-EOF
-		cs=$kept
-	fi
-	n=0
-	for f in "$map_dir"/map.v*; do
-		v=${f##*/map.v}
-		case "$v" in '' | 0* | *[!0-9]*) continue ;; esac
-		[ ${#v} -le 15 ] || continue
-		[ "$v" -le "$n" ] || n=$v
-	done
-	n=$((n + 1))
-	tmp=$(mktemp "$map_dir/.map.tmp.XXXXXX") || return 1
-	if ! { printf 'locklog-map 1\n%s%s' "$cs" "$xs" >"$tmp" && chmod 0644 "$tmp" && mv -f "$tmp" "$map_dir/map.v$n"; }; then
-		rm -f "$tmp"
+	if [ -z "$lu_ws" ]; then
+		lockup_why="no .lockfamily/up.json in $here or above it: run \`lox run\` first (lockhub: lox add locklog <name>, then lox run in a terminal of its own), then run locklog from the workspace"
 		return 1
 	fi
-	for f in "$map_dir"/map.v*; do
-		v=${f##*/map.v}
-		case "$v" in '' | 0* | *[!0-9]*) continue ;; esac
-		[ ${#v} -le 15 ] || continue
-		[ "$v" -ge $((n - 1)) ] || rm -f "$f"
-	done
-	map_version=$n
-}
-
-# map_loop SINCE PID NAME: keep the map current while the console lives:
-# its docker run (PID, which replaced the launcher) or, once that pid is
-# gone (the CLI killed), its container NAME while it still runs (checked
-# every 5 s). Every container create, rename and destroy from SINCE
-# (seconds since the epoch) on marks the map dirty, and one rewrite a
-# second at most drains the mark (a burst of events costs one rewrite).
-# When docker events exits it is restarted, from the time it exited, after
-# a backoff doubling up to 30 s, and the map rewritten then. Once the
-# console is gone, docker events and the reader are killed and the fifo
-# removed. Failures are reported on stderr, once per streak.
-map_loop() {
-	since=$1
-	ppid=$2
-	cname=$3
-	ev_pid=
-	rd_pid=
-	cl_checked=
-	cl_alive=1
-	warned_events=
-	warned_map=
-	backoff=1
-	fifo_dir=$(mktemp -d) || {
-		say "warning: mktemp failed: the containers map will not follow container changes (locklog refresh rewrites it)"
-		exit 1
+	lu_lf=$lu_ws/.lockfamily
+	lu_f=$lu_lf/up.json
+	if [ -L "$lu_lf" ] || [ ! -d "$lu_lf" ]; then
+		lockup_why="$lu_lf is not a directory (a link?): it is not lox run's; run \`lox run\` first"
+		return 1
+	fi
+	if ! private "$lu_lf"; then
+		lockup_why="$lu_lf is not yours, or others than you may write it: locklog trusts none of it (chmod go-w it, then run \`lox run\`)"
+		return 1
+	fi
+	if [ -L "$lu_f" ] || [ ! -f "$lu_f" ]; then
+		lockup_why="$lu_f is not a regular file (a link?): it is not lox run's; run \`lox run\` first"
+		return 1
+	fi
+	if ! private "$lu_f"; then
+		lockup_why="$lu_f is not yours, or others than you may write it: locklog trusts none of it; run \`lox run\` first"
+		return 1
+	fi
+	if [ "$(wc -c <"$lu_f")" -gt 1048576 ]; then
+		lockup_why="$lu_f is larger than 1 MiB: it is not lox run's; run \`lox run\` first"
+		return 1
+	fi
+	lu_ino=$(ls -di "$lu_f")
+	if ! lu_state=$(lockup_parse <"$lu_f") || [ -L "$lu_f" ] || [ "$(ls -di "$lu_f")" != "$lu_ino" ]; then
+		lockup_why="$lu_f is not lox run's state (version 1): run \`lox run\` first"
+		return 1
+	fi
+	lu_project='' lu_wsf='' lu_locks=''
+	while IFS= read -r lu_line; do
+		case "$lu_line" in
+		P*) lu_project=${lu_line#P} ;;
+		W*) lu_wsf=${lu_line#W} ;;
+		L*) lu_locks="$lu_locks${lu_line#L}
+" ;;
+		esac
+	done <<EOF_STATE
+$lu_state
+EOF_STATE
+	lu_want="lockfamily-$(sha8 "$lu_ws")"
+	if [ "$lu_project" != "$lu_want" ] || [ "$lu_wsf" != "$lu_ws" ]; then
+		lockup_why="$lu_f: project $lu_project of $lu_wsf, not this workspace's ($lu_want of $lu_ws): run \`lox run\` in $lu_ws"
+		return 1
+	fi
+	if ! json_safe "$lu_ws"; then
+		lockup_why="the workspace's path $lu_ws holds a quote, a backslash or a control character: locklog cannot check lox run's labels; move or rename it"
+		return 1
+	fi
+	lu_names=$(printf '%s' "$lu_locks" | awk '{ print $1 }' | sort | tr '\n' ' ')
+	lu_names=${lu_names% }
+	if [ -n "$lu_inst" ]; then
+		case "$lu_inst" in
+		*[!a-z0-9-]* | -*)
+			lockup_why="--instance: not an instance name (lowercase letters, digits and -)"
+			return 1
+			;;
+		esac
+		lu_sel=$(printf '%s' "$lu_locks" | awk -v n="$lu_inst" '$1 == n')
+		if [ -z "$lu_sel" ]; then
+			lockup_why="lox run runs no locklog lock $lu_inst in $lu_ws (its locklog locks: ${lu_names:-none}): name one with --instance, or add it (lox add locklog $lu_inst) and run \`lox run\`"
+			return 1
+		fi
+	else
+		case "$lu_names" in
+		"")
+			lockup_why="lox run runs no locklog lock in $lu_ws: add one (lox add locklog <name>), then run \`lox run\` first"
+			return 1
+			;;
+		*" "*)
+			lockup_why="lox run runs several locklog locks in $lu_ws ($lu_names): name one with --instance NAME"
+			return 1
+			;;
+		esac
+		lu_sel=$lu_locks
+	fi
+	# shellcheck disable=SC2086 # name, volume and group: checked words
+	set -- $lu_sel
+	lu_name=$1 lu_sock=$2 lu_gid=${3:-}
+	lu_vol=${lu_project}_$lu_name-run
+	if [ "$lu_sock" != "$lu_vol" ]; then
+		lockup_why="$lu_f: lock $lu_name: socket volume $lu_sock is not lox run's $lu_vol: run \`lox run\` first"
+		return 1
+	fi
+	if [ -n "$lu_gid" ] && [ "$lu_gid" != 10050 ]; then
+		lockup_why="lock $lu_name: clients group $lu_gid, this image's is 10050: update locklog (locklog update) or the lock's image"
+		return 1
+	fi
+	lu_got=$(docker volume inspect --format '{{json (index .Labels "com.docker.compose.project")}}
+{{json (index .Labels "com.docker.compose.volume")}}
+{{json (index .Labels "dev.lockfamily.role")}}
+{{json (index .Labels "dev.lockfamily.instance")}}
+{{json (index .Labels "dev.lockfamily.type")}}
+{{json (index .Labels "dev.lockfamily.workspace")}}' "$lu_vol" 2>/dev/null) || {
+		lockup_why="lock $lu_name: no volume $lu_vol: run \`lox run\` first"
+		return 1
 	}
-	fifo="$fifo_dir/events"
-	dirty="$fifo_dir/dirty"
-	if ! mkfifo -m 0600 "$fifo"; then
-		say "warning: mkfifo failed: the containers map will not follow container changes (locklog refresh rewrites it)"
-		rm -rf "$fifo_dir"
-		exit 1
+	if [ "$lu_got" != "\"$lu_project\"
+\"$lu_name-run\"
+\"socket\"
+\"$lu_name\"
+\"locklog\"
+\"$lu_ws\"" ]; then
+		lockup_why="lock $lu_name: volume $lu_vol is not lox run's socket volume of it (its labels): locklog trusts none of it; run \`lox run\` first"
+		return 1
 	fi
-	trap loop_end TERM HUP INT
-	while console_alive; do
-		# The reader and docker events are started from subshells that
-		# exit at once: they are not this shell's children, so kill -0
-		# tells when they are gone (no zombie). The reader opens the fifo
-		# first, with its output already away from the substitution.
-		rd_pid=$({
-			while IFS= read -r _; do : >"$dirty"; done
-		} >/dev/null <"$fifo" &
-			echo $!)
-		started=$(date +%s)
-		ev_pid=$(docker events --since "$since" --filter type=container --filter event=create \
-			--filter event=rename --filter event=destroy --format '{{.Action}}' 2>/dev/null >"$fifo" &
-			echo $!)
-		while kill -0 "$ev_pid" 2>/dev/null; do
-			console_alive || loop_end
-			flush_map
-			sleep 1
-		done
-		# Gone: their pids may be reused from here on. The reader ends on
-		# the fifo's end of file.
-		ev_pid=
-		rd_pid=
-		console_alive || loop_end
-		now=$(date +%s)
-		since=$now
-		if [ $((now - started)) -ge 30 ]; then
-			# It ran a while: a new streak.
-			backoff=1
-			warned_events=
+	# Every container that mounts the volume, running or not, must be lox
+	# run's own or unable to serve a socket there. lox run's: compose ran
+	# it from lox run's state directory, with the file on stdin or that
+	# directory's compose.yaml (compose's project label alone is anyone's: a
+	# compose file written in the workspace, run by you, would serve the
+	# socket from an image of its own). Any other container, compose's or
+	# not, must mount the volume read-only (an agent's, as this one): with
+	# a read-write mount it could listen on the socket's path.
+	lu_state_dir=$(printf '%s' "${XDG_STATE_HOME:-${HOME:-}/.local/state}/lockfamily/$lu_project" | sed -e 's#//*#/#g')
+	if ! json_safe "$lu_state_dir"; then
+		lockup_why="lox run's state directory $lu_state_dir holds a quote, a backslash or a control character: locklog cannot check lox run's containers"
+		return 1
+	fi
+	lu_ids=$(docker ps -a --no-trunc --filter "volume=$lu_vol" --format '{{.ID}}' 2>/dev/null) || {
+		lockup_why="lock $lu_name: cannot list the containers of $lu_vol (docker ps)"
+		return 1
+	}
+	if [ -n "$lu_ids" ] && printf '%s\n' "$lu_ids" | grep -vqx '[0-9a-f]\{64\}'; then
+		lockup_why="lock $lu_name: cannot read the containers of $lu_vol (docker ps)"
+		return 1
+	fi
+	for lu_id in $lu_ids; do
+		# Compose's project, working directory and files, as JSON; then
+		# rw or ro for each mount of the volume (its name: checked
+		# characters).
+		lu_c=$(docker inspect --type container -f '{{json (index .Config.Labels "com.docker.compose.project")}}
+{{json (index .Config.Labels "com.docker.compose.project.working_dir")}}
+{{json (index .Config.Labels "com.docker.compose.project.config_files")}}
+{{range .Mounts}}{{if eq .Name "'"$lu_vol"'"}}{{if .RW}}rw {{else}}ro {{end}}{{end}}{{end}}' "$lu_id" 2>/dev/null) || {
+			lockup_why="lock $lu_name: cannot read the containers of $lu_vol (docker inspect $lu_id)"
+			return 1
+		}
+		lu_rw=$(printf '%s\n' "$lu_c" | sed -n 4p)
+		lu_c=$(printf '%s\n' "$lu_c" | sed -n 1,3p)
+		if [ "$lu_c" = "\"$lu_project\"
+\"$lu_state_dir\"
+\"-\"" ] || [ "$lu_c" = "\"$lu_project\"
+\"$lu_state_dir\"
+\"$lu_state_dir/compose.yaml\"" ]; then
+			continue # lox run's
 		fi
-		if [ -z "$warned_events" ]; then
-			say "warning: docker events stopped; restarting it (backoff up to 30 s) and rewriting the containers map"
-			warned_events=1
-		fi
-		sleep "$backoff"
-		backoff=$((backoff * 2))
-		[ "$backoff" -le 30 ] || backoff=30
-		rm -f "$dirty"
-		checked_write
+		# Read-only mounts only (none listed: not one docker shows by name).
+		case " $lu_rw" in
+		" " | *" rw "*)
+			lockup_why="lock $lu_name: volume $lu_vol is mounted read-write by container $lu_id, which lox run did not start (not compose run from $lu_state_dir): locklog trusts none of its socket; remove that container, then run \`lox run\`"
+			return 1
+			;;
+		esac
 	done
-	loop_end
+	lockup_vol=$lu_vol
 }
+lockup_vol='' lockup_why=''
 
-# console_alive: the console's docker run lives, or else its container
-# still runs (asked at most every 5 s).
-console_alive() {
-	kill -0 "$ppid" 2>/dev/null && return 0
-	now=$(date +%s)
-	if [ -n "$cl_checked" ] && [ $((now - cl_checked)) -lt 5 ]; then
-		return "$cl_alive"
-	fi
-	cl_checked=$now
-	cl_alive=1
-	[ "$(docker inspect -f '{{.State.Running}}' "$cname" 2>/dev/null)" = true ] && cl_alive=0
-	return "$cl_alive"
-}
+# --instance NAME (or --instance=NAME): the launcher's own option of the
+# agent commands, which of lox run's locklog locks when the workspace has
+# several. Taken out of the command line ("--" ends the options).
+instance=
+case "${1:-}" in
+mcp | doctor)
+	n=$#
+	take=
+	done_opts=
+	for a in "$@"; do
+		if [ -n "$done_opts" ]; then
+			set -- "$@" "$a"
+			continue
+		fi
+		if [ -n "$take" ]; then
+			instance=$a
+			take=
+			continue
+		fi
+		case "$a" in
+		--) done_opts=1 ;;
+		--instance)
+			take=1
+			continue
+			;;
+		--instance=*)
+			instance=${a#--instance=}
+			continue
+			;;
+		esac
+		set -- "$@" "$a"
+	done
+	shift "$n"
+	[ -z "$take" ] || die "--instance: name the lock (lox run's instance)"
+	;;
+esac
 
-# flush_map: rewrite the map once when events marked it dirty.
-flush_map() {
-	[ -e "$dirty" ] || return 0
-	rm -f "$dirty"
-	checked_write
-}
-
-# checked_write: write_map, warning once per streak of failures.
-checked_write() {
-	if write_map; then
-		warned_map=
-	elif [ -z "$warned_map" ]; then
-		say "warning: could not rewrite the containers map (docker ps, docker inspect); retrying on the next change"
-		warned_map=1
-	fi
-}
-
-loop_end() {
-	[ -z "$ev_pid$rd_pid" ] || kill $ev_pid $rd_pid 2>/dev/null || :
-	[ -z "$lock_held" ] || rmdir "$map_dir/.lock" 2>/dev/null || :
-	rm -rf "$fifo_dir"
-	exit 0
-}
-
-# ensure_volume NAME DIR OWNER: the named volume NAME exists, created from
-# the image (Docker gives an empty volume the owner and mode of DIR in the
-# image on first use), and DIR in it has OWNER (uid:gid:mode). A volume
-# someone else created with another owner is refused.
-ensure_volume() {
-	docker volume inspect "$1" >/dev/null 2>&1 || docker volume create "$1" >/dev/null
-	got=$(docker run --rm --network none --user 0 $confined --entrypoint stat -v "$1:$2" "$image" -c '%u:%g:%a' "$2") ||
-		die "could not check the owner of the $1 volume"
-	[ "$got" = "$3" ] ||
-		die "the $1 volume has owner and mode $got, not $3: it was not created by locklog; remove it (docker volume rm $1) and start again"
+# lockup_mount: lox run's socket volume of this workspace's locklog lock,
+# as the agent commands mount it, or the reason there is none (exit 2, as
+# a client finding no console).
+lockup_mount() {
+	need_docker
+	lockup_volume "$instance" || {
+		say "$lockup_why"
+		exit 2
+	}
+	mount="type=volume,src=$lockup_vol,dst=/run/locklog,readonly"
 }
 
 # check_tag TAG: TAG is a release tag (it goes into URLs and into the
@@ -983,309 +688,8 @@ project_mount() {
 # The confinement every locklog container runs with.
 confined="--cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /tmp:rw,nosuid,nodev,noexec,size=64m"
 
-# docker_version KIND VERSION: sets major and minor of a Docker version
-# (KIND names it in messages), refusing one before 19.03.
-docker_version() {
-	major=${2%%.*}
-	rest=${2#*.}
-	minor=${rest%%.*}
-	case "$major$minor" in *[!0-9]* | '') die "unknown Docker $1 version $2" ;; esac
-	if [ "$major" -lt 19 ] || { [ "$major" -eq 19 ] && [ "$minor" -lt 3 ]; }; then
-		die "Docker $1 $2 is too old: locklog needs Docker 19.03 or later"
-	fi
-}
-
-# check_project: the trusted project and its .locklog/ (ll_dir), checked
-# again right before reading them.
-check_project() {
-	need_docker
-	project_mount
-	[ -n "$project_trusted" ] ||
-		die "no trusted .locklog/ directory here or above (yours, not a link, writable by no one else): run locklog setup first"
-	# Again right before reading it: what the walk accepted.
-	shared "$project" && die "$project is writable by someone else than you"
-	trusted_config "$project" || die "$project/.locklog changed: it is no longer trusted"
-	ll_dir="$project/.locklog"
-	physical "$ll_dir" || die "$ll_dir is not a directory with no symbolic link on its path"
-	name="locklog-console-$(printf '%s' "$project" | cksum | awk '{ print $1 }')"
-}
-
-# read_plan ARGS: the profile's mount plan, derived in the image from
-# .locklog/ (as the agent account, no network) and checked here, on the
-# host: its header and its lines.
-read_plan() {
-	# locklog mounts takes only the profile: the console's own flags
-	# (--allowed-uids) are not passed to it.
-	rp_profile=
-	while [ $# -gt 0 ]; do
-		case "$1" in
-		--profile)
-			[ $# -ge 2 ] || die "--profile needs a profile name"
-			rp_profile=$2
-			shift ;;
-		--profile=*) rp_profile=${1#--profile=} ;;
-		esac
-		shift
-	done
-	if [ -n "$rp_profile" ]; then
-		set -- --profile "$rp_profile"
-	else
-		set --
-	fi
-	planned=$(docker run --rm --network none --user agent --log-driver none $confined --pids-limit 64 --memory 256m \
-		-v "$ll_dir:$ll_dir:ro" -w "$project" "$image" mounts "$@") ||
-		die "could not read the mount plan of the profile (locklog mounts)"
-	header=$(printf '%s\n' "$planned" | sed -n 1p)
-	printf '%s\n' "$header" | grep -Eqx 'profile [A-Za-z0-9][A-Za-z0-9_.-]{0,63} (true|false)' ||
-		die "mount plan: malformed header"
-	lines=$(printf '%s\n' "$planned" | sed -n '2,$p')
-}
-
-# hub_dir: the private directory (yours, 0700, no link) that holds the
-# copies of this console's hub files, created when missing; sets hub_dir.
-ensure_hub_dir() {
-	base=$(map_base)
-	base=${base%/map}/hub
-	(umask 077 && mkdir -p "$base/$name") || die "could not create $base/$name"
-	hub_dir=$(cd "$base/$name" && pwd -P) || die "could not enter $base/$name"
-	physical "$hub_dir" || die "$hub_dir is not a directory with no symbolic link on its path"
-	chmod 0700 "$hub_dir" || die "could not make $hub_dir private"
-	case "$hub_dir" in *[*?[]* | *[[:space:]]*) die "$hub_dir holds a space or a glob character" ;; esac
-	safe "$hub_dir" || die "$hub_dir holds a character a mount cannot carry"
-	trusted "$hub_dir" || die "$hub_dir is a link, has an ACL, or is owned or writable by someone else than you"
-	# As for the original: no one else may rename the copy's directory, or
-	# one above it, between the copy and docker run.
-	trusted_chain "$hub_dir" || die "a directory on the path of $hub_dir is owned or writable by someone else than you or root, or has an ACL"
-}
-
-# trusted_chain DIR: DIR and every directory above it up to / are yours
-# or root's, with no ACL, and writable by no one else (unless sticky, as
-# /tmp, where no one else can rename or remove what is yours).
-trusted_chain() {
-	tc=$1
-	while :; do
-		[ -d "$tc" ] && [ ! -L "$tc" ] || return 1
-		mine "$tc" || return 1
-		has_acl "$tc" && return 1
-		perm "$tc"
-		if [ $((special & 1)) -eq 0 ]; then
-			[ $((g & 2)) -eq 0 ] && [ $((o & 2)) -eq 0 ] || return 1
-		fi
-		[ "$tc" = / ] && return 0
-		tc=${tc%/*}
-		[ -n "$tc" ] || tc=/
-	done
-}
-
-# hub_file FLAG FILE: FILE, a regular file of yours (no link, on a path
-# with no link and no directory someone else can write), copied into the
-# console's private hub directory and bound read-only from there into the
-# console under a fixed name: the console reads the bytes checked here.
-# hub_dst is its path in the console.
-hub_file() {
-	case "$2" in
-	'') die "$1 needs a file" ;;
-	/*) hf=$2 ;;
-	*) hf=$(pwd -P)/$2 ;;
-	esac
-	# hub_mounts is word-split into docker run's arguments: no space nor
-	# glob character, nor anything a mount cannot carry (the copy's path
-	# is fixed; the original's is refused too, for a plain message).
-	case "$hf" in *,*) die "$1: a path with a comma cannot be bound into the console" ;; esac
-	case "$hf" in *[*?[]* | *[[:space:]]*) die "$1: the path holds a space or a glob character" ;; esac
-	safe "$hf" || die "$1: the path holds a character a mount cannot carry"
-	# The real path: no symbolic link on it (".." taken as written).
-	hd=${hf%/*}
-	[ -n "$hd" ] || hd=/
-	hl=$(cd -L "$hd" 2>/dev/null && pwd -L) && hp=$(cd -P "$hd" 2>/dev/null && pwd -P) ||
-		die "$1: $hd is not a directory"
-	[ "$hl" = "$hp" ] || die "$1: $hd has a symbolic link on its path"
-	hd=$hp
-	hf=${hd%/}/${hf##*/}
-	trusted_chain "$hd" || die "$1: a directory on the path of $hf is owned or writable by someone else than you or root, or has an ACL"
-	[ -f "$hf" ] && [ ! -L "$hf" ] || die "$1: $hf is not a regular file"
-	# A trust anchor (who approves, who gets the clear screen): yours or
-	# root's, no ACL, writable by its owner only.
-	trusted "$hf" || die "$1: $hf must be owned by you or root, with no ACL, and writable by its owner only"
-	case "$1" in
-	--hub-key-file) hub_base=hub.pub ;;
-	--devices-file) hub_base=devices.json ;;
-	*) hub_base=facades.json ;;
-	esac
-	hub_dst=/run/locklog-hub/$hub_base
-	case " $hub_seen " in *" $1 "*) die "$1 given twice" ;; esac
-	hub_seen="$hub_seen $1"
-	[ -n "${hub_dir:-}" ] || ensure_hub_dir
-	# The copy: a new file in the private directory, then renamed over the
-	# last one; readable by the console's account (the directory is not).
-	hc=$(mktemp "$hub_dir/.$hub_base.XXXXXX") || die "$1: could not copy $hf"
-	cat "$hf" >"$hc" && chmod 0644 "$hc" && mv -f "$hc" "$hub_dir/$hub_base" || {
-		rm -f "$hc"
-		die "$1: could not copy $hf"
-	}
-	hub_mounts="$hub_mounts --mount type=bind,src=$hub_dir/$hub_base,dst=$hub_dst,readonly"
-}
-
-console() {
-	check_project
-
-	# The hub flags: their files bound into the console, the rest passed
-	# as they are (the console checks them).
-	hub_on='' hub_mounts='' hub_seen='' hub_dir=''
-	n=$#
-	while [ "$n" -gt 0 ]; do
-		a=$1
-		shift
-		n=$((n - 1))
-		case "$a" in
-		--hub-key-file | --devices-file | --facade-keys-file)
-			[ "$n" -gt 0 ] || die "$a needs a file"
-			hub_file "$a" "$1"
-			shift
-			n=$((n - 1))
-			set -- "$@" "$a" "$hub_dst"
-			;;
-		--hub-key-file=* | --devices-file=* | --facade-keys-file=*)
-			hub_file "${a%%=*}" "${a#*=}"
-			set -- "$@" "${a%%=*}=$hub_dst"
-			;;
-		--hub | --hub=*)
-			hub_on=1
-			set -- "$@" "$a"
-			;;
-		-hub | -hub=* | -hub-key-file | -hub-key-file=* | -devices-file | -devices-file=* | -facade-keys-file | -facade-keys-file=*)
-			die "${a%%=*}: give the hub flags with two dashes (-${a%%=*})"
-			;;
-		*) set -- "$@" "$a" ;;
-		esac
-	done
-
-	# Docker >= 19.03, rootful: rootless engines keep logs the console
-	# cannot reach. The non-recursive bind option is parsed by the CLI, so
-	# the CLI's version chooses it: CLI 29 refuses bind-nonrecursive, a CLI
-	# before 25 does not know bind-recursive. Both set the same API field
-	# (Engine >= 19.03).
-	sv=$(docker version --format '{{.Server.Version}}' 2>/dev/null) || die "the Docker engine does not answer"
-	docker_version engine "$sv"
-	cv=$(docker version --format '{{.Client.Version}}' 2>/dev/null) || die "the Docker CLI does not report its version"
-	docker_version CLI "$cv"
-	if [ "$major" -ge 25 ]; then
-		nonrecursive=bind-recursive=disabled
-	else
-		nonrecursive=bind-nonrecursive=true
-	fi
-	case "$(docker info --format '{{.SecurityOptions}}' 2>/dev/null)" in
-	*rootless*) die "rootless Docker is not supported: its containers' logs and the host's journal are out of the console's reach" ;;
-	esac
-
-	read_plan "$@"
-	if [ "$(uname -s)" = Darwin ] && [ "$(printf '%s\n' "$lines" | grep -cvx -e '' -e remote)" -gt 0 ]; then
-		die "local log sources are not supported with Docker Desktop on macOS (the containers' logs live in its VM); use a remote source"
-	fi
-	# Read in this shell (no pipe), so that plan_line fills the plan.
-	while IFS= read -r l; do
-		[ -z "$l" ] || plan_line "$l"
-	done <<EOF
-$lines
-EOF
-	docker_args=
-	if [ -n "$docker_globs" ]; then
-		[ -z "$local_lines" ] ||
-			die "a docker source cannot share a console with file or journald sources: the containers root is read with group 0, which would apply to every bound log directory; put the container logs in a profile of their own and run a separate console for them"
-		docker_root_bind
-		ensure_map_dir "$name"
-		# The time before the snapshot: the events loop replays from it, so
-		# that nothing between the snapshot and its subscription is lost.
-		t0=$(date +%s)
-		lock_traps
-		write_map || die "could not write the containers map (docker ps, docker inspect)"
-		mount_args="$mount_args --mount type=bind,src=$map_dir,dst=/run/locklog-map,readonly"
-		docker_args="-e LOCKLOG_DOCKER_ROOT=$docker_root"
-		plan_text="$plan_text  containers map $map_dir at /run/locklog-map (read-only): $map_c mapped, $map_x console containers excluded, $map_skip skipped; kept current while the console runs
-"
-	fi
-
-	net=none
-	if [ -n "${LOCKLOG_NETWORK:-}" ]; then
-		printf '%s\n' "$LOCKLOG_NETWORK" | grep -Eqx '[A-Za-z0-9][A-Za-z0-9_.-]{0,127}' ||
-			die "LOCKLOG_NETWORK: invalid network name $LOCKLOG_NETWORK"
-		case "$LOCKLOG_NETWORK" in host | none | bridge) die "LOCKLOG_NETWORK: name a network of your own, not $LOCKLOG_NETWORK" ;; esac
-		net=$LOCKLOG_NETWORK
-	fi
-	if [ -n "$hub_on" ] && [ "$net" = none ]; then
-		die "hub mode: name the Docker network the console reaches lockhub on with LOCKLOG_NETWORK (agents must not join it)"
-	fi
-	if [ -n "$remote_lines" ] && [ "$net" = none ]; then
-		die "the profile reads a remote source (Loki, Elasticsearch, OpenSearch): name the Docker network the console reaches it on with LOCKLOG_NETWORK (a Compose network, or one of yours for a backend outside Docker: docker network create locklog-egress)"
-	fi
-	if [ -n "$remote_lines" ]; then
-		plan_text="$plan_text  remote sources reached on network $net (the agent must not be on it)
-"
-	fi
-	n=$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 1)
-	case "$n" in '' | *[!0-9]*) n=1 ;; esac
-	cpus=2
-	[ "$n" -lt 2 ] && cpus=$n
-
-	ensure_volume locklog-run /run/locklog 10051:10050:2750
-	ensure_volume locklog-home /home/locklog 10051:10051:700
-
-	if [ "$(docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null)" = false ]; then
-		docker rm "$name" >/dev/null
-	fi
-	group_args=
-	for g in $gids; do group_args="$group_args --group-add $g"; done
-
-	{
-		printf 'locklog: console %s, %s\n' "$name" "$header"
-		printf '  network %s, cpus %s, memory 1g, pids 256, no log driver\n' "$net" "$cpus"
-		printf '%s' "$plan_text"
-		[ -z "$gids" ] || printf '  groups%s\n' "$gids"
-		[ -z "$hub_on" ] || printf '  hub mode: requests are decided on lockhub (network %s)\n' "$net"
-	} >&2
-
-	set -f
-	# shellcheck disable=SC2086 # the plan's arguments are split on purpose
-	set -- run --rm "$tty" --name "$name" --label locklog.console=1 --user locklog --log-driver none $confined \
-		--pids-limit 256 --memory 1g --cpus "$cpus" --network "$net" \
-		-e VAULT_ADDR -e VAULT_NAMESPACE \
-		-e "LOCKLOG_NETWORK=${LOCKLOG_NETWORK:-}" -e "LOCKLOG_EXTRA_ROOTS=${LOCKLOG_EXTRA_ROOTS:-}" \
-		-e "LOCKLOG_EXPECT_DIR=$(devino "$ll_dir")" -e "LOCKLOG_EXPECT_ROOTS=$expect" $docker_args \
-		-v locklog-run:/run/locklog -v locklog-home:/home/locklog -v "$ll_dir:$ll_dir:ro" \
-		$group_args $mount_args $hub_mounts -w "$project" "$image" console "$@"
-	set +f
-	[ -n "$docker_globs" ] || exec docker "$@"
-
-	# With a docker source, the map loop runs beside the console, watching
-	# this pid: docker run replaces the launcher as on the plain path, so
-	# signals, the terminal and the exit status are the console's, and the
-	# loop ends with it (also when this process is killed).
-	map_loop "$t0" "$$" "$name" &
-	exec docker "$@"
-}
-
-# refresh ARGS: rewrite the containers map of this project's console once,
-# from the approved globs of the profile's docker sources.
-refresh() {
-	check_project
-	read_plan "$@"
-	while IFS= read -r l; do
-		case "$l" in
-		docker\ *) add_docker_glob "${l#docker }" ;;
-		esac
-	done <<EOF
-$lines
-EOF
-	[ -n "$docker_globs" ] || die "the profile has no docker source: there is no containers map to write"
-	ensure_map_dir "$name"
-	lock_traps
-	write_map || die "could not write the containers map (docker ps, docker inspect)"
-	printf 'locklog: containers map v%s of %s (%s): %s mapped, %s console containers excluded, %s skipped (not json-file, or not a valid name)\n' \
-		"$map_version" "$name" "$map_dir" "$map_c" "$map_x" "$map_skip"
-}
-
-# write_facts FILE [logs]: the facts of this host and account that setup
-# and doctor read in the image (internal/hostfacts): ids, group names,
+# write_facts FILE [logs]: the facts of this host and account that profile
+# add and doctor read in the image (internal/hostfacts): ids, group names,
 # states, paths and container names, never a log line or a secret. With
 # "logs", the files under the log roots follow, one per line, last.
 write_facts() {
@@ -1345,16 +749,48 @@ write_facts() {
 	} >"$1"
 }
 
-# setup ARGS: `locklog setup` in the image, as you (your uid and gid, so
-# that .locklog/ and the agent files are yours), with this project
-# writable, the host's facts, and the directory of the proxies' files
-# (outside the project, 0700); no network. The trusted .locklog/ is checked
-# here afterwards, as console will check it.
-setup() {
+# profile_add ARGS: `locklog profile add` in the image, as you (your uid and
+# gid, so that .locklog/ is yours), with the project writable (the one
+# --project DIR names, passed on as an absolute path; else this project),
+# the host's facts, and the directory of the proxies' files (outside the
+# project, 0700); no network. The trusted .locklog/ is checked here
+# afterwards, as lox run's review will.
+profile_add() {
 	need_docker
-	project_mount
-	shared "$project" && die "$project is writable by someone else than you, or not yours: run setup in a project directory of your own"
-	[ -z "$home_dir" ] || [ "$project" != "$home_dir" ] || die "run locklog setup in a project directory, not in your home directory"
+	pa=$project
+	n=$#
+	take=
+	done_opts=
+	for a in "$@"; do
+		if [ -n "$done_opts" ]; then
+			set -- "$@" "$a"
+			continue
+		fi
+		if [ -n "$take" ]; then
+			a=--project=$a
+			take=
+		fi
+		case "$a" in
+		--) done_opts=1 ;;
+		--project)
+			take=1
+			continue
+			;;
+		--project=*)
+			p=${a#--project=}
+			[ -n "$p" ] && [ -d "$p" ] || die "--project: not a directory"
+			pa=$(cd "$p" && pwd -P) || die "--project: not a directory"
+			a=--project=$pa
+			;;
+		esac
+		set -- "$@" "$a"
+	done
+	shift "$n"
+	[ -z "$take" ] || die "--project: name the project directory"
+	[ "$pa" != / ] || die "run locklog from a project directory, not from /"
+	safe "$pa" || die "$pa holds a character a docker mount cannot carry: move or rename it"
+	shared "$pa" && die "$pa is writable by someone else than you, or not yours: add the profile in a project directory of your own"
+	[ -z "$home_dir" ] || [ "$pa" != "$home_dir" ] || die "run locklog profile add in a project directory, not in your home directory"
 	cfg_home=${XDG_CONFIG_HOME:-}
 	case "$cfg_home" in /*) ;; *) [ -n "${HOME:-}" ] || die "HOME is not set"; cfg_home=$HOME/.config ;; esac
 	proxy_dir=$cfg_home/locklog/proxy
@@ -1364,46 +800,96 @@ setup() {
 	trusted "$proxy_dir" || die "$proxy_dir is a link, has an ACL, or is owned or writable by someone else than you"
 	facts=$(mktemp) || die "mktemp failed"
 	chmod 0600 "$facts" || die "could not restrict $facts"
-	chmod 0600 "$facts" || die "could not restrict $facts"
-	chmod 0600 "$facts" || die "could not restrict $facts"
 	trap 'rm -f "$facts"' EXIT
 	trap 'exit 130' INT
 	trap 'exit 143' TERM
 	write_facts "$facts" logs
 	rc=0
 	docker run --rm "$tty" --user "$(id -u):$(id -g)" --log-driver none --network none $confined \
-		--pids-limit 64 --memory 256m -e "LOCKLOG_IMAGE_REF=$image" -e "LOCKLOG_HOST_HOME=$home_dir" \
-		-v "$project:$project" -v "$proxy_dir:$proxy_dir" -v "$facts:/run/locklog-facts:ro" -w "$project" \
-		"$image" setup --facts /run/locklog-facts --proxy-dir "$proxy_dir" "$@" || rc=$?
+		--pids-limit 64 --memory 256m -e "LOCKLOG_HOST_HOME=$home_dir" \
+		-v "$pa:$pa" -v "$proxy_dir:$proxy_dir" -v "$facts:/run/locklog-facts:ro" -w "$pa" \
+		"$image" profile add --facts /run/locklog-facts --proxy-dir "$proxy_dir" "$@" || rc=$?
 	[ "$rc" -eq 0 ] || exit "$rc"
-	trusted_config "$project" ||
-		die "$project/.locklog or its config.toml is a link, has an ACL, or is writable by someone else than you: fix it before locklog console"
-	if [ -f "$project/.claude/settings.local.json" ] && command -v git >/dev/null 2>&1 &&
-		git -C "$project" rev-parse --is-inside-work-tree >/dev/null 2>&1 &&
-		! git -C "$project" check-ignore -q .claude/settings.local.json; then
-		say "warning: git does not ignore .claude/settings.local.json (personal settings, with the allow list): add it to .gitignore"
-	fi
+	trusted_config "$pa" ||
+		die "$pa/.locklog or its config.toml is a link, has an ACL, or is writable by someone else than you: fix it before lox run"
+}
+
+# agent_root: the project an agent is wired in (lockkit's agentwire): the
+# nearest directory up from here with a .locklog/, else with a .git, else
+# this directory.
+agent_root() {
+	ar=$here
+	d=$here
+	while :; do
+		if [ -d "$d/.locklog" ] && [ ! -L "$d/.locklog" ]; then
+			ar=$d
+			return 0
+		fi
+		[ "$d" = / ] && break
+		d=$(dirname "$d")
+	done
+	d=$here
+	while :; do
+		if [ -e "$d/.git" ]; then
+			ar=$d
+			return 0
+		fi
+		[ "$d" = / ] && break
+		d=$(dirname "$d")
+	done
+}
+
+# as_you ARGS: `locklog init` (and `doctor --fix`'s wiring) in the image, as
+# you (the agent files are yours), with the project an agent is wired in
+# writable at its own path; no network.
+as_you() {
+	need_docker
+	agent_root
+	[ "$ar" != / ] || die "run locklog from a project directory, not from /"
+	safe "$ar" || die "$ar holds a character a docker mount cannot carry: move or rename it"
+	safe "$here" || die "$here holds a character a docker mount cannot carry: move or rename it"
+	exec docker run --rm "$tty" --user "$(id -u):$(id -g)" --log-driver none --network none $confined \
+		--pids-limit 64 --memory 256m -v "$ar:$ar" -w "$here" "$image" "$@"
 }
 
 # doctor ARGS: `locklog doctor` in the image as the agent account, with the
-# host's facts on its input, the project read-only, and the host's network (its probes
-# see what an agent here reaches). Advisory: it never prints a response
-# body.
+# host's facts on its input, the project read-only, the host's network (its
+# probes see what an agent here reaches) and, when `lox run` runs the
+# workspace's locklog lock, its socket volume read-only. Advisory: it never
+# prints a response body.
 doctor() {
 	need_docker
 	project_mount
+	fix=
+	for a in "$@"; do
+		case "$a" in --) break ;; --fix | --fix=*) fix=1 ;; esac
+	done
+	sock=
+	if lockup_volume "$instance"; then
+		sock="type=volume,src=$lockup_vol,dst=/run/locklog,readonly"
+	else
+		say "$lockup_why"
+	fi
 	facts=$(mktemp) || die "mktemp failed"
-	chmod 0600 "$facts" || die "could not restrict $facts"
-	chmod 0600 "$facts" || die "could not restrict $facts"
 	chmod 0600 "$facts" || die "could not restrict $facts"
 	trap 'rm -f "$facts"' EXIT
 	trap 'exit 130' INT
 	trap 'exit 143' TERM
 	write_facts "$facts"
 	rc=0
+	if [ -n "$fix" ]; then
+		# --fix wires your agents: it writes their files in the project, as
+		# you. It asks on the terminal unless --yes: the facts go in a file.
+		agent_root
+		safe "$ar" || die "$ar holds a character a docker mount cannot carry: move or rename it"
+		docker run --rm "$tty" --user "$(id -u):$(id -g)" --log-driver none --network host $confined --pids-limit 64 --memory 256m \
+			${sock:+--mount} ${sock:+"$sock"} -v "$ar:$ar" -v "$facts:/run/locklog-facts:ro" -w "$here" \
+			"$image" doctor --facts /run/locklog-facts "$@" || rc=$?
+		exit "$rc"
+	fi
 	# The facts go on stdin: the agent account cannot read your 0600 file.
 	docker run --rm -i --user agent --log-driver none --network host $confined --pids-limit 64 --memory 256m \
-		-v "$project:$project:ro" -w "$workdir" \
+		${sock:+--mount} ${sock:+"$sock"} -v "$project:$project:ro" -w "$workdir" \
 		"$image" doctor --facts - "$@" <"$facts" || rc=$?
 	exit "$rc"
 }
@@ -1419,26 +905,24 @@ version | --version)
 	need_docker
 	exec docker run --rm --network none --user agent $confined "$image" version
 	;;
-console)
-	shift
-	console "$@"
+console | hub-key)
+	# The console runs hub-attached only, started by lox run with its hub
+	# flags, its mounts and its home: never from this launcher.
+	say "locklog $cmd is run by \`lox run\` only (lockhub): add the lock with \`lox add locklog <name>\`, then run \`lox run\` in a terminal of its own"
+	exit 2
 	;;
-refresh)
-	shift
-	refresh "$@"
-	;;
-hub-key)
-	# The instance key lives in the console's home volume: made and read
-	# as the console account, with no network and nothing else mounted.
-	shift
+profile)
+	if [ "${2:-}" = add ]; then
+		shift 2
+		profile_add "$@"
+		exit 0
+	fi
 	need_docker
-	ensure_volume locklog-home /home/locklog 10051:10051:700
-	exec docker run --rm --user locklog --log-driver none --network none $confined \
-		-v locklog-home:/home/locklog "$image" hub-key "$@"
+	project_mount
+	exec docker run --rm "$tty" --user agent --log-driver none --network none $confined "$image" "$@"
 	;;
-setup)
-	shift
-	setup "$@"
+init)
+	as_you "$@"
 	;;
 doctor)
 	shift
@@ -1448,16 +932,16 @@ mcp)
 	# The agent speaks MCP on stdin and stdout: no terminal. The server
 	# refuses a production profile when LOCKLOG_HOST_AGENT is set: a host
 	# agent is the non-production trial.
-	need_docker
 	project_mount
+	lockup_mount
 	exec docker run --rm -i --user agent --log-driver none --network none $confined \
 		--pids-limit 64 --memory 256m -e LOCKLOG_HOST_AGENT=1 \
-		-v locklog-run:/run/locklog -v "$project:$project:ro" -w "$workdir" "$image" "$@"
+		--mount "$mount" -v "$project:$project:ro" -w "$workdir" "$image" "$@"
 	;;
 *)
 	need_docker
 	project_mount
 	exec docker run --rm "$tty" --user agent --log-driver none --network none $confined \
-		-v locklog-run:/run/locklog -v "$project:$project:ro" -w "$workdir" "$image" "$@"
+		-v "$project:$project:ro" -w "$workdir" "$image" "$@"
 	;;
 esac

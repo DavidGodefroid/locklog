@@ -197,6 +197,8 @@ requests_per_minute = 30
 		{"pii_rules_max = 501", "above its ceiling"},
 		{"lookups_per_hour = 1001", "above its ceiling"},
 		{"pii_adds_per_hour = 101", "above its ceiling"},
+		{"max_calls = 65", "above its ceiling 64"},
+		{"max_calls = -1", "must be positive"},
 		{"lookups_per_hour = 10\nlookups_per_hour_per_uid = 20", "is above limits.lookups_per_hour"},
 		{"[profiles.staging.limits.local]\nbytes_per_hour = \"2TiB\"", "above its ceiling 1TiB"},
 		{"[profiles.staging.limits.remote]\nrequests_per_minute = 6001", "above its ceiling 6000"},

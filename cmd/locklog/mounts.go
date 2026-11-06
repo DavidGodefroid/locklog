@@ -47,7 +47,7 @@ func selectProfile(ps map[string]config.Profile, name string) (config.Profile, e
 	sort.Strings(names)
 	switch len(names) {
 	case 0:
-		return config.Profile{}, fmt.Errorf("no profile: run locklog setup first")
+		return config.Profile{}, fmt.Errorf("no profile: run locklog profile add first")
 	case 1:
 		return ps[names[0]], nil
 	}

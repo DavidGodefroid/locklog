@@ -16,13 +16,17 @@ const usage = `usage: locklog <command>
 
 Commands:
   version                 print the version
-  console [--profile P]   the console of a profile (in the launcher's container)
-  mcp [--profile P]       the agent's MCP server (stdin and stdout)
-  setup                   write .locklog/config.toml from this host, wire the agent
-  doctor [--profile P]    check what the agent's account can reach (advisory)
   init <agent>            wire an agent (claude, codex, cursor, gemini) to locklog in this project
-  mounts [--profile P]    print the mount plan of a profile (read by the launcher)
-  hub-key --instance NAME print the console's instance key for lockhub to pin (lox up)
+  profile add [--non-interactive] [--json] [--profile NAME] [--production] ...
+                          add a profile to .locklog/config.toml from this host's logs
+                          (never a secret: the console asks at start, or Vault)
+  doctor [--profile P] [--fix [--yes]] [--json]
+                          check what the agent's account can reach (advisory), and the agents' wiring
+  mcp [--profile P] [--instance NAME]
+                          the agent's MCP server (stdin and stdout)
+  console --hub URL ...   the console of a profile, hub-attached (started by lox run only)
+  mounts [--profile P]    print the mount plan of a profile (read by lox run)
+  hub-key --instance NAME print the console's instance key for lockhub to pin (lox run)
 `
 
 func main() {
@@ -46,8 +50,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 0
 	case "mcp":
 		return mcpCmd(args[1:], os.Stdin, stdout, stderr)
-	case "setup":
-		return setupCmd(args[1:], os.Stdin, stdout, stderr)
+	case "profile":
+		return profileCmd(args[1:], os.Stdin, stdout, stderr)
 	case "doctor":
 		return doctorCmd(args[1:], os.Stdin, stdout, stderr)
 	case "init":

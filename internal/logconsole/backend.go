@@ -228,7 +228,7 @@ type Backend struct {
 	o Options
 
 	mu sync.Mutex
-	// hub is the console's hub mode (OnHub), nil standalone.
+	// hub is the console's hub (OnHub), nil until console.Run opened it.
 	hub *console.Hub
 	// fp is the policy in force (the last session's), in a ticket's form:
 	// what a renewal is checked against.
@@ -493,15 +493,15 @@ func (b *Backend) Checks(ctx context.Context, s console.Session) []console.Findi
 	b.mu.Lock()
 	hub := b.hub != nil
 	b.mu.Unlock()
-	// In hub mode the console is on the network it reaches lockhub on
-	// (lox up's internal network): that one interface, and no other. The
+	// The console is on the network it reaches lockhub on (lox run's
+	// internal network): that one interface, and no other. The
 	// engine of a local-only profile dials nothing; the hub client dials
 	// the pinned hub only.
 	if hub && len(ifs) == 1 {
 		return nil
 	}
 	if len(ifs) > 0 {
-		what := "but its profile reads only local logs: start it with the launcher (no network)"
+		what := "but its profile reads only local logs, and it has no hub yet: no network"
 		if hub {
 			what = "but in hub mode a profile that reads only local logs has the hub's network only: one interface"
 		}
@@ -843,8 +843,8 @@ const SystemFile = "/etc/locklog/system.toml"
 
 // InImage reports whether this process runs in locklog's image: as the
 // console account, or with the image's system file present.
-// The console runs only in the launcher's container (or `lox up`'s), which
-// always passes LOCKLOG_EXPECT_DIR: a host holding the system file but
+// The console runs only in the container `lox run` starts, which always
+// passes LOCKLOG_EXPECT_DIR: a host holding the system file but
 // started without the launcher is refused, by design.
 func InImage(uid int, stat func(string) (os.FileInfo, error)) bool {
 	if uid == product.ConsoleUID {

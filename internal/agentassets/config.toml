@@ -1,6 +1,6 @@
-# locklog: the project's log sources. The console (`locklog console`) reads
-# this file and shows every change that loosens it before it applies.
-# `locklog setup` writes it from what it finds on this host.
+# locklog: the project's log sources. The console (`lox run` starts it)
+# reads this file and shows every change that loosens it before it applies.
+# `locklog profile add` writes a profile from what it finds on this host.
 version = 1
 
 # [profiles.staging]

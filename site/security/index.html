@@ -51,7 +51,7 @@
 <section aria-labelledby="protects">
   <h2 id="protects">What locklog protects</h2>
   <ul class="cards">
-    <li><span class="icon" aria-hidden="true">🕶️</span><h3>Clear values</h3><p>Nothing unmasked leaves the console, except an unmask a human approves at the console (the exact spans, once). Secrets are never unmasked or pseudonymised.</p></li>
+    <li><span class="icon" aria-hidden="true">🕶️</span><h3>Clear values</h3><p>Nothing unmasked leaves the console, except an unmask a human approves on lockhub (the exact spans, once). Secrets are never unmasked or pseudonymised.</p></li>
     <li><span class="icon" aria-hidden="true">🧪</span><h3>Clear-text oracles</h3><p>The agent cannot learn whether a clear value it chooses occurs in the logs, except through the documented <a href="#residuals">residuals</a>.</p></li>
     <li><span class="icon" aria-hidden="true">🗄️</span><h3>The log backends</h3><p>locklog reads, never writes. Backend credentials stay in the console.</p></li>
     <li><span class="icon" aria-hidden="true">📜</span><h3>The record of what happened</h3><p>Every call is audited in a hash chain, without clear values.</p></li>
@@ -60,19 +60,20 @@
 
 <section aria-labelledby="boundaries">
   <h2 id="boundaries">Trust boundaries</h2>
-  <pre tabindex="0" class="diagram" role="img" aria-label="On the host, the root-owned locklog launcher starts the console as uid 10051 with no capability, a read-only root, CPU, memory and process limits, no log driver and an allowed-uids list, with read-only non-recursive binds of the approved roots; the home volume (keys, index, audit, PII rules) is mounted by the console only, the run volume holds the socket directory; its network is none, the backend's network or, from v0.2.0, the hub's. A map loop names the approved containers. The agent is not locklog's: the user's own agent container (a lea container is planned), or the host agent for the trial."><code> host (the human)
-   locklog launcher (root-owned /usr/local/bin/locklog)
-     ├─ console  locklog-console-&lt;n&gt;  uid 10051, no capability, read-only root,
-     │    --cpus min(2,nproc) --memory 1g --pids-limit 256 --log-driver none,
-     │    --allowed-uids …; read-only
-     │    non-recursive binds of the approved roots
-     │    volume locklog-home  keys, index, audit, PII rules          (console only)
-     │    volume locklog-run   socket dir 2750 locklog:locklog-clients (10051:10050), socket 0660
-     │    network: none (local sources) | the backend's network | the hub's network (v0.2.0)
-     └─ map loop  docker events → names and ids of the approved container globs
+  <pre tabindex="0" class="diagram" role="img" aria-label="On the host, lox run (lockhub) starts the hub and the console of each lock under compose, hub-attached, as uid 10051 with no capability, a read-only root, CPU, memory and process limits, no log driver and an allowed-uids list, with read-only non-recursive binds of the approved roots; the home volume (keys, index, audit, PII rules) is mounted by the console only, the socket volume holds the socket directory; its network is the hub's, and the lock's egress network for a remote source. The root-owned locklog launcher runs profile add, init, doctor and the host agent's mcp, on the socket volume read-only. The agent is not locklog's: a lea container, the user's own agent container, or the host agent for the trial."><code> host (the human)
+   lox run (lockhub), in a terminal of its own: the hub, and the decisions
+     └─ console  (compose, one per lock)  uid 10051, no capability, read-only root,
+          cpus min(2,nproc), memory 1g, pids 256, logging none,
+          --hub … --instance …, --allowed-uids …; read-only
+          non-recursive binds of the approved roots
+          volume &lt;project&gt;_&lt;name&gt;-home  keys, index, audit, PII rules      (console only)
+          volume &lt;project&gt;_&lt;name&gt;-run   socket dir 2750 locklog:locklog-clients (10051:10050), socket 0660
+          network: the hub's (local sources) | and the lock's egress network (remote sources)
+   locklog launcher (root-owned /usr/local/bin/locklog): profile add, init,
+     doctor, and the host agent's mcp on the socket volume up.json names, read-only
 
- agent (not locklog's): the user's own agent container (a lea container: planned)
-   (gid 10050, its uid in --allowed-uids when needed), or, for the trial,
+ agent (not locklog's): a lea container, the user's own agent container
+   (gid 10050, its uid in allowed_uids when needed), or, for the trial,
    the host agent through `locklog mcp`</code></pre>
   <p class="prose">The console is the only component that reads logs, holds credentials, keeps the pseudonym keys and decides what leaves.</p>
 </section>
@@ -82,11 +83,11 @@
   <p class="prose">Like every Lock, locklog protects the logs only from an agent that cannot reach them by another path.</p>
   <ul class="cards">
     <li><h3 id="p1">P1 · The agent is placed apart</h3><p>The agent cannot read the logs, the Docker socket, the backends’ unauthenticated ports or the cloud metadata service directly; cannot become the console’s account; and cannot write the human’s launcher state: <code>$XDG_RUNTIME_DIR/locklog</code>, or <code>~/.local/state/locklog</code> where there is no runtime directory, and the environment the human starts the launcher with.</p></li>
-    <li><h3 id="p2">P2 · One uid, one trust domain</h3><p>Agents of one uid are one trust domain. In the own-container recipe, the agent user must not have sudo. Otherwise every agent that mounts one <code>locklog-run</code> is one domain.</p></li>
+    <li><h3 id="p2">P2 · One uid, one trust domain</h3><p>Agents of one uid are one trust domain. In the own-container recipe, the agent user must not have sudo. Otherwise every agent that mounts one lock’s socket volume is one domain.</p></li>
     <li><h3 id="p3">P3 · Credentials stay with the console</h3><p>Backend read credentials are held only by the console. Log shippers use write-only tokens.</p></li>
   </ul>
   <div class="prose">
-    <p>A standalone <code>.locklog/</code> outside lea is reviewed by the console. Placing the agent is lea’s job, or the job of your own agent container. Whether agents may join <code>LOCKLOG_NETWORK</code> also falls under P1: they must not.</p>
+    <p>A <code>.locklog/</code> outside lea is reviewed by <code>lox run</code> and by the console. Placing the agent is lea’s job, or the job of your own agent container. Whether agents may join the hub’s or the lock’s egress network also falls under P1: they must not.</p>
     <h3 id="doctor"><code>locklog doctor</code></h3>
     <p>Run where the agent runs, it checks the usual ways P1 fails and never prints a response body. It looks at:</p>
     <ul>
@@ -100,7 +101,7 @@
     </ul>
     <p>Each finding prints a remedy. On a production profile its findings are errors and it exits 1. It also lists residuals: whether Landlock confines the console, containers with <code>IpcMode</code> shareable, and swarm mode.</p>
     <h3 id="trial">The host-agent trial</h3>
-    <p><code>locklog setup --agent host</code> runs the MCP server as the image’s <code>agent</code> account, launched from your own account. Your agent there can still read whatever your account can, so the trial is for non-production data. The launcher’s <code>mcp</code> refuses production profiles.</p>
+    <p>The host-agent trial (<code>locklog init &lt;agent&gt;</code>, <code>.mcp.json</code>’s <code>locklog mcp</code>) runs the MCP server as the image’s <code>agent</code> account, launched from your own account. Your agent there can still read whatever your account can, so the trial is for non-production data. The launcher’s <code>mcp</code> refuses production profiles.</p>
   </div>
 </section>
 
@@ -111,13 +112,13 @@
   <thead><tr><th scope="col">#</th><th scope="col">Invariant</th><th scope="col">Mechanism</th></tr></thead>
   <tbody>
   <tr><th scope="row">1</th><td>No locklog container has an engine socket</td><td>launcher; goldens</td></tr>
-  <tr><th scope="row">2</th><td>The console shares only <code>locklog-run</code> with agents; the home volume, the map directory and the hub network never</td><td>launcher; with the hub (v0.2.0) <code>lox run</code>; with lea (planned) its label check</td></tr>
+  <tr><th scope="row">2</th><td>The console shares only its socket volume with agents, read-only; the home volume, the map directory and the hub network never</td><td><code>lox run</code>; the launcher’s and lea’s checks of up.json and the volume’s labels</td></tr>
   <tr><th scope="row">3</th><td>Nothing unmasked leaves the console except an approved unmask; secrets never</td><td>masking pipeline, typed masked responses; canary harness</td></tr>
   <tr><th scope="row">4</th><td>Agent predicates see only the masked view; every record is masked before any predicate; no text is sent to a backend; plans, charges and stopping points depend on the plan, never on matches; agent rules only tighten</td><td>engine, oracle and equivalence suites</td></tr>
-  <tr><th scope="row">5</th><td>Approved operations run only on a decision bound to the plan hash (exact spans for an unmask, the whole plan for a scan) and the policy fingerprint, once; never auto-approved for <code>read-pii</code>. With the hub (v0.2.0), <code>read-pii</code> only from <code>tty</code>, <code>deck</code> or <code>mobile</code></td><td>lockkit plans and tickets; the facade check lands with the hub</td></tr>
+  <tr><th scope="row">5</th><td>Approved operations run only on a decision bound to the plan hash (exact spans for an unmask, the whole plan for a scan) and the policy fingerprint, once; never auto-approved: every ticket is <code>never_auto</code>, and an auto rule’s approval is refused. <code>read-pii</code> only from <code>tty</code>, <code>deck</code> or <code>mobile</code></td><td>lockkit plans and tickets; the facade check in the console</td></tr>
   <tr><th scope="row">6</th><td>No approve or reveal method on the agent socket</td><td>lockkit</td></tr>
-  <tr><th scope="row">7</th><td>With the hub (v0.2.0): hub unreachable ⇒ approvals wait; free reads continue with the local audit</td><td>hub client</td></tr>
-  <tr><th scope="row">8</th><td>With the hub (v0.2.0): no hub auto-discovery</td><td>lockkit</td></tr>
+  <tr><th scope="row">7</th><td>Hub unreachable ⇒ approvals wait; free reads continue with the local audit</td><td>hub client</td></tr>
+  <tr><th scope="row">8</th><td>No hub auto-discovery: the console runs only with the hub flags <code>lox run</code> gives it</td><td>lockkit</td></tr>
   <tr><th scope="row">9</th><td>Only approved sources are opened; the policy is the approved copy; <code>.locklog/</code> is read-only for lea agents (lea placement planned)</td><td>approved store, mount plan, dev/inode checks</td></tr>
   <tr><th scope="row">10</th><td>Log content is untrusted text everywhere</td><td>JSON-escaped under an “untrusted” header, controls replaced; injection corpus</td></tr>
   <tr><th scope="row">11</th><td>Resources are bounded</td><td>plans, rolling budgets, a queue, container limits, decompression, response and journal DATA caps, a 64 MiB result cache</td></tr>
