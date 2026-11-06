@@ -148,3 +148,24 @@ means the `secret` detector must reach roughly ≥ 4 MiB/s/core (1/total = 1/res
 the dense incident hour (213 MiB) takes about 2 min today. Until lockkit#97 (or a
 follow-up) reaches that speed, LL-16b's variant must scan the narrowed
 range, not 7 days.
+
+## Masking profile on lockkit v0.8.0 (#104, #110)
+
+Measured with `TestApprovedScanVolume` at 256-512 MiB (the JSON app log of
+the 20 GiB approved-scan test, about 200 B a line, redact-unknown,
+`GOMAXPROCS=2`, 2 masking workers) and a CPU profile, after the `secret`
+detector speed-up of lockkit#105. Before the changes below: 6.1 MiB/s on
+the development host (4.0 MiB/s on a CI runner), with 1.4 of the 2 cores
+busy.
+
+| Where the time went | Share of CPU | Change |
+|---|---|---|
+| field names: secret step and detectors on every key of every record | 24 % | names that mask to themselves are cached per source (at most 4096) |
+| values withheld whole (redact-unknown, redact rules): the secret step ran, its result dropped | about 10 % | withheld before any detection |
+| trusted values (`level`, `status`): secret step and detectors on every record | about 8 % | values that mask to themselves are cached (trusted fields only: an untrusted value's cost never tells whether it was seen) |
+| reading and parsing, one goroutine, before masking started | 15 % (a core idle meanwhile) | a group's records are masked while it is read |
+| the message: secret step and detectors | 30 % | unchanged (the work masking exists for) |
+
+After: 15.1 MiB/s on the same host and setup, 2.5 times faster. The cost
+model still calibrates on its worst-case corpus without the caches (its
+masker's source is `""`), so call sizing stays conservative.
