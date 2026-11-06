@@ -532,3 +532,34 @@ func TestClearView(t *testing.T) {
 		}
 	}
 }
+
+// The audit records a relative range (last) and a patterns baseline, in
+// a canonical form parsed from the call, never the agent's text (#78): a
+// baseline reads the same window that much earlier, which the main window
+// alone would understate.
+func TestAuditRecordsLastAndBaseline(t *testing.T) {
+	b := New(Options{Profile: "staging", Root: project(t, localCfg)})
+	pol, err := b.LoadPolicy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := &fakeEnv{policy: pol}
+	for _, c := range []struct {
+		method, params string
+		last, baseline string
+	}{
+		{MethodPatterns, `{"last":"2h","baseline":"168h"}`, "2h0m0s", "168h0m0s"},
+		{MethodPatterns, `{"from":"2026-10-30T13:00:00Z","to":"2026-10-30T14:00:00Z","baseline":"90m"}`, "", "1h30m0s"},
+		{MethodScan, `{"tool":"patterns","query":{"last":"1h","baseline":"24h"}}`, "1h0m0s", "24h0m0s"},
+		{MethodSearch, `{"last":"30m"}`, "30m0s", ""},
+		// Not a duration the engine accepts: nothing recorded.
+		{MethodPatterns, `{"last":"jane@example.com","baseline":"-24h"}`, "", ""},
+		{MethodPatterns, `{"last":"7d","baseline":"0s"}`, "", ""},
+		{MethodPatterns, `{"baseline":"` + strings.Repeat("1", 40) + `h"}`, "", ""},
+	} {
+		r := newRecord(context.Background(), env, c.method, json.RawMessage(c.params))
+		if r.Last != c.last || r.Baseline != c.baseline {
+			t.Errorf("%s %s: last %q baseline %q, want %q %q", c.method, c.params, r.Last, r.Baseline, c.last, c.baseline)
+		}
+	}
+}

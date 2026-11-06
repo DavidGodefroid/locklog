@@ -83,6 +83,9 @@ type InitResult struct {
 // server named "locklog" must not get its tools allowed.
 func InitProject(cwd, agent string) (InitResult, error) {
 	root := agentwire.ProjectRoot(product.P, cwd)
+	if err := notUserScope(root); err != nil {
+		return InitResult{}, err
+	}
 	claude := agent == "claude"
 	var before []string
 	if claude {
@@ -103,6 +106,37 @@ func InitProject(cwd, agent string) (InitResult, error) {
 			" (personal settings, with the allow list above): add it to .gitignore, or it may be committed")
 	}
 	return out, nil
+}
+
+// notUserScope refuses a project root that is the home directory (a
+// dotfiles repository, or no project around cwd), or whose .claude is the
+// user's Claude Code directory (CLAUDE_CONFIG_DIR, else ~/.claude): a
+// project init there would write the allow list and the MCP server at
+// user scope, for every project.
+func notUserScope(root string) error {
+	home, err := os.UserHomeDir()
+	if err == nil && home != "" && sameDir(root, home) {
+		return fmt.Errorf("the project root %s is your home directory: run locklog init inside a project (or use the user-scope init)", root)
+	}
+	userClaude := os.Getenv("CLAUDE_CONFIG_DIR")
+	if userClaude == "" && home != "" {
+		userClaude = filepath.Join(home, ".claude")
+	}
+	if userClaude != "" && sameDir(filepath.Join(root, ".claude"), userClaude) {
+		return fmt.Errorf("%s is your Claude Code user directory: run locklog init inside a project", filepath.Join(root, ".claude"))
+	}
+	return nil
+}
+
+// sameDir reports whether a and b name the same existing directory (links
+// resolved).
+func sameDir(a, b string) bool {
+	fa, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	fb, err := os.Stat(b)
+	return err == nil && fa.IsDir() && os.SameFile(fa, fb)
 }
 
 // userWiring is wiring without the allow list: at user scope it would
