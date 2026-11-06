@@ -36,8 +36,7 @@ containers = ["shop-api-*"]
 format = "json"
 ```
 
-A Loki source, once the console opens remote sources
-([#97](https://github.com/DavidGodefroid/locklog/pull/97)):
+A Loki source:
 
 ```toml
 [profiles.staging.sources.loki]
@@ -76,11 +75,7 @@ countable), plus per kind:
 | `journald` | `units` (globs on `_SYSTEMD_UNIT`), `allow` (extra fields, reviewed; core dumps, command lines, executables, audit and `OBJECT_` fields can never be allowed) |
 | `docker` | `containers` (name globs; a glob matching a locklog console is refused), `attrs` (json-file log-opt attributes to keep) |
 | `loki` | `url`, `selector`, `trusted_labels`, `trusted_metadata`, `auth` (`none` refused on production, `basic`, `bearer`, `mtls`), `org_id`, `user` (basic), `credentials` (`ask` or `vault`, with `vault_path`), `tls`, `tls_ca`, `tls_cert` and `tls_key` (mtls) |
-
-The console opens `loki`, `elastic` and `opensearch` sources from the
-profile once [#97](https://github.com/DavidGodefroid/locklog/pull/97) is
-merged; until then the console refuses a profile that holds one (this build
-"does not read yet" that kind) before it opens anything.
+| `elastic`, `opensearch` (preview) | `url`, `selector`, `indices`, `trusted_fields`, `time_field`, `message_field`, `tiebreaker`, `read_only_roles` (OpenSearch only), `auth` (as `loki`, plus `api_key` for `elastic`), `user`, `credentials`, `vault_path`, `tls`, `tls_ca`, `tls_cert`, `tls_key` |
 
 ## Wiring an agent
 
@@ -233,3 +228,53 @@ results are on also shows its record in clear. lockkit refuses Ctrl-O at
 desktop levels 1 and 2 and warns on a production profile. On a production
 profile, where `unmask = "never"`, this is how you read a record the agent
 points you to.
+
+## Hub mode
+
+With lockhub, `lox up` starts the console with the hub flags, and you
+decide on lockhub (its terminal, the deck or a paired phone) instead of
+this terminal. By hand, through the launcher:
+
+```sh
+locklog hub-key --instance logs     # once: prints the key lockhub pins for this console
+LOCKLOG_NETWORK=lockfamily locklog console --profile staging \
+  --hub http://lockhub:8443 --hub-plain-http --hub-key-file ./hub.pub --instance logs \
+  [--devices-file ./devices.json [--require-device read-pii] [--seal-clear]] [--facade-keys-file ./facades.json]
+```
+
+The launcher binds the files read-only into the console and passes the
+hub flags to the console only. It copies each file into a private
+directory of yours (0700, under `$XDG_RUNTIME_DIR/locklog/hub/` or
+`~/.local/state/locklog/hub/`) and binds the copy, so the console reads
+the bytes the launcher checked. Each file must be a regular file owned
+by you or root, with no ACL, writable by its owner only; no symbolic link
+may be on its path, and every directory above it must be yours or root's,
+with no ACL and writable by no one else (unless sticky, as `/tmp`). The
+path holds no space, glob character, comma, `=`, `:`, `;`, quote,
+backslash or control character. `--hub`, `--hub-key-file`,
+`--devices-file` and `--facade-keys-file` take two dashes. `--hub`,
+`--hub-key-file` and `--instance` go together; there is no hub discovery. With `--devices-file` and no
+`--require-device`, a `read-pii` approval (an unmask, an approved lookup)
+must be signed by a pinned device.
+
+- A scan, an unmask or an approved lookup becomes a ticket on lockhub:
+  the hub shows its screen masked; with `--seal-clear` the clear screen
+  (the record in clear, secrets still redacted) goes sealed to your pinned
+  devices only. The agent hears `pending` with the ticket id, nothing
+  else, and calls the same tool again with the ticket once you decided.
+- The run plans the call again: another record, other pseudonyms or spans,
+  another scan or a changed policy is refused (`E_STALE`), and asking
+  again is a new ticket. A ticket runs once; a scan's ticket covers its
+  whole plan, and its continuations need none.
+- A `read-pii` decision taken on a chat facade is refused by the console:
+  only the terminal, the deck or a phone approve an unmask or an approved
+  lookup.
+- The hub shows the requester as the console's peer credentials name it
+  (`uid N`, or `agent` for the image's agent account), never a name the
+  agent declares; the agent's lea token only binds the ticket to it.
+- A ticket waits 24 hours; its run after that asks again (a renewal, which
+  says the record could not be checked before the run).
+- With the hub down, free reads go on; approvals stay pending and go out
+  when it answers. `locklog_status` shows the hub mode and the instance.
+- Decisions (who, on which facade, the hub's signature), renewals and
+  reveals are audited.

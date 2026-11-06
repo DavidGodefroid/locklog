@@ -6,7 +6,72 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-06
+
+The first release: the console, the engine and the MCP server over files,
+journald, Docker and Loki logs (Elasticsearch and OpenSearch as a preview),
+with the masking pipeline, the local index, budgets and scan approvals, and
+the site locklog.dev.
+
+Still open in this release:
+- The Loki and approval suites and `TestLokiIncident` (LL-16b,
+  [#101](https://github.com/DavidGodefroid/locklog/pull/101)) are not
+  merged; their runs so far found:
+  - without a `level` label, the Loki incident's job 1 answers in 5m22s
+    against its 5-minute gate
+    ([#110](https://github.com/DavidGodefroid/locklog/issues/110));
+  - one 7-day trusted Loki count uses 98 of the 120 hourly metric queries,
+    so job 1's next count is refused over budget with the default budgets
+    ([#112](https://github.com/DavidGodefroid/locklog/issues/112));
+  - a 20 GiB approved scan does not finish within the 30-minute approval
+    (about 4 MiB/s measured;
+    [#104](https://github.com/DavidGodefroid/locklog/issues/104));
+  - a Loki call's `scanned.bytes` varies between identical runs
+    ([#111](https://github.com/DavidGodefroid/locklog/issues/111)).
+- On a cold start (no local index yet) a trusted count scans the
+  not-yet-indexed rest with full masking, which misses its gate on a loaded
+  host ([#94](https://github.com/DavidGodefroid/locklog/issues/94)).
+- `pii.list` and `pii.add` answer "none" until the console serves the PII
+  backend ([#64](https://github.com/DavidGodefroid/locklog/issues/64)).
+- Remote sources (Loki, Elasticsearch, OpenSearch) have open review
+  follow-ups: off production a failed Elasticsearch check still pushes the
+  configured selector, remote connections are not closed, refusals can
+  quote strings the server sent, the connection checks are outside the
+  request pacing and budgets, and relative or `~` TLS paths pass the config
+  check when the console runs without the launcher
+  ([#106](https://github.com/DavidGodefroid/locklog/issues/106)); the
+  Elasticsearch check and scan liveness follow-ups of
+  [#93](https://github.com/DavidGodefroid/locklog/issues/93).
+- The leak harness checks every agent method's output; the bytes of the
+  console socket, the audit and the MCP outputs are not scanned by it yet
+  ([#86](https://github.com/DavidGodefroid/locklog/issues/86)).
+
 ### Added
+
+- Hub mode (LL-23): `locklog console` takes lockkit's hub flags (`--hub`,
+  `--hub-key-file`, `--instance`, `--hub-plain-http`, `--devices-file`,
+  `--require-device`, `--seal-clear`, `--facade-keys-file`; with a devices
+  file, `read-pii` requires a device by default), and `locklog hub-key
+  --instance NAME` prints the instance key for `lox up`. A scan, an
+  unmask or an approved lookup becomes a plan bound to the peer, the
+  agent's token, the policy and the engine's keyed plan hash, pushed to
+  lockhub with a masked screen; the clear screen, secrets redacted, goes
+  sealed to the pinned devices only. The agent hears `pending` with the
+  ticket id only (no plan hash, digest or policy fingerprint) and runs the
+  same call with `ticket` once decided: the engine plans it again and it
+  runs once if the keyed plan hash is the ticket's (`E_STALE` otherwise).
+  A `read-pii` decision from a facade other than `tty`, `deck` or `mobile`
+  is refused by the console. Expired tickets are renewed; decisions,
+  renewals and reveals are audited; with the hub down, free reads go on.
+  The launcher checks the hub files (yours or root's, writable by no one
+  else, on a path with no link and no directory others can write), binds
+  private copies of them into the console and passes the hub flags to it
+  only; `locklog_status` shows the hub mode and instance.
+  The requester the hub shows is the kernel-verified peer uid, never a name
+  the agent declares; an approved method without peer credentials is
+  refused in hub mode. In hub mode a console reading only local logs
+  accepts one network interface, the one it reaches lockhub on (`lox up`'s
+  internal network), and still refuses any other. Built on lockkit v0.8.1.
 
 - The console's clear view: with clear results on (Ctrl-O, lockkit's
   switch), the records an agent call returned are printed on the console's
@@ -211,7 +276,6 @@ uses [Semantic Versioning](https://semver.org/).
   modes keep terms local. Until the newest `Check` has succeeded, no
   trusted term is pushed and no count is served on the server, and a
   stream whose pushed term is no longer server-side is stale.
-
 - The console opens Loki, Elasticsearch and OpenSearch sources (#96): the
   egress client of each (its allowlist, the credentials the console asked
   for or read from Vault, its tls mode), with the source's selector,
@@ -219,8 +283,7 @@ uses [Semantic Versioning](https://semver.org/).
   tiebreaker fields. At connection the unauthenticated-read probe and, for
   Elasticsearch / OpenSearch, the privilege and mapping check run; a
   production profile is refused on either (an open endpoint, a
-  write-capable key), with an error that quotes no credential or response
-  body. Off production a failed check is noted on `:status` and the source
+  write-capable key), with an error that quotes no credential. Off production a failed check is noted on `:status` and the source
   matches its terms locally until the console reconnects. Remote sources
   use the remote budgets: their range, `limits.remote.count_range` for
   counts the server answers, and `limits.remote.requests_per_minute` for
@@ -264,3 +327,6 @@ uses [Semantic Versioning](https://semver.org/).
 - The launcher chooses the non-recursive bind option from the Docker CLI
   version, which parses it (`bind-recursive=disabled` from CLI 25), not from
   the engine's.
+
+[Unreleased]: https://github.com/DavidGodefroid/locklog/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/DavidGodefroid/locklog/releases/tag/v0.1.0
