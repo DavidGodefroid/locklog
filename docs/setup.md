@@ -165,7 +165,9 @@ recognised, never a response body. Residuals: Landlock, containers with
 here are wired to locklog in this project.
 
 Each finding prints a remedy. On a production profile the findings are red
-and doctor exits 1. The launcher runs it as the image's agent account with
+and doctor exits 1. Before any profile (no `locklog profile add` yet), the
+account is checked as for a production profile, with a warning that names
+`locklog profile add`. The launcher runs it as the image's agent account with
 the host's network and the host's facts, with the socket volume of the
 lock `lox run` runs (read-only) when there is one.
 

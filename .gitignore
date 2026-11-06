@@ -5,3 +5,5 @@
 *.out
 go.work
 go.work.sum
+# A setup leak test killed before its cleanup (internal/setup).
+.locklog-leak-test-*

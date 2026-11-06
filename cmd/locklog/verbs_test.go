@@ -154,6 +154,12 @@ func TestProfileAddRefusesSecrets(t *testing.T) {
 func TestDoctorVerbs(t *testing.T) {
 	root, facts := verbProject(t)
 	var out, errb bytes.Buffer
+	// As lox add: profile add first (a non-production profile: the docker
+	// group of the facts warns).
+	if code := run([]string{"profile", "add", "--non-interactive", "--profile", "staging", "--facts", facts}, &out, &errb); code != 0 {
+		t.Fatalf("profile add: %d %s", code, errb.String())
+	}
+	out.Reset()
 	if code := run([]string{"doctor", "--json", "--facts", facts}, &out, &errb); code != 0 {
 		t.Fatalf("exit %d: %s %s", code, out.String(), errb.String())
 	}
@@ -233,11 +239,48 @@ func TestDoctorProduction(t *testing.T) {
 
 // doctor --facts - reads the launcher's facts on its input.
 func TestDoctorFactsOnStdin(t *testing.T) {
-	t.Chdir(t.TempDir())
+	_, facts := verbProject(t)
 	var out, errb bytes.Buffer
+	if code := run([]string{"profile", "add", "--non-interactive", "--profile", "staging", "--facts", facts}, &out, &errb); code != 0 {
+		t.Fatalf("profile add: %d %s", code, errb.String())
+	}
+	out.Reset()
 	in := strings.NewReader(hostfacts.Header + "\neuid 0\ngroups root\nsudo absent\ndocker absent\n")
 	code := doctorCmd([]string{"--facts", "-"}, in, &out, &errb)
 	if code != 0 || !strings.Contains(out.String(), "euid 0: the agent runs as root") {
 		t.Errorf("exit %d\n%s%s", code, out.String(), errb.String())
+	}
+}
+
+// doctor before any profile (#87): the project's logs are not known to be
+// test data, so the account is checked as for a production profile (red,
+// exit 1), and doctor says why and what to run.
+func TestDoctorNoProfile(t *testing.T) {
+	_, facts := verbProject(t)
+	var out, errb bytes.Buffer
+	if code := run([]string{"doctor", "--facts", facts}, &out, &errb); code != 1 || !strings.Contains(out.String(), "RED   group docker") {
+		t.Errorf("doctor before profile add: exit %d\n%s", code, out.String())
+	}
+	if !strings.Contains(errb.String(), "no profile") || !strings.Contains(errb.String(), "locklog profile add") {
+		t.Errorf("no word of the missing profile: %q", errb.String())
+	}
+	out.Reset()
+	var d verbs.Doctor
+	if code := run([]string{"doctor", "--json", "--facts", facts}, &out, &errb); code != 1 || json.Unmarshal(out.Bytes(), &d) != nil || d.OK {
+		t.Fatalf("doctor --json before profile add: exit %d\n%s", code, out.String())
+	}
+	found := false
+	for _, c := range d.Checks {
+		if c.Check == "profile" {
+			found = c.Status == verbs.StatusWarn && strings.Contains(c.Fix, "locklog profile add")
+		}
+	}
+	if !found {
+		t.Errorf("no profile check with its fix: %+v", d.Checks)
+	}
+	// --profile names one that does not exist: a usage error, as before.
+	out.Reset()
+	if code := run([]string{"doctor", "--profile", "prod", "--facts", facts}, &out, &errb); code != 2 {
+		t.Errorf("--profile without a config: exit %d", code)
 	}
 }
