@@ -153,22 +153,6 @@ func TestRender(t *testing.T) {
 	}
 }
 
-const digestRef = "ghcr.io/davidgodefroid/locklog@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-
-func TestContainerRecipe(t *testing.T) {
-	var b bytes.Buffer
-	ContainerRecipe(&b, RecipeOptions{Image: digestRef, Profile: "prod"})
-	golden(t, "recipe-container.txt", b.Bytes())
-
-	b.Reset()
-	ContainerRecipe(&b, RecipeOptions{Image: "locklog", AgentUID: 1000, Profile: "prod"})
-	golden(t, "recipe-container-uid.txt", b.Bytes())
-
-	b.Reset()
-	LeaRecipe(&b)
-	golden(t, "recipe-lea.txt", b.Bytes())
-}
-
 func TestSourceNames(t *testing.T) {
 	used := map[string]bool{}
 	for _, c := range []struct{ dir, stem, want string }{

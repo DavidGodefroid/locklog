@@ -5,7 +5,6 @@ package e2e
 import (
 	"context"
 	"encoding/json"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -77,45 +76,6 @@ func (e *e2eEnv) locklog(t *testing.T, args ...string) string {
 	return string(out)
 }
 
-// startConsole starts `locklog console ARGS` in a terminal of its own
-// (script(1)) and answers the prompts in order, each once it shows, as a
-// human does; it returns once the console listens.
-func (e *e2eEnv) startConsole(t *testing.T, args string, answers ...[2]string) {
-	t.Helper()
-	console := exec.Command("script", "-q", "-f", "-e", "-c", "exec locklog console "+args, "/dev/null")
-	console.Dir, console.Env = e.proj, e.env
-	keys, err := console.StdinPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	var screen buffer
-	console.Stdout, console.Stderr = &screen, &screen
-	if err := console.Start(); err != nil {
-		t.Fatal(err)
-	}
-	exited := make(chan struct{})
-	go func() { _ = console.Wait(); close(exited) }()
-	t.Cleanup(func() {
-		if t.Failed() {
-			t.Logf("console output (masked):\n%s", plain(screen.String()))
-		}
-		_, _ = io.WriteString(keys, ":quit\r")
-		select {
-		case <-exited:
-		case <-time.After(20 * time.Second):
-			_ = console.Process.Kill()
-			<-exited
-		}
-	})
-	for _, a := range answers {
-		waitFor(t, &screen, a[0], 3*time.Minute, exited)
-		if _, err := io.WriteString(keys, a[1]+"\r"); err != nil {
-			t.Fatal(err)
-		}
-	}
-	waitFor(t, &screen, "Listening on ", 2*time.Minute, exited)
-}
-
 // connect starts an MCP server with argv and connects a client to it.
 func (e *e2eEnv) connect(t *testing.T, ctx context.Context, argv []string) *mcp.ClientSession {
 	t.Helper()
@@ -157,15 +117,21 @@ func masked(t *testing.T, ctx context.Context, cs *mcp.ClientSession, from, to s
 	}
 }
 
-// The five-minute path: install (the launcher on PATH), setup scripted,
-// the console, and an MCP client spawning the server the written
-// .mcp.json names asks a count, under 300 s; the answer is masked, and the
-// written allow list holds the free tools only, at project scope.
+// The five-minute path: install (the launcher on PATH), lox add's verbs
+// (profile add --non-interactive, init claude), the console as lox run
+// starts it, and an MCP client spawning the server the written .mcp.json
+// names asks a count, under 300 s; the answer is masked, and the written
+// allow list holds the free tools only, at project scope.
 func TestFiveMinutes(t *testing.T) {
 	t0 := time.Now()
 	e, want, from, to := newEnv(t, "five")
-	out := e.locklog(t, "setup", "--yes", "--no-production", "--agent", "host", "--agents", "claude", "--only", e.logs)
-	t.Logf("setup output:\n%s", out)
+	out := e.locklog(t, "profile", "add", "--non-interactive", "--json", "--profile", "staging", "--only", e.logs)
+	t.Logf("profile add: %s", out)
+	if !strings.Contains(out, `{"lock":"locklog","profile":"staging","config":"`+filepath.Join(e.proj, ".locklog", "config.toml")+`","production":false}`) {
+		t.Fatalf("profile add --json: %s", out)
+	}
+	out = e.locklog(t, "init", "claude")
+	t.Logf("init claude:\n%s", out)
 
 	var mcpJSON struct {
 		MCPServers map[string]struct {
@@ -204,14 +170,20 @@ func TestFiveMinutes(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(e.proj, ".claude", "settings.json")); err == nil {
 		t.Error("the shared .claude/settings.json was written")
 	}
+	// The agent's mcp before lox run: refused, saying to run lox run.
+	cmd := exec.Command(e.launcher, "mcp")
+	cmd.Dir, cmd.Env = e.proj, e.env
+	if b, err := cmd.CombinedOutput(); err == nil || !strings.Contains(string(b), "run `lox run` first") {
+		t.Errorf("mcp without lox run: %v\n%s", err, b)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	e.startConsole(t, "--profile staging", [2]string{"Apply these changes? [y/N]", "y"})
+	startLoxRun(t, e, "staging", "", [2]string{"Apply these changes? [y/N]", "y"})
 	cs := e.connect(t, ctx, append([]string{srv.Command}, srv.Args...))
 	total, _, calls := count(t, ctx, cs, map[string]any{"from": from, "to": to})
 	elapsed := time.Since(t0)
-	t.Logf("locklog_count: %d records (%d calls), want %d; %s from setup to the answer", total, calls, want, elapsed.Round(time.Second))
+	t.Logf("locklog_count: %d records (%d calls), want %d; %s from profile add to the answer", total, calls, want, elapsed.Round(time.Second))
 	if total != int64(want) {
 		t.Errorf("locklog_count = %d, want %d", total, want)
 	}
@@ -221,44 +193,48 @@ func TestFiveMinutes(t *testing.T) {
 	masked(t, ctx, cs, from, to)
 }
 
-// The own-container recipe: an agent image built from the snippet setup
-// prints, run as its non-root agent user, calls the console.
+// The own-container recipe (docs/setup.md): an agent image built from its
+// Dockerfile snippet, run as its non-root agent user with lox run's socket
+// volume read-only, calls the console.
 func TestOwnContainer(t *testing.T) { ownContainer(t, 0) }
 
-// TestOwnContainerUID: the recipe for an agent uid the console's image
-// knows by no account prints the console line with --allowed-uids, and
-// that very line, run through the launcher, admits the agent.
+// TestOwnContainerUID: an agent uid the console's image knows by no
+// account is admitted by the console's --allowed-uids (lockfamily.yaml's
+// allowed_uids, which lox run passes on).
 func TestOwnContainerUID(t *testing.T) { ownContainer(t, 1000) }
+
+// recipe is the own-container recipe's Dockerfile snippet in docs/setup.md
+// (its first dockerfile block), for image and the agent's uid.
+func recipe(t *testing.T, image, uid string) string {
+	t.Helper()
+	doc, err := os.ReadFile("../../docs/setup.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, rest, ok := strings.Cut(string(doc), "```dockerfile\n")
+	block, _, ok2 := strings.Cut(rest, "```")
+	if !ok || !ok2 {
+		t.Fatal("docs/setup.md has no dockerfile block")
+	}
+	const ref = "ghcr.io/davidgodefroid/locklog@sha256:<digest>"
+	if !strings.Contains(block, "COPY --from="+ref+" ") || !strings.Contains(block, "USER 10052:10050") {
+		t.Fatalf("the recipe changed:\n%s", block)
+	}
+	block = strings.ReplaceAll(block, ref, image)
+	return strings.ReplaceAll(block, "10052", uid)
+}
 
 // ownContainer runs the own-container recipe end to end, for the agent
 // uid (0: the image's agent account, 10052).
 func ownContainer(t *testing.T, agentUID int) {
-	name, uid, args := "own", "10052", []string{"setup", "--yes", "--no-production", "--agent", "container", "--only"}
+	name, uid, allowed := "own", "10052", ""
 	if agentUID != 0 {
 		name, uid = "own"+strconv.Itoa(agentUID), strconv.Itoa(agentUID)
+		allowed = uid
 	}
 	e, want, from, to := newEnv(t, name)
-	args = append(args, e.logs)
-	if agentUID != 0 {
-		args = append(args, "--agent-uid", uid)
-	}
-	out := e.locklog(t, args...)
-	lines := strings.Split(out, "\n")
-	first := slices.IndexFunc(lines, func(l string) bool { return strings.HasPrefix(l, "# locklog's client") })
-	last := slices.IndexFunc(lines, func(l string) bool { return strings.HasPrefix(l, "USER ") })
-	if first < 0 || last < first {
-		t.Fatalf("no Dockerfile snippet in:\n%s", out)
-	}
-	snippet := strings.Join(lines[first:last+1], "\n")
-	for _, want := range []string{"COPY --from=" + e.image + " ", "/etc/locklog/system.toml", "USER " + uid + ":10050"} {
-		if !strings.Contains(snippet, want) {
-			t.Errorf("snippet lacks %q", want)
-		}
-	}
-	if !strings.Contains(out, `docker run --rm -it --cap-drop ALL --security-opt no-new-privileges -v locklog-run:/run/locklog -v "$PWD:$PWD" -w "$PWD" your-agent-image`) ||
-		!strings.Contains(out, "one locklog-run volume is one trust") {
-		t.Errorf("the run line or the trust domain is missing:\n%s", out)
-	}
+	e.locklog(t, "profile", "add", "--non-interactive", "--profile", "staging", "--only", e.logs)
+	snippet := recipe(t, e.image, uid)
 	base := os.Getenv("LOCKLOG_E2E_AGENT_BASE")
 	if base == "" {
 		base = "alpine:3.22"
@@ -284,22 +260,12 @@ func ownContainer(t *testing.T, agentUID int) {
 	if f[0] != uid || !slices.Contains(f[1:len(f)-2], "10050") || f[len(f)-2] != "no-sudo" || f[len(f)-1] != "0:644" {
 		t.Errorf("agent image: want uid %s in 10050, no sudo, system.toml 0:644; got %q", uid, id)
 	}
-	// The console is started with the line the recipe printed.
-	var consoleArgs string
-	for _, l := range lines {
-		if rest, ok := strings.CutPrefix(strings.TrimSpace(l), "locklog console "); ok {
-			consoleArgs = rest
-		}
-	}
-	if consoleArgs == "" || strings.Contains(consoleArgs, "--allowed-uids") != (agentUID != 0) {
-		t.Fatalf("recipe console line: %q", consoleArgs)
-	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	e.startConsole(t, consoleArgs, [2]string{"Apply these changes? [y/N]", "y"})
+	lr := startLoxRun(t, e, "staging", allowed, [2]string{"Apply these changes? [y/N]", "y"})
 	cs := e.connect(t, ctx, []string{"docker", "run", "--rm", "-i", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
-		"--network", "none", "-v", "locklog-run:/run/locklog",
+		"--network", "none", "-v", lr.sockVol + ":/run/locklog:ro",
 		"-v", e.proj + ":" + e.proj, "-w", e.proj, tag, "locklog", "mcp"})
 	_, st := call(t, ctx, cs, "locklog_status", nil)
 	t.Logf("locklog_status from the agent's own container:\n%s", st)
@@ -315,14 +281,15 @@ func ownContainer(t *testing.T, agentUID int) {
 // production profile with E_PRODUCTION_HOST_AGENT, for every data tool.
 func TestProductionGuard(t *testing.T) {
 	e, _, from, to := newEnv(t, "prod")
-	e.locklog(t, "setup", "--yes", "--production", "--agent", "host", "--agents", "claude", "--only", e.logs)
+	e.locklog(t, "profile", "add", "--non-interactive", "--production", "--profile", "prod", "--only", e.logs)
 	cfg, err := os.ReadFile(filepath.Join(e.proj, ".locklog", "config.toml"))
 	if err != nil || !strings.Contains(string(cfg), "[profiles.prod]\nproduction = true\n") {
 		t.Fatalf("config: %v\n%s", err, cfg)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	e.startConsole(t, "--profile prod", [2]string{"Apply these changes? [y/N]", "y"}, [2]string{`Type the profile name "prod"`, "prod"})
+	// On production, the policy review takes the profile name typed.
+	startLoxRun(t, e, "prod", "", [2]string{`Apply these changes? Type the profile name "prod" to apply them`, "prod"})
 	cs := e.connect(t, ctx, []string{"locklog", "mcp"})
 	for _, c := range []struct {
 		tool string

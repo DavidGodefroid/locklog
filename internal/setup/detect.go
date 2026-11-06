@@ -1,8 +1,8 @@
-// Package setup is `locklog setup`: the project's first .locklog/config.toml
-// from what the host holds (log files with their rotated and compressed
-// siblings, the journal, the running containers, a Compose Loki), the
-// production question, the agent wiring at project scope, the
-// authenticating proxy of a Compose Loki, and the own-container recipe.
+// Package setup is `locklog profile add`: a profile of the project's
+// .locklog/config.toml from what the host holds (log files with their
+// rotated and compressed siblings, the journal, the running containers, a
+// Compose Loki), the production question, and the authenticating proxy of
+// a Compose Loki.
 //
 // Everything it writes is a proposal: the console shows the profile and
 // every loosening to the human before any log is read.

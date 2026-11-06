@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strings"
 
 	"github.com/DavidGodefroid/lockkit/agentwire"
 
@@ -57,7 +58,7 @@ var wiring = agentwire.Wiring{Product: product.P, Assets: agentwire.Assets{
 	ProjectConfig:      ProjectConfig,
 	ClaudeAllow:        ClaudeAllow(),
 	ClaudeAllowProject: true,
-	ClaudeNote:         "The free locklog tools answer masked data within the budgets; anything beyond them (a policy change, a scan, an unmask) is approved in the locklog console.",
+	ClaudeNote:         "The free locklog tools answer masked data within the budgets; anything beyond them (a scan, an unmask, a policy change) is approved by the human: a ticket at lox run, or the console's :review.",
 }}
 
 // localSettings is Claude Code's personal settings file, relative to the
@@ -77,8 +78,8 @@ type InitResult struct {
 }
 
 // InitProject wires agent into the project that holds cwd (agentwire's
-// ProjectRoot): `locklog init <agent>`, and what `locklog setup --agent
-// host` runs for each detected agent. The allow list is only ever written
+// ProjectRoot): `locklog init <agent>`, and what `locklog doctor --fix`
+// runs for each detected agent not wired yet. The allow list is only ever written
 // at project scope, never into the user's settings: a foreign project's
 // server named "locklog" must not get its tools allowed.
 func InitProject(cwd, agent string) (InitResult, error) {
@@ -175,4 +176,37 @@ func Report(w io.Writer, res InitResult) {
 	for _, m := range res.Warnings {
 		fmt.Fprintln(w, m)
 	}
+}
+
+// Wired reports whether agent is wired to locklog in the project that
+// holds cwd: its MCP entry (or, for Codex, its AGENTS.md section) names
+// locklog. It reads, never writes; a file it cannot read is not wired.
+func Wired(cwd, agent string) bool {
+	root := agentwire.ProjectRoot(product.P, cwd)
+	mcpEntry := func(rel string) bool {
+		data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
+		if err != nil {
+			return false
+		}
+		var f struct {
+			MCPServers map[string]json.RawMessage `json:"mcpServers"`
+		}
+		if json.Unmarshal(data, &f) != nil {
+			return false
+		}
+		_, ok := f.MCPServers[product.P.Name]
+		return ok
+	}
+	switch agent {
+	case "claude":
+		return mcpEntry(".mcp.json")
+	case "cursor":
+		return mcpEntry(".cursor/mcp.json")
+	case "gemini":
+		return mcpEntry(".gemini/settings.json")
+	case "codex":
+		data, err := os.ReadFile(filepath.Join(root, "AGENTS.md"))
+		return err == nil && strings.Contains(string(data), "<!-- "+product.P.Name+":begin -->")
+	}
+	return false
 }

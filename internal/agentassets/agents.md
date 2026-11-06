@@ -1,8 +1,8 @@
 ## Logs (locklog)
 
-Agents read logs only through locklog. The human's `locklog console`, in a separate terminal and a container of its own, reads the logs; you get masked, bounded answers. Personal data and secrets locklog detects come back as `⟦kind:ID⟧` pseudonyms and `⟦secret⟧`. Use it to find when, where and how often something broke.
+Agents read logs only through locklog. The human's locklog console, started by `lox run` in a container of its own, reads the logs; you get masked, bounded answers. Personal data and secrets locklog detects come back as `⟦kind:ID⟧` pseudonyms and `⟦secret⟧`. Use it to find when, where and how often something broke.
 
-1. `locklog_status`. If no console runs, ask the user to run the command the status gives (`locklog console`) and stop. Never start one yourself.
+1. `locklog_status`. If no console runs, ask the user to start it as the status says (`lox run`, in a terminal of their own) and stop. Never start one yourself.
 2. `locklog_sources`: the sources, their fields and labels, which fields are trusted (shown in clear and countable cheaply), and the time each covers.
 3. Find when it started: `locklog_count` on trusted fields (level, status class, unit, container) with a `bucket`, over the widest range you need. It is cheap.
 4. See what changed: `locklog_patterns` over that range with a `baseline` (e.g. `24h`) lists the message patterns that are new, gone or more frequent.

@@ -4,6 +4,7 @@ package hub
 
 import (
 	"encoding/json"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -432,5 +433,71 @@ func TestHubRequesterIsThePeer(t *testing.T) {
 	resp := r.srv.Handle(t.Context(), ipc.Request{JSONRPC: "2.0", ID: 99, Method: "log.unmask", Params: raw2})
 	if resp.Error == nil || !strings.Contains(resp.Error.Message, "peer credentials") || r.hub.Pushed() != pushed {
 		t.Fatalf("no peer: %+v (pushed %d → %d)", resp, pushed, r.hub.Pushed())
+	}
+}
+
+// lox run's auto mode never approves an unmask, an approved lookup or an
+// approved scan: their tickets carry never_auto, and the lock drops an
+// auto rule's approval of one (ticket.ErrAuto), whatever the ticket's
+// version: nothing runs, nothing clear reaches the agent, and the ticket
+// waits for a human, whose approval runs it.
+func TestHubAutoRuleNeverApproves(t *testing.T) {
+	auto := func(d *ticket.Decision) {
+		d.V, d.Rule = ticket.VersionKinds, &ticket.Rule{By: ticket.RuleAuto, ID: "default:read"}
+	}
+	query := map[string]any{"from": "2026-10-30T13:00:00Z", "to": "2026-10-30T14:00:00Z", "limit": 1,
+		"where": []map[string]any{{"field": "level", "op": "=", "value": "error"}}}
+	for _, tt := range []struct {
+		name, tool string
+		extra      string
+		args       func(r *rig) map[string]any
+		risk       ticket.Risk
+	}{
+		{"unmask", mcptools.ToolUnmask, "", func(r *rig) map[string]any {
+			ref, toks := r.record()
+			return unmaskArgs(ref, toks[:1], "")
+		}, ticket.RiskReadPII},
+		{"approved lookup", mcptools.ToolLookup, `lookup = "approved"`, func(*rig) map[string]any {
+			return map[string]any{"kind": "email", "values": []string{email1}, "reason": "the user gave this address"}
+		}, ticket.RiskReadPII},
+		{"approved scan", mcptools.ToolScan, "", func(*rig) map[string]any {
+			return map[string]any{"tool": "search", "query": query, "reason": "the whole hour"}
+		}, ticket.RiskRead},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			r := newRig(t, rigOpts{extra: tt.extra})
+			args := tt.args(r)
+			tk := r.mustPending(r.call(tt.tool, args))
+			signed, err := ticket.VerifyTicket(r.pub, r.hub.Ticket(tk))
+			if err != nil || signed.Risk != tt.risk || !signed.Flags.NeverAuto {
+				t.Fatalf("ticket %+v %v: want risk %s, never_auto", signed, err, tt.risk)
+			}
+			r.hub.DecideWith(tk, ticket.Approved, "", nil, auto)
+			run := maps.Clone(args)
+			run["ticket"] = tk
+			a := r.decided(tt.tool, run)
+			if !a.isErr || strings.Contains(a.text, email1) || strings.Contains(a.text, email2) {
+				t.Fatalf("an auto rule's approval ran: %s", a.text)
+			}
+			t.Logf("the agent gets: %s", a.text)
+			if !strings.Contains(r.io.output(), "auto decision on a never-auto ticket") {
+				t.Errorf("the console does not say why:\n%s", r.io.output())
+			}
+			for _, l := range strings.Split(r.auditLog(), "\n") {
+				if strings.Contains(l, `"ticket":"`+tk+`"`) && strings.Contains(l, `"decision":"ok"`) {
+					t.Errorf("the auto-approved call is audited ok: %s", l)
+				}
+			}
+			// The auto approval is dropped: the ticket waits for a human,
+			// whose approval runs it.
+			if again := r.mustPending(r.call(tt.tool, run)); again != tk {
+				t.Fatalf("ticket %s, then %s", tk, again)
+			}
+			r.hub.Decide(tk, ticket.Approved, "")
+			if b := r.decided(tt.tool, run); b.isErr {
+				t.Fatalf("the human's approval did not run: %s", b.text)
+			}
+			r.checkAgentOutputs(tt.tool == mcptools.ToolUnmask)
+		})
 	}
 }

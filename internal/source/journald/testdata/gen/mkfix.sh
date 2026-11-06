@@ -1,7 +1,7 @@
 #!/bin/sh
 # Runs inside a distro container: installs journal tools, writes two fixture
 # kinds into /out: remote.journal (systemd-journal-remote from export format)
-# and native/ (a standalone systemd-journald fed through the native socket),
+# and native/ (a separate systemd-journald fed through the native socket),
 # then the journalctl -o json reference for each.
 set -eu
 if command -v apt-get >/dev/null; then
@@ -20,7 +20,7 @@ journalctl --file /out/remote.journal -o json --no-pager --all > /out/remote.jso
 journalctl --file /out/remote.journal -o export --no-pager --all > /out/remote.export
 journalctl --file /out/remote.journal --header > /out/remote.header || true
 
-# native journald, standalone, persistent storage
+# native journald, on its own, persistent storage
 systemd-machine-id-setup >/dev/null 2>&1 || true
 mkdir -p /var/log/journal /run/systemd/journal /etc/systemd
 JD=$(ls /lib/systemd/systemd-journald /usr/lib/systemd/systemd-journald 2>/dev/null | head -1)

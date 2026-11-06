@@ -31,6 +31,6 @@ asked again:
   "mcp__locklog__locklog_pii_list",
   "mcp__locklog__locklog_pii_add"
 
-The free locklog tools answer masked data within the budgets; anything beyond them (a policy change, a scan, an unmask) is approved in the locklog console.
+The free locklog tools answer masked data within the budgets; anything beyond them (a scan, an unmask, a policy change) is approved by the human: a ticket at lox run, or the console's :review.
 
 

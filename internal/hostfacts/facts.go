@@ -1,11 +1,11 @@
-// Package hostfacts holds what `locklog setup` and `locklog doctor` know of
+// Package hostfacts holds what `locklog profile add` and `locklog doctor` know of
 // the machine the agent runs on: its account (euid, groups, sudo), Docker's
 // reach, the log files and journals, the containers and the installed
 // agents.
 //
 // The launcher (scripts/locklog) gathers them on the host, where the agent
-// runs, and passes them to the image in a facts file (Parse): setup and
-// doctor run in a container that would otherwise see only itself. Without
+// runs, and passes them to the image in a facts file (Parse): profile add
+// and doctor run in a container that would otherwise see only itself. Without
 // the launcher (the binary copied into an agent's own image, or a test),
 // Gather reads them where the binary runs.
 //
@@ -91,7 +91,7 @@ var (
 // Parse reads a facts file. Unknown keys are skipped (a newer launcher);
 // a malformed value of a known key is an error. Every line after "logs" is
 // a log path: a path that would break a line (a newline in a file name)
-// can only add log paths, which setup checks like any other.
+// can only add log paths, which profile add checks like any other.
 func Parse(r io.Reader) (Facts, error) {
 	f := Facts{EUID: -1}
 	sc := bufio.NewScanner(r)
@@ -183,7 +183,7 @@ func Parse(r io.Reader) (Facts, error) {
 			f.Agents = append(f.Agents, rest)
 		case "container":
 			// A container whose record does not parse (a legacy linked
-			// name, a label with a space) is skipped: setup proposes only
+			// name, a label with a space) is skipped: profile add proposes only
 			// what it can name.
 			if c, ok := parseContainer(rest); ok {
 				f.Containers = append(f.Containers, c)

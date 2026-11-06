@@ -67,10 +67,10 @@
   <h2 id="demo" class="visually-hidden">See it run</h2>
   <figure class="demo">
     <div class="demo-frame" role="region" aria-label="Animated demo" tabindex="0">
-      <img src="assets/demo.svg" alt="Claude Code asks when the PDF errors started on a staging profile. locklog_count shows the step at 14:02, locklog_patterns finds the new pattern with the email and the IP masked, and locklog_trace follows order 4812: all free and masked. The agent then asks locklog_unmask for the email. The locklog console, in its own account and container, shows the read-pii approval screen with the masked record and the span marked; the human answers n. The agent gets denied and carries on without the address; the audit records every call with pseudonyms only." width="1200" height="620" aria-describedby="demo-caption">
+      <img src="assets/demo.svg" alt="Claude Code asks when the PDF errors started on a staging profile. locklog_count shows the step at 14:02, locklog_patterns finds the new pattern with the email and the IP masked, and locklog_trace follows order 4812: all free and masked. The agent then asks locklog_unmask for the email. lox run, lockhub's terminal outside the agent, shows the read-pii ticket with the masked record and the span marked, never auto-approved; the human answers n. The agent gets denied and carries on without the address; the audit records every call with pseudonyms only." width="1200" height="620" aria-describedby="demo-caption">
     </div>
     <p class="demo-hint">Swipe sideways to see both terminals.</p>
-    <figcaption id="demo-caption">Claude Code (left) finds when the PDF errors started with <code>locklog_count</code>, <code>locklog_patterns</code> and <code>locklog_trace</code>: free, and already masked. Its <code>locklog_unmask</code> for an email waits in the locklog console (right, its own account and container). You see the masked record with the span marked and answer <code>n</code>: the agent carries on without the address, and the audit keeps every call with pseudonyms only.</figcaption>
+    <figcaption id="demo-caption">Claude Code (left) finds when the PDF errors started with <code>locklog_count</code>, <code>locklog_patterns</code> and <code>locklog_trace</code>: free, and already masked. Its <code>locklog_unmask</code> for an email is a ticket in <code>lox run</code> (right, lockhub’s terminal, outside the agent), never auto-approved. You see the masked record with the span marked and answer <code>n</code>: the agent carries on without the address, and the audit keeps every call with pseudonyms only.</figcaption>
   </figure>
 </section>
 
@@ -103,25 +103,24 @@
     <li><span class="icon" aria-hidden="true">⚖️</span><h3>Free within budgets, approved beyond</h3><p>Reads are bounded per call and per hour. A call over a budget is refused before it touches data, and <code>locklog_scan</code> asks you once for the whole plan.</p></li>
     <li><span class="icon" aria-hidden="true">📚</span><h3>Your sources</h3><p>Files (globs, rotation, gzip, zstd), journald (a pure-Go reader), Docker container logs and Loki; Elasticsearch and OpenSearch as a preview (their incident gates come with v0.3.0).</p></li>
     <li><span class="icon" aria-hidden="true">🔒</span><h3>Read-only</h3><p>Read-only mounts, a read-only root filesystem, an allowlist of backend endpoints, no Docker socket in any locklog container, no write path to any backend.</p></li>
-    <li><span class="icon" aria-hidden="true">👤</span><h3>Clear values stay with you</h3><p>Reads are free. Handing a clear value to the agent waits for your approval at the console and is off by default on production.</p></li>
+    <li><span class="icon" aria-hidden="true">👤</span><h3>Clear values stay with you</h3><p>Reads are free. Handing a clear value to the agent waits for your approval at <code>lox run</code> and is off by default on production.</p></li>
   </ul>
 </section>
 
 <section aria-labelledby="quick-start">
   <h2 id="quick-start">Quick start</h2>
-  <p class="prose">The trial takes about five minutes. Run it on a <strong>non-production</strong> profile: your agent runs on your own account, where it could still read the logs directly.</p>
-  <pre tabindex="0" class="term"><code><span class="cmt"># 1. Install the launcher (it verifies the release and the image with cosign)</span>
-curl -fsSL https://locklog.dev/install.sh | sh
+  <p class="prose">locklog is one lock of the Lock Family: <code>lox run</code> (lockhub) starts its console, in a terminal you keep open, outside the agent. Try it on a <strong>non-production</strong> profile: a host agent runs on your own account, where it could still read the logs directly.</p>
+  <pre tabindex="0" class="term"><code><span class="cmt"># The Lock Family: lox and every lock's launcher (cosign verifies each image)</span>
+brew trust davidgodefroid/tap
+brew install davidgodefroid/tap/lockfamily
 
-<span class="cmt"># 2. Describe your logs: setup detects files, journald and containers,
-#    asks whether the profile is production (answer "no" for the trial),
-#    and wires the detected agents (Claude Code, Codex, Cursor, Gemini CLI)</span>
-locklog setup --agent host
-
-<span class="cmt"># 3. The console, in a terminal you keep in view (setup prints the line;</span>
-<span class="cmt">#    containers get a profile of their own, &lt;profile&gt;-docker)</span>
-locklog console --profile &lt;profile&gt;</code></pre>
-  <p class="prose">Then, in another terminal, ask your agent: <em>“when did the 502s start?”</em>. It calls <code>locklog_count</code>, <code>locklog_patterns</code> and <code>locklog_trace</code>; the console audits every call and asks you only when the agent wants more than the free budgets or a value in clear.</p>
+<span class="cmt"># From the project: lox add runs locklog profile add, init claude and doctor;
+# lox run, in a terminal of its own, starts the hub and the console and
+# decides the tickets</span>
+cd ~/projects/shop
+lox add locklog logs
+lox run</code></pre>
+  <p class="prose">Then, in another terminal, ask your agent: <em>“when did the 502s start?”</em>. It calls <code>locklog_count</code>, <code>locklog_patterns</code> and <code>locklog_trace</code>: free, masked, audited. A scan or a value in clear becomes a ticket that <code>lox run</code> shows you and never approves on its own.</p>
   <p><a href="install/">Prerequisites, production placement and install details</a></p>
 </section>
 

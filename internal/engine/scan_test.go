@@ -92,7 +92,7 @@ func TestApprovedScanLocal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.count() != 1 || a.last.Class != "read" || a.last.NeverAuto {
+	if a.count() != 1 || a.last.Class != "read" || !a.last.NeverAuto {
 		t.Fatalf("approvals %d %+v", a.count(), a.last)
 	}
 	if !hex24.MatchString(res.Scan.ID) || res.Scan.Done || res.Scan.Reattached {

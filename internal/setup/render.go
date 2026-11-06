@@ -94,20 +94,66 @@ func tomlList(xs []string) string {
 	return "[" + strings.Join(q, ", ") + "]"
 }
 
+// Names are the profiles p writes: its main profile, Profile-docker for
+// the containers, Profile-loki for a proxied Loki (loki: one is written).
+func (p Plan) Names(loki bool) []string {
+	names := []string{p.Profile}
+	if len(p.Detected.Containers) > 0 {
+		names = append(names, DockerProfile(p.Profile))
+	}
+	if loki {
+		names = append(names, LokiProfile(p.Profile))
+	}
+	return names
+}
+
 // Render writes the config file of p and checks that it loads.
 func Render(p Plan) ([]byte, error) {
 	var b strings.Builder
 	w := func(format string, a ...any) { fmt.Fprintf(&b, format, a...) }
-	w("# locklog: the project's log sources, written by `locklog setup` from what\n")
-	w("# it found on this host. Nothing here is read until the console shows it to\n")
-	w("# you: `locklog console` reviews the profile, and every later change that\n")
-	w("# loosens it, before any log is opened. Remove what the agent should not see.\n")
+	w("# locklog: the project's log sources, written by `locklog profile add` from\n")
+	w("# what it found on this host. Nothing here is read until the console shows\n")
+	w("# it to you: the console `lox run` starts reviews the profile, and every\n")
+	w("# later change that loosens it, before any log is opened. Remove what the\n")
+	w("# agent should not see.\n")
 	w("version = 1\n")
-	d := p.Detected
-	prod := "false"
-	if p.Production {
-		prod = "true"
+	profiles(w, p)
+	w("\n# An Elasticsearch (kind = \"elastic\") or OpenSearch (kind = \"opensearch\")\n")
+	w("# source: uncomment and fill in. The console asks for the secret (or reads\n")
+	w("# it from Vault: credentials = \"vault\", vault_path); it is never written\n")
+	w("# here. Give it a read-only key: read and view_index_metadata on the indices\n")
+	w("# (monitor on the cluster); a production profile refuses any write or manage\n")
+	w("# privilege, and a backend that answers without credentials. Trusted fields\n")
+	w("# are keyword fields. The console reaches it on its lock's egress network.\n")
+	commented(w, searchExample(p.Profile, prodString(p.Production)))
+	out := []byte(b.String())
+	if _, err := config.ParseProfiles(out, ".locklog/config.toml"); err != nil {
+		return nil, fmt.Errorf("profile add: the config written would not load: %w", err)
 	}
+	return out, nil
+}
+
+// RenderProfiles writes the profiles of p alone, to append to an existing
+// config (whose loading the caller checks with them).
+func RenderProfiles(p Plan) ([]byte, error) {
+	var b strings.Builder
+	w := func(format string, a ...any) { fmt.Fprintf(&b, format, a...) }
+	w("# Added by `locklog profile add`.\n")
+	profiles(w, p)
+	return []byte(b.String()), nil
+}
+
+func prodString(prod bool) string {
+	if prod {
+		return "true"
+	}
+	return "false"
+}
+
+// profiles writes the profile tables of p.
+func profiles(w func(string, ...any), p Plan) {
+	d := p.Detected
+	prod := prodString(p.Production)
 	main := len(d.Files) > 0 || d.Journald
 	if main {
 		w("\n[profiles.%s]\nproduction = %s\n", p.Profile, prod)
@@ -125,7 +171,7 @@ func Render(p Plan) ([]byte, error) {
 	if len(d.Containers) > 0 {
 		dp := DockerProfile(p.Profile)
 		w("\n# The running containers. A docker source runs in a console of its own:\n")
-		w("# locklog console --profile %s\n", dp)
+		w("# a locklog lock of its own (lox add locklog <name>) serving %s.\n", dp)
 		w("[profiles.%s]\nproduction = %s\n", dp, prod)
 		w("\n[profiles.%s.sources.containers]\nkind = \"docker\"\ncontainers = %s\n", dp, tomlList(d.Containers))
 	}
@@ -143,9 +189,9 @@ func Render(p Plan) ([]byte, error) {
 		if k, v, ok := strings.Cut(l.Selector, "="); ok {
 			sw("selector = { %s = %s }\n", k, tomlString(v))
 		}
-		w("\n# The Compose Loki, behind the authenticating proxy setup generated (its\n")
-		w("# files are outside the project). The console reaches it on the Compose\n")
-		w("# network: LOCKLOG_NETWORK=%s locklog console --profile %s\n", l.Network, lp)
+		w("\n# The Compose Loki, behind the authenticating proxy profile add generated\n")
+		w("# (its files are outside the project). The console of a lock serving %s\n", lp)
+		w("# reaches it on the Compose network %s.\n", l.Network)
 		if l.Selector == "" {
 			w("# Uncomment it once it names the streams to serve: selector = { app = \"api\" }.\n")
 			commented(w, s.String())
@@ -153,18 +199,4 @@ func Render(p Plan) ([]byte, error) {
 			w("%s", s.String())
 		}
 	}
-	w("\n# An Elasticsearch (kind = \"elastic\") or OpenSearch (kind = \"opensearch\")\n")
-	w("# source: uncomment and fill in. The console asks for the secret (or reads\n")
-	w("# it from Vault: credentials = \"vault\", vault_path); it is never written\n")
-	w("# here. Give it a read-only key: read and view_index_metadata on the indices\n")
-	w("# (monitor on the cluster); a production profile refuses any write or manage\n")
-	w("# privilege, and a backend that answers without credentials. Trusted fields\n")
-	w("# are keyword fields. The console reaches it on a Docker network:\n")
-	w("# LOCKLOG_NETWORK=<network> locklog console --profile %s\n", SearchProfile(p.Profile))
-	commented(w, searchExample(p.Profile, prod))
-	out := []byte(b.String())
-	if _, err := config.ParseProfiles(out, ".locklog/config.toml"); err != nil {
-		return nil, fmt.Errorf("setup: the config written would not load: %w", err)
-	}
-	return out, nil
 }

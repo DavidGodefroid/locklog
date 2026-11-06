@@ -6,6 +6,62 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+Hub only: the console is started by `lox run` (lockhub) only, and locklog
+takes the launcher verbs every lock of the Lock Family takes (#117).
+
+### Changed
+
+- **Breaking.** lockkit v0.13.0 (from v0.8.1). `locklog console` without
+  `--hub`, `--hub-key-file` and `--instance` refuses before it touches the
+  terminal, the project or the config, with lockkit's "the console is
+  launched by `lox up` only" (lockkit's text predates the `lox run` name).
+  There is no standalone console and no auto mode.
+- **Breaking.** The launcher runs no console: `locklog console` and
+  `locklog hub-key` through it say that `lox run` runs them and exit 2.
+  Its console path (the mount plan, the containers map and its `docker
+  events` loop, `refresh`, the hub-file copies of #114) is gone: `lox run`
+  mounts the plan (lockhub#86).
+- **Breaking.** The launcher's `mcp` reaches the lock `lox run` runs: it
+  finds `.lockfamily/up.json` up from the current directory (the user's, no
+  link, not writable by group or others, at most 1 MiB, version 1, this
+  workspace's), checks the socket volume's labels and the containers that
+  mount it with Docker, and mounts it read-only on `/run/locklog`; with
+  none it says to run `lox run` first and exits 2. `--instance NAME` picks
+  one of several locklog locks (without it the error names them).
+  `doctor` mounts the same volume when there is one.
+- **Breaking.** `locklog setup` is replaced by the launcher verbs of
+  lockkit's GUIDE.md §14: `locklog profile add [--non-interactive] [--json]
+  [--project DIR] [--profile NAME] [--production] [--only DIR,...]
+  [--loki-proxy SERVICE ...] [--credentials ask|vault [--vault-path P]]`
+  (a profile from the host's logs, appended to an existing config, never
+  rewriting one: `exists`; never a secret: lockkit's `verbs` checks),
+  `locklog init <agent>` (now run as you, the project writable), and
+  `locklog doctor [--fix [--yes]] [--json]` (also checks the agents' wiring;
+  `--fix` wires the ones installed here). The own-container recipe and the
+  lea placement are no longer printed: the recipe is in docs/setup.md.
+- An approved scan's ticket is `never_auto` (still risk `read`, one
+  approval for its whole plan), like an unmask's and an approved lookup's:
+  `lox run`'s auto mode approves no locklog ticket, and the console refuses
+  an auto rule's approval of one (lockkit's `ErrAuto`).
+- `locklog mcp --instance NAME` (else `LOCKLOG_INSTANCE`, else the one lock
+  lea lists in `LEA_LOCKLOG_INSTANCES`) dials one lock among several
+  (lockkit's `client.DialInstance`).
+- From lockkit v0.11 to v0.13: the console asks the Vault token at its start
+  for a `credentials = "vault"` source (never `VAULT_TOKEN` or
+  `~/.vault-token`); a production profile's widenings at the console (the
+  policy review, a loosening at `:review`, `:unmask`) take the profile name
+  typed exactly; the idle timeout counts only the human's input and the
+  backend's methods.
+- Remote sources still connect at the console's start (no `connect` ticket,
+  lockkit's `lazyconn`, yet).
+- CI: the five-minute, own-container, production-guard and e2e jobs start
+  the console as `lox run` does, against lockkit's fake hub, until `lox run`
+  knows locklog (lockhub#84, #86, #87); the docker-source job writes the
+  containers map itself.
+
+Not in this release: per-profile auto rules for `lox run`
+([#126](https://github.com/DavidGodefroid/locklog/issues/126)).
+
 ## [0.1.0] - 2026-11-06
 
 The first release: the console, the engine and the MCP server over files,

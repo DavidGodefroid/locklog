@@ -17,7 +17,7 @@ import (
 )
 
 // The ticket and the requester of an approved method are the console's:
-// the engine gets the rest, standalone too.
+// the engine gets the rest, also before the hub is open.
 func TestSplitEnvelope(t *testing.T) {
 	out, env, ok := splitEnvelope(json.RawMessage(`{"ref":"Lr1.x","ticket":"T1","requester":{"agent":"dev-1","token":"ab"},"pseudonyms":["⟦email:A⟧"]}`))
 	if !ok || env.Ticket != "T1" || env.Requester != (ipc.Requester{Agent: "dev-1", Token: "ab"}) {
@@ -48,7 +48,7 @@ func TestSplitEnvelope(t *testing.T) {
 	resp := b.Methods()[MethodUnmask](ctx, ipc.Request{ID: 3, Method: MethodUnmask,
 		Params: json.RawMessage(`{"ref":"Lr1.x","pseudonyms":["⟦email:A⟧"],"reason":"r","requester":{"agent":"dev-1","token":"ab"}}`)}, fe)
 	if resp.Error != nil || strings.Contains(eng.params, "requester") || !strings.Contains(eng.params, `"ref":"Lr1.x"`) {
-		t.Fatalf("standalone: %+v, engine got %s", resp.Error, eng.params)
+		t.Fatalf("no hub: %+v, engine got %s", resp.Error, eng.params)
 	}
 	// A free method is not touched: an unknown field is the engine's.
 	b.Methods()[MethodSearch](ctx, ipc.Request{ID: 4, Method: MethodSearch, Params: json.RawMessage(`{"ticket":"T1"}`)}, fe)
@@ -112,8 +112,8 @@ func TestPeerName(t *testing.T) {
 	}
 }
 
-// In hub mode a local-only console may be on one network, the hub's;
-// standalone it has none, and in hub mode never two.
+// A local-only console may be on one network, the hub's, once its hub is
+// open; before, it has none, and never two.
 func TestChecksNetworkHubMode(t *testing.T) {
 	eng := &fakeEngine{}
 	open := func(context.Context, OpenOptions) (Engine, error) { return eng, nil }
@@ -123,7 +123,7 @@ func TestChecksNetworkHubMode(t *testing.T) {
 		hub    bool
 		refuse bool
 	}{
-		{"standalone, one interface", []string{"eth0"}, false, true},
+		{"no hub yet, one interface", []string{"eth0"}, false, true},
 		{"hub, the hub's network", []string{"eth0"}, true, false},
 		{"hub, two networks", []string{"eth0", "eth1"}, true, true},
 		{"hub, no network", nil, true, false},
