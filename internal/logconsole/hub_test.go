@@ -7,8 +7,11 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -118,29 +121,97 @@ func TestPeerName(t *testing.T) {
 	}
 }
 
-// A local-only console may be on one network, the hub's, once its hub is
-// open; before, it has none, and never two.
+// procNet writes a container's routing tables: IPv4 lines "iface
+// dst/len [via gw]" (addresses in the host's byte order, as the kernel
+// prints them), and the IPv6 table of a container with IPv6 off.
+func procNet(t *testing.T, routes ...string) string {
+	t.Helper()
+	h := func(ip net.IP) string { return fmt.Sprintf("%08X", binary.NativeEndian.Uint32(ip.To4())) }
+	lines := []string{"Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT"}
+	for _, r := range routes {
+		f := strings.Fields(r)
+		_, dst, err := net.ParseCIDR(f[1])
+		if err != nil {
+			t.Fatal(err)
+		}
+		gw, flags := net.IPv4zero, 0x1
+		if len(f) == 4 {
+			gw, flags = net.ParseIP(f[3]), 0x3
+		}
+		lines = append(lines, fmt.Sprintf("%s\t%s\t%s\t%04X\t0\t0\t0\t%s\t0\t0\t0", f[0], h(dst.IP), h(gw), flags, h(net.IP(dst.Mask))))
+	}
+	d := t.TempDir()
+	if err := os.WriteFile(filepath.Join(d, "route"), []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	v6 := "00000000000000000000000000000000 00 00000000000000000000000000000000 00 00000000000000000000000000000000 ffffffff 00000001 00000000 00200200       lo\n" +
+		"00000000000000000000000000000001 80 00000000000000000000000000000000 00 00000000000000000000000000000000 00000000 00000004 00000000 80200001       lo\n"
+	if err := os.WriteFile(filepath.Join(d, "ipv6_route"), []byte(v6), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
+
+// A local-only console has no network before its hub is open; in hub
+// mode, the one network lox run gives it to reach the hub (internal: no
+// route out), and no other (#136).
 func TestChecksNetworkHubMode(t *testing.T) {
 	eng := &fakeEngine{}
 	open := func(context.Context, OpenOptions) (Engine, error) { return eng, nil }
+	// lox run's hub network: the hub by its service name, on the
+	// console's one interface.
+	internal := []string{"eth0 172.24.0.0/16"}
+	lookup := func(ips ...string) func(context.Context, string) ([]net.IP, error) {
+		return func(_ context.Context, host string) ([]net.IP, error) {
+			if host != "lockhub" {
+				return nil, errors.New("no such host " + host)
+			}
+			var out []net.IP
+			for _, ip := range ips {
+				out = append(out, net.ParseIP(ip))
+			}
+			return out, nil
+		}
+	}
 	for _, tt := range []struct {
 		name   string
 		ifs    []string
+		routes []string
+		hubURL string
+		ips    []string
 		hub    bool
-		refuse bool
+		refuse string
 	}{
-		{"no hub yet, one interface", []string{"eth0"}, false, true},
-		{"hub, the hub's network", []string{"eth0"}, true, false},
-		{"hub, two networks", []string{"eth0", "eth1"}, true, true},
-		{"hub, no network", nil, true, false},
+		{name: "no hub yet, one interface", ifs: []string{"eth0"}, routes: internal, ips: []string{"172.24.0.2"}, refuse: "no hub yet"},
+		{name: "no hub yet, no network", hub: false},
+		{name: "hub, no network", hub: true},
+		{name: "hub, the hub's internal network", ifs: []string{"eth0"}, routes: internal, ips: []string{"172.24.0.2"}, hub: true},
+		{name: "hub, the hub's network by address", ifs: []string{"eth0"}, routes: internal, hubURL: "http://172.24.0.2:8443", hub: true},
+		{name: "hub, the hub's network, two addresses", ifs: []string{"eth0"}, routes: internal, ips: []string{"172.24.0.2", "172.24.0.9"}, hub: true},
+		{name: "hub, an extra interface", ifs: []string{"eth0", "eth1"}, routes: append([]string{"eth1 10.9.0.0/16"}, internal...), ips: []string{"172.24.0.2"}, hub: true, refuse: "one interface"},
+		{name: "hub, a network with a route out", ifs: []string{"eth0"}, routes: append([]string{"eth0 0.0.0.0/0 via 172.24.0.1"}, internal...), ips: []string{"172.24.0.2"}, hub: true, refuse: "a route out (0.0.0.0/0 on eth0)"},
+		{name: "hub, a route through a gateway", ifs: []string{"eth0"}, routes: append([]string{"eth0 10.0.0.0/8 via 172.24.0.1"}, internal...), ips: []string{"172.24.0.2"}, hub: true, refuse: "a route out (10.0.0.0/8 on eth0)"},
+		{name: "hub, an undeclared network (the hub is not on it)", ifs: []string{"eth0"}, routes: []string{"eth0 10.9.0.0/16"}, ips: []string{"172.24.0.2"}, hub: true, refuse: "is not reached through eth0 (no route)"},
+		{name: "hub, one of the hub's addresses elsewhere", ifs: []string{"eth0"}, routes: internal, ips: []string{"172.24.0.2", "10.1.0.2"}, hub: true, refuse: "10.1.0.2) is not reached"},
+		{name: "hub, the hub on the loopback", ifs: []string{"eth0"}, routes: append([]string{"lo 127.0.0.0/8"}, internal...), hubURL: "http://127.0.0.1:8443", hub: true, refuse: "is not reached through eth0 (lo)"},
+		{name: "hub, the hub's host does not resolve", ifs: []string{"eth0"}, routes: internal, hubURL: "http://elsewhere:8443", hub: true, refuse: "cannot resolve the hub's host elsewhere"},
+		{name: "hub, no hub address", ifs: []string{"eth0"}, routes: internal, hubURL: "-", hub: true, refuse: "no hub address"},
 	} {
-		net := t.TempDir()
+		sys := t.TempDir()
 		for _, n := range append([]string{"lo"}, tt.ifs...) {
-			if err := os.Mkdir(filepath.Join(net, n), 0o755); err != nil {
+			if err := os.Mkdir(filepath.Join(sys, n), 0o755); err != nil {
 				t.Fatal(err)
 			}
 		}
-		b := New(Options{Profile: "staging", Root: project(t, localCfg), SysClassNet: net, Open: open})
+		hubURL := tt.hubURL
+		switch hubURL {
+		case "":
+			hubURL = "http://lockhub:8443"
+		case "-":
+			hubURL = ""
+		}
+		b := New(Options{Profile: "staging", Root: project(t, localCfg), SysClassNet: sys, ProcNet: procNet(t, tt.routes...),
+			HubURL: hubURL, LookupIP: lookup(tt.ips...), Open: open})
 		pol, err := b.LoadPolicy()
 		if err != nil {
 			t.Fatal(err)
@@ -150,9 +221,34 @@ func TestChecksNetworkHubMode(t *testing.T) {
 			b.hub = &console.Hub{Instance: "logs"}
 		}
 		f := b.Checks(context.Background(), &session{engine: eng, policy: pol.(Policy)})
-		if (len(f) > 0 && f[0].Refuse) != tt.refuse {
-			t.Errorf("%s: findings %+v", tt.name, f)
+		switch {
+		case tt.refuse == "" && len(f) > 0:
+			t.Errorf("%s: refused: %+v", tt.name, f)
+		case tt.refuse != "" && (len(f) != 1 || !f[0].Refuse || !strings.Contains(f[0].Text, tt.refuse)):
+			t.Errorf("%s: findings %+v, want a refusal with %q", tt.name, f, tt.refuse)
 		}
+	}
+}
+
+// A routing table the console cannot read is a refusal, not a pass.
+func TestChecksNetworkHubModeNoRoutes(t *testing.T) {
+	eng := &fakeEngine{}
+	sys := t.TempDir()
+	for _, n := range []string{"lo", "eth0"} {
+		if err := os.Mkdir(filepath.Join(sys, n), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	b := New(Options{Profile: "staging", Root: project(t, localCfg), SysClassNet: sys, ProcNet: t.TempDir(), HubURL: "http://172.24.0.2:8443",
+		Open: func(context.Context, OpenOptions) (Engine, error) { return eng, nil }})
+	pol, err := b.LoadPolicy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.o.InContainer = true
+	b.hub = &console.Hub{Instance: "logs"}
+	if f := b.Checks(context.Background(), &session{engine: eng, policy: pol.(Policy)}); len(f) != 1 || !f[0].Refuse || !strings.Contains(f[0].Text, "cannot read the routing tables") {
+		t.Errorf("findings %+v", f)
 	}
 }
 

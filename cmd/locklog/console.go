@@ -77,6 +77,9 @@ func consoleCmd(args []string, stdout, stderr io.Writer) int {
 	}
 	o := logconsole.FromEnv(logconsole.Options{}, os.Getenv)
 	o.InContainer = logconsole.InImage(os.Getuid(), os.Stat)
+	// In hub mode a local-only console's one network must be the one it
+	// reaches this hub on (Checks).
+	o.HubURL = hub.URL
 	o.Open = openEngine(o.InContainer)
 	// The engine's state (keys, index, PII rules) beside lockkit's own
 	// (approved policies, audit), in the home volume in the image.

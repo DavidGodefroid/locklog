@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -218,7 +219,17 @@ type Options struct {
 	InContainer bool
 	// SysClassNet is /sys/class/net (tests replace it).
 	SysClassNet string
-	Open        Opener
+	// ProcNet is /proc/net, whose routing tables say whether the console
+	// has a route out (tests replace it).
+	ProcNet string
+	// HubURL is the hub the console was started against (--hub): in hub
+	// mode, a local-only console's one network must be the one it
+	// reaches that hub on.
+	HubURL string
+	// LookupIP resolves the hub's host name (nil: the system resolver;
+	// tests replace it).
+	LookupIP func(ctx context.Context, host string) ([]net.IP, error)
+	Open     Opener
 	// Now is the clock of hub tickets: the console's (console.Options.Now;
 	// nil is time.Now).
 	Now func() time.Time
@@ -259,6 +270,14 @@ var _ console.Backend = (*Backend)(nil)
 func New(o Options) *Backend {
 	if o.SysClassNet == "" {
 		o.SysClassNet = "/sys/class/net"
+	}
+	if o.ProcNet == "" {
+		o.ProcNet = "/proc/net"
+	}
+	if o.LookupIP == nil {
+		o.LookupIP = func(ctx context.Context, host string) ([]net.IP, error) {
+			return net.DefaultResolver.LookupIP(ctx, "ip", host)
+		}
 	}
 	return &Backend{o: o, exp: NewExposure(time.Now())}
 }
@@ -484,8 +503,16 @@ func (b *Backend) closed(s *session) {
 }
 
 // Checks implements console.Backend: a console with no remote source and
-// no LOCKLOG_NETWORK runs with no network; any interface but the loopback
-// means it was started otherwise, and it refuses.
+// no LOCKLOG_NETWORK has no network of its own. Before its hub is open it
+// has none (any interface but the loopback means it was started
+// otherwise, and it refuses). In hub mode it may be on the one network
+// lox run gives it to reach the hub, its internal hub network, and on no
+// other: exactly one interface besides the loopback, the one the hub's
+// address is routed through, with no route out of it (no default route,
+// no route through a gateway: an internal Docker network gives neither).
+// The hub's network is identified by the hub address the console was
+// started with (--hub), so lox run passes nothing more, and a network
+// named in LOCKLOG_NETWORK is never needed for it (#136).
 func (b *Backend) Checks(ctx context.Context, s console.Session) []console.Finding {
 	ls, ok := console.Unwrap(s).(*session)
 	if !ok || !b.o.InContainer {
@@ -497,26 +524,69 @@ func (b *Backend) Checks(ctx context.Context, s console.Session) []console.Findi
 	}
 	ifs, err := egress.ExtraInterfaces(b.o.SysClassNet)
 	if err != nil {
-		return []console.Finding{{Refuse: true, Text: "cannot list the network interfaces: " + Sanitizer().Error(err)}}
+		return refuseNet("cannot list the network interfaces: " + Sanitizer().Error(err))
+	}
+	if len(ifs) == 0 {
+		return nil
 	}
 	b.mu.Lock()
 	hub := b.hub != nil
 	b.mu.Unlock()
-	// The console is on the network it reaches lockhub on (lox run's
-	// internal network): that one interface, and no other. The
-	// engine of a local-only profile dials nothing; the hub client dials
-	// the pinned hub only.
-	if hub && len(ifs) == 1 {
-		return nil
+	has := "the console has a network (" + strings.Join(ifs, ", ") + ") "
+	if !hub {
+		return refuseNet(has + "but its profile reads only local logs, and it has no hub yet: no network")
 	}
-	if len(ifs) > 0 {
-		what := "but its profile reads only local logs, and it has no hub yet: no network"
-		if hub {
-			what = "but in hub mode a profile that reads only local logs has the hub's network only: one interface"
-		}
-		return []console.Finding{{Refuse: true, Text: "the console has a network (" + strings.Join(ifs, ", ") + ") " + what}}
+	if len(ifs) > 1 {
+		return refuseNet(has + "but in hub mode a profile that reads only local logs has the hub's network only: one interface")
+	}
+	if why := b.hubNetwork(ctx, ifs[0]); why != "" {
+		return refuseNet(has + "but in hub mode a profile that reads only local logs has the hub's internal network only: " + why)
 	}
 	return nil
+}
+
+// hubNetwork checks that iface, a local-only console's one interface in
+// hub mode, is the hub's internal network: the hub's address is routed
+// through it, and nothing leaves the console's networks (no default
+// route, no gateway). It returns why not ("" if it is).
+func (b *Backend) hubNetwork(ctx context.Context, iface string) string {
+	routes, err := egress.Routes(b.o.ProcNet)
+	if err != nil {
+		return "cannot read the routing tables: " + Sanitizer().Error(err)
+	}
+	for _, r := range routes {
+		if r.Out() {
+			return "it has a route out (" + r.Dst.String() + " on " + r.Iface + ")"
+		}
+	}
+	u, err := url.Parse(b.o.HubURL)
+	if err != nil || u.Hostname() == "" {
+		return "no hub address to check the network against"
+	}
+	host := u.Hostname()
+	ips := []net.IP{net.ParseIP(host)}
+	if ips[0] == nil {
+		lctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		ips, err = b.o.LookupIP(lctx, host)
+		cancel()
+		if err != nil || len(ips) == 0 {
+			return "cannot resolve the hub's host " + host
+		}
+	}
+	for _, ip := range ips {
+		if got := egress.RouteTo(routes, ip); got != iface {
+			if got == "" {
+				got = "no route"
+			}
+			return "the hub (" + host + ", " + ip.String() + ") is not reached through " + iface + " (" + got + ")"
+		}
+	}
+	return ""
+}
+
+// refuseNet is the refusing finding of the network check.
+func refuseNet(text string) []console.Finding {
+	return []console.Finding{{Refuse: true, Text: text}}
 }
 
 // Status implements console.Backend: the engine's status, and in hub
