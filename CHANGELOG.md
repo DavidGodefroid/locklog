@@ -6,10 +6,37 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-06
+
 Hub only: the console is started by `lox run` (lockhub) only, and locklog
 takes the launcher verbs every lock of the Lock Family takes (#117).
+lox run starts a locklog console once lockhub knows the `locklog` type
+(lockhub#84, #86, #87); until then the e2e and CI jobs start it the way
+lox run will, against lockkit's test hub.
 
 ### Added
+
+- Hub mode (LL-23): `locklog console` takes lockkit's hub flags (`--hub`,
+  `--hub-key-file`, `--instance`, `--hub-plain-http`, `--devices-file`,
+  `--require-device`, `--seal-clear`, `--facade-keys-file`; with a devices
+  file, `read-pii` requires a device by default), and `locklog hub-key
+  --instance NAME` prints the instance key for `lox run` to pin. A scan, an
+  unmask or an approved lookup becomes a plan bound to the peer, the
+  agent's token, the policy and the engine's keyed plan hash, pushed to
+  lockhub with a masked screen; the clear screen, secrets redacted, goes
+  sealed to the pinned devices only. The agent hears `pending` with the
+  ticket id only (no plan hash, digest or policy fingerprint) and runs the
+  same call with `ticket` once decided: the engine plans it again and it
+  runs once if the keyed plan hash is the ticket's (`E_STALE` otherwise).
+  A `read-pii` decision from a facade other than `tty`, `deck` or `mobile`
+  is refused by the console. Expired tickets are renewed; decisions,
+  renewals and reveals are audited; with the hub down, free reads go on.
+  `locklog_status` shows the hub mode and instance.
+  The requester the hub shows is the kernel-verified peer uid, never a name
+  the agent declares; an approved method without peer credentials is
+  refused in hub mode. In hub mode a console reading only local logs
+  accepts one network interface, the one it reaches lockhub on (`lox run`'s
+  internal network), and still refuses any other.
 
 - Tests (LL-16b): the leak, oracle, equivalence and injection suites run
   over a Loki source too (a fake Loki in unit runs, a real one in the CI
@@ -279,31 +306,6 @@ Still open in this release:
 
 ### Added
 
-- Hub mode (LL-23): `locklog console` takes lockkit's hub flags (`--hub`,
-  `--hub-key-file`, `--instance`, `--hub-plain-http`, `--devices-file`,
-  `--require-device`, `--seal-clear`, `--facade-keys-file`; with a devices
-  file, `read-pii` requires a device by default), and `locklog hub-key
-  --instance NAME` prints the instance key for `lox up`. A scan, an
-  unmask or an approved lookup becomes a plan bound to the peer, the
-  agent's token, the policy and the engine's keyed plan hash, pushed to
-  lockhub with a masked screen; the clear screen, secrets redacted, goes
-  sealed to the pinned devices only. The agent hears `pending` with the
-  ticket id only (no plan hash, digest or policy fingerprint) and runs the
-  same call with `ticket` once decided: the engine plans it again and it
-  runs once if the keyed plan hash is the ticket's (`E_STALE` otherwise).
-  A `read-pii` decision from a facade other than `tty`, `deck` or `mobile`
-  is refused by the console. Expired tickets are renewed; decisions,
-  renewals and reveals are audited; with the hub down, free reads go on.
-  The launcher checks the hub files (yours or root's, writable by no one
-  else, on a path with no link and no directory others can write), binds
-  private copies of them into the console and passes the hub flags to it
-  only; `locklog_status` shows the hub mode and instance.
-  The requester the hub shows is the kernel-verified peer uid, never a name
-  the agent declares; an approved method without peer credentials is
-  refused in hub mode. In hub mode a console reading only local logs
-  accepts one network interface, the one it reaches lockhub on (`lox up`'s
-  internal network), and still refuses any other. Built on lockkit v0.8.1.
-
 - The console's clear view: with clear results on (Ctrl-O, lockkit's
   switch), the records an agent call returned are printed on the console's
   own terminal with their pseudonyms in clear (secrets, redactions and
@@ -552,5 +554,6 @@ Still open in this release:
   version, which parses it (`bind-recursive=disabled` from CLI 25), not from
   the engine's.
 
-[Unreleased]: https://github.com/DavidGodefroid/locklog/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/DavidGodefroid/locklog/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/DavidGodefroid/locklog/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/DavidGodefroid/locklog/releases/tag/v0.1.0

@@ -45,7 +45,7 @@ clear value to the agent waits for your approval at `lox run` (lockhub) and
 is off by default on production.
 
 > [!NOTE]
-> **Early release.** v0.1.0 is the first release: see the
+> **Early release.** v0.2.0 is the current release: see the
 > [CHANGELOG](CHANGELOG.md) for what it holds and what is still open.
 > Built on [lockkit](https://github.com/DavidGodefroid/lockkit).
 > The design is public in [docs/security-model.md](docs/security-model.md);
@@ -314,8 +314,8 @@ launcher's and the image's versions.
 
 In active development: see the [CHANGELOG](CHANGELOG.md). v0.1.0 shipped
 files, journald, Docker and Loki, and Elasticsearch and OpenSearch as a
-preview. v0.2.0 makes the console hub-only, started by `lox run`; v0.3.0
-adds the Elasticsearch and OpenSearch incident gates and the masked export.
+preview. v0.2.0 makes the console hub-only, started by `lox run`, with
+per-profile auto rules; v0.3.0 adds the Elasticsearch and OpenSearch incident gates and the masked export.
 
 ## The Lock family
 
