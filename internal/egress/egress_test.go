@@ -487,3 +487,62 @@ func TestMetadataAddr(t *testing.T) {
 		}
 	}
 }
+
+// Close closes the pooled connections of both transports (the
+// credentialed one and the probe's), and the client sends nothing after
+// it. Idle connections also time out on their own.
+func TestCloseReleasesConnections(t *testing.T) {
+	var open atomic.Int32
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "" {
+			w.WriteHeader(401)
+			return
+		}
+		_, _ = w.Write([]byte(`{"status":"success","data":["app"]}`))
+	}))
+	srv.Config.ConnState = func(_ net.Conn, st http.ConnState) {
+		switch st {
+		case http.StateNew:
+			open.Add(1)
+		case http.StateClosed, http.StateHijacked:
+			open.Add(-1)
+		}
+	}
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+	c, err := New(remote(srv.URL, config.AuthBearer, kconfig.TLSVerifyFull), LokiRoutes, Credentials{Secret: "s3cret"}, Options{RootCAs: roots(srv)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tr := range []*http.Client{c.http, c.probe} {
+		if it := tr.Transport.(*http.Transport).IdleConnTimeout; it <= 0 || it > 2*time.Minute {
+			t.Errorf("IdleConnTimeout = %v", it)
+		}
+	}
+	if _, err := c.Get(context.Background(), "/loki/api/v1/labels", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Probe(context.Background(), LokiProbePath, LokiData); err != nil {
+		t.Fatal(err)
+	}
+	if open.Load() < 2 {
+		t.Fatalf("%d connections open, want the credentialed one and the probe's", open.Load())
+	}
+	c.Close()
+	deadline := time.Now().Add(5 * time.Second)
+	for open.Load() > 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if n := open.Load(); n != 0 {
+		t.Errorf("%d connections still open after Close", n)
+	}
+	if _, err := c.Get(context.Background(), "/loki/api/v1/labels", nil); !errors.Is(err, ErrClosed) {
+		t.Errorf("Get after Close: %v", err)
+	}
+	if _, err := c.Probe(context.Background(), LokiProbePath, LokiData); !errors.Is(err, ErrClosed) {
+		t.Errorf("Probe after Close: %v", err)
+	}
+	if open.Load() != 0 {
+		t.Error("a request after Close opened a connection")
+	}
+}

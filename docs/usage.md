@@ -159,6 +159,10 @@ trusted fields.
 | `lookup` distinct values per hour | 50 per console, 20 per uid (production: 10 per console) | same |
 | agent `pii.add` | 10 per hour, 50 rules | same |
 
+The connection checks of a remote source are not charged to these
+budgets: they run once per connection, before the agent can call (up to 2
+requests for Loki, up to 8 for Elasticsearch or OpenSearch).
+
 A call over a budget is refused with `E_OVER_BUDGET` and the estimate,
 before it touches any data. `locklog_scan` is the only way past. A call
 also stops at its deadline (30 s) and returns `complete: false` with a
