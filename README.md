@@ -1,354 +1,228 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="site/assets/banner-dark.svg">
-    <img alt="locklog — Your AI reads the logs, not the people in them." src="site/assets/banner-light.svg" width="600">
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/banner-dark.svg">
+    <img alt="locklog: your agent reads the logs, not the people in them." src="docs/assets/banner-light.svg" width="600">
   </picture>
 </p>
 
 <p align="center">
   <a href="https://github.com/DavidGodefroid/locklog/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/DavidGodefroid/locklog/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/DavidGodefroid/locklog/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/DavidGodefroid/locklog?include_prereleases&color=0EA5E9"></a>
-  <img alt="Go 1.26+" src="https://img.shields.io/badge/go-1.26%2B-00ADD8?logo=go&logoColor=white">
-  <a href="LICENSE"><img alt="Apache 2.0" src="https://img.shields.io/badge/license-Apache%202.0-0EA5E9"></a>
+  <a href="https://github.com/DavidGodefroid/locklog/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/DavidGodefroid/locklog?include_prereleases&sort=semver&label=release&color=1f4a9c"></a>
+  <a href="LICENSE"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/license-Apache%202.0-575146"></a>
+  <a href="go.mod"><img alt="Go version" src="https://img.shields.io/github/go-mod/go-version/DavidGodefroid/locklog?color=575146&logo=go&logoColor=white"></a>
 </p>
 
-<p align="center">
-  <b>Let Claude Code, Codex, Cursor or Gemini CLI investigate your production logs.<br>
-  The personal data and secrets locklog detects never reach the model without your approval.</b>
-</p>
+<p align="center"><b>Let any AI agent investigate your logs: counts, patterns and traces come back<br>
+with emails, IPs and secrets masked, and a value in clear waits for you.</b></p>
 
 <p align="center">
-  <img src="site/assets/demo.svg" alt="Claude Code asks when the PDF errors started on a staging profile. locklog_count shows the step at 14:02, locklog_patterns finds the new pattern with the email and the IP masked, and locklog_trace follows order 4812: all free and masked. The agent then asks locklog_unmask for the email. lox run, lockhub's terminal outside the agent, shows the read-pii ticket with the masked record and the span marked, never auto-approved; the human answers n. The agent gets denied and carries on without the address; the audit records every call with pseudonyms only." width="900">
+  <img src="site/assets/demo.svg" alt="An agent (here Claude Code) asks when the PDF errors started on a staging profile. locklog_count shows the step at 14:02, locklog_patterns finds the new pattern with the email and the IP masked, and locklog_trace follows order 4812: all free and masked. The agent then asks locklog_unmask for the email. lox run, lockhub's terminal outside the agent, shows the read-pii ticket with the masked record and the span marked; the human answers n. The agent gets denied and carries on without the address; the audit records every call with pseudonyms only." width="900">
 </p>
+<p align="center"><sub>An agent (here Claude Code, left) and <code>lox run</code> (right, outside the agent): free calls come back masked, an unmask waits for you.</sub></p>
 
 <p align="center">
   <a href="#quick-start">Quick start</a> ·
   <a href="#how-it-works">How it works</a> ·
-  <a href="#safety-model">Safety model</a> ·
-  <a href="#what-is-not-masked">What is not masked</a> ·
-  <a href="#sources">Sources</a> ·
-  <a href="#install">Install</a> ·
-  <a href="docs/usage.md">Docs</a> ·
-  <a href="https://locklog.dev">Website</a>
+  <a href="#documentation">Docs</a> ·
+  <a href="#the-lock-family">Lock Family</a> ·
+  <a href="https://locklog.dev">locklog.dev</a>
 </p>
 
 ---
 
-locklog lets an AI agent find **when** and **where** something broke in your
-logs without reading them in clear. A console held by a human, in its own
-account and container, reads the logs. The agent asks over MCP and gets
-masked, bounded, typed answers: counts, patterns, traces, lines around a
-hit. Emails, IPs, card numbers, national ids and the other values locklog
-detects become **pseudonyms** (`⟦email:7F3KQ2M9ZD4X⟧`), and secrets become
-`⟦secret⟧`, before anything leaves the console. Reads are free. Handing a
-clear value to the agent waits for your approval at `lox run` (lockhub) and
-is off by default on production.
+locklog is a Lock of the [Lock Family](https://github.com/DavidGodefroid/lockfamily),
+harness security for AI agents. A **console** held by a human reads your
+logs; the agent asks over MCP and gets masked, bounded, typed answers:
+counts, patterns, traces, lines around a hit.
 
 > [!NOTE]
-> **Early release.** v0.2.0 is the current release: see the
-> [CHANGELOG](CHANGELOG.md) for what it holds and what is still open.
-> Built on [lockkit](https://github.com/DavidGodefroid/lockkit).
-> The design is public in [docs/security-model.md](docs/security-model.md);
-> what the spikes measured is in [docs/sources.md](docs/sources.md) and
-> [docs/performance.md](docs/performance.md).
+> **Pre-release** (`v0.2.x`). The console is started by `lox run` only, from
+> the lockhub release after v0.9.0. See [the install status](docs/install.md#status).
 
-## Why locklog?
+## Why locklog
 
-Logs are where personal data hides in free text: an email in an error
-message, a client IP in an access log, a token in a header someone logged.
-An agent that runs `journalctl`, `docker logs` or `grep`, or queries Loki
-with its own credentials, sends all of it to the model provider.
+- **Masked before the model.** Emails, IPs, card numbers, national ids and
+  the other values locklog detects become pseudonyms
+  (`⟦email:7F3KQ2M9ZD4X⟧`); secrets become `⟦secret⟧`.
+- **The agent never holds the logs.** It never reads files, the Docker
+  socket or a backend's credentials: the console does, in its own account
+  and container.
+- **Approval outside the agent.** Reads within budgets are free. A scan
+  beyond a budget or a value in clear is a ticket that waits for you in
+  `lox run`, and unmask is off by default on production.
+- **Read-only.** No write path to any log or backend, and every call is
+  audited without clear values.
 
-| | Agent reads logs directly | Agent with a log backend's own AI | locklog |
-|---|:---:|:---:|:---:|
-| The agent can answer "when did it start?" | ✅ | ✅ | ✅ |
-| Personal values and secrets masked before the model | ❌ | rarely | ✅ |
-| The agent never holds the log backend's credentials | ❌ | ✅ | ✅ |
-| Self-hosted, any agent that speaks MCP | ✅ | ❌ | ✅ |
-| A clear value reaches the agent only with your approval | ❌ | ❌ | ✅ |
-| Every call audited, without clear values | ❌ | varies | ✅ |
+## Install
 
-## Highlights
+```sh
+brew trust davidgodefroid/tap
+brew install davidgodefroid/tap/lockfamily
+```
 
-- **Masked by construction.** Every record is masked inside the console
-  before any predicate runs, and a predicate holding a clear email is
-  refused (`E_PII_IN_QUERY`): the agent only ever works on the masked view. Equality on a
-  pseudonym works, so "every record of this user" still does. (The opt-in
-  `prefilter`, refused on production, is the documented exception.)
-- **Investigation tools, not a query language.** `locklog_count` (with
-  buckets and `first_last`), `locklog_patterns` (new templates against a
-  baseline), `locklog_trace` (one request across sources),
-  `locklog_context`, `locklog_search`, `locklog_tail`. Text never goes to a
-  backend.
-- **Free within budgets, approved beyond.** Reads are bounded per call and
-  per hour. A call over a budget is refused before it touches data, and
-  `locklog_scan` asks you once for the whole plan.
-- **Your sources.** Files (globs, rotation, gzip, zstd), journald (a pure-Go
-  reader), Docker container logs and Loki; Elasticsearch and OpenSearch as a
-  preview (their incident gates come with v0.3.0).
-- **Read-only.** Read-only mounts, a read-only root filesystem, an allowlist
-  of backend endpoints, no Docker socket in any locklog container, no write
-  path to any backend.
+That installs the Lock Family (`lox` and the other Locks). locklog joins it,
+with `brew install davidgodefroid/tap/locklog` and `lox add locklog`, in the
+lockhub release after v0.9.0. Until then, the signed install script
+installs locklog's launcher:
+
+```sh
+curl -fsSL https://locklog.dev/install.sh | sh
+```
+
+A Linux host with the logs, Docker ≥ 19.03 and
+[cosign](https://docs.sigstore.dev/cosign/system_config/installation/).
+Status, the script read first, and production placement:
+[docs/install.md](docs/install.md).
 
 ## Quick start
 
-**Prerequisites:** a Linux host with the logs, Docker ≥ 19.03 and
-[cosign](https://docs.sigstore.dev/cosign/system_config/installation/).
-locklog is one lock of the [Lock Family](https://lockfamily.dev): its
-console is started by `lox run` (lockhub), which you keep open in a
-terminal of its own, outside the agent; it starts the hub and the locks,
-shows every ticket and decides it, by its rules or by you.
+On a **non-production** profile first (a host agent runs on your own
+account, where it could still read the logs directly):
 
-```sh
-brew trust davidgodefroid/tap                # Homebrew asks you to trust a third-party tap once
-brew install davidgodefroid/tap/lockfamily   # or only this tool: brew install davidgodefroid/tap/locklog
-cd ~/projects/shop                           # the project whose logs the agent investigates
-lox init                                      # or: lox add locklog logs
-lox run                                       # in a terminal of its own, kept open
-```
+1. In your project, add the lock. `lox add` builds a profile from the logs
+   this host has (never a secret), wires your agent and checks the setup:
 
-`lox add locklog` and the locklog console in `lox run` come with the
-lockhub release that adds the locklog type
-([lockhub#84](https://github.com/DavidGodefroid/lockhub/issues/84),
-[#86](https://github.com/DavidGodefroid/lockhub/issues/86),
-[#87](https://github.com/DavidGodefroid/lockhub/issues/87); lockhub v0.9.0
-does not know it yet), and the tap's `locklog` formula, and locklog in
-`lockfamily`, with it. Until then, `scripts/install.sh` ([Install](#install))
-installs the launcher, whose verbs you can run yourself
-([docs/setup.md](docs/setup.md)).
+   ```sh
+   cd ~/projects/shop
+   lox add locklog
+   ```
 
-`lox add locklog <name>` runs locklog's three launcher verbs from the
-project ([docs/setup.md](docs/setup.md)):
+2. In a terminal of its own, outside any agent, keep `lox run` open. It
+   starts the console, and every ticket shows up there:
 
-- `locklog profile add --non-interactive --json --profile NAME`: a profile
-  of `.locklog/config.toml` from the logs this host has (files, journald,
-  containers); never a secret;
-- `locklog init claude`: the agent's `.mcp.json`, skill and allow list (the
-  free tools only);
-- `locklog doctor --fix --yes --json`: what an agent here can reach.
+   ```sh
+   lox run
+   ```
 
-`lox run` then reviews the profile, starts the console (attach with `lox
-attach <name>` for its own questions: the policy review at its first
-start) and decides the tickets. Then, in another terminal, ask your agent:
-*"when did the 502s start?"*. It calls `locklog_count`, `locklog_patterns`
-and `locklog_trace`: free, masked, audited. A scan, an unmask or an
-approved lookup becomes a ticket that `lox run` shows you and never
-approves on its own.
+3. Start your agent in the project (`claude`, `codex`, `gemini`, …) and ask:
+   *"when did the 502s start?"*
 
-On the host, `locklog mcp` (the server `.mcp.json` names) refuses every
-call on a production profile (`E_PRODUCTION_HOST_AGENT`): the host agent is
-a trial for non-production data, since your agent runs on your own
-account, where it could still read the logs directly. Without `lox run`,
-it says to run `lox run` first.
+`lox add` wires Claude Code; for Codex, Cursor or Gemini CLI, also run
+`locklog init codex` (or `cursor`, `gemini`). On production, run the agent
+in [lea](https://github.com/DavidGodefroid/lea) or in its own container
+([docs/setup.md](docs/setup.md#the-own-container-recipe)).
 
-### For production
+## Highlights
 
-On production the agent must not be able to read the logs, the Docker
-socket or the backends itself (precondition P1 below). Run it:
+<table>
+<tr>
+<td width="50%" valign="top">
 
-- with [lea](https://github.com/DavidGodefroid/lea), which runs the agent
-  in a container of its own with the lock's socket mounted;
-- or in **its own container**: [docs/setup.md](docs/setup.md) has a tested
-  Dockerfile snippet for your agent image and the `docker run` line. The
-  agent user must not have sudo.
+**🕶️ Masked by construction**<br>
+Every record is masked before any predicate runs. A clear email in a query
+is refused; equality on a pseudonym still finds one user's records.
 
-Your agent CLI's own login (Anthropic, OpenAI, Google) is yours to set up.
+</td>
+<td width="50%" valign="top">
+
+**🔎 Investigation tools, not a query language**<br>
+`locklog_count`, `locklog_patterns`, `locklog_trace`, `locklog_context`,
+`locklog_search`, `locklog_tail`. Text never goes to a backend.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+**⚖️ Free within budgets, approved beyond**<br>
+Reads are bounded per call and per hour. `locklog_scan` asks you once for
+its whole plan.
+
+</td>
+<td valign="top">
+
+**📚 Your sources**<br>
+Files (rotation, gzip, zstd), journald, Docker container logs and Loki;
+Elasticsearch and OpenSearch as a preview.
+
+</td>
+</tr>
+</table>
+
+More: [the highlights in full and a comparison](docs/architecture.md#highlights-in-full).
 
 ## How it works
 
 ```
  host (you)
    lox run (lockhub): the hub and the decisions, in a terminal of its own
-     └─ console container (one per lock)   uid 10051 "locklog", no capability,
-          read-only root, cpus min(2,nproc), memory 1g, logging none, hub-attached
-          read-only, non-recursive binds of the approved log directories
-          home volume:   pseudonym keys, local index, audit, rules (console only)
-          socket volume: /run/locklog (2750 locklog:locklog-clients), one socket
-                         per project and profile, <project-hash>-<profile>.sock (0660)
-          network: the hub's; and the lock's egress network for Loki, Elasticsearch
-
- agent (yours: lea, your own container, or the host for the trial)
-   MCP server `locklog mcp` → its project's socket, the lock's socket volume
-   read-only (peer uid checked by the kernel)
+     └─ console container   uid 10051, no capability, read-only root,
+          read-only binds of the approved log directories,
+          pseudonym keys, index and audit in its own volume
+ agent (lea, your own container, or the host for the trial)
+   MCP server `locklog mcp` → the console's socket (peer uid checked by the kernel)
 ```
 
-1. The console reads the approved sources, and only those. The sources are
-   reviewed at the console's first start and on every loosening.
-2. For each call it builds a **byte plan** from the time range and the
-   trusted selectors only (local index, Loki label stats, ES `_count`).
-   Admission, cursors and stopping points depend on the plan, never on what
-   matched.
-3. Every record of a planned chunk is **masked first**: secrets
-   (`⟦secret⟧`, final), then your rules, personal field names, value
-   detectors (email, phone, IBAN, card, BE/FR/NL/US national ids, public IP;
-   person names and loose phone numbers opt-in) and the structured or text
-   mode. Then the agent's
-   predicates run on the masked view.
-4. The answer leaves through `render` caps as JSON under an "untrusted
-   content" header, with the pseudonym `epoch` and a sealed cursor to
-   continue for free.
+1. The console reads the approved sources, and only those.
+2. Each call gets a byte plan from the time range and trusted selectors
+   only; admission and stopping points never depend on what matched.
+3. Every record is masked first; then the agent's predicates run on the
+   masked view.
+4. The answer leaves capped, as JSON under an "untrusted content" header.
 
-| Operation | Who decides |
-|---|---|
-| `status`, `sources`, `search`, `count`, `patterns`, `context`, `trace`, `tail` within budgets | free, audited |
-| `lookup` (clear value → pseudonym, detector kinds only) | free, rate-limited, audited; or approved each time with `lookup = "approved"` |
-| `pii_list` / `pii_add` (agent masking rules, tighten only) | free, capped, audited |
-| `locklog_scan` (beyond a budget, approved once for its whole plan; its cursor continues free for 30 minutes, or its plan's bound when longer, at most 4 hours) | you, a ticket at `lox run` (or the deck, a phone); auto-approved only if the profile's auto rules say so (`auto.read`) |
-| `locklog_unmask` (the clear value of exact spans of one record, once) | you, a ticket at `lox run`, the deck or a phone; auto-approved only if the profile's auto rules say so (`auto.unmask`); **off by default on production** |
-| `locklog_request_change` (any loosening) | you, at the console's `:review` |
-| write, delete, admin | does not exist |
-
-An unmask ticket shows the record **masked**, with the asked spans marked
-`» «`, the agent's reason and what a yes lets the agent link. To read a
-record yourself without sending anything to the agent, turn clear results
-on with Ctrl-O at the console (`lox attach <name>`): the records the
-agent's calls return are then printed in clear on the console's terminal
-(secrets kept redacted). Secrets are never unmasked. By default `lox run`'s
-auto mode approves no locklog ticket: scans, unmasks and approved lookups
-wait for you. A profile's auto rules (`auto = "full-auto"`, or `read`,
-`unmask`, `lookup` set to `auto`, `ask` or `deny`) change that, as a
-policy loosening you review; see
-[docs/usage.md](docs/usage.md#what-lox-run-decides-and-what-it-asks).
+Reads within budgets are free and audited. A scan beyond a budget, an
+unmask or an approved lookup is a ticket at `lox run`; a profile's auto
+rules (`auto`, `ask`, `deny`) decide which `lox run` may approve alone, and
+the default asks you. The full layout, the decision table, the sources and
+the masking benchmark: [docs/architecture.md](docs/architecture.md).
 
 ## Safety model
 
-locklog enforces what it owns:
+- **The console is the enforcement point.** It alone reads logs, holds
+  credentials and pseudonym keys, and decides what leaves.
+- **OS separation.** Only the clients group, the image's `agent` and the
+  uids you list reach the socket, never root; no Docker socket in any
+  locklog container.
+- **Approvals bound to the plan.** Single use; an unmask re-reads the
+  record and is refused if anything moved. Secrets are never unmasked.
+- **Preconditions.** The agent must not reach the logs another way (P1),
+  agents of one uid are one trust domain (P2), and only the console holds
+  backend read credentials (P3). `locklog doctor` checks the usual ways P1
+  fails.
+- **Known limits.** locklog masks what it detects: person names (unless
+  opted in), usernames in free text, postal addresses, private IPs and
+  business ids are not. Pseudonymised data is still personal data under the
+  GDPR.
 
-- the console's **peer check**: only the clients group (10050), the image's
-  `agent` (10052) and the uids you list in `allowed_uids` reach the
-  socket, never root or `nobody`;
-- its mounts (read-only, non-recursive), its network, and its image
-  hardening; **no Docker socket** in any locklog container;
-- on production, backends with **authentication over TLS**, and a refusal
-  when an endpoint answers a read without credentials;
-- the masking pipeline, the budgets, and approvals bound to the exact plan
-  (single use; an unmask re-reads the record and is refused if anything
-  moved since you approved it).
-
-Like the other Locks, it relies on three **preconditions** it does not
-enforce:
-
-- **P1** The agent cannot read the logs, the Docker socket, the backends'
-  unauthenticated ports or the cloud metadata service directly, cannot
-  become the console's account, and cannot write `lox run`'s state.
-  That is lea's job, or your own container setup's.
-- **P2** Agents of one uid are one trust domain.
-- **P3** Backend read credentials are held only by the console. Log
-  shippers use write-only tokens.
-
-`locklog doctor`, run where the agent runs, checks the common ways P1
-fails. It reports and never prints a response body. Details:
+Threat model, invariants, what is not masked and retention:
 [docs/security-model.md](docs/security-model.md).
 
-## What is not masked
+## Documentation
 
-locklog masks the values it **detects**. It does not detect:
+| Doc | What it covers |
+|---|---|
+| [docs/install.md](docs/install.md) | status, Homebrew, `install.sh`, the host-agent trial, production placement |
+| [docs/setup.md](docs/setup.md) | the launcher verbs: `profile add`, `init <agent>`, `doctor`, the own-container recipe |
+| [docs/usage.md](docs/usage.md) | the profile file, the agent's tools, budgets, `lox run` and its auto rules, the console, tickets |
+| [docs/architecture.md](docs/architecture.md) | process layout, the life of a call, who decides what, sources, masking benchmark |
+| [docs/security-model.md](docs/security-model.md) | what locklog protects and enforces, preconditions, masking pipeline, what is not masked, retention |
+| [docs/sources.md](docs/sources.md) | journald, Docker and Podman: what the spikes measured |
+| [docs/loki.md](docs/loki.md) | Loki 3's `detected_level`, a test Loki with past data |
+| [docs/performance.md](docs/performance.md) | backend and masking throughput, and the defaults derived |
+| [docs/recipes/holmesgpt.md](docs/recipes/holmesgpt.md) | HolmesGPT with locklog, in its own container |
+| [CHANGELOG.md](CHANGELOG.md) | what changed, release by release |
 
-- person names unless you enable the opt-in `person_name` detector (and
-  names outside its heuristics when you do), usernames and logins in free
-  text, postal addresses;
-- private and loopback IPs (infrastructure, never detected), user agents and
-  other quasi-identifiers;
-- business ids (order and customer ids, kept so `trace` works);
-- base64 or hex-encoded content;
-- secrets without a known shape: short or low-entropy tokens, passwords in
-  prose, session ids in URL paths, connection strings without userinfo.
-
-It also leaks, by design:
-
-- pseudonyms link a person's records within an epoch (7 days by default),
-  and `lookup` or an approved unmask links a known value to them;
-- how far a call got before its deadline reflects content density, rounded
-  to plan granules, and so do aggregate byte volumes.
-
-Pseudonymised data is still personal data under the GDPR: the model
-provider receives pseudonyms, timestamps and the fields locklog does not
-mask. Tighten with `redact-unknown` (the production default for structured
-logs), your own rules, and `lookup = "approved"`.
-
-## Sources
-
-| Source | Since | Notes |
-|---|---|---|
-| Files | v0.1.0 | globs under approved roots, rotation, `.gz`, `.zst`; formats `auto`, `json`, `logfmt`, `syslog`, `cri`, `docker-json`, `combined`, `plain`; multi-line events |
-| journald | v0.1.0 | pure-Go reader, field allowlist; core dumps, command lines and audit fields are never served |
-| Docker containers | v0.1.0 | `json-file` logs by container name glob; the `journald` driver through journald. Podman through journald |
-| Loki | v0.1.0 | trusted labels and structured metadata, server-side metric counts; text never sent to Loki |
-| Elasticsearch, OpenSearch | v0.1.0 (preview) | trusted keyword fields, `search_after`, a read-only privilege check; their incident gates come with v0.3.0 |
-
-`docker compose up` deletes a recreated container's `json-file` logs: use
-the journald driver or Loki for history across deploys.
-
-Loki 3 users: see [docs/loki.md](docs/loki.md) on the default
-`detected_level` field: what Loki puts in it, and how locklog selects on it
-(locally, never as a Loki filter).
-
-## Masking benchmark
-
-The leak harness plants canaries of every detected kind, in every format
-and position and in encoded forms (percent, JSON `\u`, HTML entities,
-look-alikes, zero-width characters), and checks every byte that leaves the
-console: what the engine returns (CI job `suites`, with the oracle and
-equivalence suites), and the IPC socket's replies, the audit file, the MCP
-tools' outputs and the hub tickets' screens (`test/hub`). **0 leaks**,
-checked on every pull request. Throughput and the budgets derived from
-it are in [docs/performance.md](docs/performance.md).
-
-## Install
-
-The shortest path is the Lock Family's: install it with Homebrew, then let
-`lox add locklog` (or `lox init`) set up the lock from the project and
-`lox run` start it, in a terminal of its own, outside the agent:
-
-```sh
-brew trust davidgodefroid/tap                # Homebrew asks you to trust a third-party tap once
-brew install davidgodefroid/tap/lockfamily   # or only this tool: brew install davidgodefroid/tap/locklog
-cd ~/projects/shop
-lox add locklog logs                          # or: lox init
-lox run                                       # approvals live there
-```
-
-Both need the lockhub release that knows locklog (see
-[Quick start](#quick-start)). Without Homebrew, `install.sh` installs
-locklog's launcher alone:
-
-```sh
-curl -fsSL https://locklog.dev/install.sh | sh
-```
-
-`install.sh` installs the latest **published** release, or
-`LOCKLOG_VERSION=vX.Y.Z`. It verifies the release with cosign before it
-installs a root-owned `/usr/local/bin/locklog`, and the launcher runs the
-image by its signed digest. To read the script first:
-
-```sh
-curl -fsSLO https://locklog.dev/install.sh   # or raw.githubusercontent.com/DavidGodefroid/locklog/main/scripts/install.sh
-less install.sh && sh install.sh
-```
-
-`locklog update` moves to another release; `locklog version` shows the
-launcher's and the image's versions.
-
-## Status
-
-In active development: see the [CHANGELOG](CHANGELOG.md). v0.1.0 shipped
-files, journald, Docker and Loki, and Elasticsearch and OpenSearch as a
-preview. v0.2.0 makes the console hub-only, started by `lox run`, with
-per-profile auto rules; v0.3.0 adds the Elasticsearch and OpenSearch incident gates and the masked export.
-
-## The Lock family
-
-locklog is one of the [Locks](https://lockfamily.dev):
-[locksql](https://github.com/DavidGodefroid/locksql) (databases),
-[lockmq](https://github.com/DavidGodefroid/lockmq) (message queues),
-[lockfile](https://github.com/DavidGodefroid/lockfile) (files),
-[lockhttp](https://github.com/DavidGodefroid/lockhttp) (the web) and
-locklog (logs), on the shared engine
-[lockkit](https://github.com/DavidGodefroid/lockkit), with
-[lockhub](https://github.com/DavidGodefroid/lockhub) to run them together
-and [lea](https://github.com/DavidGodefroid/lea) to run the agents.
-
-## License
-
-Apache License 2.0: see [LICENSE](LICENSE) and [NOTICE](NOTICE).
+The site, [locklog.dev](https://locklog.dev), is built from [`site/`](site/).
 The demo is generated by `python3 scripts/brand/demo.py > site/assets/demo.svg`.
+
+## The Lock Family
+
+| Repo | What it does |
+|---|---|
+| [lockfamily](https://github.com/DavidGodefroid/lockfamily) | The family site ([lockfamily.dev](https://lockfamily.dev)) and the one-line installer. |
+| [locksql](https://github.com/DavidGodefroid/locksql) | SQL databases: the agent queries, PII comes back masked; connections and writes wait for you. |
+| [lockmq](https://github.com/DavidGodefroid/lockmq) | RabbitMQ: masked queue inspection; reading messages and acting on queues wait for you. |
+| [lockfile](https://github.com/DavidGodefroid/lockfile) | Files (S3, SFTP, disk): the agent asks yes/no questions about files it never reads. |
+| [lockhttp](https://github.com/DavidGodefroid/lockhttp) | Outbound HTTP(S): reads of trusted hosts pass; anything that sends data or reaches an unknown host waits for you. |
+| [locklog](https://github.com/DavidGodefroid/locklog) | Logs: masked, bounded log search; the agent reads the logs, not the people in them. |
+| [lockssh](https://github.com/DavidGodefroid/lockssh) | Commands over SSH: allow-listed commands run at once, the rest waits for you; the key never leaves the console. |
+| [lockhub](https://github.com/DavidGodefroid/lockhub) | The approval hub and its `lox` CLI: `lox run` approves outside the agent's harness and never sees values in clear. |
+| [lockkit](https://github.com/DavidGodefroid/lockkit) | The shared Go core of every Lock: console, policies, masking, signed tickets, audit, MCP. |
+| [lea](https://github.com/DavidGodefroid/lea) | Runs many agents in containers, wired to the Locks. |
+
+## Contributing · Security · License
+
+- **Contributing:** [CONTRIBUTING.md](CONTRIBUTING.md). Build with
+  `CGO_ENABLED=0 go build ./cmd/locklog` (Go 1.26+).
+- **Security:** report a vulnerability privately, see [SECURITY.md](SECURITY.md).
+- **License:** Apache License 2.0, see [LICENSE](LICENSE) and [NOTICE](NOTICE).
