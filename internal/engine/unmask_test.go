@@ -4,6 +4,7 @@ package engine
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 func withUnmask(o *Options) { o.Unmask = UnmaskApproved }
@@ -370,5 +372,121 @@ func TestOracleScanUnmaskLookup(t *testing.T) {
 		if outs[0][i] != outs[1][i] {
 			t.Fatalf("answers differ:\n%s\n%s", outs[0][i], outs[1][i])
 		}
+	}
+}
+
+// TestLookupApprovedBudget: an approved lookup is charged once approved:
+// a denied (or pending) one uses none of the budget, and its run is
+// charged once; one over the budget is refused before the human is asked.
+func TestLookupApprovedBudget(t *testing.T) {
+	f := newFixture(t, genLog(t0, 100, "c@example.org"), func(o *Options) {
+		o.LookupApproved = true
+		o.Budgets = DefaultBudgets()
+		o.Budgets.LookupsPerHour, o.Budgets.LookupsPerHourPerUID = 3, 1
+	})
+	lq := LookupQuery{Kind: "email", Values: []string{"a@example.com"}, Reason: "r"}
+	deny := &approver{deny: true}
+	for range 3 {
+		if _, err := f.eng.Lookup(peerCtx(1, deny), lq); !errors.Is(err, errDenied) {
+			t.Fatalf("denied: %v", err)
+		}
+	}
+	if f.eng.BudgetStatus().LookupsLeft != 3 {
+		t.Fatalf("a denied lookup was charged: %d left", f.eng.BudgetStatus().LookupsLeft)
+	}
+	a := &approver{}
+	// The pending call and the ticket's run: charged once.
+	for range 2 {
+		if _, err := f.eng.Lookup(peerCtx(1, a), lq); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if left := f.eng.BudgetStatus().LookupsLeft; left != 2 {
+		t.Fatalf("lookups left %d, want 2", left)
+	}
+	// uid 1 has used its one value: refused before anyone is asked.
+	other := LookupQuery{Kind: "email", Values: []string{"b@example.com"}, Reason: "r"}
+	if _, err := f.eng.Lookup(peerCtx(1, a), other); code(err) != EOverBudget || a.count() != 2 {
+		t.Fatalf("over budget: %v, asked %d", err, a.count())
+	}
+	st := f.eng.BudgetStatusFor(peerCtx(1, nil))
+	if st.LookupsLeftPeer == nil || *st.LookupsLeftPeer != 0 || st.LookupsLeft != 2 {
+		t.Fatalf("status for uid 1: %+v", st)
+	}
+	if st := f.eng.BudgetStatusFor(peerCtx(2, nil)); st.LookupsLeftPeer == nil || *st.LookupsLeftPeer != 1 {
+		t.Fatalf("status for uid 2: %+v", st)
+	}
+	if f.eng.BudgetStatusFor(context.Background()).LookupsLeftPeer != nil {
+		t.Fatal("a peer's lookups with no peer")
+	}
+}
+
+// TestUnmaskScreenExposure: the unmask screen says, for each pseudonym,
+// how many records holding it agents were given in this epoch (the
+// console's count); the screen, line by line.
+func TestUnmaskScreenExposure(t *testing.T) {
+	const canary = "canary@example.org"
+	f := newFixture(t, genLog(t0, 100, canary), withUnmask)
+	ref, toks := recordWith(t, f, "(order 25)", "email")
+	since := time.Date(2026, 11, 6, 8, 0, 0, 0, time.UTC)
+	var asked []string
+	count := func(epoch string, ps []string) ([]int, bool, time.Time) {
+		if epoch != f.eng.o.Masker.Epoch() {
+			t.Errorf("counted for epoch %q", epoch)
+		}
+		asked = ps
+		return []int{2}, true, since
+	}
+	a := &approver{}
+	ctx := WithExposureCount(peerCtx(1, a), count)
+	if _, err := f.eng.Unmask(ctx, UnmaskQuery{Ref: ref, Pseudonyms: toks, Reason: "who failed"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(asked) != 1 || asked[0] != toks[0] {
+		t.Fatalf("counted %v", asked)
+	}
+	want := []string{"source: app", "record: 2026-10-30T12:00:25Z", "reveal: " + toks[0], "spans: 1 in this record (marked » «)",
+		"returned to agents in this epoch: " + toks[0] + " in 2 records (counted by this console since 2026-11-06T08:00:00Z)"}
+	if len(a.last.Body) != len(want)+1 {
+		t.Fatalf("screen %q", a.last.Body)
+	}
+	for i, w := range want {
+		if a.last.Body[i] != w {
+			t.Errorf("line %d: %q, want %q", i, a.last.Body[i], w)
+		}
+	}
+	if !strings.Contains(a.last.Body[len(want)], "»"+toks[0]+"«") {
+		t.Errorf("record line %q", a.last.Body[len(want)])
+	}
+	// Lower bounds, one record, and no count.
+	ctx = WithExposureCount(peerCtx(1, a), func(string, []string) ([]int, bool, time.Time) { return []int{1}, false, since })
+	if _, err := f.eng.Unmask(ctx, UnmaskQuery{Ref: ref, Pseudonyms: toks, Reason: "who failed"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.last.Body[4]; !strings.Contains(got, toks[0]+" in at least 1 records") {
+		t.Errorf("lower bound: %q", got)
+	}
+	ctx = WithExposureCount(peerCtx(1, a), func(string, []string) ([]int, bool, time.Time) { return []int{1}, true, since })
+	if _, err := f.eng.Unmask(ctx, UnmaskQuery{Ref: ref, Pseudonyms: toks, Reason: "who failed"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.last.Body[4]; !strings.Contains(got, toks[0]+" in 1 record (") {
+		t.Errorf("one record: %q", got)
+	}
+	if _, err := f.eng.Unmask(peerCtx(1, a), UnmaskQuery{Ref: ref, Pseudonyms: toks, Reason: "who failed"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.last.Body[4]; got != "returned to agents in this epoch: not counted by this console" {
+		t.Errorf("no count: %q", got)
+	}
+	// The record's key: the same record, the same key, its epoch.
+	k1, ep, ok := f.eng.RefRecord(ref)
+	ref2, _ := recordWith(t, f, "(order 25)", "email")
+	k2, _, _ := f.eng.RefRecord(ref2)
+	if !ok || ep != f.eng.o.Masker.Epoch() || k1 == "" || k1 != k2 || strings.Contains(k1, canary) {
+		t.Fatalf("record key %q %q %q %v", k1, k2, ep, ok)
+	}
+	if _, _, ok := f.eng.RefRecord("Lr1.forged"); ok {
+		t.Fatal("a forged ref opened")
 	}
 }

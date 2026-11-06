@@ -34,6 +34,9 @@ const (
 	// EUnmaskNever: the profile's unmask = "never" (the production
 	// default) refuses every unmask.
 	EUnmaskNever = "E_UNMASK_NEVER"
+	// EBusy: the console runs its most calls at once (limits.max_calls);
+	// the call did no work and can be retried.
+	EBusy = "E_BUSY"
 )
 
 // Error is a structured refusal. Its text never holds log content: query

@@ -501,3 +501,36 @@ func TestLokiScannedIsFetched(t *testing.T) {
 		t.Fatalf("charged %d, fetched %d", f.eng.ledger.b.RemoteBytesPerHour-left, served)
 	}
 }
+
+// TestFreeRemoteRefusedBeforeWork: a free call to a remote source whose
+// request budget this minute has no room before its deadline is refused
+// before any request, with its estimate.
+func TestFreeRemoteRefusedBeforeWork(t *testing.T) {
+	bl := &bigLoki{every: 5 * time.Second, pad: 64}
+	p, _ := parse.New(parse.Options{})
+	src, err := loki.New(loki.Options{Name: "lk", Client: bl, Parser: p, Selector: map[string]string{"env": "prod"},
+		InFlight: 4, Limit: 4, Now: func() time.Time { return t0.Add(2 * time.Hour) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := newFixture(t, "x\n", func(o *Options) {
+		o.Sources["lk"] = src
+		o.Budgets = DefaultBudgets()
+		o.Budgets.RemoteRequestsPerMinute = 1
+	})
+	if _, err := f.eng.ledger.takeRequest("lk", false); err != nil {
+		t.Fatal(err)
+	}
+	q := q(func(q *Query) { q.From, q.To = t0, t0.Add(time.Minute); q.Sources = []string{"lk"} })
+	_, err = f.eng.Search(peerCtx(1, nil), q)
+	var e *Error
+	if !errors.As(err, &e) || e.Code != EOverBudget || e.Estimate == nil || !strings.Contains(e.Message, "remote requests per minute") {
+		t.Fatalf("refusal %v", err)
+	}
+	bl.mu.Lock()
+	served := bl.served
+	bl.mu.Unlock()
+	if served != 0 {
+		t.Fatalf("%d bytes fetched before the refusal", served)
+	}
+}

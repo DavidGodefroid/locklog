@@ -501,3 +501,53 @@ func TestHubAutoRuleNeverApproves(t *testing.T) {
 		})
 	}
 }
+
+// An approved scan is bound to the agent's token: another agent of the
+// same uid asking the same scan gets a ticket of its own, never a
+// re-attach to the first agent's scan.
+func TestHubScanBoundToToken(t *testing.T) {
+	r := newRig(t, rigOpts{})
+	query := map[string]any{"from": "2026-10-30T13:00:00Z", "to": "2026-10-30T14:00:00Z", "limit": 1,
+		"where": []map[string]any{{"field": "level", "op": "=", "value": "error"}}}
+	args := map[string]any{"tool": "search", "query": query, "reason": "the whole hour"}
+	tk := r.mustPending(r.call(mcptools.ToolScan, args))
+	r.hub.Decide(tk, ticket.Approved, "")
+	run := map[string]any{"tool": "search", "query": query, "reason": "the whole hour", "ticket": tk}
+	if a := r.decided(mcptools.ToolScan, run); a.isErr {
+		t.Fatalf("first page: %s", a.text)
+	}
+	// (The same agent would re-attach with no ticket.)
+	other := r.mcp("tok-2")
+	tk2 := r.mustPending(r.callWith(other, mcptools.ToolScan, args))
+	if tk2 == tk {
+		t.Fatal("the other agent got the first agent's ticket")
+	}
+	r.checkAgentOutputs(false)
+}
+
+// The unmask screen counts the records with each pseudonym the agents
+// were given in this epoch (here: the one record the search returned).
+func TestHubUnmaskScreenCountsExposure(t *testing.T) {
+	r := newRig(t, rigOpts{})
+	ref, toks := r.record()
+	tk := r.mustPending(r.call(mcptools.ToolUnmask, unmaskArgs(ref, toks, "")))
+	signed, err := ticket.VerifyTicket(r.pub, r.hub.Ticket(tk))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "returned to agents in this epoch: " + toks[0] + " in 1 record, " + toks[1] + " in 1 record (counted by this console since "
+	if !slices.ContainsFunc(signed.Screen.Body, func(l string) bool { return strings.HasPrefix(l, want) }) {
+		t.Fatalf("screen %q", signed.Screen.Body)
+	}
+	// A second search returning the same record does not count it twice.
+	r.record()
+	tk2 := r.mustPending(r.call(mcptools.ToolUnmask, unmaskArgs(ref, toks[:1], "")))
+	s2, err := ticket.VerifyTicket(r.pub, r.hub.Ticket(tk2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(s2.Screen.Body, func(l string) bool { return strings.Contains(l, toks[0]+" in 1 record (") }) {
+		t.Fatalf("screen %q", s2.Screen.Body)
+	}
+	r.checkAgentOutputs(false)
+}

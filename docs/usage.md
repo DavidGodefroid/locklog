@@ -200,9 +200,38 @@ requests for Loki, up to 8 for Elasticsearch or OpenSearch).
 
 A call over a budget is refused with `E_OVER_BUDGET` and the estimate,
 before it touches any data. `locklog_scan` is the only way past. A call
-also stops at its deadline (30 s) and returns `complete: false` with a
-cursor. The numbers behind these defaults are in
+also stops at its deadline (30 s, its planning included) and returns
+`complete: false` with a cursor. The numbers behind these defaults are in
 [performance.md](performance.md).
+
+The console runs at most `limits.max_calls` agent calls at once (default
+4, ceiling 64): parallel calls would otherwise multiply the per-call
+budgets. One more is refused at once with `E_BUSY`, before any work; the
+agent sends it again once one of its calls answered. A tail holds its slot
+for its whole duration. A scan waits for its approval without a slot and
+takes one once approved; an unmask or a lookup takes none.
+
+The output cap applies to every answer:
+
+- A record whose masked rendering alone exceeds it comes back as a stub:
+  its `source`, `ref` and `ts`, `"oversized": true` and the `bytes` of its
+  rendering. Ask for some of its fields (`fields`), or for its context.
+- A whole count whose groups do not fit is paged: each page holds the next
+  groups in order (`groups_from` of `groups_total`) and a `cursor` to the
+  rest, for free; the last page is `complete`. A partial count (its scan
+  continues) shows the first groups that fit, with `"truncated": true`,
+  `omitted_groups` and `omitted_n` (the records in the groups left out for
+  now).
+- A search keeps the matches its page cannot hold for the next pages.
+  When one call's matches outgrow that cache (64 MiB for the console), a
+  query without predicates (browsing a range) stops before the part that
+  did and continues from there with its cursor (it reads local logs in
+  parts small enough for this; a single remote slice whose matches alone
+  outgrow the cache is still refused). A query with predicates is
+  refused with `E_OVER_BUDGET` ("too many matching records in one call to
+  page through"): where a call stops never depends on what its predicates
+  match. Narrow its range, sources or `fields`, or make a predicate more
+  selective.
 
 ## Starting: `lox run`
 
@@ -264,9 +293,11 @@ and `:unmask`.
 | `:quit` | end the console |
 
 An unmask ticket's screen shows the record masked, the asked spans marked `» «`,
-the agent's reason, and two warnings: the agent receives these clear values
-once, and can link them to every record with the same pseudonym in the
-epoch. After a yes the record is read again, and the unmask is refused
+the agent's reason, how many records holding each pseudonym agents were
+given in this epoch (counted by the console from the calls it answered and
+audited, by pseudonym only, since the console started), and two warnings:
+the agent receives these clear values once, and can link them to every
+record with the same pseudonym in the epoch. After a yes the record is read again, and the unmask is refused
 (`E_STALE`) if the record, the epoch or the policy changed.
 
 With clear results on (Ctrl-O), the console prints, after each agent call,
