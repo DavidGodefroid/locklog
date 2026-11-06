@@ -18,6 +18,19 @@ takes the launcher verbs every lock of the Lock Family takes (#117).
 - On a production profile without Landlock, `:status` and `doctor` name the
   residual: its local sources are read by an unconfined console
   ([#62](https://github.com/DavidGodefroid/locklog/issues/62)).
+- Auto mode per profile for `lox run` (#126): `auto = "full-auto"`, or an
+  `[profiles.P.auto]` table setting `read` (an approved scan), `unmask` and
+  `lookup` (an approved lookup) to `auto`, `ask` or `deny` (default `ask`
+  for all three: unchanged behaviour). `deny` is refused by the console
+  before any ticket (`E_AUTO_DENY`; `lookup = "deny"` refuses free lookups
+  too); `ask` tickets are signed `never_auto` and an auto rule's approval
+  of one is refused; `auto` tickets are left to `lox run`'s auto mode. The
+  rules are part of the fingerprinted policy (stored sparsely: approved
+  policies keep their fingerprint); moving one toward `auto` is a reviewed
+  loosening, with the typed profile name on production. Shown in the
+  review, `:status` and `locklog_status` (`auto`); the audit records
+  `auto_rule` and `decided_by`. New `locklog profile rules [--json]
+  [--project DIR] [--profile NAME]`, which `lox run` reads.
 - docs/recipes/holmesgpt.md: HolmesGPT's CLI in its own container with the
   locklog client and only the lock's socket volume from `up.json`, locklog
   as its stdio MCP server, `MCP_TOOL_CALL_TIMEOUT_SEC=600`; a test checks
@@ -54,6 +67,8 @@ takes the launcher verbs every lock of the Lock Family takes (#117).
   directories (an extra root under `/tmp` or the home volume) is refused
   instead of losing its read-only Landlock rule
   ([#62](https://github.com/DavidGodefroid/locklog/issues/62)).
+- Hub tickets are version 2 (lockkit's kind `read`, the profile as their
+  subject), so that `lox run` can apply a profile's rules to them (#126).
 - **Breaking.** lockkit v0.13.0 (from v0.8.1). `locklog console` without
   `--hub`, `--hub-key-file` and `--instance` refuses before it touches the
   terminal, the project or the config, with lockkit's "the console is

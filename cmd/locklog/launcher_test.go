@@ -327,6 +327,28 @@ func TestLauncherProfileDoctorInit(t *testing.T) {
 	}
 }
 
+// profile rules runs as the agent account with the project read-only, no
+// network and no volume: it reads the project's config file only.
+func TestLauncherProfileRules(t *testing.T) {
+	f := newLauncherFixture(t)
+	_, calls, err := f.run(t, f.project, nil, "profile", "rules", "--json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	noEngineSocket(t, calls)
+	run := lastRun(t, calls)
+	confined(t, run)
+	for _, seq := range [][]string{{"--user", "agent"}, {"--network", "none"}, {"--log-driver", "none"},
+		{"-v", f.project + ":" + f.project + ":ro"}, {"-w", f.project}, {"locklog", "profile", "rules", "--json"}} {
+		if !hasSeq(run, seq...) {
+			t.Errorf("profile rules run lacks %q: %q", seq, run)
+		}
+	}
+	if slices.ContainsFunc(run, func(a string) bool { return strings.Contains(a, "-run") || strings.Contains(a, "-home") }) {
+		t.Errorf("profile rules has a console volume: %q", run)
+	}
+}
+
 // The home directory is never a project: profile add refuses it, and the walk
 // from below it ignores a ~/.locklog/.
 func TestLauncherHomeIsNoProject(t *testing.T) {

@@ -25,6 +25,7 @@ import (
 	kconfig "github.com/DavidGodefroid/lockkit/config"
 	"github.com/DavidGodefroid/lockkit/console"
 	"github.com/DavidGodefroid/lockkit/ipc"
+	"github.com/DavidGodefroid/lockkit/plans"
 	"github.com/DavidGodefroid/lockkit/refusal"
 	"github.com/DavidGodefroid/lockkit/sanitize"
 
@@ -525,7 +526,7 @@ func (b *Backend) Status(s console.Session) any {
 	if !ok {
 		return nil
 	}
-	st := ls.engine.Status(context.Background())
+	st := withAuto(ls.engine.Status(context.Background()), ls.policy.Policy.Profile.AutoRules())
 	b.mu.Lock()
 	h := b.hub
 	b.mu.Unlock()
@@ -575,6 +576,24 @@ func (b *Backend) handler(method string) console.Handler {
 			var ok bool
 			if params, ev, ok = splitEnvelope(params); !ok {
 				return failed(req.ID, env, rec, ipc.CodeInvalidParams, "invalid ticket or requester", "invalid ticket or requester")
+			}
+		}
+		// The profile's auto rule for the method, from the policy in
+		// force (#126): deny is refused here, before any ticket or
+		// session; ask and auto shape the hub ticket (newHubCall).
+		if approved {
+			if r := autoRuleOf(env, method, &rec); r != nil {
+				if hub := console.HubOf(env); hub != nil && ev.Ticket != "" && peerKnown {
+					// The run of a ticket the rule now denies: its plan
+					// is taken back (the tightening made it stale too).
+					withdrawTicket(context.WithoutCancel(ctx), env, hub, ev.Ticket, plans.Caller{UID: c.UID, Token: ev.Requester.Token})
+				}
+				rec.Decision, rec.Code = "refused", string(r.Info.Code)
+				if err := writeAudit(env, rec); err != nil {
+					return console.ErrResp(req.ID, ipc.CodeInternal, "the call could not be audited: refused")
+				}
+				env.Println(console.Paint.Warn(method + ": refused by the profile's auto rules (" + rec.AutoRule + ")"))
+				return refusalResp(req.ID, r, env)
 			}
 		}
 		sess, err := env.Session(ctx)

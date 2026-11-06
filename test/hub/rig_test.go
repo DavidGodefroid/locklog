@@ -125,6 +125,9 @@ type rigOpts struct {
 	files map[string]string
 	rules string
 	now   time.Time
+	// reconnect: the console reconnects on the policy in force once the
+	// session is dropped (a policy change), as console.Run does.
+	reconnect bool
 }
 
 type rig struct {
@@ -263,8 +266,14 @@ func newRig(t *testing.T, o rigOpts) *rig {
 			t.Error(err)
 		}
 	})
-	r.srv, err = console.NewServer(console.ServerConfig{Product: product.P, Backend: be, Policy: pol, Session: sess, Audit: log, IO: r.io,
-		Hub: r.h, Approver: r.h.Approver(console.NewTypedApprover(r.io)), Sanitizer: logconsole.Sanitizer(), Now: r.clock.now, Quantum: -1})
+	sc := console.ServerConfig{Product: product.P, Backend: be, Policy: pol, Session: sess, Audit: log, IO: r.io,
+		Hub: r.h, Approver: r.h.Approver(console.NewTypedApprover(r.io)), Sanitizer: logconsole.Sanitizer(), Now: r.clock.now, Quantum: -1}
+	if o.reconnect {
+		sc.ReconnectPolicy = func(ctx context.Context, p console.Policy) (console.Session, error) {
+			return be.Connect(ctx, console.Credentials{Policy: p})
+		}
+	}
+	r.srv, err = console.NewServer(sc)
 	if err != nil {
 		t.Fatal(err)
 	}

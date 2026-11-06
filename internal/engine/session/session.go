@@ -700,7 +700,7 @@ func (s *Session) hubRequest(a engine.Approval) logconsole.HubRequest {
 		risk = ticket.RiskReadPII
 	}
 	return logconsole.HubRequest{Risk: risk, Header: a.Header, Note: s.maskers.base.Text(a.Note), Body: a.Body, HubBody: a.HubBody,
-		Warnings: a.Warnings, Clear: a.Clear, PlanHash: a.Hash, Inputs: a.Inputs, Moving: a.Moving, Production: s.prod, NeverAuto: a.NeverAuto}
+		Warnings: a.Warnings, Clear: a.Clear, PlanHash: a.Hash, Inputs: a.Inputs, Moving: a.Moving, Production: s.prod}
 }
 
 // noParams refuses parameters to a method that takes none.
