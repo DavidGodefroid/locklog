@@ -2,6 +2,8 @@ package setup
 
 import (
 	"bufio"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -286,11 +288,13 @@ func proxy(o Options, det Detected, target, profile string) (*LokiSource, authpr
 		return nil, r, fmt.Errorf("profile add: %w", err)
 	}
 	llDir := filepath.Join(o.Root, product.P.ProjectDir())
-	if err := os.MkdirAll(llDir, 0o755); err != nil {
-		return nil, r, fmt.Errorf("profile add: %w", err)
+	ll, err := openLocklogDir(llDir, false)
+	if err != nil {
+		return nil, r, err
 	}
+	defer ll.Close()
 	caPath := filepath.Join(llDir, host+"-ca.crt")
-	if err := writeExcl(caPath, ca, 0o644); err != nil {
+	if err := writeExcl(ll, host+"-ca.crt", ca, 0o644); err != nil {
 		return nil, r, err
 	}
 	creds := o.Credentials
@@ -350,58 +354,92 @@ func checkLocklogDir(dir, cfg string) (bool, error) {
 	return true, nil
 }
 
+// openLocklogDir creates .locklog/ when missing (0755 with fix, whatever
+// the umask) and opens it, refusing a link, a non-directory, another
+// owner's or one others can write. The writes go through the opened
+// directory (os.Root): a .locklog/ replaced by a link after
+// checkLocklogDir and the prompts is refused, never followed (#87).
+func openLocklogDir(dir string, fix bool) (*os.Root, error) {
+	refuse := fmt.Errorf("profile add: %s is a link, not a directory, not yours, or writable by others: remove it and run locklog profile add again", dir)
+	if err := os.Mkdir(dir, 0o755); err != nil && !errors.Is(err, fs.ErrExist) {
+		return nil, fmt.Errorf("profile add: %w", err)
+	}
+	st, err := os.Lstat(dir)
+	if err != nil {
+		return nil, fmt.Errorf("profile add: %w", err)
+	}
+	if !st.IsDir() || st.Mode().Perm()&0o022 != 0 || !ownedByMe(st) {
+		return nil, refuse
+	}
+	r, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, fmt.Errorf("profile add: %w", err)
+	}
+	// The directory opened is the one checked (not a link put there in
+	// between).
+	if opened, err := r.Stat("."); err != nil || !os.SameFile(st, opened) {
+		r.Close()
+		return nil, refuse
+	}
+	if fix && st.Mode().Perm() != 0o755 {
+		if err := r.Chmod(".", 0o755); err != nil {
+			r.Close()
+			return nil, fmt.Errorf("profile add: %w", err)
+		}
+	}
+	return r, nil
+}
+
 // writeConfig creates .locklog/ (0755) and its config.toml (0644), never
 // over an existing file.
 func writeConfig(dir, cfg string, data []byte) error {
-	if err := os.Mkdir(dir, 0o755); err != nil && !errors.Is(err, fs.ErrExist) {
-		return fmt.Errorf("profile add: %w", err)
+	r, err := openLocklogDir(dir, true)
+	if err != nil {
+		return err
 	}
-	if err := os.Chmod(dir, 0o755); err != nil {
-		return fmt.Errorf("profile add: %w", err)
-	}
-	return writeExcl(cfg, data, 0o644)
+	defer r.Close()
+	return writeExcl(r, filepath.Base(cfg), data, 0o644)
 }
 
 // replaceConfig replaces the config (a trusted file of yours) with data:
 // a new file beside it, renamed over it, 0644 as writeConfig makes it.
 func replaceConfig(dir, cfg string, data []byte) error {
-	f, err := os.CreateTemp(dir, ".config.toml.*")
+	r, err := openLocklogDir(dir, false)
 	if err != nil {
+		return err
+	}
+	defer r.Close()
+	var rnd [8]byte
+	if _, err := rand.Read(rnd[:]); err != nil {
 		return fmt.Errorf("profile add: %w", err)
 	}
-	tmp := f.Name()
-	_, err = f.Write(data)
-	if cerr := f.Close(); err == nil {
-		err = cerr
+	tmp := ".config.toml." + hex.EncodeToString(rnd[:])
+	if err := writeExcl(r, tmp, data, 0o644); err != nil {
+		return err
 	}
-	if err == nil {
-		err = os.Chmod(tmp, 0o644)
-	}
-	if err == nil {
-		err = os.Rename(tmp, cfg)
-	}
-	if err != nil {
-		os.Remove(tmp)
+	if err := r.Rename(tmp, filepath.Base(cfg)); err != nil {
+		r.Remove(tmp)
 		return fmt.Errorf("profile add: %w", err)
 	}
 	return nil
 }
 
-// writeExcl creates path with data, never over an existing file or link.
-func writeExcl(path string, data []byte, mode os.FileMode) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+// writeExcl creates name in dir with data, never over an existing file or
+// link.
+func writeExcl(dir *os.Root, name string, data []byte, mode os.FileMode) error {
+	f, err := dir.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
 	if err != nil {
 		return fmt.Errorf("profile add: %w", err)
 	}
 	_, err = f.Write(data)
+	if err == nil {
+		err = f.Chmod(mode)
+	}
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
-	if err == nil {
-		err = os.Chmod(path, mode)
-	}
 	if err != nil {
-		os.Remove(path)
+		dir.Remove(name)
 		return fmt.Errorf("profile add: %w", err)
 	}
 	return nil

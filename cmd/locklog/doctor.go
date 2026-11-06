@@ -24,6 +24,10 @@ import (
 
 const doctorUsage = "usage: locklog doctor [--profile P] [--fix [--yes]] [--json]"
 
+// noProfile names the production profile doctor checks against when the
+// project has none yet.
+const noProfile = "(none yet)"
+
 // doctorCmd is `locklog doctor`, the launcher verb of lockkit's GUIDE.md
 // §14: what the agent's account can reach where it runs (advisory), and
 // whether the agents found here are wired to locklog in this project.
@@ -119,6 +123,15 @@ func doctorCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		p := ps["unreadable-config"]
 		p.Production = true
 		ps["unreadable-config"] = p
+	} else if len(ps) == 0 && *profile == "" {
+		// No profile yet: nothing says the logs here are test data, so the
+		// account is checked as for a production profile (fail safe).
+		fmt.Fprintln(stderr, "locklog doctor: no profile in this project yet (locklog profile add): checked as a production profile")
+		p := config.Profile{Name: noProfile}
+		p.Production = true
+		ps = map[string]config.Profile{noProfile: p}
+		wiring = append(wiring, verbs.Check{Check: "profile", Status: verbs.StatusWarn,
+			Detail: "no profile in this project yet: the account is checked as for a production profile", Fix: "locklog profile add"})
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -143,8 +156,11 @@ func doctorCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			mark = "warn"
 		}
 		fmt.Fprintf(stdout, "  %s  %s\n", mark, c.Detail)
-		if c.Fix != "" {
+		switch {
+		case c.Fix != "" && strings.HasPrefix(c.Check, "agent "):
 			fmt.Fprintf(stdout, "        fix: %s (or locklog doctor --fix)\n", c.Fix)
+		case c.Fix != "":
+			fmt.Fprintf(stdout, "        fix: %s\n", c.Fix)
 		}
 	}
 	return code
