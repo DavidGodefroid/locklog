@@ -111,7 +111,7 @@
   <thead><tr><th scope="col">#</th><th scope="col">Invariant</th><th scope="col">Mechanism</th></tr></thead>
   <tbody>
   <tr><th scope="row">1</th><td>No locklog container has an engine socket</td><td>launcher; goldens</td></tr>
-  <tr><th scope="row">2</th><td>The console shares only <code>locklog-run</code> with agents; the home volume, the map directory and the hub network never</td><td>launcher; with the hub (v0.2.0) <code>lock up</code>; with lea (planned) its label check</td></tr>
+  <tr><th scope="row">2</th><td>The console shares only <code>locklog-run</code> with agents; the home volume, the map directory and the hub network never</td><td>launcher; with the hub (v0.2.0) <code>lox run</code>; with lea (planned) its label check</td></tr>
   <tr><th scope="row">3</th><td>Nothing unmasked leaves the console except an approved unmask; secrets never</td><td>masking pipeline, typed masked responses; canary harness</td></tr>
   <tr><th scope="row">4</th><td>Agent predicates see only the masked view; every record is masked before any predicate; no text is sent to a backend; plans, charges and stopping points depend on the plan, never on matches; agent rules only tighten</td><td>engine, oracle and equivalence suites</td></tr>
   <tr><th scope="row">5</th><td>Approved operations run only on a decision bound to the plan hash (exact spans for an unmask, the whole plan for a scan) and the policy fingerprint, once; never auto-approved for <code>read-pii</code>. With the hub (v0.2.0), <code>read-pii</code> only from <code>tty</code>, <code>deck</code> or <code>mobile</code></td><td>lockkit plans and tickets; the facade check lands with the hub</td></tr>

@@ -293,7 +293,7 @@ launcher's and the image's versions.
 v0.1.0, in active development: see the [CHANGELOG](CHANGELOG.md). It ships
 files, journald, Docker and Loki with the standalone console, and
 Elasticsearch and OpenSearch as a preview.
-v0.2.0 adds the hub (`lock up`, `lock approve`), and v0.3.0 the
+v0.2.0 makes the console hub-only (started by `lox run`), and v0.3.0 adds the
 Elasticsearch and OpenSearch incident gates and the masked export.
 
 ## The Lock family
