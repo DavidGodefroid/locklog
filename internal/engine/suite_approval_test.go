@@ -215,6 +215,9 @@ func echoLine(l string) bool {
 // carried, which the agent may see echoed anywhere on its screen.
 func (l *leakScanner) screen(where string, a Approval, own []masktest.Canary) {
 	a.Note = ""
+	// The hub binding is keyed digests (random base64, never shown to
+	// the agent): a canary form can occur in it by chance.
+	a.Hash, a.Inputs = blankBinding(a)
 	// The clear view is the human's own (the console shows it on its
 	// terminal with Ctrl-O): it never reaches the agent nor a hub, and
 	// holds the record in clear by design; its secrets stay masked.
@@ -736,10 +739,22 @@ func TestSuiteApprovalOracle(t *testing.T) {
 	}
 }
 
+// blankBinding returns a screen's hub binding (its keyed plan hash and
+// input digests) blanked, the input names kept: keyed digests under each
+// engine's random key (random base64, never shown to the agent).
+func blankBinding(a Approval) (string, map[string]string) {
+	in := map[string]string{}
+	for k := range a.Inputs {
+		in[k] = ""
+	}
+	return "", in
+}
+
 // oracleScreen renders an approval screen for comparison: pseudonym ids
 // dropped and, in its clear view (the human's own, which shows the
 // record's values by design), the planted values replaced by "planted".
 func oracleScreen(a Approval, vals oracleValues) string {
+	a.Hash, a.Inputs = blankBinding(a)
 	a.Clear = slices.Clone(a.Clear)
 	for i, l := range a.Clear {
 		for _, v := range vals {
