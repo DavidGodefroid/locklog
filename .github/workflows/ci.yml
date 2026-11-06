@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    - cron: "47 4 * * *" # nightly: macOS
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -18,7 +21,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # macOS runs on main, nightly and by hand, not on pull requests:
+        # hosted macOS runners are too often not acquired to gate a PR.
+        os: ${{ github.event_name == 'pull_request' && fromJSON('["ubuntu-latest"]') || fromJSON('["ubuntu-latest","macos-latest"]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     env:
