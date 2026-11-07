@@ -30,7 +30,7 @@ func TestConsoleRefusedWithoutHub(t *testing.T) {
 			t.Errorf("%v: exit %d, want 2", args, code)
 		}
 		msg := errb.String()
-		if !strings.Contains(msg, "the console is launched by `lox up` only: --hub, --hub-key-file and --instance are required") ||
+		if !strings.Contains(msg, "the console is launched by `lox run` only: --hub, --hub-key-file and --instance are required") ||
 			!strings.Contains(msg, "(started by lox run only)") || out.Len() != 0 {
 			t.Errorf("%v: stdout %q, stderr %q", args, out.String(), msg)
 		}

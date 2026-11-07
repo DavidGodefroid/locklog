@@ -239,8 +239,7 @@ The output cap applies to every answer:
 The console is started by `lox run` only (the first lockhub release that
 knows the locklog type: lockhub#84, #86, #87, after v0.9.0), hub
 attached: `locklog console` without its hub flags refuses with lockkit's
-"the console is launched by `lox up` only" (lockkit's text predates the
-`lox run` name). The journey:
+"the console is launched by `lox run` only". The journey:
 
 ```sh
 brew trust davidgodefroid/tap
