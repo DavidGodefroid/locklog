@@ -6,6 +6,37 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-07
+
+Fixes and distribution: no new console method or profile setting.
+
+### Changed
+
+- Releases ask the Homebrew tap to bump the `locklog` formula once the
+  release is published (`tap` job; needs the `TAP_DISPATCH_TOKEN` secret,
+  skipped without it). The install docs lead with
+  `brew install davidgodefroid/tap/lockfamily` and `lox add locklog` /
+  `lox run`, with `install.sh` as the alternative (#134).
+- `scripts/install.sh`'s last hint has lockfamily's wording: `lox add
+  locklog` in your project, then `lox run` in a terminal of its own,
+  outside the agent, where approvals live (#134).
+- lockkit v0.13.1 (from v0.13.0).
+
+### Fixed
+
+- In hub mode, a console with local sources only accepts exactly lox run's
+  internal hub network: one interface besides the loopback, the one its
+  `--hub` address is routed through, with no default route and no route
+  through a gateway. It refuses a second interface, a network with a route
+  out, or a network the hub is not on. lox run passes nothing new (#136).
+- The console audits the backend's `pii.add` refusals with the client's
+  peer (lockkit v0.13.1), and locklog no longer records them a second time
+  (lockkit#142).
+- Tests: the leak suite no longer fails at random (about one run in five)
+  when the random scan id held a 7-digit run of a corpus phone number; the
+  whole-corpus scan blanks the scan id only in its exact 24-hex form
+  (`TestLeakScannerScanID`). No production code changed (#138).
+
 ## [0.2.0] - 2026-11-06
 
 Hub only: the console is started by `lox run` (lockhub) only, and locklog
@@ -554,6 +585,7 @@ Still open in this release:
   version, which parses it (`bind-recursive=disabled` from CLI 25), not from
   the engine's.
 
-[Unreleased]: https://github.com/DavidGodefroid/locklog/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/DavidGodefroid/locklog/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/DavidGodefroid/locklog/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/DavidGodefroid/locklog/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/DavidGodefroid/locklog/releases/tag/v0.1.0

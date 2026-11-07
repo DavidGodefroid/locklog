@@ -192,4 +192,9 @@ func TestInstallShNextHint(t *testing.T) {
 	if strings.Contains(last, "lox up") {
 		t.Errorf("install.sh's last line names lox up: %q", last)
 	}
+	// lockfamily's install.sh wording (#134).
+	const want = `say "next step: lox add locklog in your project, then lox run in a terminal of its own, outside the agent: approvals live there"`
+	if last != want {
+		t.Errorf("install.sh's last line = %q, want %q", last, want)
+	}
 }

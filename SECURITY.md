@@ -2,7 +2,7 @@
 
 locklog lets an AI agent search and count across logs while a console held
 by a human reads them: the personal data and secrets locklog detects are
-masked before anything reaches the agent. v0.2.0 is the current release,
+masked before anything reaches the agent. v0.2.1 is the current release,
 early and in active development. The console runs in Docker, in a
 container and under an account of its own, which the agent cannot reach. A
 flaw in the masking, the console or its socket is a security issue.

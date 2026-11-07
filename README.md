@@ -45,7 +45,7 @@ clear value to the agent waits for your approval at `lox run` (lockhub) and
 is off by default on production.
 
 > [!NOTE]
-> **Early release.** v0.2.0 is the current release: see the
+> **Early release.** v0.2.1 is the current release: see the
 > [CHANGELOG](CHANGELOG.md) for what it holds and what is still open.
 > Built on [lockkit](https://github.com/DavidGodefroid/lockkit).
 > The design is public in [docs/security-model.md](docs/security-model.md);
