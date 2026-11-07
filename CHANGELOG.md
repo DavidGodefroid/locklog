@@ -6,6 +6,12 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- lockkit v0.14.1 (from v0.13.1). `locklog console` without its hub flags
+  now refuses with lockkit's "the console is launched by `lox run` only"
+  (was `lox up`, lockkit#147); docs/usage.md quotes the new text.
+
 ## [0.2.1] - 2026-11-07
 
 Fixes and distribution: no new console method or profile setting.
