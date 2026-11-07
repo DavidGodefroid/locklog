@@ -65,9 +65,9 @@
   <div class="prose">
     <p>locklog v0.2.1 is released. Its console is started by <code>lox run</code> (lockhub) only.</p>
     <ul>
-      <li><code>lox add locklog</code> and the locklog console in <code>lox run</code> come with the lockhub release after v0.9.0 (<a href="https://github.com/DavidGodefroid/lockhub/issues/84">lockhub#84</a>, <a href="https://github.com/DavidGodefroid/lockhub/issues/86">#86</a>, <a href="https://github.com/DavidGodefroid/lockhub/issues/87">#87</a>). lockhub v0.9.0 does not know locklog yet.</li>
-      <li>The tap’s <code>locklog</code> formula, and locklog in <code>lockfamily</code>, come with that release.</li>
-      <li>Today, <code>install.sh</code> installs the latest <strong>published</strong> release of the launcher (v0.2.1 at this writing), whose verbs you can run yourself.</li>
+      <li><code>lox add locklog</code> and the locklog console in <code>lox run</code> need lockhub v0.10.0 or later (<a href="https://github.com/DavidGodefroid/lockhub/issues/84">lockhub#84</a>, <a href="https://github.com/DavidGodefroid/lockhub/issues/86">#86</a>, <a href="https://github.com/DavidGodefroid/lockhub/issues/87">#87</a>).</li>
+      <li>The tap’s <code>locklog</code> formula installs v0.2.1, and the <code>lockfamily</code> formula includes locklog.</li>
+      <li>Without Homebrew, <code>install.sh</code> installs the latest <strong>published</strong> release of the launcher (v0.2.1 at this writing), whose verbs you can run yourself.</li>
     </ul>
     <p>Follow the <a href="https://github.com/DavidGodefroid/locklog/blob/main/CHANGELOG.md">CHANGELOG</a> and the <a href="https://github.com/DavidGodefroid/locklog/releases">releases page</a>.</p>
   </div>
@@ -90,7 +90,7 @@
     <div class="install-head"><span>Install the Lock Family with Homebrew</span></div>
     <pre tabindex="0" aria-label="Install commands"><code><span class="cmd">brew trust davidgodefroid/tap</span>
 <span class="cmd">brew install davidgodefroid/tap/lockfamily</span></code></pre>
-    <p class="install-note">Homebrew asks you to trust a third-party tap once. With the next lockhub release, <code>brew install davidgodefroid/tap/locklog</code> installs this Lock alone (with <code>davidgodefroid/tap/lox</code>).</p>
+    <p class="install-note">Homebrew asks you to trust a third-party tap once. <code>brew install davidgodefroid/tap/locklog</code> installs this Lock alone; <code>lox add</code> and <code>lox run</code> also need <code>davidgodefroid/tap/lox</code>.</p>
   </div>
   <ol class="steps prose">
     <li><p>From the project whose logs the agent investigates, <code>lox add locklog</code> sets up the lock (or <code>lox init</code>).</p>

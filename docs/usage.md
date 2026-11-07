@@ -236,8 +236,8 @@ The output cap applies to every answer:
 
 ## Starting: `lox run`
 
-The console is started by `lox run` only (the first lockhub release that
-knows the locklog type: lockhub#84, #86, #87, after v0.9.0), hub
+The console is started by `lox run` only (from lockhub v0.10.0, the first
+release that knows the locklog type: lockhub#84, #86, #87), hub
 attached: `locklog console` without its hub flags refuses with lockkit's
 "the console is launched by `lox up` only" (lockkit's text predates the
 `lox run` name). The journey:

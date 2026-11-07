@@ -7,16 +7,15 @@ shows every ticket and decides it, by its rules or by you.
 
 ## Status
 
-- locklog v0.2.0 is released: see the [CHANGELOG](../CHANGELOG.md).
-- `lox add locklog` and the locklog console in `lox run` come with the
-  lockhub release that adds the locklog type
-  ([lockhub#84](https://github.com/DavidGodefroid/lockhub/issues/84),
+- locklog v0.2.1 is released: see the [CHANGELOG](../CHANGELOG.md).
+- `lox add locklog` and the locklog console in `lox run` need lockhub
+  v0.10.0 or later ([lockhub#84](https://github.com/DavidGodefroid/lockhub/issues/84),
   [#86](https://github.com/DavidGodefroid/lockhub/issues/86),
-  [#87](https://github.com/DavidGodefroid/lockhub/issues/87)). lockhub
-  v0.9.0 does not know it yet.
-- The tap's `locklog` formula, and locklog in `lockfamily`, come with it.
-- Until then, `scripts/install.sh` ([below](#without-homebrew)) installs
-  the launcher, whose verbs you can run yourself ([setup.md](setup.md)).
+  [#87](https://github.com/DavidGodefroid/lockhub/issues/87)).
+- The tap's `locklog` formula installs v0.2.1, and the `lockfamily` formula
+  includes locklog.
+- Without Homebrew, `scripts/install.sh` ([below](#without-homebrew))
+  installs the launcher, whose verbs you can run yourself ([setup.md](setup.md)).
 
 v0.1.0 shipped files, journald, Docker and Loki, and Elasticsearch and
 OpenSearch as a preview. v0.2.0 makes the console hub-only, started by

@@ -36,8 +36,8 @@ logs; the agent asks over MCP and gets masked, bounded, typed answers:
 counts, patterns, traces, lines around a hit.
 
 > [!NOTE]
-> **Pre-release** (`v0.2.x`). The console is started by `lox run` only, from
-> the lockhub release after v0.9.0. See [the install status](docs/install.md#status).
+> **Pre-release** (`v0.2.x`). The console is started by `lox run` only,
+> from lockhub v0.10.0. See [the install status](docs/install.md#status).
 
 ## Why locklog
 
@@ -60,10 +60,9 @@ brew trust davidgodefroid/tap
 brew install davidgodefroid/tap/lockfamily
 ```
 
-That installs the Lock Family (`lox` and the other Locks). locklog joins it,
-with `brew install davidgodefroid/tap/locklog` and `lox add locklog`, in the
-lockhub release after v0.9.0. Until then, the signed install script
-installs locklog's launcher:
+That installs the Lock Family, locklog included. For locklog alone:
+`brew install davidgodefroid/tap/locklog` (with `lox` for `lox add locklog`
+and `lox run`), or the signed install script, which installs the launcher:
 
 ```sh
 curl -fsSL https://locklog.dev/install.sh | sh
