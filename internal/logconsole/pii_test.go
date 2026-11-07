@@ -170,8 +170,11 @@ func TestPIIAddAudited(t *testing.T) {
 		switch rec["decision"] {
 		case "tightened":
 			added = rec["pattern"] == canonical && rec["event"] == audit.EventPolicy
-		case "refused":
-			refused = rec["code"] == "E_UNKNOWN_FIELD" && rec["profile"] == "staging" && rec["pattern"] == nil
+		case "failed":
+			// lockkit's record of the backend's refusal (v0.13.1): the
+			// client, neither the pattern nor the engine's text.
+			refused = rec["event"] == audit.EventPolicy && rec["error"] == piiRefusedPrefix+"invalid pattern" &&
+				rec["profile"] == "staging" && rec["pattern"] == nil && rec["peer_uid"] == float64(1000)
 		}
 	}
 	if !added || !refused {
@@ -191,8 +194,9 @@ func TestPIIAddAudited(t *testing.T) {
 	}
 }
 
-// A rule the engine cannot save is refused with a fixed text, audited as
-// failed; AuditRecord leaves the console's other records alone.
+// A rule the engine cannot save is refused with a fixed text; the backend
+// audits nothing itself (lockkit records the refusal, AuditRecord adds the
+// method); AuditRecord leaves the console's other records alone.
 func TestPIIAddSaveFailsAndOtherRecords(t *testing.T) {
 	eng := &ruleEngine{shown: map[string]string{"x": "agent redact " + strings.Repeat("0", 64)}, addErr: errors.New("disk full at /home/x")}
 	b := New(Options{Profile: "staging", Root: project(t, localCfg), Open: func(context.Context, OpenOptions) (Engine, error) { return eng, nil }})
@@ -209,8 +213,12 @@ func TestPIIAddSaveFailsAndOtherRecords(t *testing.T) {
 	if err := b.SaveMask(c); err == nil || err.Error() != errPIISaveText {
 		t.Fatalf("SaveMask = %v", err)
 	}
-	if len(env.records) != 1 || env.records[0].(Record).Decision != "failed" || env.records[0].(Record).Error != errPIISaveText {
-		t.Errorf("records = %+v", env.records)
+	if len(env.records) != 0 {
+		t.Errorf("the backend audited the refusal itself (lockkit does): %+v", env.records)
+	}
+	unsaved := audit.Base{Event: audit.EventPolicy, Decision: "failed", Pattern: c, Error: piiRefusedPrefix + "mask rule not saved: " + errPIISaveText}
+	if rec, ok := b.AuditRecord(unsaved).(PIIRecord); !ok || rec.Method != ipc.MethodPIIAdd || rec.Pattern != c || rec.Error != unsaved.Error {
+		t.Errorf("lockkit's unsaved record = %+v", b.AuditRecord(unsaved))
 	}
 	if rec := b.AuditRecord(audit.Base{Event: audit.EventPolicy, Decision: "tightened"}); rec.(audit.Base).Decision != "tightened" {
 		t.Errorf("a file tightening = %+v", rec)

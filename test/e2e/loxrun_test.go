@@ -29,9 +29,11 @@ import (
 // describes it. A lock "logs" of the workspace (the project), with:
 //
 //   - the console's home and socket volumes, with lox run's labels;
-//   - lockkit's fake lockhub (hubtest) in this process, reached over a
-//     Docker network of its own (the console's only network, as lox run's
-//     hub network), through a forwarder on that network's gateway;
+//   - lockkit's fake lockhub (hubtest) in this process, reached over an
+//     internal Docker network of its own (the console's only network, as
+//     lox run's hub network: no route out), through a forwarder on that
+//     network's gateway; a local-only console accepts that network and no
+//     other (#136);
 //   - the console in the image, hub-attached, as the console account, its
 //     project's .locklog read-only and the log directory bound read-only
 //     at its own path, checked by device and inode (LOCKLOG_EXPECT_*), in
@@ -82,6 +84,18 @@ func docker(t *testing.T, args ...string) string {
 // returns once it listens. allowed is its --allowed-uids ("" none).
 func startLoxRun(t *testing.T, e *e2eEnv, profile, allowed string, answers ...[2]string) *loxRun {
 	t.Helper()
+	r, screen, exited := launchLoxRun(t, e, true, profile, allowed, answers...)
+	waitFor(t, screen, "Listening on ", 2*time.Minute, exited)
+	writeUpJSON(t, e.proj, r.project)
+	return r
+}
+
+// launchLoxRun starts the console as startLoxRun does, on an internal hub
+// network (internal false: a plain bridge network, with a route out),
+// answers its prompts and returns its screen and a channel closed once it
+// exits.
+func launchLoxRun(t *testing.T, e *e2eEnv, internal bool, profile, allowed string, answers ...[2]string) (*loxRun, *buffer, <-chan struct{}) {
+	t.Helper()
 	ws := e.proj
 	r := &loxRun{project: loxProject(ws)}
 	r.sockVol, r.homeVol = r.project+"_"+instance+"-run", r.project+"_"+instance+"-home"
@@ -111,9 +125,14 @@ func startLoxRun(t *testing.T, e *e2eEnv, profile, allowed string, answers ...[2
 	}
 	r.hub = hubtest.New(t, instance, ed25519.PublicKey(pub))
 
-	// The hub's network, the console's only one, and the hub on its
-	// gateway (the fake hub listens on the loopback only).
-	docker(t, "network", "create", r.network)
+	// The hub's network, the console's only one, internal as lox run's,
+	// and the hub on its gateway (the fake hub listens on the loopback
+	// only).
+	netArgs := []string{"network", "create"}
+	if internal {
+		netArgs = append(netArgs, "--internal")
+	}
+	docker(t, append(netArgs, r.network)...)
 	gw := docker(t, "network", "inspect", "-f", "{{range .IPAM.Config}}{{.Gateway}}{{end}}", r.network)
 	// The hub by a service name, as lox run's consoles name it (plain http
 	// only to a name without a dot or a private address).
@@ -180,9 +199,7 @@ func startLoxRun(t *testing.T, e *e2eEnv, profile, allowed string, answers ...[2
 			t.Fatal(err)
 		}
 	}
-	waitFor(t, &screen, "Listening on ", 2*time.Minute, exited)
-	writeUpJSON(t, ws, r.project)
-	return r
+	return r, &screen, exited
 }
 
 // forward serves target (http://127.0.0.1:port) on ip, a port of its own

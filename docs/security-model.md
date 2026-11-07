@@ -56,7 +56,7 @@ the pseudonym keys and decides what leaves.
 | 10 | Log content is untrusted text everywhere | JSON-escaped under an "untrusted" header, controls replaced; injection corpus |
 | 11 | Resources are bounded | plans, rolling budgets, a queue, container limits, decompression, response and journal DATA caps, a 64 MiB result cache |
 | 12 | Every call is audited, chained, without clear values (the console's clear view, Ctrl-O, is counted as `shown_clear`, never recorded) | lockkit audit |
-| 13 | No egress except the configured backends; production backends authenticated over TLS | network none or a dedicated network; a dialer pinned to host:port; no proxy environment, no redirects off-host; an unauthenticated-read check |
+| 13 | No egress except the configured backends; production backends authenticated over TLS | network none or a dedicated network; a console with local sources only has, in hub mode, one interface besides the loopback: the one its `--hub` address is routed through, with no default route and no route through a gateway (lox run's internal hub network), refused otherwise; a dialer pinned to host:port; no proxy environment, no redirects off-host; an unauthenticated-read check |
 | 14 | Read-only by construction | read-only binds and root; `O_RDONLY` beneath-root opens; HTTP method and path allowlists |
 | 15 | Pseudonym keys never leave the home volume; old epoch keys are deleted | files 0600, rotation |
 | 16 | Only the clients group, the image's `agent`, the console's own uid and `--allowed-uids` reach the socket (never root or 65534) | kernel peer credentials, lockkit peer check |

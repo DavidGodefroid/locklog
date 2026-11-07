@@ -190,8 +190,36 @@ func (l *leakScanner) scanPage(where string, page []byte) {
 		l.page(where+" (result)", r)
 		delete(m, "result")
 	}
+	blankScanID(l.t, m)
 	b, _ := json.Marshal(m)
 	l.global(where, b)
+}
+
+// scanIDRe is the form of a scan's id: 12 random bytes (crypto/rand) in
+// hex.
+var scanIDRe = regexp.MustCompile(`^[0-9a-f]{24}$`)
+
+// blankScanID blanks the scan's id of a scan answer (its "scan" object)
+// from the whole-corpus scan when it is well formed. The id is random,
+// not log content: over the ~190 scans of a run its 24 hex digits match
+// a 7-digit canary form (a phone's, card's or IBAN's digit run) about one
+// run in five (#138), as the cursor's and refs' random letters would. Any other
+// value of the id is scanned.
+func blankScanID(t testing.TB, m map[string]json.RawMessage) {
+	raw, ok := m["scan"]
+	if !ok {
+		return
+	}
+	var sc map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &sc); err != nil {
+		t.Fatalf("scan info is not a JSON object: %v", err)
+	}
+	var id string
+	if json.Unmarshal(sc["id"], &id) != nil || !scanIDRe.MatchString(id) {
+		return
+	}
+	sc["id"] = json.RawMessage(`""`)
+	m["scan"], _ = json.Marshal(sc)
 }
 
 // echoLine reports a screen line that shows the agent's own input as it
