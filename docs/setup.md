@@ -24,10 +24,9 @@ lox add locklog logs                          # or: lox init
 lox run                                       # in a terminal of its own, outside the agent
 ```
 
-`lox add locklog` and the locklog console in `lox run` need the lockhub
-release that adds the locklog type (lockhub#84, #86, #87; lockhub v0.9.0
-does not know it), which the tap's `locklog` formula, and locklog in
-`lockfamily`, come with. The alternative, without Homebrew, installs the
+`lox add locklog` and the locklog console in `lox run` need lockhub
+v0.10.0 or later, the first release that knows the locklog type (lockhub#84,
+#86, #87); the tap's `locklog` and `lockfamily` formulas install it. The alternative, without Homebrew, installs the
 launcher alone, cosign-verified:
 
 ```sh
