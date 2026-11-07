@@ -188,4 +188,4 @@ case ":$PATH:" in
 *) say "$dir is not on your PATH" ;;
 esac
 command -v docker >/dev/null 2>&1 || say "docker is not installed: the launcher needs it"
-say "next: locklog profile add in your project, then lox add locklog and lox run (lockhub)"
+say "next step: lox add locklog in your project, then lox run in a terminal of its own, outside the agent: approvals live there"
