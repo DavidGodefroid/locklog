@@ -708,6 +708,8 @@ jobs:
   # the console refuses an input that is not one), a file source over
   # rotated and compressed logs, and an MCP client speaking to the
   # launcher's mcp on lox run's socket volume (test/e2e, build tag e2e).
+  # The hub network (#136): a local-only console accepts lox run's internal
+  # hub network alone, and refuses a network with a route out.
   e2e-docker:
     name: e2e (docker)
     runs-on: ubuntu-latest
@@ -730,8 +732,10 @@ jobs:
           set -euxo pipefail
           d="$RUNNER_TEMP/e2e-$(od -An -N4 -tx4 /dev/urandom | tr -d ' ')"
           mkdir -m 0755 "$d"
-          LOCKLOG_E2E_DIR="$d" go test -tags e2e -count=1 -v -timeout 15m -run '^TestCountRotatedGz$' ./test/e2e 2>&1 | tee e2e.log
-          grep -q -- '--- PASS: TestCountRotatedGz' e2e.log
+          LOCKLOG_E2E_DIR="$d" go test -tags e2e -count=1 -v -timeout 15m -run '^(TestCountRotatedGz|TestHubNetworkLocalOnly|TestHubNetworkRouteOutRefused)$' ./test/e2e 2>&1 | tee e2e.log
+          for t in TestCountRotatedGz TestHubNetworkLocalOnly TestHubNetworkRouteOutRefused; do
+            grep -q -- "--- PASS: $t " e2e.log
+          done
       - name: remove the console and the volumes
         if: always()
         run: |
