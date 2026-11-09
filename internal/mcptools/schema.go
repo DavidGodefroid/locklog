@@ -113,7 +113,7 @@ func bound(s *jsonschema.Schema) {
 			p.MaxLength = ptr(n)
 		}
 	}
-	for name, n := range map[string]int{"sources": maxSources, "where": maxWhere, "by": maxBy, "fields": maxFields} {
+	for name, n := range map[string]int{"sources": maxSources, "where": maxWhere, "by": maxBy, "by_labels": maxBy, "fields": maxFields} {
 		if p := s.Properties[name]; p != nil {
 			p.MaxItems = ptr(n)
 		}

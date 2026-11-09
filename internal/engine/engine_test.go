@@ -375,6 +375,69 @@ func TestCursorRefusals(t *testing.T) {
 	}
 }
 
+// TestCursorRoundTrip (#144): a continuation may leave the range out (it
+// continues the first call's window); with other parameters it is refused
+// naming them.
+func TestCursorRoundTrip(t *testing.T) {
+	f := newFixture(t, genLog(t0, 30000, "c@example.org"), oneGranulePerCall)
+	// A cursor alone continues a query of from/to and nothing else.
+	res, err := f.eng.Search(ctx, q(nil))
+	if err != nil || res.Complete {
+		t.Fatal(err)
+	}
+	if _, err := f.eng.Search(ctx, Query{Cursor: res.Cursor}); err != nil {
+		t.Fatalf("cursor alone: %v", err)
+	}
+	// A query by last, continued with its parameters but no range.
+	f.eng.o.Now = func() time.Time { return t0.Add(20 * time.Hour) }
+	first := Query{Last: "20h", Where: []Pred{{Field: "level", Op: "=", Value: raw("error")}}, Limit: 50}
+	res, err = f.eng.Search(ctx, first)
+	if err != nil || res.Complete {
+		t.Fatal(err)
+	}
+	// (A page's cursor serves once: each continuation takes the last one.)
+	next := first
+	next.Last, next.Cursor = "", res.Cursor
+	if res, err = f.eng.Search(ctx, next); err != nil || res.Complete {
+		t.Fatalf("cursor without the range: %v", err)
+	}
+	same := first
+	same.Cursor = res.Cursor
+	if res, err = f.eng.Search(ctx, same); err != nil || res.Complete {
+		t.Fatalf("cursor with the same parameters: %v", err)
+	}
+	next.Cursor, same.Cursor = res.Cursor, res.Cursor
+	for name, tc := range map[string]struct {
+		q    Query
+		want string
+	}{
+		"cursor alone":  {Query{Cursor: res.Cursor}, "limit, where differ"},
+		"other text":    {func() Query { o := next; o.Text = "pdf"; return o }(), "text differ"},
+		"other limit":   {func() Query { o := next; o.Limit = 10; return o }(), "limit differ"},
+		"other where":   {func() Query { o := next; o.Where = []Pred{{Field: "level", Op: "=", Value: raw("info")}}; return o }(), "where differ"},
+		"other last":    {func() Query { o := same; o.Last = "10h"; return o }(), "last differs"},
+		"other sources": {func() Query { o := next; o.Sources = []string{"app"}; o.Order = "desc"; return o }(), "order differ"},
+	} {
+		_, err := f.eng.Search(ctx, tc.q)
+		var e *Error
+		if !errors.As(err, &e) || e.Code != EStale || !strings.Contains(e.Message, tc.want) || !strings.Contains(e.Message, "same") {
+			t.Errorf("%s: %v, want %q", name, err, tc.want)
+		}
+	}
+	// A trace continues with its id and the cursor, without the range.
+	tr, err := f.eng.Trace(ctx, TraceQuery{ID: "125", From: day.From, To: day.To})
+	if err != nil || tr.Complete {
+		t.Fatalf("%v %v", err, tr.Complete)
+	}
+	if _, err := f.eng.Trace(ctx, TraceQuery{ID: "125", Cursor: tr.Cursor}); err != nil {
+		t.Fatalf("trace cursor without the range: %v", err)
+	}
+	var e *Error
+	if _, err := f.eng.Trace(ctx, TraceQuery{ID: "126", Cursor: tr.Cursor}); !errors.As(err, &e) || e.Code != EStale || !strings.Contains(e.Message, "id differ") {
+		t.Fatalf("trace with another id: %v", err)
+	}
+}
+
 // TestStoppingPointsIndependentOfPredicates is the oracle v1 case: queries
 // that differ only in which canary they look for stop at the same plan
 // positions and report the same work.

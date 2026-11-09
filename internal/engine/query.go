@@ -247,8 +247,10 @@ type validator struct {
 	trustedValue func(src, path, v string) string
 	// nameMasked reports a clear path whose name the masker shows masked.
 	nameMasked func(src, path string) bool
-	maxRange   time.Duration
-	limitMax   int
+	// labelOnly reports a name a source holds only as a label.
+	labelOnly func(src, name string) bool
+	maxRange  time.Duration
+	limitMax  int
 }
 
 // validate checks q totally and fills the validated forms. Refusals name
@@ -311,7 +313,11 @@ func (v *validator) validate(q *Query) *Error {
 		return refuse(EBadQuery, "fields", "at most %d fields", MaxFields)
 	}
 	for i, f := range q.Fields {
-		if err := v.path(q, f, fmt.Sprintf("fields[%d]", i)); err != nil {
+		span := fmt.Sprintf("fields[%d]", i)
+		if err := v.path(q, f, span); err != nil {
+			return err
+		}
+		if err := v.notLabel(q, f, span, "records show labels under attrs when fields is left out"); err != nil {
 			return err
 		}
 	}
@@ -349,12 +355,29 @@ func (v *validator) path(q *Query, p, span string) *Error {
 	return nil
 }
 
+// notLabel refuses a field name a queried source holds only as a label
+// (the docker source's container): as a field it would match nothing.
+func (v *validator) notLabel(q *Query, name, span, hint string) *Error {
+	if v.labelOnly == nil {
+		return nil
+	}
+	for _, s := range q.Sources {
+		if v.labelOnly(s, name) {
+			return refuse(EBadQuery, span, "%q is a label of source %q, not a field: %s", name, s, hint)
+		}
+	}
+	return nil
+}
+
 func (v *validator) pred(q *Query, p *Pred, span string) *Error {
 	if (p.Field == "") == (p.Label == "") {
 		return refuse(EBadQuery, span, "give one of field or label")
 	}
 	if p.Field != "" {
 		if err := v.path(q, p.Field, span+".field"); err != nil {
+			return err
+		}
+		if err := v.notLabel(q, p.Field, span+".field", fmt.Sprintf("use {\"label\":%q}", p.Field)); err != nil {
 			return err
 		}
 	}

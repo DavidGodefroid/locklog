@@ -205,6 +205,7 @@ func (e *Engine) Patterns(ctx context.Context, q PatternsQuery) (_ PatternsResul
 		if err = restoreWindow(&q.Query, st); err != nil {
 			return PatternsResult{}, err
 		}
+		last = st.Last // the first call's, whether this one gave it or no range
 	}
 	v := e.validator(maxRange)
 	if err := v.validate(&q.Query); err != nil {
@@ -228,6 +229,7 @@ func (e *Engine) Patterns(ctx context.Context, q PatternsQuery) (_ PatternsResul
 		base.From, base.To = q.From.Add(-d), q.To.Add(-d)
 	}
 	digest := e.queryDigest("patterns", q)
+	params := e.paramDigests("patterns", q)
 	if cursor != "" {
 		var err *Error
 		if digest, err = e.scanDigest(ctx, "patterns", digest); err != nil {
@@ -242,7 +244,7 @@ func (e *Engine) Patterns(ctx context.Context, q PatternsQuery) (_ PatternsResul
 	a.base = newAgg()
 	if cursor != "" {
 		var err *Error
-		if f, err = e.resume(st, digest); err != nil {
+		if f, err = e.resume(st, digest, params); err != nil {
 			return PatternsResult{}, err
 		}
 		chunk, gran = st.Chunk, st.Granule
@@ -419,7 +421,7 @@ func (e *Engine) Patterns(ctx context.Context, q PatternsQuery) (_ PatternsResul
 	res.Complete = chunk >= len(f.plan.Chunks)
 	if !res.Complete {
 		st := cursorState{Plan: f.id, Query: digest, Chunk: chunk, Granule: gran, Epoch: e.o.Masker.Epoch(), PolicyFP: e.o.PolicyFP(), Cache: e.aggs.put(a),
-			From: q.From, To: q.To, Last: last, Scan: scanID(ctx)}
+			From: q.From, To: q.To, Last: last, Scan: scanID(ctx), Params: params}
 		res.Cursor = e.seal("Lc1", st)
 		// The plan holds the window, then the baseline: until the window
 		// is read, coverage is the window's.

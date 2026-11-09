@@ -4,9 +4,9 @@ Agents read logs only through locklog. The human's locklog console, started by `
 
 1. `locklog_status`. If no console runs, ask the user to start it as the status says (`lox run`, in a terminal of their own) and stop. Never start one yourself.
 2. `locklog_sources`: the sources, their fields and labels, which fields are trusted (shown in clear and countable cheaply), and the time each covers.
-3. Find when it started: `locklog_count` on trusted fields (level, status class, unit, container) with a `bucket`, over the widest range you need. It is cheap.
+3. Find when it started: `locklog_count` on trusted fields (level, status class, unit) with a `bucket`, or on labels with `by_labels` (a docker source's `container`: in `where` it is `{label: "container"}`, not a field), over the widest range you need. It is cheap.
 4. See what changed: `locklog_patterns` over that range with a `baseline` (e.g. `24h`) lists the message patterns that are new, gone or more frequent.
-5. Narrow to the hour where it changed. Then use `locklog_search` (or `locklog_count` with `text`/`regex`) on that hour only. A result with `complete: false` continues for free with its `cursor`.
+5. Narrow to the hour where it changed. Then use `locklog_search` (or `locklog_count` with `text`/`regex`) on that hour only. A result with `complete: false` continues for free with its `cursor`, given with the same parameters as the first call (the range may be left out).
 6. Follow a user or a request by its pseudonym: `⟦email:…⟧` means the same value in every record of the epoch. Search or count by it, never by a clear value. For a clear value the user gave you (an e-mail, an IP), `locklog_lookup` gives its pseudonym (rate-limited; never a secret). `locklog_trace` with a request id or a pseudonym gives its timeline across sources; `locklog_context` with a record's `ref` shows the records around it.
 7. To watch it happen again, `locklog_tail` follows the new records for up to 50 s while the user reproduces the problem.
 8. Report what you found. Masked values stay masked.
