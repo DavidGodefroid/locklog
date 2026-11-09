@@ -352,6 +352,7 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 		if err = restoreWindow(&q.Query, st); err != nil {
 			return CountResult{}, err
 		}
+		last = st.Last // the first call's, whether this one gave it or no range
 	}
 	v := e.validator(maxRange)
 	if err := v.validate(&q.Query); err != nil {
@@ -361,7 +362,11 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 		return CountResult{}, refuse(EBadQuery, "by", "at most %d fields, labels and the pattern", MaxBy)
 	}
 	for i, b := range q.By {
-		if err := v.path(&q.Query, b, fmt.Sprintf("by[%d]", i)); err != nil {
+		span := fmt.Sprintf("by[%d]", i)
+		if err := v.path(&q.Query, b, span); err != nil {
+			return CountResult{}, err
+		}
+		if err := v.notLabel(&q.Query, b, span, "count by it with by_labels"); err != nil {
 			return CountResult{}, err
 		}
 	}
@@ -381,6 +386,7 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 		q.bucket = d
 	}
 	digest := e.queryDigest("count", q)
+	params := e.paramDigests("count", q)
 	if cursor != "" {
 		var err *Error
 		if digest, err = e.scanDigest(ctx, "count", digest); err != nil {
@@ -394,7 +400,7 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 	a := newAgg()
 	if cursor != "" {
 		var err *Error
-		if f, err = e.resume(st, digest); err != nil {
+		if f, err = e.resume(st, digest, params); err != nil {
 			return CountResult{}, err
 		}
 		chunk, gran, groupsFrom = st.Chunk, st.Granule, st.Groups
@@ -573,7 +579,7 @@ func (e *Engine) Count(ctx context.Context, q CountQuery) (_ CountResult, retErr
 	res.Complete = scanned && nextGroups == 0
 	if !res.Complete {
 		st := cursorState{Plan: f.id, Query: digest, Chunk: chunk, Granule: gran, Epoch: e.o.Masker.Epoch(), PolicyFP: e.o.PolicyFP(), Cache: e.aggs.put(a),
-			From: q.From, To: q.To, Last: last, Scan: scanID(ctx), Groups: nextGroups}
+			From: q.From, To: q.To, Last: last, Scan: scanID(ctx), Groups: nextGroups, Params: params}
 		res.Cursor = e.seal("Lc1", st)
 		if scanned {
 			to := q.To

@@ -178,6 +178,11 @@ func TestSearchForwards(t *testing.T) {
 	if calls := c.methods(); !strings.Contains(calls[3], `"by_pattern":true`) || !strings.HasPrefix(calls[3], logconsole.MethodCount) {
 		t.Errorf("count by pattern call = %q", calls[3])
 	}
+	// #144: a count by a label (a docker source's container).
+	call(t, cs, ToolCount, map[string]any{"by_labels": []string{"container"}})
+	if calls := c.methods(); !strings.Contains(calls[4], `"by_labels":["container"]`) || !strings.HasPrefix(calls[4], logconsole.MethodCount) {
+		t.Errorf("count by label call = %q", calls[4])
+	}
 }
 
 // locklog_patterns forwards its range, top and baseline to log.patterns,
@@ -554,7 +559,7 @@ func TestInputSchemas(t *testing.T) {
 	for _, tool := range []string{ToolSearch, ToolCount, ToolPatterns, ToolContext, ToolTrace, ToolTail} {
 		for name, want := range map[string][2]any{
 			"text": {"maxLength", float64(256)}, "last": {"maxLength", float64(16)}, "cursor": {"maxLength", float64(4100)},
-			"sources": {"maxItems", float64(32)}, "where": {"maxItems", float64(32)}, "by": {"maxItems", float64(2)}, "fields": {"maxItems", float64(64)},
+			"sources": {"maxItems", float64(32)}, "where": {"maxItems", float64(32)}, "by": {"maxItems", float64(2)}, "by_labels": {"maxItems", float64(2)}, "fields": {"maxItems", float64(64)},
 		} {
 			p, ok := prop(tool, "properties")[name].(map[string]any)
 			if ok && p[want[0].(string)] != want[1] {

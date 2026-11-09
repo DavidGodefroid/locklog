@@ -231,6 +231,7 @@ func Open(ctx context.Context, o Options) (_ *Session, err error) {
 		PolicyFP:   func() string { return fp },
 		Detect:     func(v string) bool { return s.maskers.base.Text(v) != v },
 		NameMasked: s.maskers.nameMasked,
+		LabelOnly:  s.labelOnly,
 		Limits:     limits(pr.Limits),
 		Budgets:    budgets(pr.Limits),
 		Prefilter:  pr.Prefilter,
@@ -507,6 +508,14 @@ func (s *Session) trusted(src, name string, label bool) bool {
 		return slices.Contains(labels, name)
 	}
 	return slices.Contains(fields, name)
+}
+
+// labelOnly implements engine.Options.LabelOnly: a docker source's
+// container is a label (the name every record carries), never a line
+// field.
+func (s *Session) labelOnly(src, name string) bool {
+	c, ok := s.cfg[src]
+	return ok && c.Kind == config.KindDocker && name == docker.ContainerField
 }
 
 func (s *Session) openSource(ctx context.Context, c config.Source, o Options) (source.Source, error) {

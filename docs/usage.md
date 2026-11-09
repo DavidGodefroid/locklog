@@ -111,7 +111,7 @@ it back and says so.
 | `locklog_status` | consoles, profiles, sources, budgets left, the pseudonym epoch | free |
 | `locklog_sources` | per source: kind, format, field and label names (masked names as `⟦key:ID⟧`), trusted values, coverage | free |
 | `locklog_search` | masked records of a range: `where`, `text`, `regex`, `fields`, `limit ≤ 200`, cursor | free within budgets |
-| `locklog_count` | histogram, `by` ≤ 2 trusted or pseudonym fields, `first_last` | free within budgets |
+| `locklog_count` | histogram, `by` trusted or pseudonym fields and `by_labels` labels (≤ 2 in all), `first_last` | free within budgets |
 | `locklog_patterns` | top templates of the masked text, `baseline` diff | free within budgets |
 | `locklog_context` | records around a `ref` (≤ 50 each side) | free |
 | `locklog_trace` | one id or pseudonym across sources, merged timeline | free within budgets |
@@ -123,8 +123,12 @@ it back and says so.
 | `locklog_unmask` | the clear value of up to 8 exact pseudonyms of one record, once, with a reason | you approve a ticket at `lox run`, the deck or a phone (automatically only with `auto.unmask = "auto"`); off by default on production |
 
 Every result carries the pseudonym `epoch`. A result with
-`complete: false` has a `cursor`: passing it back continues the same plan
-for free. A record the masker fails on is withheld whole and counted in
+`complete: false` has a `cursor`: passing it back with the same parameters
+continues the same plan for free (the range may be left out: the cursor
+holds the first call's window). Other parameters are refused with
+`E_STALE`, naming the ones that differ. A docker source's `container` is a
+label, not a field: `where` takes `{label: "container"}` and `locklog_count`
+`by_labels`; as a field it is refused, naming the label. A record the masker fails on is withheld whole and counted in
 `masked_failures`. One exception: with `prefilter = true`, a search whose
 query has `text` or a `contains` predicate masks only the records whose
 clear text holds those needles, so counting the failures would tell whether

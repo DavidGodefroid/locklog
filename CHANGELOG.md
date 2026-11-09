@@ -6,6 +6,16 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- MCP (#144): a docker source's `container` addressed as a field (`where`,
+  `fields`, count `by`) was answered with nothing; it is now refused,
+  naming the label to use. `locklog_count` takes `by_labels` (a docker
+  source's container, Loki labels). A cursor continues when the range is
+  left out (the first call's window), and a cursor given with other
+  parameters is refused naming the ones that differ; the tool descriptions
+  say to repeat them.
+
 ### Changed
 
 - lockkit v0.14.1 (from v0.13.1). `locklog console` without its hub flags

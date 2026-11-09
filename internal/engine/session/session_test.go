@@ -301,6 +301,32 @@ func TestDockerGuardAndTrust(t *testing.T) {
 	if v, _ := rec.Lookup("container"); v.Text() != mask.Redacted || strings.Contains(string(out), "Jane") || !strings.Contains(string(out), "shop-api-1") || !strings.Contains(string(out), `"level":"warn"`) {
 		t.Errorf("docker record = %s", out)
 	}
+	// #144: the container is a label: as a field (where, fields, count by)
+	// it is refused naming the label, not answered with nothing.
+	const rng = `"from":"2026-10-30T13:00:00Z","to":"2026-10-30T14:00:00Z"`
+	for _, c := range []struct{ method, params, span, hint string }{
+		{logconsole.MethodSearch, `{` + rng + `,"where":[{"field":"container","op":"=","value":"shop-api-1"}]}`, "where[0].field", `use {"label":"container"}`},
+		{logconsole.MethodSearch, `{` + rng + `,"fields":["level","container"]}`, "fields[1]", "under attrs"},
+		{logconsole.MethodCount, `{` + rng + `,"by":["container"]}`, "by[0]", "by_labels"},
+		{logconsole.MethodCount, `{` + rng + `,"where":[{"field":"container","op":"=","value":"shop-api-1"}]}`, "where[0].field", `use {"label":"container"}`},
+	} {
+		_, ref := call(t, s, c.method, c.params)
+		if ref == nil || ref.Info.Code != "E_BAD_QUERY" || !strings.Contains(ref.Message, c.span) || !strings.Contains(ref.Message, `"container" is a label of source "web"`) || !strings.Contains(ref.Message, c.hint) {
+			t.Errorf("%s %s: %+v", c.method, c.params, ref)
+		}
+	}
+	// As a label it passes validation, as a line field such as level does.
+	for _, params := range []string{
+		`{` + rng + `,"where":[{"label":"container","op":"=","value":"shop-api-1"}]}`,
+		`{` + rng + `,"where":[{"field":"level","op":"=","value":"warn"}]}`,
+	} {
+		if _, ref := call(t, s, logconsole.MethodSearch, params); ref != nil && ref.Info.Code == "E_BAD_QUERY" {
+			t.Errorf("%s refused: %+v", params, ref)
+		}
+	}
+	if _, ref := call(t, s, logconsole.MethodCount, `{`+rng+`,"by_labels":["container"]}`); ref != nil && ref.Info.Code == "E_BAD_QUERY" {
+		t.Errorf("count by_labels container refused: %+v", ref)
+	}
 	// A wrong containers root is refused.
 	s.Close()
 	o.Roots.Docker = "/srv/docker/containers"

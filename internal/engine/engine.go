@@ -23,6 +23,7 @@ import (
 	"math"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -86,7 +87,11 @@ type Options struct {
 	Detect func(string) bool
 	// NameMasked reports a clear path the masker shows masked.
 	NameMasked func(src, path string) bool
-	Limits     Limits
+	// LabelOnly reports a name a source holds only as a label (the docker
+	// source's container): a field of that name is refused, naming the
+	// label, rather than matching nothing.
+	LabelOnly func(src, name string) bool
+	Limits    Limits
 	// Prefilter (opt-in, refused on production by the config) skips
 	// masking a record whose clear text cannot contain a needle.
 	Prefilter bool
@@ -231,13 +236,56 @@ func (e *Engine) selector(q *Query, src string) source.Selector {
 // range to the count budget.
 func (e *Engine) validator(maxRange time.Duration) *validator {
 	return &validator{now: e.o.Now(), sources: e.names, trusted: e.o.Trusted, detect: e.o.Detect,
-		trustedValue: e.o.Masker.TrustedValue, nameMasked: e.o.NameMasked, maxRange: maxRange, limitMax: e.o.Limits.MaxRecords}
+		trustedValue: e.o.Masker.TrustedValue, nameMasked: e.o.NameMasked, labelOnly: e.o.LabelOnly, maxRange: maxRange, limitMax: e.o.Limits.MaxRecords}
 }
 
 // queryDigest is the keyed digest of a validated query (cursor excluded).
 func (e *Engine) queryDigest(kind string, q any) string {
 	b, _ := json.Marshal(q)
 	return e.o.Sealer.Digest("locklog/query/v1", []byte(kind), b)
+}
+
+// paramDigests are short keyed digests of each parameter of a validated
+// query (its top-level JSON members), sealed into its cursors: a
+// continuation with other parameters is refused naming the ones that
+// differ.
+func (e *Engine) paramDigests(kind string, q any) map[string]string {
+	b, _ := json.Marshal(q)
+	var m map[string]json.RawMessage
+	if json.Unmarshal(b, &m) != nil {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = e.o.Sealer.Digest("locklog/param/v1", []byte(kind), []byte(k), v)[:8]
+	}
+	return out
+}
+
+// errOtherQuery refuses a continuation whose parameters differ from its
+// first call's: it names the differing parameters the cursor knows.
+func errOtherQuery(sealed, given map[string]string) *Error {
+	var diff []string
+	n := len(sealed)
+	for k, v := range sealed {
+		if given[k] != v {
+			diff = append(diff, k)
+		}
+	}
+	for k := range given {
+		if _, ok := sealed[k]; !ok {
+			diff = append(diff, k)
+			n++
+		}
+	}
+	msg := "the cursor belongs to another query: give it with the same parameters as the first call"
+	// Every parameter differing (digests are per method): another tool's
+	// cursor, or one from before the parameters were sealed.
+	if len(diff) > 0 && len(diff) < n {
+		sort.Strings(diff)
+		msg = fmt.Sprintf("the cursor belongs to another query: %s differ from the first call's; give the cursor with the same parameters as the first call", strings.Join(diff, ", "))
+	}
+	return &Error{Code: EStale, Span: "cursor", Message: msg}
 }
 
 // cursorState is sealed into a cursor; the agent sees only ciphertext.
@@ -262,6 +310,8 @@ type cursorState struct {
 	// Groups is where the next page of a whole count's groups starts
 	// (Count).
 	Groups int `json:"n,omitempty"`
+	// Params are the first call's paramDigests.
+	Params map[string]string `json:"r,omitempty"`
 }
 
 // refState is sealed into a record ref.
@@ -591,10 +641,15 @@ func (e *Engine) openCursor(cursor string) (cursorState, *Error) {
 
 // restoreWindow resolves the last of a continued query to the window of its
 // first call; the query digest, over the resolved range, then matches. A
-// continuation whose last differs from the first call's is refused.
+// continuation that gives no range continues the first call's window; one
+// whose last differs from the first call's is refused.
 func restoreWindow(q *Query, st cursorState) *Error {
+	if q.Last == "" && q.From.IsZero() && q.To.IsZero() && !st.From.IsZero() {
+		q.From, q.To = st.From, st.To
+		return nil
+	}
 	if q.Last != st.Last {
-		return &Error{Code: EStale, Span: "cursor", Message: "the cursor belongs to another query"}
+		return &Error{Code: EStale, Span: "cursor", Message: "the cursor belongs to another query: last differs from the first call's; give the cursor with the same last, or with no range"}
 	}
 	if q.Last != "" && q.From.IsZero() && q.To.IsZero() && !st.From.IsZero() {
 		q.From, q.To, q.Last = st.From, st.To, ""
@@ -602,10 +657,11 @@ func restoreWindow(q *Query, st cursorState) *Error {
 	return nil
 }
 
-// resume returns the frozen plan of an opened cursor of a query.
-func (e *Engine) resume(st cursorState, query string) (*frozen, *Error) {
+// resume returns the frozen plan of an opened cursor of a query; params
+// are the query's paramDigests.
+func (e *Engine) resume(st cursorState, query string, params map[string]string) (*frozen, *Error) {
 	if st.Query != query {
-		return nil, &Error{Code: EStale, Span: "cursor", Message: "the cursor belongs to another query"}
+		return nil, errOtherQuery(st.Params, params)
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -1459,18 +1515,25 @@ func (e *Engine) search(ctx context.Context, q Query, kind string) (_ SearchResu
 		if err = restoreWindow(&q, st); err != nil {
 			return SearchResult{}, err
 		}
+		last = st.Last // the first call's, whether this one gave it or no range
 	}
 	if err := e.validator(maxRange).validate(&q); err != nil {
 		return SearchResult{}, err
 	}
 	var digest string
+	var params map[string]string
 	if q.trace != nil {
 		digest = e.queryDigest(kind, struct {
 			Q  Query
 			ID string
 		}{q, q.trace.id})
+		params = e.paramDigests(kind, struct {
+			Query
+			ID string `json:"id"`
+		}{q, q.trace.id})
 	} else {
 		digest = e.queryDigest(kind, q)
+		params = e.paramDigests(kind, q)
 	}
 	if cursor != "" {
 		var err *Error
@@ -1485,7 +1548,7 @@ func (e *Engine) search(ctx context.Context, q Query, kind string) (_ SearchResu
 	var pending []match
 	if cursor != "" {
 		var err *Error
-		if f, err = e.resume(st, digest); err != nil {
+		if f, err = e.resume(st, digest, params); err != nil {
 			return SearchResult{}, err
 		}
 		chunk, gran = st.Chunk, st.Granule
@@ -1625,7 +1688,7 @@ func (e *Engine) search(ctx context.Context, q Query, kind string) (_ SearchResu
 	res.Complete = done && len(rest) == 0
 	if !res.Complete {
 		st := cursorState{Plan: f.id, Query: digest, Chunk: chunk, Granule: gran, Epoch: e.o.Masker.Epoch(), PolicyFP: e.o.PolicyFP(),
-			From: q.From, To: q.To, Last: last, Scan: scanID(ctx)}
+			From: q.From, To: q.To, Last: last, Scan: scanID(ctx), Params: params}
 		if len(rest) > 0 {
 			id, ok := e.cache.put(rest)
 			if !ok {
