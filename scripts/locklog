@@ -36,7 +36,11 @@
 #              no volume: mounts, help...
 #
 # The project (the nearest directory up from here that holds .locklog/, or
-# this directory) is mounted read-only at its own path.
+# this directory) is mounted read-only at its own path. The company's
+# managed directory, when this machine has one (/etc/lockfamily on Linux,
+# /Library/Application Support/lockfamily on macOS), is mounted read-only on
+# /etc/lockfamily in every container, where lockkit reads managed.toml in
+# the image, as lox run mounts it in its locks.
 #
 # Environment:
 #   LOCKLOG_IMAGE        image to run (default: the release image of this
@@ -688,6 +692,31 @@ project_mount() {
 	safe "$workdir" || die "$workdir holds a character a docker mount cannot carry: move or rename it"
 }
 
+# The company-managed directory of this machine (lockkit's
+# managed.DefaultPath): managed.toml, its signature bundle, signer.toml and
+# lox's managed.toml.verified stamp. Every container mounts it read-only on
+# /etc/lockfamily, the path lockkit reads in the (Linux) image, as lox run
+# mounts it in its locks (lockhub#179): the commands see the bounds the
+# console enforces. lockkit's ownership checks still apply in the
+# container: a bind mount keeps the files' owner and mode.
+case "$(uname -s)" in
+Darwin) managed_dir="/Library/Application Support/lockfamily" ;;
+*) managed_dir=/etc/lockfamily ;;
+esac
+
+# managed_check: sets managed_mount, the -v spec of the managed directory,
+# or nothing when this machine has none (no mount, no managed policy). A
+# path that is not a directory (a file, a dangling link) or that a docker
+# mount cannot carry stops the launcher, before any docker run.
+managed_check() {
+	managed_mount=
+	if [ -e "$managed_dir" ] || [ -L "$managed_dir" ]; then
+		[ -d "$managed_dir" ] || die "$managed_dir is not a directory: locklog cannot mount the company-managed configuration"
+		safe "$managed_dir" || die "$managed_dir holds a character a docker mount cannot carry: locklog cannot mount the company-managed configuration"
+		managed_mount="$managed_dir:/etc/lockfamily:ro"
+	fi
+}
+
 # The confinement every locklog container runs with.
 confined="--cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /tmp:rw,nosuid,nodev,noexec,size=64m"
 
@@ -820,7 +849,7 @@ profile_add() {
 	trap 'exit 143' TERM
 	write_facts "$facts" logs
 	rc=0
-	docker run --rm "$tty" --user "$(id -u):$(id -g)" --log-driver none --network none $confined \
+	docker run --rm "$tty" --user "$(id -u):$(id -g)" --log-driver none --network none $confined ${managed_mount:+-v} ${managed_mount:+"$managed_mount"} \
 		--pids-limit 64 --memory 256m -e "LOCKLOG_HOST_HOME=$home_dir" \
 		-v "$pa:$pa" -v "$proxy_dir:$proxy_dir" -v "$facts:/run/locklog-facts:ro" -w "$pa" \
 		"$image" profile add --facts /run/locklog-facts --proxy-dir "$proxy_dir" "$@" || rc=$?
@@ -863,7 +892,7 @@ as_you() {
 	[ "$ar" != / ] || die "run locklog from a project directory, not from /"
 	safe "$ar" || die "$ar holds a character a docker mount cannot carry: move or rename it"
 	safe "$here" || die "$here holds a character a docker mount cannot carry: move or rename it"
-	exec docker run --rm "$tty" --user "$(id -u):$(id -g)" --log-driver none --network none $confined \
+	exec docker run --rm "$tty" --user "$(id -u):$(id -g)" --log-driver none --network none $confined ${managed_mount:+-v} ${managed_mount:+"$managed_mount"} \
 		--pids-limit 64 --memory 256m -v "$ar:$ar" -w "$here" "$image" "$@"
 }
 
@@ -897,19 +926,23 @@ doctor() {
 		# you. It asks on the terminal unless --yes: the facts go in a file.
 		agent_root
 		safe "$ar" || die "$ar holds a character a docker mount cannot carry: move or rename it"
-		docker run --rm "$tty" --user "$(id -u):$(id -g)" --log-driver none --network host $confined --pids-limit 64 --memory 256m \
+		docker run --rm "$tty" --user "$(id -u):$(id -g)" --log-driver none --network host $confined ${managed_mount:+-v} ${managed_mount:+"$managed_mount"} --pids-limit 64 --memory 256m \
 			${sock:+--mount} ${sock:+"$sock"} -v "$ar:$ar" -v "$facts:/run/locklog-facts:ro" -w "$here" \
 			"$image" doctor --facts /run/locklog-facts "$@" || rc=$?
 		exit "$rc"
 	fi
 	# The facts go on stdin: the agent account cannot read your 0600 file.
-	docker run --rm -i --user agent --log-driver none --network host $confined --pids-limit 64 --memory 256m \
+	docker run --rm -i --user agent --log-driver none --network host $confined ${managed_mount:+-v} ${managed_mount:+"$managed_mount"} --pids-limit 64 --memory 256m \
 		${sock:+--mount} ${sock:+"$sock"} -v "$project:$project:ro" -w "$workdir" \
 		"$image" doctor --facts - "$@" <"$facts" || rc=$?
 	exit "$rc"
 }
 
 cmd="${1:-}"
+case "$cmd" in
+update | console | hub-key) ;;
+*) managed_check ;;
+esac
 case "$cmd" in
 update)
 	shift
@@ -918,7 +951,7 @@ update)
 version | --version)
 	printf 'locklog launcher %s (image %s)\n' "$launcher_version" "$image"
 	need_docker
-	exec docker run --rm --network none --user agent $confined "$image" version
+	exec docker run --rm --network none --user agent $confined ${managed_mount:+-v} ${managed_mount:+"$managed_mount"} "$image" version
 	;;
 console | hub-key)
 	# The console runs hub-attached only, started by lox run with its hub
@@ -939,10 +972,10 @@ profile)
 		# the agent account, the project read-only, no network, no volume
 		# (the rules of the config file; the console's approved ones are
 		# in its home volume).
-		exec docker run --rm --user agent --log-driver none --network none $confined \
+		exec docker run --rm --user agent --log-driver none --network none $confined ${managed_mount:+-v} ${managed_mount:+"$managed_mount"} \
 			-v "$project:$project:ro" -w "$workdir" "$image" "$@"
 	fi
-	exec docker run --rm "$tty" --user agent --log-driver none --network none $confined "$image" "$@"
+	exec docker run --rm "$tty" --user agent --log-driver none --network none $confined ${managed_mount:+-v} ${managed_mount:+"$managed_mount"} "$image" "$@"
 	;;
 init)
 	as_you "$@"
@@ -957,14 +990,14 @@ mcp)
 	# agent is the non-production trial.
 	project_mount
 	lockup_mount
-	exec docker run --rm -i --user agent --log-driver none --network none $confined \
+	exec docker run --rm -i --user agent --log-driver none --network none $confined ${managed_mount:+-v} ${managed_mount:+"$managed_mount"} \
 		--pids-limit 64 --memory 256m -e LOCKLOG_HOST_AGENT=1 \
 		--mount "$mount" -v "$project:$project:ro" -w "$workdir" "$image" "$@"
 	;;
 *)
 	need_docker
 	project_mount
-	exec docker run --rm "$tty" --user agent --log-driver none --network none $confined \
+	exec docker run --rm "$tty" --user agent --log-driver none --network none $confined ${managed_mount:+-v} ${managed_mount:+"$managed_mount"} \
 		-v "$project:$project:ro" -w "$workdir" "$image" "$@"
 	;;
 esac

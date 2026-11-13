@@ -19,7 +19,11 @@ import (
 // with "--". PATH holds only the tools the launcher needs.
 type launcherFixture struct {
 	root, bin, fake, project, logs, calls, script string
-	env                                           []string
+	// managed and managedMac are the launcher's managed directories (the
+	// host's /etc/lockfamily, and /Library/Application Support/lockfamily
+	// on macOS): the fixture's, absent until a test makes them.
+	managed, managedMac string
+	env                 []string
 }
 
 var launcherTools = []string{"sh", "dirname", "mkdir", "id", "cat", "printf", "awk", "sha256sum", "shasum", "tar",
@@ -91,11 +95,42 @@ exit 0
 		t.Fatal(err)
 	}
 	f.script = filepath.Join(root, "locklog")
-	writeExec(t, f.script, string(launcher))
+	// The machine's managed directories: the fixture's, never the host's.
+	f.managed = filepath.Join(root, "managed dir", "lockfamily")
+	f.managedMac = filepath.Join(root, "Application Support", "lockfamily")
+	s := string(launcher)
+	for line, dir := range map[string]string{
+		`Darwin) managed_dir="/Library/Application Support/lockfamily" ;;`: f.managedMac,
+		`*) managed_dir=/etc/lockfamily ;;`:                                f.managed,
+	} {
+		if !strings.Contains(s, line) {
+			t.Fatalf("launcher lacks %q", line)
+		}
+		s = strings.Replace(s, line, line[:strings.Index(line, "managed_dir=")]+`managed_dir="`+dir+`" ;;`, 1)
+	}
+	writeExec(t, f.script, s)
 	f.env = []string{"PATH=" + f.bin, "HOME=" + filepath.Join(root, "home"), "LOCKLOG_EXTRA_ROOTS=" + f.logs}
 	// The workspace is root: lox run runs its locklog lock "logs".
 	f.loxRun(t, root, map[string]string{"logs": "locklog"})
 	return f
+}
+
+// fakeUname makes uname -s print sysname, so the launcher picks that OS's
+// managed directory whatever the host (the macOS runner prints Darwin);
+// every other uname call is the real one.
+func (f *launcherFixture) fakeUname(t *testing.T, sysname string) {
+	t.Helper()
+	real, err := exec.LookPath("uname")
+	if err != nil {
+		t.Skip("no uname")
+	}
+	uname := filepath.Join(f.bin, "uname")
+	if err := os.Remove(uname); err != nil {
+		t.Fatal(err)
+	}
+	writeExec(t, uname, `#!/bin/sh
+case "$1" in -s) echo `+sysname+` ;; *) exec '`+real+`' "$@" ;; esac
+`)
 }
 
 // allGroupsNamed reports whether getent names every gid of this account.

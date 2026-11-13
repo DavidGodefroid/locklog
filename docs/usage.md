@@ -164,6 +164,11 @@ user file > managed defaults > built-in defaults.
   `blocked by company policy: …` line per violation and exit 3, else `ok: …`
   and exit 0. `lox run` runs it before it starts the lock. `locklog doctor`
   has a `managed` line, and `locklog console` exits 3 on a refusal.
+- The host launcher (`scripts/locklog`) mounts the machine's managed
+  directory read-only on `/etc/lockfamily` in every container it runs, as
+  `lox run` mounts it in its locks: `managed show`, `managed check`,
+  `doctor`, `profile`, `init` and `mcp` run from the host see the bounds the
+  console enforces ([install.md](install.md#the-managed-directory)).
 
 | Bound key | Type | Looser (refused) |
 |---|---|---|
