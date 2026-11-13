@@ -37,6 +37,10 @@ uses [Semantic Versioning](https://semver.org/).
   left out (the first call's window), and a cursor given with other
   parameters is refused naming the ones that differ; the tool descriptions
   say to repeat them.
+- JSON lines are decoded about 8 times faster (#150): locklog reads them
+  with a scanner of its own instead of encoding/json's token reader,
+  exactly as before (the same strings, numbers, member order, depth and
+  key limits). An approved scan of JSON logs runs about 20 % faster.
 
 ### Changed
 
