@@ -142,7 +142,7 @@
   <tr><th scope="row">journald</th><td>v0.1.0</td><td>pure-Go reader, field allowlist; core dumps, command lines and audit fields are never served</td></tr>
   <tr><th scope="row">Docker containers</th><td>v0.1.0</td><td><code>json-file</code> logs by container name glob; the <code>journald</code> driver through journald. Podman through journald</td></tr>
   <tr><th scope="row">Loki</th><td>v0.1.0</td><td>trusted labels and structured metadata, server-side metric counts; text never sent to Loki</td></tr>
-  <tr><th scope="row">Elasticsearch, OpenSearch</th><td>v0.1.0 (preview)</td><td>trusted keyword fields, <code>search_after</code>, a read-only privilege check; their incident gates come with v0.3.0</td></tr>
+  <tr><th scope="row">Elasticsearch, OpenSearch</th><td>v0.1.0 (preview)</td><td>trusted keyword fields, <code>search_after</code>, a read-only privilege check; their incident gates come with v0.4.0</td></tr>
   </tbody>
   </table>
   </div>
@@ -166,7 +166,8 @@
   <ul class="prose">
     <li><strong>v0.1.0</strong> shipped files, journald, Docker and Loki; Elasticsearch and OpenSearch as a preview.</li>
     <li><strong>v0.2.0</strong> makes the console hub-only, started by <code>lox run</code>, with per-profile auto rules.</li>
-    <li><strong>v0.3.0</strong> adds the Elasticsearch and OpenSearch incident gates and the masked export.</li>
+    <li><strong>v0.3.0</strong> enforces the <code>[locklog]</code> section of the company’s managed configuration (<code>managed.toml</code>).</li>
+    <li><strong>v0.4.0</strong> adds the Elasticsearch and OpenSearch incident gates and the masked export.</li>
   </ul>
   <p><a href="../security/">What locklog relies on, and what it does not mask</a></p>
 </section>

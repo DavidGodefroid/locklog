@@ -36,7 +36,7 @@ logs; the agent asks over MCP and gets masked, bounded, typed answers:
 counts, patterns, traces, lines around a hit.
 
 > [!NOTE]
-> **Pre-release** (`v0.2.x`). The console is started by `lox run` only,
+> **Pre-release** (`v0.3.x`). The console is started by `lox run` only,
 > from lockhub v0.10.0. See [the install status](docs/install.md#status).
 
 ## Why locklog
