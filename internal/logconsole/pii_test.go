@@ -84,12 +84,19 @@ func (e *ruleEngine) PIIRules() ([]string, []string) {
 
 const maskedName = "jean.secretname@example.com"
 
+// piiCfg is a profile with one file source, nginx, under dir: no journald
+// source, whose journal directory the host may lack (macOS has none, and
+// PlanRoots refuses such a profile there).
+func piiCfg(dir string) string {
+	return "version = 1\n[profiles.staging.sources.nginx]\nkind = \"file\"\npaths = [\"" + dir + "/access.log*\"]\n"
+}
+
 // pii.add through the console server: the rule reaches the engine, the
 // console's record of it holds the method and the canonical pattern (a
 // digest), a refusal is audited with its code, and the audit file never
 // holds the name the agent sent.
 func TestPIIAddAudited(t *testing.T) {
-	root := project(t, localCfg)
+	root := project(t, piiCfg(t.TempDir()))
 	os.WriteFile(filepath.Join(root, ".locklog", "pii.toml"), []byte("[[allow]]\nfield = \"user\"\n"), 0o644)
 	digest := strings.Repeat("ab", 32)
 	canonical := "agent redact " + digest
@@ -199,7 +206,7 @@ func TestPIIAddAudited(t *testing.T) {
 // method); AuditRecord leaves the console's other records alone.
 func TestPIIAddSaveFailsAndOtherRecords(t *testing.T) {
 	eng := &ruleEngine{shown: map[string]string{"x": "agent redact " + strings.Repeat("0", 64)}, addErr: errors.New("disk full at /home/x")}
-	b := New(Options{Profile: "staging", Root: project(t, localCfg), Open: func(context.Context, OpenOptions) (Engine, error) { return eng, nil }})
+	b := New(Options{Profile: "staging", Root: project(t, piiCfg(t.TempDir())), Open: func(context.Context, OpenOptions) (Engine, error) { return eng, nil }})
 	pol, _ := b.LoadPolicy()
 	if _, err := b.Connect(context.Background(), console.Credentials{Policy: pol}); err != nil {
 		t.Fatal(err)
