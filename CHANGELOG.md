@@ -27,6 +27,13 @@ uses [Semantic Versioning](https://semver.org/).
   …` line each; `lox run` runs it before it starts the lock), a `managed`
   line in `locklog doctor`, and `locklog console` exits 3 when the managed
   configuration refuses it.
+- The launcher mounts the machine's managed directory (`/etc/lockfamily`,
+  `/Library/Application Support/lockfamily` on macOS) read-only on
+  `/etc/lockfamily` in every container it runs, as `lox run` does in its
+  locks: `locklog managed show`, `managed check`, `doctor` and the other
+  commands run from the host see the company's managed configuration. A
+  managed path that is not a directory, or that a docker mount cannot
+  carry, stops the launcher (#146).
 
 ### Fixed
 
