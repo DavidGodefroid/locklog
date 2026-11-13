@@ -88,7 +88,11 @@ func (s *Session) PIIRules() (maskRules, allow []string) {
 	}
 	text := s.maskers.base.Text
 	for _, r := range s.rules.Mask {
-		maskRules = append(maskRules, text(r.Text()))
+		t := text(r.Text())
+		if r.Managed {
+			t += " (managed)"
+		}
+		maskRules = append(maskRules, t)
 	}
 	if s.rules.Agent != nil {
 		for _, a := range s.rules.Agent.List() {

@@ -39,7 +39,10 @@ func (b *Backend) PIIRules(p console.Policy) (mask, allow []string) {
 		return ar.PIIRules()
 	}
 	if lp, ok := p.(Policy); ok {
-		return nil, slices.Clone(lp.Policy.PIIAllow)
+		for _, r := range lp.Policy.PIIMask {
+			mask = append(mask, r.Text()+" (managed)")
+		}
+		return mask, slices.Clone(lp.Policy.PIIAllow)
 	}
 	return nil, nil
 }

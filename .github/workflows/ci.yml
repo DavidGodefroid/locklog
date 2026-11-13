@@ -122,6 +122,11 @@ jobs:
             grep -E -- '--- FAIL|_test\.go:[0-9]+:|^FAIL|panic:' test.log | head -40 | sed 's/^/::error::/'
             exit 1
           }
+      # The managed-configuration tests place a managed file through
+      # managed.SetTestPath, which only this tag builds: a release build
+      # never carries it.
+      - name: go test -tags lockfamily_managed_test
+        run: go test -tags lockfamily_managed_test ./...
 
   # Remote sources against real backends (pulled images, no local build).
   integration-loki:
@@ -150,7 +155,7 @@ jobs:
       - name: integration tests
         env:
           LOCKLOG_LOKI_URL: http://127.0.0.1:3100
-        run: go test -tags integration -count=1 ./test/loki/...
+        run: go test -tags 'integration lockfamily_managed_test' -count=1 ./test/loki/...
       - name: backend logs on failure
         if: failure()
         run: docker logs loki 2>&1 | tail -100
@@ -732,8 +737,8 @@ jobs:
           set -euxo pipefail
           d="$RUNNER_TEMP/e2e-$(od -An -N4 -tx4 /dev/urandom | tr -d ' ')"
           mkdir -m 0755 "$d"
-          LOCKLOG_E2E_DIR="$d" go test -tags e2e -count=1 -v -timeout 15m -run '^(TestCountRotatedGz|TestHubNetworkLocalOnly|TestHubNetworkRouteOutRefused)$' ./test/e2e 2>&1 | tee e2e.log
-          for t in TestCountRotatedGz TestHubNetworkLocalOnly TestHubNetworkRouteOutRefused; do
+          LOCKLOG_E2E_DIR="$d" go test -tags e2e -count=1 -v -timeout 15m -run '^(TestCountRotatedGz|TestHubNetworkLocalOnly|TestHubNetworkRouteOutRefused|TestManagedFile|TestManagedFileWritableRefused)$' ./test/e2e 2>&1 | tee e2e.log
+          for t in TestCountRotatedGz TestHubNetworkLocalOnly TestHubNetworkRouteOutRefused TestManagedFile TestManagedFileWritableRefused; do
             grep -q -- "--- PASS: $t " e2e.log
           done
       - name: remove the console and the volumes

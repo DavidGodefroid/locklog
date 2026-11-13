@@ -6,6 +6,28 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- The company's managed configuration (`/etc/lockfamily/managed.toml`, the
+  Lock Family's `managed.toml`): locklog enforces its `[locklog]` section
+  (#147). `[locklog.profiles.<name>]` are served as written and cannot be
+  redefined in the config files; `[locklog.defaults]` fill the keys a
+  profile leaves unset; `[locklog.bounds]` bound every profile (production,
+  structured, text, unmask, lookup, strict, prefilter, user_journals,
+  pseudonym rotation and max age, auto rules, every limit, and the
+  allowlists kinds, hosts, paths, auth, credentials, tls, network,
+  extra_roots): a profile beyond them is refused at the console's start
+  and at every policy poll, with no prompt, citing the managed key, and no
+  human can approve past it. Required `detectors` and
+  `[[locklog.bounds.pii_mask]]` rules are always on; a project `[[allow]]`
+  that could show what a managed mask hides is refused. `[family]
+  vault.required` requires `credentials = "vault"`. Keys: docs/usage.md.
+- `locklog managed show` and `locklog managed check [--profile NAME]
+  [--project DIR]` (exit 3 on a violation, one `blocked by company policy:
+  …` line each; `lox run` runs it before it starts the lock), a `managed`
+  line in `locklog doctor`, and `locklog console` exits 3 when the managed
+  configuration refuses it.
+
 ### Fixed
 
 - MCP (#144): a docker source's `container` addressed as a field (`where`,
@@ -21,6 +43,13 @@ uses [Semantic Versioning](https://semver.org/).
 - lockkit v0.14.1 (from v0.13.1). `locklog console` without its hub flags
   now refuses with lockkit's "the console is launched by `lox run` only"
   (was `lox up`, lockkit#147); docs/usage.md quotes the new text.
+- lockkit v0.19.0 (from v0.14.1, #147). The default value detectors mask
+  more: a French NIR is recognised before a card number, `phone` is wider,
+  `be_niss` is new and an e-mail address may hold an apostrophe. A URL
+  holding a user (`https://u@host`) is now refused by lockkit's check
+  ("url looks like it embeds a secret"), before locklog's own. The
+  `locklog init` text says the allowed calls answer within the console's
+  policy and budgets.
 
 ## [0.2.1] - 2026-11-07
 
