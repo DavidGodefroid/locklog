@@ -69,7 +69,7 @@ policy loosening you review; see
 | journald | v0.1.0 | pure-Go reader, field allowlist; core dumps, command lines and audit fields are never served |
 | Docker containers | v0.1.0 | `json-file` logs by container name glob; the `journald` driver through journald. Podman through journald |
 | Loki | v0.1.0 | trusted labels and structured metadata, server-side metric counts; text never sent to Loki |
-| Elasticsearch, OpenSearch | v0.1.0 (preview) | trusted keyword fields, `search_after`, a read-only privilege check; their incident gates come with v0.3.0 |
+| Elasticsearch, OpenSearch | v0.1.0 (preview) | trusted keyword fields, `search_after`, a read-only privilege check; their incident gates come with v0.4.0 |
 
 `docker compose up` deletes a recreated container's `json-file` logs: use
 the journald driver or Loki for history across deploys.
@@ -106,7 +106,7 @@ it are in [performance.md](performance.md).
   `locklog_scan` asks you once for the whole plan.
 - **Your sources.** Files (globs, rotation, gzip, zstd), journald (a pure-Go
   reader), Docker container logs and Loki; Elasticsearch and OpenSearch as a
-  preview (their incident gates come with v0.3.0).
+  preview (their incident gates come with v0.4.0).
 - **Read-only.** Read-only mounts, a read-only root filesystem, an allowlist
   of backend endpoints, no Docker socket in any locklog container, no write
   path to any backend.

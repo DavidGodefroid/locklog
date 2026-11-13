@@ -6,6 +6,62 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-13
+
+The company's managed configuration (`managed.toml`), lockkit v0.19.1
+(from v0.13.1) and faster JSON decoding. A minor release (pre-1.0 semver):
+it adds a refusal no human can approve past, and the MCP tools refuse calls
+they used to answer.
+
+### Breaking
+
+- With a managed configuration (`/etc/lockfamily/managed.toml`), a profile
+  beyond its `[locklog.bounds]`, or a profile of yours named as a managed
+  one, is refused at the console's start and at every policy poll, and the
+  console exits 3 (see Added). Without the file, nothing changes.
+- MCP (#144): a docker source's `container` addressed as a field (`where`,
+  `fields`, count `by`) is refused, naming the label to use (it was
+  answered with nothing), and a cursor given with other parameters than the
+  first call's is refused naming the ones that differ. `locklog_count`
+  takes `by_labels` (a docker source's container, Loki labels); a cursor
+  continues when the range is left out (the first call's window), and the
+  tool descriptions say to repeat the parameters.
+
+### Behaviour
+
+- lockkit v0.19.0 (from v0.14.1, #147). The default value detectors mask
+  more: a French NIR is recognised before a card number, `phone` is wider,
+  `be_niss` is new and an e-mail address may hold an apostrophe. A URL
+  holding a user (`https://u@host`) is now refused by lockkit's check
+  ("url looks like it embeds a secret"), before locklog's own. The
+  `locklog init` text says the allowed calls answer within the console's
+  policy and budgets.
+- lockkit v0.15.0–v0.18.0, through the hub client every lock shares: the
+  console opens at most 30 tickets a human decides per 5 minutes (was 10)
+  and 30 pending ones (was 20), a ticket `lox run`'s auto rules decide
+  leaving that count (a safety cap of 300 per window counts every one);
+  `read` and `read-pii` tickets, and their approvals, expire after 1 h
+  (was never); the status answer no longer carries `auto_approve`, which
+  locklog never showed the agent.
+- lockkit v0.14.1 (from v0.13.1). `locklog console` without its hub flags
+  now refuses with lockkit's "the console is launched by `lox run` only"
+  (was `lox up`, lockkit#147); docs/usage.md quotes the new text.
+- The launcher mounts the machine's managed directory (`/etc/lockfamily`,
+  `/Library/Application Support/lockfamily` on macOS) read-only on
+  `/etc/lockfamily` in every container it runs, as `lox run` does in its
+  locks: `locklog managed show`, `managed check`, `doctor` and the other
+  commands run from the host see the company's managed configuration. A
+  managed path that is not a directory, or that a docker mount cannot
+  carry, stops the launcher (#146).
+
+### Performance
+
+- JSON lines are decoded about 8 times faster (#150): locklog reads them
+  with a scanner of its own instead of encoding/json's token reader,
+  exactly as before (the same strings, numbers, member order, depth and
+  key limits). With lockkit v0.19.1 (its detectors skip text that cannot
+  hold a value), an approved scan of JSON logs runs several times faster.
+
 ### Added
 
 - The company's managed configuration (`/etc/lockfamily/managed.toml`, the
@@ -27,41 +83,15 @@ uses [Semantic Versioning](https://semver.org/).
   …` line each; `lox run` runs it before it starts the lock), a `managed`
   line in `locklog doctor`, and `locklog console` exits 3 when the managed
   configuration refuses it.
-- The launcher mounts the machine's managed directory (`/etc/lockfamily`,
-  `/Library/Application Support/lockfamily` on macOS) read-only on
-  `/etc/lockfamily` in every container it runs, as `lox run` does in its
-  locks: `locklog managed show`, `managed check`, `doctor` and the other
-  commands run from the host see the company's managed configuration. A
-  managed path that is not a directory, or that a docker mount cannot
-  carry, stops the launcher (#146).
 
 ### Fixed
 
-- MCP (#144): a docker source's `container` addressed as a field (`where`,
-  `fields`, count `by`) was answered with nothing; it is now refused,
-  naming the label to use. `locklog_count` takes `by_labels` (a docker
-  source's container, Loki labels). A cursor continues when the range is
-  left out (the first call's window), and a cursor given with other
-  parameters is refused naming the ones that differ; the tool descriptions
-  say to repeat them.
-- JSON lines are decoded about 8 times faster (#150): locklog reads them
-  with a scanner of its own instead of encoding/json's token reader,
-  exactly as before (the same strings, numbers, member order, depth and
-  key limits). With lockkit v0.19.1 (its detectors skip text that cannot
-  hold a value), an approved scan of JSON logs runs several times faster.
-
-### Changed
-
-- lockkit v0.14.1 (from v0.13.1). `locklog console` without its hub flags
-  now refuses with lockkit's "the console is launched by `lox run` only"
-  (was `lox up`, lockkit#147); docs/usage.md quotes the new text.
-- lockkit v0.19.0 (from v0.14.1, #147). The default value detectors mask
-  more: a French NIR is recognised before a card number, `phone` is wider,
-  `be_niss` is new and an e-mail address may hold an apostrophe. A URL
-  holding a user (`https://u@host`) is now refused by lockkit's check
-  ("url looks like it embeds a secret"), before locklog's own. The
-  `locklog init` text says the allowed calls answer within the console's
-  policy and budgets.
+- The launcher picks BSD (`stat -f`) or GNU (`stat -c`) stat by probing
+  `stat` instead of reading `uname -s`. On macOS with GNU coreutils first
+  in `PATH`, the project directory was silently ignored (GNU `stat -f` is
+  the file system status); a Linux `uname` with BSD stat refused it
+  (#152). Tests: the `pii.add` audit tests no longer need a journal
+  directory, so they pass on macOS.
 
 ## [0.2.1] - 2026-11-07
 
@@ -642,7 +672,8 @@ Still open in this release:
   version, which parses it (`bind-recursive=disabled` from CLI 25), not from
   the engine's.
 
-[Unreleased]: https://github.com/DavidGodefroid/locklog/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/DavidGodefroid/locklog/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/DavidGodefroid/locklog/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/DavidGodefroid/locklog/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/DavidGodefroid/locklog/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/DavidGodefroid/locklog/releases/tag/v0.1.0
