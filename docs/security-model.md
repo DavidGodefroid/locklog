@@ -60,6 +60,20 @@ the pseudonym keys and decides what leaves.
 | 14 | Read-only by construction | read-only binds and root; `O_RDONLY` beneath-root opens; HTTP method and path allowlists |
 | 15 | Pseudonym keys never leave the home volume; old epoch keys are deleted | files 0600, rotation |
 | 16 | Only the clients group, the image's `agent`, the console's own uid and `--allowed-uids` reach the socket (never root or 65534) | kernel peer credentials, lockkit peer check |
+| 17 | A company's managed configuration bounds every profile above the human: a policy beyond `[locklog.bounds]` is refused with no prompt, at start and at every policy poll; its managed mask rules and required detectors are always on | lockkit `managed` and the console's `ManagedBounds` |
+
+**The company above the human.** A company can install the Lock Family's
+managed file (`/etc/lockfamily/managed.toml`, root-owned, optionally
+signed; [usage.md](usage.md#managed-configuration)). Its `[locklog]`
+section sits above the human at the console: the merged profile is checked
+against `[locklog.bounds]` at start and at every 2 s poll, a loosening
+beyond a bound is refused (audited `refused-managed`) and never offered for
+approval, a managed profile cannot be redefined, and the managed PII rules
+and detectors cannot be removed or weakened by the project's `pii.toml` or
+the agent. The file is trusted because only root can write it: a badly
+owned, invalid or badly signed file is a refusal to start, never a file
+ignored. It does not protect against root on the machine, which can also
+replace locklog itself.
 
 ## Preconditions (not enforced by locklog)
 

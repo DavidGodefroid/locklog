@@ -184,7 +184,10 @@ the masking benchmark: [docs/architecture.md](docs/architecture.md).
   GDPR.
 
 Threat model, invariants, what is not masked and retention:
-[docs/security-model.md](docs/security-model.md).
+[docs/security-model.md](docs/security-model.md). A company bounds every
+profile of a machine with the Lock Family's
+[managed configuration](https://github.com/DavidGodefroid/lockfamily/blob/main/docs/managed.md)
+([locklog's keys](docs/usage.md#managed-configuration)).
 
 ## Documentation
 
@@ -192,7 +195,7 @@ Threat model, invariants, what is not masked and retention:
 |---|---|
 | [docs/install.md](docs/install.md) | status, Homebrew, `install.sh`, the host-agent trial, production placement |
 | [docs/setup.md](docs/setup.md) | the launcher verbs: `profile add`, `init <agent>`, `doctor`, the own-container recipe |
-| [docs/usage.md](docs/usage.md) | the profile file, the agent's tools, budgets, `lox run` and its auto rules, the console, tickets |
+| [docs/usage.md](docs/usage.md) | the profile file, the managed configuration, the agent's tools, budgets, `lox run` and its auto rules, the console, tickets |
 | [docs/architecture.md](docs/architecture.md) | process layout, the life of a call, who decides what, sources, masking benchmark |
 | [docs/security-model.md](docs/security-model.md) | what locklog protects and enforces, preconditions, masking pipeline, what is not masked, retention |
 | [docs/sources.md](docs/sources.md) | journald, Docker and Podman: what the spikes measured |

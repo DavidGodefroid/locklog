@@ -79,6 +79,122 @@ countable), plus per kind:
 | `loki` | `url`, `selector`, `trusted_labels`, `trusted_metadata`, `auth` (`none` refused on production, `basic`, `bearer`, `mtls`), `org_id`, `user` (basic), `credentials` (`ask` or `vault`, with `vault_path`), `tls`, `tls_ca`, `tls_cert` and `tls_key` (mtls) |
 | `elastic`, `opensearch` (preview) | `url`, `selector`, `indices`, `trusted_fields`, `time_field`, `message_field`, `tiebreaker`, `read_only_roles` (OpenSearch only), `auth` (as `loki`, plus `api_key` for `elastic`), `user`, `credentials`, `vault_path`, `tls`, `tls_ca`, `tls_cert`, `tls_key` |
 
+## Managed configuration
+
+A company can bound every locklog of a machine with the Lock Family's
+managed file, `/etc/lockfamily/managed.toml` on Linux and
+`/Library/Application Support/lockfamily/managed.toml` on macOS (schema,
+signing and deployment:
+[lockfamily docs/managed.md](https://github.com/DavidGodefroid/lockfamily/blob/main/docs/managed.md)).
+The file and its directory must be owned by root and writable by root
+only; a badly owned, invalid or badly signed file is a refusal to start,
+never a file ignored. locklog reads its `[locklog]` section:
+
+```toml
+version = 1
+organisation = "Acme"
+
+[locklog.bounds]                     # the loosest policy allowed
+unmask = "never"
+lookup = "approved"
+kinds = ["file", "journald", "loki"]
+hosts = ["*.logs.acme.internal"]
+credentials = ["vault"]
+tls = "verify-full"
+network = []                         # no LOCKLOG_NETWORK
+limits = { max_records = 100, max_session = "8h", remote = { range = "1d" } }
+auto = { unmask = "ask" }
+detectors = ["iban"]                 # always on, added to every profile
+
+[[locklog.bounds.pii_mask]]          # always on, before the project's rules
+sources = ["app-*"]
+field = "user.email"
+
+[locklog.defaults]                   # for the keys a profile leaves unset
+structured = "redact-unknown"
+limits = { max_records = 50 }
+
+[locklog.profiles.prod-loki]         # served as written
+production = true
+[locklog.profiles.prod-loki.sources.loki]
+kind = "loki"
+url = "https://loki.logs.acme.internal"
+selector = { env = "prod" }
+auth = "bearer"
+credentials = "vault"
+vault_path = "secret/loki"
+```
+
+Precedence: hard-coded floor > managed bounds and profiles > project file >
+user file > managed defaults > built-in defaults.
+
+- **Profiles**: `[locklog.profiles.<name>]` takes every profile key,
+  `sources`, `auto` and `limits` included, with the same checks as a
+  profile of `.locklog/config.toml` (production rules too); the defaults
+  fill what it leaves unset. A profile of the same name in the project or
+  user config is refused at load, naming it: rename yours.
+  `locklog profile rules` marks managed profiles `(managed)`.
+- **Defaults**: `[locklog.defaults]` takes the scalar profile keys, `auto`
+  and `limits.*`, not `sources`; a value of the config files wins over it.
+- **Bounds**: the merged profile is checked against `[locklog.bounds]` at
+  the console's start and at every policy poll (2 s). A profile beyond a
+  bound is refused with no prompt, citing the key (`blocked by company
+  policy: locklog.bounds.unmask = never (profile dev: unmask =
+  approved)`), audited `refused-managed`, and no human can approve past it.
+  A loosening edited in while the console runs is refused at the next poll,
+  never pending. A duration or size beyond its bound is a violation, never
+  clamped; the built-in default counts when the profile sets none. A
+  managed default or a managed profile beyond the bounds is a load error.
+- **PII**: `detectors` are added to every profile. `[[locklog.bounds.pii_mask]]`
+  takes the keys of a `[[mask]]` rule of `pii.toml` (`sources`, which may be
+  globs here, `field` or `label`, `mode`, `kind`): the rules are part of the
+  policy, applied before the project's, and shown `(managed)` by the
+  console's PII view and `locklog_pii_list`. A project `[[allow]]` that could
+  show what one masks is refused at load, citing `locklog.bounds.pii_mask`.
+- `[family] vault = { required = true }` acts as `credentials = ["vault"]`
+  on every remote source whose `auth` is not `none` or `mtls`, cited as
+  `family.vault.required`.
+- `locklog managed show` prints the file's path, organisation, fingerprint
+  and signature, the bounds, the defaults, the managed PII rules and the
+  managed profiles (`no managed configuration` and exit 0 without a file,
+  the error and exit 3 for a refused one). `locklog managed check [--profile
+  NAME] [--project DIR]` checks the project's profiles as the console does,
+  with the launch environment (`LOCKLOG_NETWORK`, `LOCKLOG_EXTRA_ROOTS`),
+  without a connection, a log, a credential, a hub or a terminal: one
+  `blocked by company policy: …` line per violation and exit 3, else `ok: …`
+  and exit 0. `lox run` runs it before it starts the lock. `locklog doctor`
+  has a `managed` line, and `locklog console` exits 3 on a refusal.
+
+| Bound key | Type | Looser (refused) |
+|---|---|---|
+| `production` | `true` | a profile that is not production |
+| `structured` | `"redact-unknown"` | `detect` |
+| `text` | `"template"` | `detect` |
+| `unmask` | `"never"` | `approved` |
+| `lookup` | `"approved"` | `free` |
+| `strict` | `true` | `strict = false` |
+| `prefilter`, `user_journals` | `false` | `true` |
+| `pseudonym_rotation` | `session`, a duration or `never`, a ceiling (`session` < durations < `never`) | a longer rotation |
+| `pseudonym_max_age` | duration ceiling | longer |
+| `auto.<action>` (`read`, `unmask`, `lookup`) | `deny`, `ask` or `auto`, a ceiling; a preset (`auto = "full-auto"`) is refused in a bound | a looser rule (`deny` < `ask` < `auto`), the profile's preset included |
+| `limits.local.*`, `limits.remote.*` (`range`, `count_range`, `max_bytes`, `bytes_per_hour`; remote also `metric_queries_per_hour`, `requests_per_minute`) | ceiling | a larger value |
+| `limits.max_records`, `limits.max_output`, `limits.lookups_per_hour`, `limits.lookups_per_hour_per_uid`, `limits.pii_adds_per_hour`, `limits.pii_rules_max`, `limits.max_calls` | ceiling | a larger value |
+| `limits.idle_timeout`, `limits.max_session` | duration ceiling | longer |
+| `kinds` | allowed source kinds (`file`, `journald`, `docker`, `loki`, `elastic`, `opensearch`) | a source of another kind |
+| `hosts` | host patterns (`*` any run) | a loki, elastic or opensearch `url` whose host matches none |
+| `paths` | allowed directories | a `file` source path outside them |
+| `auth` | allowed modes (`none`, `basic`, `bearer`, `mtls`, `api_key`) | another mode |
+| `credentials` | allowed modes (`ask`, `vault`) | another mode |
+| `tls` | a floor (`disable` < `prefer` < `require` < `verify-ca` < `verify-full`) | a weaker remote source |
+| `network` | allowed `LOCKLOG_NETWORK` names; `[]` none | another network |
+| `extra_roots` | allowed `LOCKLOG_EXTRA_ROOTS` directories; `[]` none | a root outside them |
+| `detectors` | required detectors | none: added to every profile |
+| `[[pii_mask]]` | mask rules, as `[[mask]]` | none: always on; an `[[allow]]` over one is refused |
+
+A value outside an allowlist (`kinds` to `extra_roots`) is cited as
+`blocked by company policy: locklog.bounds.<key> does not allow <field> =
+<value> (profile <name>; allowed: …)`.
+
 ## Wiring an agent
 
 `locklog init <agent>` wires an agent in the project (`lox add locklog`
