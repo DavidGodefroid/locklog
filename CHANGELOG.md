@@ -21,6 +21,13 @@ uses [Semantic Versioning](https://semver.org/).
 - lockkit v0.14.1 (from v0.13.1). `locklog console` without its hub flags
   now refuses with lockkit's "the console is launched by `lox run` only"
   (was `lox up`, lockkit#147); docs/usage.md quotes the new text.
+- lockkit v0.19.0 (from v0.14.1, #147). The default value detectors mask
+  more: a French NIR is recognised before a card number, `phone` is wider,
+  `be_niss` is new and an e-mail address may hold an apostrophe. A URL
+  holding a user (`https://u@host`) is now refused by lockkit's check
+  ("url looks like it embeds a secret"), before locklog's own. The
+  `locklog init` text says the allowed calls answer within the console's
+  policy and budgets.
 
 ## [0.2.1] - 2026-11-07
 

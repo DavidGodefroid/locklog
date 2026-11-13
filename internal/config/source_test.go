@@ -211,8 +211,8 @@ org_id = "tenant-1"`))["staging"]
 		t.Fatalf("remote = %+v", r)
 	}
 	for _, tt := range []struct{ body, part string }{
-		{strings.Replace(lokiOK, "https://loki.example.com", "https://u:p@loki.example.com", 1), "embedded password"},
-		{strings.Replace(lokiOK, "https://loki.example.com", "https://u@loki.example.com", 1), "must not hold a user or password"},
+		{strings.Replace(lokiOK, "https://loki.example.com", "https://u:p@loki.example.com", 1), "embeds a secret"},
+		{strings.Replace(lokiOK, "https://loki.example.com", "https://u@loki.example.com", 1), "embeds a secret"},
 		{strings.Replace(lokiOK, "https://loki.example.com", "ftp://loki.example.com", 1), "want http:// or https://"},
 		{strings.Replace(lokiOK, "https://loki.example.com", "https://loki.example.com/?x=1", 1), "query or a fragment"},
 		{strings.Replace(lokiOK, `selector = { app = "api" }`, "", 1), "at least one label matcher"},
