@@ -183,7 +183,7 @@ func Open(ctx context.Context, o Options) (_ *Session, err error) {
 	if s.epochs, err = openEpochs(filepath.Join(dir, "epochs"), fresh, pr, o.FirstOpen, o.Now(), o.EpochsOpened); err != nil {
 		return nil, err
 	}
-	rules, notes, err := loadRules(o.Project, filepath.Join(dir, "pii"), o.Policy.PIIAllow)
+	rules, notes, err := loadRules(o.Project, filepath.Join(dir, "pii"), o.Policy.PIIAllow, o.Policy.PIIMask)
 	if err != nil {
 		return nil, err
 	}
@@ -370,16 +370,21 @@ func openEpochs(dir string, create bool, pr config.Profile, first bool, now time
 // directory, in the home volume). The project's allow rules loosen the
 // masking: only those of the approved policy (approved, their canonical
 // texts) apply; the others are skipped, and notes says how many on
-// :status.
-func loadRules(project, piiDir string, approved []string) (*mask.Rules, []string, error) {
+// :status. The company's managed mask rules (managed, from the policy)
+// come first and are always on.
+func loadRules(project, piiDir string, approved []string, managed []mask.Rule) (*mask.Rules, []string, error) {
 	var notes []string
 	r := &mask.Rules{}
+	for _, m := range managed {
+		m.Managed = true
+		r.Mask = append(r.Mask, m)
+	}
 	if project != "" {
 		pr, err := mask.LoadProjectRules(filepath.Join(project, ".locklog", "pii.toml"))
 		if err != nil {
 			return nil, nil, err
 		}
-		r.Mask = pr.Mask
+		r.Mask = append(r.Mask, pr.Mask...)
 		skipped := 0
 		for _, a := range pr.Allow {
 			if slices.Contains(approved, a.Text()) {

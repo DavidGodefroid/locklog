@@ -11,6 +11,8 @@ import (
 	"time"
 
 	kconfig "github.com/DavidGodefroid/lockkit/config"
+
+	"github.com/DavidGodefroid/locklog/internal/mask"
 )
 
 // Policy is the security-relevant view of one profile plus the launch
@@ -29,6 +31,11 @@ type Policy struct {
 	// their canonical form (mask.Rule.Text), sorted: an allow rule loosens
 	// the masking, so it applies only once part of an approved policy.
 	PIIAllow []string `json:"pii_allow,omitempty"`
+	// PIIMask are the mask rules of the company's managed configuration
+	// ([[locklog.bounds.pii_mask]]), sorted by their text: always on,
+	// before the project's rules. Part of the policy, so that a change of
+	// them is a policy change.
+	PIIMask []mask.Rule `json:"pii_mask,omitempty"`
 }
 
 var _ kconfig.Policy = Policy{}
@@ -100,7 +107,23 @@ func Canonical(p Policy) Policy {
 	}
 	p.ExtraRoots = kconfig.SortedSet(roots)
 	p.PIIAllow = sortedOrNil(p.PIIAllow)
+	if len(p.PIIMask) == 0 {
+		p.PIIMask = nil
+	} else {
+		p.PIIMask = slices.Clone(p.PIIMask)
+		slices.SortFunc(p.PIIMask, func(a, b mask.Rule) int { return strings.Compare(a.Text(), b.Text()) })
+		p.PIIMask = slices.CompactFunc(p.PIIMask, func(a, b mask.Rule) bool { return a.Text() == b.Text() })
+	}
 	return p
+}
+
+// ruleTexts are the texts of rules (sorted when rules are).
+func ruleTexts(rules []mask.Rule) []string {
+	var out []string
+	for _, r := range rules {
+		out = append(out, r.Text())
+	}
+	return out
 }
 
 func sortedOrNil(s []string) []string {
@@ -181,6 +204,8 @@ func (p Policy) Diff(approved kconfig.Policy) []kconfig.Change {
 	// An allow rule added (or widened: another text) shows more; one
 	// removed only tightens.
 	out = append(out, kconfig.SetDiff("pii.allow", a.PIIAllow, c.PIIAllow, false)...)
+	// A managed mask rule removed shows more.
+	out = append(out, kconfig.SetDiff("pii.mask", ruleTexts(a.PIIMask), ruleTexts(c.PIIMask), true)...)
 
 	for _, cs := range cp.Sources {
 		as, found := ap.Source(cs.Name)
@@ -346,6 +371,9 @@ func (p Policy) Describe() []string {
 	}
 	for _, r := range c.PIIAllow {
 		lines = append(lines, "pii allow: "+r)
+	}
+	for _, r := range c.PIIMask {
+		lines = append(lines, "pii mask (managed): "+r.Text())
 	}
 	for _, s := range pr.Sources {
 		lines = append(lines, describeSource(s)...)

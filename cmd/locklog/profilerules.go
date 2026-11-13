@@ -37,7 +37,9 @@ type profileRules struct {
 	// human applies the change at :review. FileRules are the file's.
 	PendingReview bool                        `json:"pending_review"`
 	FileRules     map[string]config.AutoValue `json:"file_rules,omitempty"`
-	text          string
+	// Managed marks a profile of the company's managed configuration.
+	Managed bool `json:"managed,omitempty"`
+	text    string
 }
 
 // profileRulesOut is the --json output of `profile rules`.
@@ -135,6 +137,9 @@ func profileRulesCmd(args []string, cwd, stateBase string, stdout, stderr io.Wri
 		if pr.Production {
 			tag = " (production)"
 		}
+		if pr.Managed {
+			tag += " (managed)"
+		}
 		note := " [approved]"
 		switch {
 		case pr.PendingReview:
@@ -156,7 +161,7 @@ func rulesOf(n string, p config.Profile, ap *config.Profile) profileRules {
 	}
 	r := src.AutoRules()
 	pr := profileRules{Profile: n, Production: src.Production || p.Production, Preset: r.Preset(), Rules: r.Map(),
-		IDs: map[string]string{}, Source: from, text: r.String()}
+		IDs: map[string]string{}, Source: from, Managed: p.Managed, text: r.String()}
 	for _, a := range config.AutoActions {
 		pr.IDs[string(a)] = r.RuleText(a)
 	}

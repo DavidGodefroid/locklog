@@ -108,7 +108,13 @@ func consoleCmd(args []string, stdout, stderr io.Writer) int {
 		}
 		o.Root = root
 	}
-	ps, err := config.LoadFile(kconfig.ProjectConfigPath(product.P, root))
+	// A managed file refused is a refusal to start, before the terminal.
+	m, err := config.LoadManaged()
+	if err != nil {
+		fmt.Fprintln(stderr, "locklog console:", err)
+		return exitManaged
+	}
+	ps, err := config.LoadFileWith(kconfig.ProjectConfigPath(product.P, root), m)
 	if err != nil {
 		fmt.Fprintln(stderr, "locklog console:", err)
 		return 1
@@ -142,6 +148,18 @@ func consoleCmd(args []string, stdout, stderr io.Writer) int {
 		Sanitizer: logconsole.Sanitizer(), Hub: hub, OnHub: be.OnHub,
 	})
 	if err != nil {
+		if errors.Is(err, console.ErrManaged) {
+			// Refused by the company's managed configuration: the lines
+			// cite the managed key; no human can approve past it.
+			lines := console.ManagedLines(err)
+			if len(lines) == 0 {
+				lines = []string{err.Error()}
+			}
+			for _, l := range lines {
+				fmt.Fprintln(stderr, "locklog console: "+l)
+			}
+			return exitManaged
+		}
 		fmt.Fprintln(stderr, "locklog console:", err)
 		if errors.Is(err, console.ErrConfig) {
 			return 2

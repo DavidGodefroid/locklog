@@ -33,10 +33,15 @@ const (
 // also a key holding dots: one or more segments, so a mask rule covers
 // more, never less).
 type Rule struct {
-	Sources []string // source names; empty: every source
-	Field   string
-	Mode    string
-	Kind    string // pseudonym rules: the pseudonym kind ("customer")
+	// Sources are source names (a managed rule's may be globs, "app-*");
+	// empty: every source.
+	Sources []string `json:"sources,omitempty"`
+	Field   string   `json:"field"`
+	Mode    string   `json:"mode"`
+	Kind    string   `json:"kind,omitempty"` // pseudonym rules: the pseudonym kind ("customer")
+	// Managed marks a rule of the company's managed configuration
+	// ([[locklog.bounds.pii_mask]]): shown as such, never removable.
+	Managed bool `json:"-"`
 }
 
 // ValueRule is a human rule of the console's PII directory: a regular
@@ -57,7 +62,9 @@ type Rules struct {
 	Agent  *AgentRules
 }
 
-type rawRule struct {
+// RuleSpec is a rule as written: a [[mask]] or [[allow]] table of
+// pii.toml, or a [[locklog.bounds.pii_mask]] of the managed file.
+type RuleSpec struct {
 	Sources []string `toml:"sources"`
 	Field   string   `toml:"field"`
 	Label   string   `toml:"label"`
@@ -66,8 +73,8 @@ type rawRule struct {
 }
 
 type rawRules struct {
-	Mask  []rawRule `toml:"mask"`
-	Allow []rawRule `toml:"allow"`
+	Mask  []RuleSpec `toml:"mask"`
+	Allow []RuleSpec `toml:"allow"`
 }
 
 type rawValues struct {
@@ -128,7 +135,27 @@ func ParseProjectRules(data []byte) (Rules, error) {
 	return out, nil
 }
 
-func buildRule(r rawRule, mask bool) (Rule, error) {
+// BuildManagedRule builds a mask rule of the company's managed
+// configuration: the keys of a [[mask]] rule, its sources source names or
+// globs ("app-*") since the same file applies to every project.
+func BuildManagedRule(r RuleSpec) (Rule, error) {
+	for _, s := range r.Sources {
+		if _, err := path.Match(s, ""); err != nil || !validName(strings.NewReplacer("*", "a", "?", "a").Replace(s)) {
+			return Rule{}, fmt.Errorf("source %q: want a source name or a glob of one (\"app-*\")", s)
+		}
+	}
+	names := r
+	names.Sources = nil
+	rule, err := buildRule(names, true)
+	if err != nil {
+		return Rule{}, err
+	}
+	rule.Sources = slices.Sorted(slices.Values(r.Sources))
+	rule.Managed = true
+	return rule, nil
+}
+
+func buildRule(r RuleSpec, mask bool) (Rule, error) {
 	field := r.Field
 	if (r.Field == "") == (r.Label == "") {
 		return Rule{}, errors.New("set exactly one of field and label")
@@ -267,7 +294,7 @@ func maskRuleMatches(r Rule, source, clearPath string) bool {
 	if ruleMatches(r, source, clearPath) {
 		return true
 	}
-	if len(r.Sources) > 0 && !slices.Contains(r.Sources, source) || !strings.Contains(r.Field, "*") {
+	if !r.coversSource(source) || !strings.Contains(r.Field, "*") {
 		return false
 	}
 	ps, fs := strings.Split(clearPath, "."), strings.Split(r.Field, ".")
@@ -294,8 +321,25 @@ func maskRuleMatches(r Rule, source, clearPath string) bool {
 	return i == len(fs)
 }
 
+// coversSource reports whether r applies to source: no sources is every
+// source; a managed rule's source may be a glob.
+func (r Rule) coversSource(source string) bool {
+	if len(r.Sources) == 0 {
+		return true
+	}
+	for _, s := range r.Sources {
+		if s == source {
+			return true
+		}
+		if ok, _ := path.Match(s, source); ok && strings.ContainsAny(s, "*?") {
+			return true
+		}
+	}
+	return false
+}
+
 func ruleMatches(r Rule, source, clearPath string) bool {
-	if len(r.Sources) > 0 && !slices.Contains(r.Sources, source) {
+	if !r.coversSource(source) {
 		return false
 	}
 	ps, fs := strings.Split(clearPath, "."), strings.Split(r.Field, ".")
@@ -456,4 +500,49 @@ func Change(old, new Rules) (loosenings []string) {
 	}
 	slices.Sort(loosenings)
 	return loosenings
+}
+
+// Overlaps reports whether the allow rule a could show a value the mask
+// rule m masks: their sources meet and a field a matches can be one m
+// matches. It errs on the side of an overlap: a managed mask rule
+// refuses every allow rule that overlaps it.
+func Overlaps(a, m Rule) bool {
+	if !sourcesMeet(a.Sources, m.Sources) {
+		return false
+	}
+	if a.Field == m.Field || maskRuleMatches(Rule{Field: m.Field}, "", a.Field) {
+		return true
+	}
+	as, ms := strings.Split(a.Field, "."), strings.Split(m.Field, ".")
+	if len(as) != len(ms) {
+		return false
+	}
+	for i := range as {
+		if as[i] != "*" && ms[i] != "*" && as[i] != ms[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// sourcesMeet reports whether two source lists (empty: every source;
+// globs allowed) can name a common source.
+func sourcesMeet(a, b []string) bool {
+	if len(a) == 0 || len(b) == 0 {
+		return true
+	}
+	for _, x := range a {
+		for _, y := range b {
+			if x == y {
+				return true
+			}
+			if ok, _ := path.Match(y, x); ok {
+				return true
+			}
+			if ok, _ := path.Match(x, y); ok {
+				return true
+			}
+		}
+	}
+	return false
 }

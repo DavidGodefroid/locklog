@@ -26,6 +26,7 @@ import (
 	kconfig "github.com/DavidGodefroid/lockkit/config"
 	"github.com/DavidGodefroid/lockkit/console"
 	"github.com/DavidGodefroid/lockkit/ipc"
+	"github.com/DavidGodefroid/lockkit/managed"
 	"github.com/DavidGodefroid/lockkit/plans"
 	"github.com/DavidGodefroid/lockkit/refusal"
 	"github.com/DavidGodefroid/lockkit/sanitize"
@@ -353,7 +354,8 @@ func where(pr config.Profile) string {
 }
 
 // LoadPolicy implements console.Backend: the profile from the project's
-// .locklog/config.toml with the launch environment.
+// .locklog/config.toml and the company's managed file, with the launch
+// environment and the managed mask rules.
 func (b *Backend) LoadPolicy() (console.Policy, error) {
 	// What the launcher checked, before the file is read.
 	if err := CheckMounts(b.o); err != nil {
@@ -362,7 +364,11 @@ func (b *Backend) LoadPolicy() (console.Policy, error) {
 	if b.o.Root == "" {
 		return nil, errors.New("no project: the console serves the profiles of a project's .locklog/config.toml")
 	}
-	profiles, err := config.LoadFile(kconfig.ProjectConfigPath(product.P, b.o.Root))
+	m, err := config.LoadManaged()
+	if err != nil {
+		return nil, err
+	}
+	profiles, err := config.LoadFileWith(kconfig.ProjectConfigPath(product.P, b.o.Root), m)
 	if err != nil {
 		return nil, err
 	}
@@ -370,6 +376,18 @@ func (b *Backend) LoadPolicy() (console.Policy, error) {
 	if !ok {
 		return nil, fmt.Errorf("no profile %q in the config", b.o.Profile)
 	}
+	p, err := ProfilePolicy(pr, b.o.Root, b.o.Network, b.o.ExtraRoots, m)
+	if err != nil {
+		return nil, err
+	}
+	return Policy{p}, nil
+}
+
+// ProfilePolicy is the policy of profile pr as the console loads it: with
+// the launch environment (network, extraRoots), the allow rules of the
+// project's .locklog/pii.toml and the managed mask rules of m (nil: no
+// managed file). `locklog managed check` checks the same policy.
+func ProfilePolicy(pr config.Profile, root, network string, extraRoots []string, m *config.Managed) (config.Policy, error) {
 	n := 0
 	for _, s := range pr.Sources {
 		if s.Remote != nil && s.Remote.Credentials != "" {
@@ -377,23 +395,54 @@ func (b *Backend) LoadPolicy() (console.Policy, error) {
 		}
 	}
 	if n > 1 {
-		return nil, fmt.Errorf("profile %q: at most one remote source with credentials per profile", b.o.Profile)
+		return config.Policy{}, fmt.Errorf("profile %q: at most one remote source with credentials per profile", pr.Name)
 	}
-	p, err := config.NewPolicy(pr, b.o.Network, b.o.ExtraRoots)
+	p, err := config.NewPolicy(pr, network, extraRoots)
 	if err != nil {
-		return nil, err
+		return config.Policy{}, err
 	}
 	// The allow rules of .locklog/pii.toml loosen the masking: they are
 	// part of the policy, reviewed as any loosening, and the engine
 	// applies only those of the approved policy.
-	rules, err := mask.LoadProjectRules(filepath.Join(b.o.Root, ".locklog", "pii.toml"))
-	if err != nil {
-		return nil, err
+	var rules mask.Rules
+	if root != "" {
+		if rules, err = mask.LoadProjectRules(filepath.Join(root, ".locklog", "pii.toml")); err != nil {
+			return config.Policy{}, err
+		}
+	}
+	// The managed mask rules are always on; an allow rule that could
+	// show what one masks is refused.
+	if err := m.BoundsOf().CheckAllow(rules.Allow); err != nil {
+		return config.Policy{}, err
 	}
 	for _, a := range rules.Allow {
 		p.PIIAllow = append(p.PIIAllow, a.Text())
 	}
-	return Policy{config.Canonical(p)}, nil
+	p.PIIMask = m.BoundsOf().Masks()
+	return config.Canonical(p), nil
+}
+
+var _ console.ManagedBackend = (*Backend)(nil)
+
+// ManagedBounds implements console.ManagedBackend: p at the ceiling of
+// [locklog.bounds] (config.Bounds.Check). A value outside an allowlist
+// bound (kinds, hosts, paths, auth, credentials, tls, network,
+// extra_roots, family.vault.required) is an error naming the managed key,
+// which the console refuses as a violation.
+func (b *Backend) ManagedBounds(p console.Policy, f *managed.File) (managed.Bounds, error) {
+	pol, ok := p.(Policy)
+	if !ok {
+		return managed.Bounds{}, fmt.Errorf("not a locklog policy: %T", p)
+	}
+	m, err := config.ParseManaged(f)
+	if err != nil {
+		return managed.Bounds{}, err
+	}
+	mb, err := m.BoundsOf().Check(pol.Policy)
+	if c, ok := mb.Ceiling.(config.Policy); ok {
+		mb.Ceiling = Policy{c}
+	}
+	return mb, err
 }
 
 // session is one open engine.

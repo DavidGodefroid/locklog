@@ -25,6 +25,11 @@ Commands:
                           (read, unmask, lookup: auto, ask or deny)
   doctor [--profile P] [--fix [--yes]] [--json]
                           check what the agent's account can reach (advisory), and the agents' wiring
+  managed show            the company's managed configuration (managed.toml): its
+                          fingerprint, bounds, defaults, PII rules and profiles
+  managed check [--profile NAME] [--project DIR]
+                          check the profiles against its bounds, as the console
+                          does at start (exit 3 when one is blocked)
   mcp [--profile P] [--instance NAME]
                           the agent's MCP server (stdin and stdout)
   console --hub URL ...   the console of a profile, hub-attached (started by lox run only)
@@ -37,7 +42,8 @@ func main() {
 }
 
 // run executes one command and returns the process exit code: 0 on
-// success, 1 on a failure, 2 on a usage error.
+// success, 1 on a failure, 2 on a usage error, 3 on a refusal of the
+// company's managed configuration (managed, console).
 func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprint(stderr, usage)
@@ -59,6 +65,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return doctorCmd(args[1:], os.Stdin, stdout, stderr)
 	case "init":
 		return initCmd(args[1:], stdout, stderr)
+	case "managed":
+		return managedCmd(args[1:], stdout, stderr)
 	case "console":
 		return consoleCmd(args[1:], stdout, stderr)
 	case "mounts":

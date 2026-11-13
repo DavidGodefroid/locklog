@@ -114,6 +114,17 @@ func doctorCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		wiring = append(wiring, c)
 	}
 
+	// The company's managed file, as the console reads it; refused, the
+	// config below is unreadable too.
+	if m, err := config.LoadManaged(); err != nil {
+		wiring = append(wiring, verbs.Check{Check: "managed", Status: verbs.StatusFail, Detail: "managed: " + err.Error()})
+	} else {
+		detail := noManaged
+		if m != nil {
+			detail = m.File.Describe()
+		}
+		wiring = append(wiring, verbs.Check{Check: "managed", Status: verbs.StatusOK, Detail: "managed: " + detail})
+	}
 	ps, root, err := config.Load(cwd)
 	if err != nil {
 		// A broken config is the console's to report; doctor still checks
@@ -152,7 +163,10 @@ func doctorCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	code := doctor.Print(stdout, r)
 	for _, c := range wiring {
 		mark := "ok  "
-		if c.Status != verbs.StatusOK {
+		switch c.Status {
+		case verbs.StatusFail:
+			mark, code = "FAIL", 1
+		case verbs.StatusWarn:
 			mark = "warn"
 		}
 		fmt.Fprintf(stdout, "  %s  %s\n", mark, c.Detail)
