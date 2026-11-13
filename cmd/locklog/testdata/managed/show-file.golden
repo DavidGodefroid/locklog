@@ -1,0 +1,21 @@
+exit 0
+--- stdout
+Managed by Acme (sha256:285b72c1350d)
+path: <managed>
+organisation: Acme
+fingerprint: sha256:285b72c1350dc12e1fc79d828c4e200438ffae63fd858c97efaf580d27d2544d
+signed: no
+bounds:
+  locklog.bounds.unmask = never
+  locklog.bounds.limits.max_records = 100
+  locklog.bounds.limits.max_session = 8h0m0s
+  locklog.bounds.kinds = file, journald, loki
+  locklog.bounds.hosts = *.example.com
+  locklog.bounds.detectors = iban
+defaults:
+  locklog.defaults.limits.max_records = 50
+  locklog.defaults.lookup = "approved"
+pii rules (locklog.bounds.pii_mask):
+  redact field=user.email sources=app-*
+profiles: shared
+--- stderr

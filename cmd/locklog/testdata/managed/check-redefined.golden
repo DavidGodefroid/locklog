@@ -1,0 +1,4 @@
+exit 3
+--- stdout
+--- stderr
+locklog managed check: config: managed: profile "shared" is provided by the company's managed configuration and cannot be redefined in the project config: rename yours

@@ -62,7 +62,13 @@ func ParseManaged(f *managed.File) (*Managed, error) {
 	where := func(kind string, err error) error {
 		return fmt.Errorf("managed: %s: [%s.%s]: %w", f.Path, ManagedTool, kind, err)
 	}
-	b, err := parseBounds(f)
+	// File.Decode's errors name the file and the section already.
+	var r rawBounds
+	ok, err := f.Decode(&r, ManagedTool, managed.KindBounds)
+	if err != nil {
+		return nil, err
+	}
+	b, err := parseBounds(f, r, ok)
 	if err != nil {
 		return nil, where(managed.KindBounds, err)
 	}
@@ -150,15 +156,17 @@ func (m *Managed) checkDefaults() error {
 	return nil
 }
 
-// flatKeys lists the keys of t, those of its limits and auto tables as
-// "limits.max_records", "limits.local.range", "auto.read".
+// flatKeys lists the leaf keys of t, those of its limits and auto tables
+// as "limits.max_records", "limits.local.range", "auto.read" (a preset
+// auto = "full-auto" is the key auto).
 func flatKeys(t map[string]any, prefix string) []string {
 	var out []string
 	for _, k := range slices.Sorted(maps.Keys(t)) {
-		out = append(out, prefix+k)
 		if sub, ok := t[k].(map[string]any); ok {
 			out = append(out, flatKeys(sub, prefix+k+".")...)
+			continue
 		}
+		out = append(out, prefix+k)
 	}
 	return out
 }
@@ -350,14 +358,10 @@ type rawBounds struct {
 // boundKey is the managed key of a bound ("locklog.bounds.unmask").
 func boundKey(k string) string { return ManagedTool + "." + managed.KindBounds + "." + k }
 
-// parseBounds reads [locklog.bounds] and the [family] vault rule: nil
-// when f has neither. Its errors name the key, never quote a value.
-func parseBounds(f *managed.File) (*Bounds, error) {
-	var r rawBounds
-	ok, err := f.Decode(&r, ManagedTool, managed.KindBounds)
-	if err != nil {
-		return nil, err
-	}
+// parseBounds reads [locklog.bounds] (r, decoded when ok) and the
+// [family] vault rule of f: nil when f has neither. Its errors name the
+// key, never quote a value.
+func parseBounds(f *managed.File, r rawBounds, ok bool) (*Bounds, error) {
 	vault := f.Family.Vault != nil && f.Family.Vault.Required
 	if !ok && !vault {
 		return nil, nil

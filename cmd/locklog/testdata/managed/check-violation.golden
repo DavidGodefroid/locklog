@@ -1,0 +1,6 @@
+exit 3
+--- stdout
+blocked by company policy: locklog.bounds.kinds does not allow sources.es.kind = elastic (profile qa; allowed: file, journald, loki)
+blocked by company policy: locklog.bounds.hosts does not allow sources.es.url = es.other.org (profile qa; allowed: *.example.com)
+blocked by company policy: locklog.bounds.unmask = never (profile qa: unmask = approved)
+--- stderr
