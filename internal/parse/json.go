@@ -1,10 +1,11 @@
 package parse
 
 import (
-	"encoding/json"
 	"errors"
-	"io"
 	"strings"
+	"unicode"
+	"unicode/utf16"
+	"unicode/utf8"
 )
 
 // jsonSpace is the whitespace JSON allows around a value.
@@ -17,85 +18,308 @@ var errStructure = errors.New("parse: structure over limits")
 // are kept. Nesting deeper than MaxDepth or a key longer than MaxKeyBytes is
 // an error: the caller treats the text as free text, which is masked in text
 // mode.
+//
+// It reads as encoding/json does (strings unquoted alike, an invalid UTF-8
+// byte or a lone surrogate read as U+FFFD), with a scanner of its own: every
+// line of a JSON source is decoded, and encoding/json's token reader was a
+// quarter of an approved scan's time (#150).
 func DecodeJSON(text string) (Value, error) {
-	dec := json.NewDecoder(strings.NewReader(text))
-	dec.UseNumber()
-	v, err := decodeValue(dec, 0)
+	d := jsonDecoder{s: text}
+	v, err := d.value(0)
 	if err != nil {
 		return Value{}, err
 	}
-	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+	if d.skipSpace(); d.i < len(d.s) {
 		return Value{}, errors.New("parse: trailing data after JSON value")
 	}
 	return v, nil
 }
 
-func decodeValue(dec *json.Decoder, depth int) (Value, error) {
-	tok, err := dec.Token()
-	if err != nil {
-		return Value{}, err
-	}
-	return decodeFrom(dec, tok, depth)
+var errSyntax = errors.New("parse: invalid JSON")
+
+type jsonDecoder struct {
+	s string
+	i int
 }
 
-func decodeFrom(dec *json.Decoder, tok json.Token, depth int) (Value, error) {
-	switch t := tok.(type) {
-	case nil:
-		return Value{Kind: KindNull}, nil
-	case bool:
-		if t {
-			return Value{Kind: KindBool, Str: "true"}, nil
+func (d *jsonDecoder) skipSpace() {
+	for d.i < len(d.s) {
+		switch d.s[d.i] {
+		case ' ', '\t', '\r', '\n':
+			d.i++
+		default:
+			return
 		}
-		return Value{Kind: KindBool, Str: "false"}, nil
-	case json.Number:
-		return Value{Kind: KindNumber, Str: string(t)}, nil
-	case string:
-		return Value{Kind: KindString, Str: t}, nil
-	case json.Delim:
+	}
+}
+
+func (d *jsonDecoder) value(depth int) (Value, error) {
+	d.skipSpace()
+	if d.i >= len(d.s) {
+		return Value{}, errSyntax
+	}
+	switch c := d.s[d.i]; {
+	case c == '"':
+		str, err := d.str()
+		if err != nil {
+			return Value{}, err
+		}
+		return Value{Kind: KindString, Str: str}, nil
+	case c == '{':
 		if depth >= MaxDepth {
 			return Value{}, errStructure
 		}
-		switch t {
-		case '{':
-			v := Value{Kind: KindObject, Members: []Member{}}
-			for dec.More() {
-				kt, err := dec.Token()
-				if err != nil {
-					return Value{}, err
-				}
-				key, ok := kt.(string)
-				if !ok {
-					return Value{}, errors.New("parse: object key is not a string")
-				}
-				if len(key) > MaxKeyBytes {
-					return Value{}, errStructure
-				}
-				mv, err := decodeValue(dec, depth+1)
-				if err != nil {
-					return Value{}, err
-				}
-				v.Members = append(v.Members, Member{Key: key, Value: mv})
-			}
-			if _, err := dec.Token(); err != nil { // '}'
-				return Value{}, err
-			}
+		return d.object(depth)
+	case c == '[':
+		if depth >= MaxDepth {
+			return Value{}, errStructure
+		}
+		return d.array(depth)
+	case c == '-' || c >= '0' && c <= '9':
+		n, err := d.number()
+		if err != nil {
+			return Value{}, err
+		}
+		return Value{Kind: KindNumber, Str: n}, nil
+	case strings.HasPrefix(d.s[d.i:], "true"):
+		d.i += 4
+		return Value{Kind: KindBool, Str: "true"}, nil
+	case strings.HasPrefix(d.s[d.i:], "false"):
+		d.i += 5
+		return Value{Kind: KindBool, Str: "false"}, nil
+	case strings.HasPrefix(d.s[d.i:], "null"):
+		d.i += 4
+		return Value{Kind: KindNull}, nil
+	}
+	return Value{}, errSyntax
+}
+
+func (d *jsonDecoder) object(depth int) (Value, error) {
+	d.i++ // '{'
+	v := Value{Kind: KindObject, Members: []Member{}}
+	if d.skipSpace(); d.i < len(d.s) && d.s[d.i] == '}' {
+		d.i++
+		return v, nil
+	}
+	for {
+		if d.skipSpace(); d.i >= len(d.s) || d.s[d.i] != '"' {
+			return Value{}, errors.New("parse: object key is not a string")
+		}
+		key, err := d.str()
+		if err != nil {
+			return Value{}, err
+		}
+		if len(key) > MaxKeyBytes {
+			return Value{}, errStructure
+		}
+		if d.skipSpace(); d.i >= len(d.s) || d.s[d.i] != ':' {
+			return Value{}, errSyntax
+		}
+		d.i++
+		mv, err := d.value(depth + 1)
+		if err != nil {
+			return Value{}, err
+		}
+		v.Members = append(v.Members, Member{Key: key, Value: mv})
+		if d.skipSpace(); d.i >= len(d.s) {
+			return Value{}, errSyntax
+		}
+		switch d.s[d.i] {
+		case ',':
+			d.i++
+		case '}':
+			d.i++
 			return v, nil
-		case '[':
-			v := Value{Kind: KindArray, Items: []Value{}}
-			for dec.More() {
-				iv, err := decodeValue(dec, depth+1)
-				if err != nil {
-					return Value{}, err
-				}
-				v.Items = append(v.Items, iv)
-			}
-			if _, err := dec.Token(); err != nil { // ']'
-				return Value{}, err
-			}
-			return v, nil
+		default:
+			return Value{}, errSyntax
 		}
 	}
-	return Value{}, errors.New("parse: unexpected JSON token")
+}
+
+func (d *jsonDecoder) array(depth int) (Value, error) {
+	d.i++ // '['
+	v := Value{Kind: KindArray, Items: []Value{}}
+	if d.skipSpace(); d.i < len(d.s) && d.s[d.i] == ']' {
+		d.i++
+		return v, nil
+	}
+	for {
+		iv, err := d.value(depth + 1)
+		if err != nil {
+			return Value{}, err
+		}
+		v.Items = append(v.Items, iv)
+		if d.skipSpace(); d.i >= len(d.s) {
+			return Value{}, errSyntax
+		}
+		switch d.s[d.i] {
+		case ',':
+			d.i++
+		case ']':
+			d.i++
+			return v, nil
+		default:
+			return Value{}, errSyntax
+		}
+	}
+}
+
+// number reads a number's literal: -?(0|[1-9][0-9]*)(.[0-9]+)?([eE][+-]?[0-9]+)?
+func (d *jsonDecoder) number() (string, error) {
+	start := d.i
+	if d.s[d.i] == '-' {
+		d.i++
+	}
+	switch {
+	case d.i < len(d.s) && d.s[d.i] == '0':
+		d.i++
+	case d.i < len(d.s) && d.s[d.i] >= '1' && d.s[d.i] <= '9':
+		d.digits()
+	default:
+		return "", errSyntax
+	}
+	if d.i < len(d.s) && d.s[d.i] == '.' {
+		d.i++
+		if d.digits() == 0 {
+			return "", errSyntax
+		}
+	}
+	if d.i < len(d.s) && (d.s[d.i] == 'e' || d.s[d.i] == 'E') {
+		d.i++
+		if d.i < len(d.s) && (d.s[d.i] == '+' || d.s[d.i] == '-') {
+			d.i++
+		}
+		if d.digits() == 0 {
+			return "", errSyntax
+		}
+	}
+	return d.s[start:d.i], nil
+}
+
+func (d *jsonDecoder) digits() int {
+	start := d.i
+	for d.i < len(d.s) && d.s[d.i] >= '0' && d.s[d.i] <= '9' {
+		d.i++
+	}
+	return d.i - start
+}
+
+// str reads a string at d.i (its opening quote) and returns it unquoted:
+// the text itself when it has no escape and is valid UTF-8, else decoded
+// as encoding/json does.
+func (d *jsonDecoder) str() (string, error) {
+	start := d.i + 1
+	escaped, ascii := false, true
+	for i := start; i < len(d.s); i++ {
+		switch c := d.s[i]; {
+		case c == '"':
+			d.i = i + 1
+			if body := d.s[start:i]; !escaped && (ascii || utf8.ValidString(body)) {
+				return body, nil
+			}
+			return unquoteJSON(d.s[start:i]), nil
+		case c == '\\':
+			escaped = true
+			i++
+			if i >= len(d.s) {
+				return "", errSyntax
+			}
+			switch d.s[i] {
+			case '"', '\\', '/', 'b', 'f', 'n', 'r', 't':
+			case 'u':
+				if i+4 >= len(d.s) || !isHex4(d.s[i+1:i+5]) {
+					return "", errSyntax
+				}
+				i += 4
+			default:
+				return "", errSyntax
+			}
+		case c < 0x20:
+			return "", errSyntax
+		case c >= utf8.RuneSelf:
+			ascii = false
+		}
+	}
+	return "", errSyntax
+}
+
+func isHex4(s string) bool {
+	for i := 0; i < 4; i++ {
+		if c := s[i]; !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F') {
+			return false
+		}
+	}
+	return true
+}
+
+// unquoteJSON decodes the body of a string str validated: its escapes, a
+// surrogate pair as one rune, a lone surrogate and an invalid UTF-8 byte
+// as U+FFFD (encoding/json's unquote).
+func unquoteJSON(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		c := s[i]
+		if c != '\\' {
+			if c < utf8.RuneSelf {
+				b.WriteByte(c)
+				i++
+				continue
+			}
+			r, n := utf8.DecodeRuneInString(s[i:])
+			b.WriteRune(r) // RuneError for an invalid byte
+			i += n
+			continue
+		}
+		switch e := s[i+1]; e {
+		case 'b':
+			b.WriteByte('\b')
+		case 'f':
+			b.WriteByte('\f')
+		case 'n':
+			b.WriteByte('\n')
+		case 'r':
+			b.WriteByte('\r')
+		case 't':
+			b.WriteByte('\t')
+		case 'u':
+			r := hex4(s[i+2 : i+6])
+			i += 6
+			if utf16.IsSurrogate(r) {
+				if i+6 <= len(s) && s[i] == '\\' && s[i+1] == 'u' {
+					if dec := utf16.DecodeRune(r, hex4(s[i+2:i+6])); dec != unicode.ReplacementChar {
+						b.WriteRune(dec)
+						i += 6
+						continue
+					}
+				}
+				r = unicode.ReplacementChar
+			}
+			b.WriteRune(r)
+			continue
+		default: // '"', '\\', '/'
+			b.WriteByte(e)
+		}
+		i += 2
+	}
+	return b.String()
+}
+
+func hex4(s string) rune {
+	var r rune
+	for i := 0; i < 4; i++ {
+		c := s[i]
+		switch {
+		case c >= '0' && c <= '9':
+			c -= '0'
+		case c >= 'a' && c <= 'f':
+			c -= 'a' - 10
+		default:
+			c -= 'A' - 10
+		}
+		r = r<<4 | rune(c)
+	}
+	return r
 }
 
 // jsonFormat decodes one JSON object per event.
