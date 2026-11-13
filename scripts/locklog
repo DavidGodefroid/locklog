@@ -114,18 +114,16 @@ physical() {
 	[ -d "$1" ] && [ ! -L "$1" ] && [ "$(cd "$1" 2>/dev/null && pwd -P)" = "$1" ]
 }
 
-# Portable stat: the octal mode of PATH.
-if [ "$(uname -s)" = Darwin ]; then
-	fmode() { stat -f '%Mp%Lp' "$1"; }
-else
+# Portable stat, by what stat itself understands rather than by the OS:
+# GNU stat (Linux, or GNU coreutils first in PATH on macOS) takes -c, BSD
+# stat (macOS) -f, which GNU stat reads as "file system status".
+# fmode PATH: the octal mode of PATH; fowner PATH: its numeric owner.
+if stat -c '%u' / >/dev/null 2>&1; then
 	fmode() { stat -c '%a' "$1"; }
-fi
-
-# fowner PATH: the numeric owner of PATH.
-if [ "$(uname -s)" = Darwin ]; then
-	fowner() { stat -f '%u' "$1"; }
-else
 	fowner() { stat -c '%u' "$1"; }
+else
+	fmode() { stat -f '%Mp%Lp' "$1"; }
+	fowner() { stat -f '%u' "$1"; }
 fi
 
 # perm PATH: sets special (setuid/setgid/sticky digit), g and o (the

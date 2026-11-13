@@ -553,3 +553,71 @@ func TestLauncherProjectRoot(t *testing.T) {
 		}
 	}
 }
+
+// The launcher picks GNU (-c) or BSD (-f) stat by what the stat in PATH
+// takes, not by uname -s: the macOS runner's BSD stat under a pinned
+// Linux, GNU coreutils first in PATH on macOS. With either OS and either
+// stat it finds the project and still refuses a sticky directory's
+// .locklog.
+func TestLauncherStatFlavour(t *testing.T) {
+	real, err := exec.LookPath("stat")
+	if err != nil {
+		t.Skip("no stat")
+	}
+	gnu := exec.Command(real, "-c", "%u", "/").Run() == nil
+	for _, sysname := range []string{"Linux", "Darwin"} {
+		for _, emulate := range []bool{false, true} {
+			if emulate && !gnu {
+				continue // the BSD stat is emulated with a GNU one
+			}
+			f := newLauncherFixture(t)
+			f.fakeUname(t, sysname)
+			if emulate {
+				// BSD stat: no -c; -f with the two formats the launcher uses.
+				stat := filepath.Join(f.bin, "stat")
+				if err := os.Remove(stat); err != nil {
+					t.Fatal(err)
+				}
+				writeExec(t, stat, `#!/bin/sh
+[ "$1" = -f ] || { echo "stat: illegal option -- c" >&2; exit 1; }
+case "$2" in
+'%Mp%Lp') printf '%04d\n' "$('`+real+`' -c '%a' "$3")" ;;
+'%u') exec '`+real+`' -c '%u' "$3" ;;
+*) exit 1 ;;
+esac
+`)
+			}
+			projectOf := func(dir string) string {
+				t.Helper()
+				out, calls, err := f.run(t, dir, nil, "status")
+				if err != nil {
+					t.Fatalf("%s, BSD stat %v: status from %s: %v\n%s", sysname, emulate || !gnu, dir, err, out)
+				}
+				run := lastRun(t, calls)
+				for i, a := range run {
+					if a == "-v" && strings.HasSuffix(run[i+1], ":ro") && !strings.HasPrefix(run[i+1], "locklog-") {
+						return strings.SplitN(run[i+1], ":", 2)[0]
+					}
+				}
+				t.Fatalf("no project mount: %q", run)
+				return ""
+			}
+			if p := projectOf(filepath.Join(f.project, "sub")); p != f.project {
+				t.Errorf("%s, BSD stat %v: project = %s, want %s", sysname, emulate || !gnu, p, f.project)
+			}
+			tmpLike := filepath.Join(f.root, "tmp")
+			sub := filepath.Join(tmpLike, "work")
+			for _, d := range []string{filepath.Join(tmpLike, ".locklog"), sub} {
+				if err := os.MkdirAll(d, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.Chmod(tmpLike, 0o1777); err != nil {
+				t.Fatal(err)
+			}
+			if p := projectOf(sub); p != sub {
+				t.Errorf("%s, BSD stat %v: planted .locklog in a sticky dir taken: %s", sysname, emulate || !gnu, p)
+			}
+		}
+	}
+}
