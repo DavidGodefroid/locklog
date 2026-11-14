@@ -6,6 +6,12 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Masking (#144): lockkit v0.19.2 (from v0.19.1). Postgres initdb's hint
+  `--auth-local and --auth-host` and `--auth-local peer` stay readable; a
+  real `--auth-token …` or `--auth admin:pw` value is still masked.
+
 ## [0.3.0] - 2026-11-13
 
 The company's managed configuration (`managed.toml`), lockkit v0.19.1
