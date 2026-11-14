@@ -88,6 +88,25 @@ Pull requests target `main`, which is protected:
   (`feat:`, `fix:`, `docs:`, `test:`, `chore:`, ...).
 
 Workflows on pull requests from forks run after a maintainer approves them.
+
+Docs are published at [lockfamily.dev/docs](https://lockfamily.dev/docs/) from
+this repo's Markdown (`README.md`, `CHANGELOG.md`, `docs/**`). Adding a file
+under `docs/`, or renaming or removing a README H2 section, needs a matching
+change to [lockfamily's `docs-site/nav.toml`](https://github.com/DavidGodefroid/lockfamily/blob/main/docs-site/nav.toml):
+open a lockfamily PR, or the nightly docs build fails. A push to `main` that
+touches the docs, and each published release, sends lockfamily a
+`repository_dispatch` of type `docs` (`.github/workflows/docs-dispatch.yml`,
+and the `docs` job of `release.yml` for a tagged release) so the site
+rebuilds within minutes. It needs the secret
+`LOCKFAMILY_DOCS_TOKEN`, a fine-grained token limited to
+DavidGodefroid/lockfamily (Contents: read and write); without it the workflow
+passes with a notice and the nightly build picks the change up.
+
+The project site [locklog.dev](https://locklog.dev) is separate: hand-written
+HTML under `site/`, deployed by `.github/workflows/pages.yml` on a push to
+`main` that touches `site/**` or `scripts/install.sh`. It does not render the
+Markdown docs, so a docs change that alters what the site says (install
+steps, defaults, guarantees) needs a matching edit under `site/`.
 Participation is governed by the [code of conduct](CODE_OF_CONDUCT.md).
 
 Every `uses:` in `.github/workflows/` names a full commit SHA with its

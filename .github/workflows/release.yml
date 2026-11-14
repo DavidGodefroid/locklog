@@ -205,6 +205,26 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  # Asks lockfamily to rebuild lockfamily.dev/docs, so the new CHANGELOG and
+  # release show within minutes (docs-dispatch.yml cannot: a release
+  # published with GITHUB_TOKEN starts no workflow). Needs the secret
+  # LOCKFAMILY_DOCS_TOKEN, a fine-grained token limited to lockfamily
+  # (Contents: read and write, lockfamily#39); without it the step prints a
+  # notice and the nightly build picks the release up.
+  docs:
+    name: docs site
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: dispatch to lockfamily
+        env:
+          GH_TOKEN: ${{ secrets.LOCKFAMILY_DOCS_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then echo "::notice::LOCKFAMILY_DOCS_TOKEN not set"; exit 0; fi
+          gh api repos/DavidGodefroid/lockfamily/dispatches -f event_type=docs
+
   # Asks the Homebrew tap (DavidGodefroid/homebrew-tap) to bump the locklog
   # formula to this release, once the archives and the images are published
   # and signed: the tap's bump workflow verifies them with cosign before
