@@ -7,12 +7,12 @@ shows every ticket and decides it, by its rules or by you.
 
 ## Status
 
-- locklog v0.3.0 is released: see the [CHANGELOG](../CHANGELOG.md).
+- locklog v0.3.1 is released: see the [CHANGELOG](../CHANGELOG.md).
 - `lox add locklog` and the locklog console in `lox run` need lockhub
   v0.10.0 or later ([lockhub#84](https://github.com/DavidGodefroid/lockhub/issues/84),
   [#86](https://github.com/DavidGodefroid/lockhub/issues/86),
   [#87](https://github.com/DavidGodefroid/lockhub/issues/87)).
-- The tap's `locklog` formula installs v0.3.0, and the `lockfamily` formula
+- The tap's `locklog` formula installs v0.3.1, and the `lockfamily` formula
   includes locklog.
 - Without Homebrew, `scripts/install.sh` ([below](#without-homebrew))
   installs the launcher, whose verbs you can run yourself ([setup.md](setup.md)).
