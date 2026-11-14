@@ -6,6 +6,10 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-14
+
+A masking fix: lockkit v0.19.2.
+
 ### Fixed
 
 - Masking (#144): lockkit v0.19.2 (from v0.19.1). Postgres initdb's hint
@@ -678,7 +682,8 @@ Still open in this release:
   version, which parses it (`bind-recursive=disabled` from CLI 25), not from
   the engine's.
 
-[Unreleased]: https://github.com/DavidGodefroid/locklog/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/DavidGodefroid/locklog/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/DavidGodefroid/locklog/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/DavidGodefroid/locklog/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/DavidGodefroid/locklog/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/DavidGodefroid/locklog/compare/v0.1.0...v0.2.0
