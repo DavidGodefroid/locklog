@@ -7,6 +7,10 @@ not be checked here, it says so and names the source it relies on.
 Spike date: 2026-10-31. Host: Ubuntu 24.04, kernel 7.0, Docker Engine and
 CLI 29.7.2 (API 1.55), Docker Compose v5.4.0.
 
+This is a dated spike record: the to-dos it lists were written before the
+adapters, and each now says what became of it. What the code does today
+is in [usage.md](usage.md) and [security-model.md](security-model.md).
+
 ## journald (spike S1)
 
 **Question.** Can a pure-Go reader return exactly what
@@ -184,7 +188,8 @@ Consequences, for LL-11 and LL-09a:
      `shareable` (the flag, or a daemon with `default-ipc-mode: shareable`)
      and a swarm-mode engine as a residual: their shared memory and secrets are readable by a
      compromised console;
-  4. `docs/security-model.md` (written in the docs PR, LL-20) must state it.
+  4. `docs/security-model.md` states it (done: [containers' logs and later
+     mounts](security-model.md#containers-logs-and-later-mounts)).
 - The `LL14` test "no submount" must start the console first, then start an
   `--ipc=shareable` container, and assert that the console cannot open,
   `open(O_WRONLY)`, create in or `truncate` anything under the propagated
@@ -203,7 +208,8 @@ subscription is lost, and no `--since` replay is needed.
 
 `docker compose up --force-recreate` gives a new id and **deletes the old
 container directory with its logs**, checked. History across deploys needs
-the journald driver or Loki, as `doctor` and the README say.
+the journald driver or Loki ([architecture.md](architecture.md) says so;
+`doctor` does not check it).
 
 ### Podman (5.8.9, nested in `quay.io/podman/stable`, rootful and rootless)
 
@@ -225,10 +231,11 @@ and locklog takes no `CAP_DAC_READ_SEARCH`. Supported Podman paths in v1:
   the journald source;
 - candidate [NV]: `--log-opt path=/var/log/containers/<name>.log` with `k8s-file`, read by the
   file source with `format = "cri"`. The mode and owner Podman gives that file
-  and its directory were **not** recorded [NV]; LL-11 must check that uid
-  10051 with an allowlisted group can read it before calling this supported.
+  and its directory were **not** recorded [NV], and no test has checked since
+  that uid 10051 with an allowlisted group can read it: it is not
+  supported until one does.
 
-`doctor` must say so. The CRI line format was confirmed:
+`doctor` has no Podman check (not done). The CRI line format was confirmed:
 `2026-10-31T01:23:48.564078242+00:00 stdout F rootful line`.
 
 ### Not checked here
@@ -238,5 +245,5 @@ and locklog takes no `CAP_DAC_READ_SEARCH`. Supported Podman paths in v1:
   can check it.
 - `bind-nonrecursive=true` on CLI 19.03-24, and on CLI 25-28 (behaviour read from the CLI source only).
 - Swarm secrets propagation.
-- Rootless Docker (unsupported in v1, named by `doctor`).
+- Rootless Docker (unsupported in v1; `doctor` does not check for it).
 - Mode and owner of a Podman `k8s-file` log written to `--log-opt path=`.

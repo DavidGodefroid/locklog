@@ -5,9 +5,10 @@ Claude Code (left) investigates PDF errors on a staging profile. locklog_count s
 14:02, locklog_patterns the new pattern (the email and the IP masked to their kinds), and
 locklog_trace the order behind it, with the email's pseudonym: all free, all masked. The agent then asks locklog_unmask for
 the email. lox run (right, lockhub's terminal, outside the agent) shows the read-pii ticket of the
-locklog lock: the masked record with the exact span marked » «, the agent's reason and what
+locklog lock: the masked record with the exact span marked » «, how many records holding that pseudonym
+agents were already given (the exposure line), the agent's reason and what
 revealing it lets the agent do; it is never auto-approved. The human answers "n". The agent gets
-"denied by the human" and carries on without the address. The console's audit (bottom) keeps every
+"denied by the human on lockhub" and carries on without the address. The console's audit (bottom) keeps every
 call, with no clear value. Pure SVG + CSS keyframes, so it plays on
 GitHub, on the site and in any browser; every animation shares one clock of LOOP seconds, and
 prefers-reduced-motion shows the final frame.
@@ -133,8 +134,8 @@ row = len(agent)
 body.append(spans(ax, ay + row * LH, [("  └ ", D), ("Pending: ticket on lox run, waiting for you…", Y)],
                   cls=show(6.1, 11.4)))
 reply = [
-    (11.6, [("  └ ", D), ("Error: denied by the human; do not retry", T)]),
-    (11.6, [("    ", D), ("unless asked", T)]),
+    (11.6, [("  └ ", D), ("Error: denied by the human on lockhub;", T)]),
+    (11.6, [("    ", D), ("do not retry unless asked", T)]),
     (12.4, [("● ", T), ("The PDF renderer's upstream has timed out since", T)]),
     (12.4, [("  ", T), ("14:02:11 (1,204 requests, order 4812 among them).", T)]),
     (12.4, [("  ", T), ("I can't see the customer's address: support can", T)]),
@@ -163,6 +164,7 @@ screen = [
     [("│ ", V), ("source: api · record: 2026-10-30T14:02:11.204Z", T)],
     [("│ ", V), ("reveal: ", T), (EMAIL, Y)],
     [("│ ", V), ("spans: 1 in this record (marked » «)", T)],
+    [("│ ", V), ("returned to agents in this epoch: ", T), (EMAIL, Y), (" in 3 records", T)],
 ]
 srow = 3
 g = [f'<g class="{show(6.4)}">']

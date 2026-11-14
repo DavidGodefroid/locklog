@@ -5,7 +5,7 @@ budgets. The security model is in [security-model.md](security-model.md).
 
 ## The profile file
 
-`locklog profile add` (which `lox add locklog <name>` calls) writes
+`locklog profile add` (which `lox add locklog`, the guided form, calls) writes
 `.locklog/config.toml` in your project. `lox run` reviews the profile
 directory, and the console reviews the policy at its first start. After that it serves only the **approved**
 copy. A change that loosens the policy waits for you at the console's
@@ -216,7 +216,7 @@ has none.
 | `claude` | `.mcp.json` (the `locklog mcp` server), `.claude/skills/locklog/SKILL.md`, the allow list below |
 | `codex` | a locklog section in `AGENTS.md`; it prints the `~/.codex/config.toml` table to add yourself (it writes no file outside the project) |
 | `cursor` | `.cursor/mcp.json`, `.cursor/rules/locklog.mdc` |
-| `gemini` | `.gemini/settings.json` (timeout 600 s, which covers the console's 5-minute approval timeout), a locklog section in `GEMINI.md` |
+| `gemini` | `.gemini/settings.json` (timeout 600 s, which covers one approved-scan call's 570 s budget), a locklog section in `GEMINI.md` |
 
 For Claude Code it also adds the **free** tools to `permissions.allow` in
 `.claude/settings.local.json`, the personal file, so they do not prompt.
@@ -318,7 +318,7 @@ cases are pessimistic on purpose.
 | bytes per hour | 40 GiB | 20 GiB / 10 GiB |
 | backend requests per minute | — | 600 / 240 |
 | server-side metric queries per hour | — | 120 / 60 |
-| `lookup` distinct values per hour | 50 per console, 20 per uid (production: 10 per console) | same |
+| `lookup` distinct values per hour | 50 per console, 20 per uid (production: 10 per console, so 10 per uid) | same |
 | agent `pii.add` | 10 per hour, 50 rules | same |
 
 The connection checks of a remote source are not charged to these
@@ -369,13 +369,13 @@ attached: `locklog console` without its hub flags refuses with lockkit's
 
 ```sh
 brew trust davidgodefroid/tap
-brew install davidgodefroid/tap/lockfamily   # or: brew install davidgodefroid/tap/locklog
-lox init                      # or: lox add locklog logs
+brew install davidgodefroid/tap/lockfamily   # lox and every Lock (the locklog formula alone also needs davidgodefroid/tap/lox)
+lox init                      # or: lox add locklog (guided)
 lox run                       # in a terminal of its own, kept open
 ```
 
-`lox add locklog <name>` runs the three launcher verbs ([setup.md](setup.md))
-from the project, `lox run` starts the hub and the console, with the log
+`lox add locklog` (the guided form) runs the three launcher verbs
+([setup.md](setup.md)) from the project, `lox run` starts the hub and the console, with the log
 directories of the profile's mount plan bound read-only, and shows every
 ticket and decides it, by its rules or by you. A host agent (Claude Code,
 Codex...) reaches the console through the launcher's `locklog mcp`, which
