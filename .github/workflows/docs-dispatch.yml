@@ -1,0 +1,35 @@
+name: docs-dispatch
+
+# lockfamily.dev/docs is built by lockfamily's docs-site/build.py from this
+# repository's README.md, CHANGELOG.md, GUIDE.md and docs/**. Its pages
+# workflow rebuilds every night; this dispatch makes a docs change or a
+# release show within minutes instead. locklog.dev (site/) is deployed by
+# pages.yml, not by this workflow.
+# release.yml publishes the release with GITHUB_TOKEN, and an event made with
+# GITHUB_TOKEN starts no workflow: its docs job sends the dispatch for a
+# tagged release. The release trigger here covers a release published by hand.
+
+on:
+  push:
+    branches: [main]
+    paths: [README.md, CHANGELOG.md, GUIDE.md, "docs/**"]
+  release:
+    types: [published]
+
+permissions: {}
+
+jobs:
+  dispatch:
+    name: dispatch
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      # LOCKFAMILY_DOCS_TOKEN: a fine-grained token limited to
+      # DavidGodefroid/lockfamily, Contents read and write (lockfamily#39).
+      # Without it the nightly build still picks the change up.
+      - name: dispatch to lockfamily
+        env:
+          GH_TOKEN: ${{ secrets.LOCKFAMILY_DOCS_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then echo "::notice::LOCKFAMILY_DOCS_TOKEN not set"; exit 0; fi
+          gh api repos/DavidGodefroid/lockfamily/dispatches -f event_type=docs
