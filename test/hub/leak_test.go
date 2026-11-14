@@ -78,7 +78,20 @@ type sockConn struct {
 	next int64
 }
 
+// dialSock dials the socket and says hello as a confined agent: the console
+// serves a connection once its hello is accepted, and the test dials from
+// the host (lockkit#133).
 func dialSock(t *testing.T, path string) *sockConn {
+	t.Helper()
+	s := dialRaw(t, path)
+	if err := s.hello(&ipc.Confinement{Confined: true}); err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+// dialRaw dials the socket without a hello.
+func dialRaw(t *testing.T, path string) *sockConn {
 	t.Helper()
 	c, err := net.Dial("unix", path)
 	if err != nil {
@@ -88,6 +101,12 @@ func dialSock(t *testing.T, path string) *sockConn {
 	s.r = bufio.NewReader(io.TeeReader(c, &s.got))
 	t.Cleanup(func() { c.Close() })
 	return s
+}
+
+// hello opens the session with the confinement report conf.
+func (s *sockConn) hello(conf *ipc.Confinement) error {
+	hp := ipc.HelloParams{ProtocolMajor: ipc.ProtocolMajor, Client: "locklog-test", Confinement: conf}
+	return s.Call(context.Background(), ipc.MethodHello, hp, nil)
 }
 
 func (s *sockConn) Call(ctx context.Context, method string, params, result any) error {

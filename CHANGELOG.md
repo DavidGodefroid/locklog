@@ -6,6 +6,27 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Breaking
+
+- Unconfined agents are refused by default (#158, lockkit#133): lockkit
+  v0.20.0 (from v0.19.2). Every client reports in its `hello` whether it
+  runs confined (in a container, no host runtime socket, no Lock Family
+  state, a read-only `.lockfamily/`); the console refuses one that does
+  not, holds a group owning a runtime socket, or sends no report (an older
+  client), with `CodeUnconfined` (-32009). The launcher's `mcp`, lea's
+  agents and the own-container recipe run confined. Client and console
+  must be of the same version: an older console refuses the new `hello`,
+  and an older client is refused by the new console.
+
+### Added
+
+- The profile key `unconfined = true` serves agents that do not run
+  confined on a non-production profile: a loosening approved at the
+  console (it changes the policy fingerprint), a red banner, and
+  `"unconfined":true` on every audit record and `flags.unconfined` on
+  every hub ticket of the connection. It is refused on a production
+  profile; a managed `require_confined_agent = true` overrides it.
+
 ## [0.3.1] - 2026-11-14
 
 A masking fix: lockkit v0.19.2.

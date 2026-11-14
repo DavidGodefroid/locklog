@@ -318,7 +318,7 @@ func (p Policy) remote() (config.Source, bool) {
 func (p Policy) Profile() console.Profile {
 	pr := p.Policy.Profile
 	cp := console.Profile{
-		Name: pr.Name, Production: pr.Production, Where: where(pr),
+		Name: pr.Name, Production: pr.Production, Unconfined: pr.Unconfined, Where: where(pr),
 		Credentials: console.CredentialsNone, IdleTimeout: pr.IdleTimeout, MaxSession: pr.MaxSession,
 	}
 	if s, ok := p.remote(); ok {

@@ -118,6 +118,27 @@ as the image's `agent` account, launched from your own account. Your agent
 there can still read whatever your account can, so the trial is for
 non-production data. The launcher's `mcp` refuses production profiles.
 
+### Confined agents
+
+Every locklog client reports in its `hello` whether it runs confined
+(lockkit's `confine` check): in a container, with no host container
+runtime socket it can reach, the Lock Family's state unreadable and the
+project's `.lockfamily/` read-only. The console also refuses a client that
+holds a group owning a runtime socket (`runtime_group`), and one too old to
+send the report (`old_client`). Such an agent is refused (`-32009`,
+`CodeUnconfined`), with the failed checks in the message, before any
+method is served; the decision is taken again at every request.
+
+The launcher's `mcp`, lea's agents and the
+[own-container recipe](setup.md#the-own-container-recipe) run confined.
+To serve an agent that does not, set `unconfined = true` on a
+non-production profile: a loosening you approve at the console, which then
+prints a red banner and marks every audit record (`"unconfined":true`) and
+hub ticket (`flags.unconfined`) of the connection. A production profile
+with `unconfined = true` is refused at load, and a managed
+`require_confined_agent = true` refuses unconfined agents whatever the
+profile says.
+
 ## The masking pipeline
 
 Order, fixed, per record and per field:

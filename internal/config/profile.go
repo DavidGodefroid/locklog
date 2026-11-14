@@ -107,6 +107,7 @@ type rawLimits struct {
 
 type rawProfile struct {
 	Production        bool                 `toml:"production"`
+	Unconfined        bool                 `toml:"unconfined"`
 	Structured        string               `toml:"structured"`
 	Text              string               `toml:"text"`
 	Detectors         []string             `toml:"detectors"`
@@ -268,7 +269,7 @@ func buildProfile(name string, r rawProfile, detectorsSet bool) (Profile, error)
 	}
 	prod := r.Production
 	p := Profile{
-		Name: name, Base: kconfig.Base{Production: prod},
+		Name: name, Base: kconfig.Base{Production: prod, Unconfined: r.Unconfined},
 		Structured: r.Structured, Text: r.Text, Detectors: r.Detectors, Unmask: r.Unmask, Lookup: r.Lookup,
 		Strict: r.Strict, Prefilter: r.Prefilter, UserJournals: r.UserJournals,
 	}
@@ -309,6 +310,9 @@ func buildProfile(name string, r rawProfile, detectorsSet bool) (Profile, error)
 			return Profile{}, errf("%v", err)
 		}
 		p.Auto = rules.sparse()
+	}
+	if prod && p.Unconfined {
+		return Profile{}, errf("unconfined = true is refused on a production profile: an agent that does not run confined is never served on production")
 	}
 	if prod && p.Prefilter {
 		return Profile{}, errf("prefilter = true is refused on a production profile: with it, latency reveals how many records hold a clear substring")
