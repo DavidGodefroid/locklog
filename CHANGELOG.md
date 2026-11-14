@@ -6,6 +6,12 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-14
+
+Confined agents by default: lockkit v0.20.0. A minor release (pre-1.0
+semver): the console refuses agents it used to serve, and client and
+console must be upgraded together.
+
 ### Breaking
 
 - Unconfined agents are refused by default (#158, lockkit#133): lockkit
@@ -703,7 +709,8 @@ Still open in this release:
   version, which parses it (`bind-recursive=disabled` from CLI 25), not from
   the engine's.
 
-[Unreleased]: https://github.com/DavidGodefroid/locklog/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/DavidGodefroid/locklog/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/DavidGodefroid/locklog/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/DavidGodefroid/locklog/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/DavidGodefroid/locklog/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/DavidGodefroid/locklog/compare/v0.2.0...v0.2.1
