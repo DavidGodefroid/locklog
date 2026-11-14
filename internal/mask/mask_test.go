@@ -157,6 +157,20 @@ func TestMaskSecretFirst(t *testing.T) {
 	}
 }
 
+// Postgres initdb's hint names flags, not credentials: "and" after
+// --auth-local stays readable, a real --auth-token value does not (#144).
+func TestMaskInitdbAuthHint(t *testing.T) {
+	m := newMasker(t, Options{Structured: StructuredDetect})
+	hint := "initdb: hint: You can change this by editing pg_hba.conf or using the option -A, or --auth-local and --auth-host, the next time you run initdb."
+	if got := encode(t, m.Mask("db", event(t, `{"msg":"`+hint+`"}`))); !strings.Contains(got, "--auth-local and --auth-host") || strings.Contains(got, Secret) {
+		t.Errorf("initdb hint masked: %s", got)
+	}
+	got := encode(t, m.Mask("db", event(t, `{"msg":"initdb --auth-local peer --auth-token abcd1234efgh5678"}`)))
+	if strings.Contains(got, "abcd1234efgh5678") || !strings.Contains(got, "--auth-local peer --auth-token "+Secret) {
+		t.Errorf("auth token: %s", got)
+	}
+}
+
 // A name holding a value is shown as ⟦key:ID⟧; source brackets cannot
 // forge a placeholder; controls and invisible characters do not reach the
 // output.
