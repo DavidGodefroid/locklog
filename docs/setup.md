@@ -204,7 +204,10 @@ and every check; the exit status is 0 exactly when no check fails.
 A host agent is the non-production trial: its MCP server refuses production
 profiles (`E_PRODUCTION_HOST_AGENT`). For a production profile, run the
 agent with lea, or in an image of its own, as a non-root user without sudo
-that reaches the console only through its socket. Add this to the agent's
+that reaches the console only through its socket. The console serves it
+only when it runs confined: no container runtime socket mounted, no Lock
+Family state, the project's `.lockfamily/` read-only
+([security-model.md](security-model.md#confined-agents)). Add this to the agent's
 Dockerfile, after its packages are installed, with the locklog image
 pinned by digest (`docker buildx imagetools inspect
 ghcr.io/davidgodefroid/locklog:<version>`):

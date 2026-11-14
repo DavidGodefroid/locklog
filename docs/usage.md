@@ -62,6 +62,7 @@ credentials = "ask"          # typed at the console, never written to disk
 | `strict` | `false` | Accepted and reviewed, but not applied yet (planned: every search and count becomes a ticket) |
 | `prefilter` | `false` | Opt-in speed-up for non-production; reveals through latency how many records hold a clear substring, and turns off the `masked_failures` count of text searches (see The agent's tools) |
 | `user_journals` | `false` | Also serve `user-*.journal` files |
+| `unconfined` | `false` | Also serve an agent that does not run confined (see [security-model.md](security-model.md#confined-agents)): a loosening you approve at the console, shown by a red banner and recorded on every audit record and hub ticket of its connections; refused on production |
 | `pseudonym_rotation` | `7d` | Epoch length (`session` or a duration; `never` is refused on production) |
 | `pseudonym_max_age` | `30d` | How long a replaced epoch key is kept; older ones are deleted when the console opens the profile |
 | `limits` | see Budgets | Per-call and rolling budgets |

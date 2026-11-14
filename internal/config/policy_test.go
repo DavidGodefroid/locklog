@@ -121,6 +121,8 @@ func TestDiffLoosens(t *testing.T) {
 		{name: "lookup free", approved: "[profiles.pp]\nlookup = \"approved\"\n", field: "lookup", loosens: true},
 		{name: "strict off", approved: "[profiles.pp]\nstrict = true\n", field: "strict", loosens: true},
 		{name: "prefilter on", cur: "[profiles.pp]\nprefilter = true\n", field: "prefilter", loosens: true},
+		{name: "unconfined on", cur: "[profiles.pp]\nunconfined = true\n", field: "unconfined", loosens: true},
+		{name: "unconfined off", approved: "[profiles.pp]\nunconfined = true\n", field: "unconfined", loosens: false},
 		{name: "user journals on", cur: "[profiles.pp]\nuser_journals = true\n", field: "user_journals", loosens: true},
 		{name: "rotation longer", cur: "[profiles.pp]\npseudonym_rotation = \"14d\"\n", field: "pseudonym_rotation", loosens: true},
 		{name: "rotation never", cur: "[profiles.pp]\npseudonym_rotation = \"never\"\n", field: "pseudonym_rotation", loosens: true},

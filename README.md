@@ -99,7 +99,10 @@ account, where it could still read the logs directly):
 `lox add` wires Claude Code; for Codex, Cursor or Gemini CLI, also run
 `locklog init codex` (or `cursor`, `gemini`). On production, run the agent
 in [lea](https://github.com/DavidGodefroid/lea) or in its own container
-([docs/setup.md](docs/setup.md#the-own-container-recipe)).
+([docs/setup.md](docs/setup.md#the-own-container-recipe)). The console
+serves only agents that run confined, unless a non-production profile sets
+`unconfined = true`
+([docs/security-model.md](docs/security-model.md#confined-agents)).
 
 ## Highlights
 

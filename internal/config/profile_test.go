@@ -120,9 +120,29 @@ func TestProductionRefusals(t *testing.T) {
 	prod := strings.ReplaceAll(fileSrc, "staging", "prod") + "[profiles.prod]\nproduction = true\n"
 	wantErr(t, prod+"prefilter = true\n", "prefilter = true is refused on a production profile")
 	wantErr(t, prod+`pseudonym_rotation = "never"`+"\n", `"never" is refused on a production profile`)
+	wantErr(t, prod+"unconfined = true\n", "unconfined = true is refused on a production profile")
 	wantErr(t, strings.ReplaceAll(fileSrc, "staging", "y")+"[profiles.y]\nproduction = true\n", "production profile needs a name")
-	// Non-production accepts both.
-	mustParse(t, fileSrc+"[profiles.staging]\nprefilter = true\npseudonym_rotation = \"never\"\n")
+	// Non-production accepts them.
+	mustParse(t, fileSrc+"[profiles.staging]\nprefilter = true\npseudonym_rotation = \"never\"\nunconfined = true\n")
+}
+
+// TestUnconfined (#158): unconfined = true is read into the profile's
+// base and changes the policy fingerprint; unset, the fingerprint is the
+// one before the key existed.
+func TestUnconfined(t *testing.T) {
+	if p := mustParse(t, fileSrc)["staging"]; p.Unconfined {
+		t.Error("unconfined by default")
+	}
+	if p := mustParse(t, fileSrc+"[profiles.staging]\nunconfined = true\n")["staging"]; !p.Unconfined {
+		t.Error("unconfined = true not read")
+	}
+	none, off := policyOf(t, "", ""), policyOf(t, "[profiles.pp]\nunconfined = false\n", "")
+	if none.Fingerprint() != off.Fingerprint() {
+		t.Error("unconfined = false changes the fingerprint")
+	}
+	if on := policyOf(t, "[profiles.pp]\nunconfined = true\n", ""); on.Fingerprint() == none.Fingerprint() {
+		t.Error("unconfined = true keeps the fingerprint")
+	}
 }
 
 func TestProfileValues(t *testing.T) {
