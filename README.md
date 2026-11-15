@@ -36,7 +36,7 @@ logs; the agent asks over MCP and gets masked, bounded, typed answers:
 counts, patterns, traces, lines around a hit.
 
 > [!NOTE]
-> **Pre-release** (`v0.3.x`). The console is started by `lox run` only,
+> **Pre-release** (0.x releases). The console is started by `lox run` only,
 > from lockhub v0.10.0. See [the install status](docs/install.md#status).
 
 ## Why locklog
@@ -51,7 +51,7 @@ counts, patterns, traces, lines around a hit.
   beyond a budget or a value in clear is a ticket that waits for you in
   `lox run`, and unmask is off by default on production.
 - **Read-only.** No write path to any log or backend, and every call is
-  audited without clear values.
+  audited without the clear values locklog masks.
 
 ## Install
 
@@ -96,8 +96,9 @@ account, where it could still read the logs directly):
 3. Start your agent in the project (`claude`, `codex`, `gemini`, …) and ask:
    *"when did the 502s start?"*
 
-`lox add` wires Claude Code; for Codex, Cursor or Gemini CLI, also run
-`locklog init codex` (or `cursor`, `gemini`). On production, run the agent
+`lox add` wires Claude Code; for another agent (Codex, Cursor, Gemini CLI,
+or one installed later), run `locklog init <agent>` (`claude`, `codex`,
+`cursor`, `gemini`). On production, run the agent
 in [lea](https://github.com/DavidGodefroid/lea) or in its own container
 ([docs/setup.md](docs/setup.md#the-own-container-recipe)). The console
 serves only agents that run confined, unless a non-production profile sets

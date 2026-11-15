@@ -1,12 +1,17 @@
 # Setup: the launcher verbs
 
 locklog takes the three verbs every lock of the Lock Family takes
-(lockkit's GUIDE.md §14), which `lox add locklog <name>` (or `lox init`)
-calls from the project:
+(lockkit's GUIDE.md §14), which `lox add locklog`, the guided form (or
+`lox init`), calls from the project:
 
     locklog profile add --non-interactive --json --profile NAME [--production] ...
     locklog init claude
-    locklog doctor --fix --yes --json
+    locklog doctor --json
+
+`lox add` runs doctor without `--fix`: it wires Claude Code only. For
+another agent, run `locklog init <agent>` or `locklog doctor --fix`
+yourself. `lox add locklog <name>`, with a name, only declares the lock in
+`lockfamily.yaml` and runs none of these verbs.
 
 You can run them yourself, in the project directory, in your own terminal.
 The console is not one of them: `lox run` starts it, hub-attached, in a
@@ -18,16 +23,19 @@ The Lock Family's path is Homebrew, then `lox`:
 
 ```sh
 brew trust davidgodefroid/tap                # Homebrew asks you to trust a third-party tap once
-brew install davidgodefroid/tap/lockfamily   # or only this tool: brew install davidgodefroid/tap/locklog
+brew install davidgodefroid/tap/lockfamily   # lox and every Lock, locklog included
 cd ~/projects/shop                           # the project whose logs the agent investigates
-lox add locklog logs                          # or: lox init
-lox run                                       # in a terminal of its own, outside the agent
+lox add locklog                              # guided; or: lox init
+lox run                                      # in a terminal of its own, outside the agent
 ```
 
 `lox add locklog` and the locklog console in `lox run` need lockhub
 v0.10.0 or later, the first release that knows the locklog type (lockhub#84,
-#86, #87); the tap's `locklog` and `lockfamily` formulas install it. The alternative, without Homebrew, installs the
-launcher alone, cosign-verified:
+#86, #87). The tap's `lockfamily` formula installs it;
+`brew install davidgodefroid/tap/locklog` installs the launcher alone, and
+then also needs `brew install davidgodefroid/tap/lox`.
+The alternative, without Homebrew, installs the launcher alone,
+cosign-verified:
 
 ```sh
 curl -fsSL https://locklog.dev/install.sh | sh   # or LOCKLOG_VERSION=vX.Y.Z
@@ -172,7 +180,11 @@ asks, and a second run changes nothing.
 
 ## `locklog doctor`
 
-    locklog doctor [--profile P] [--fix [--yes]] [--json]
+    locklog doctor [--instance NAME] [--profile P] [--fix [--yes]] [--json]
+
+`--instance` is the launcher's own option (as for `locklog mcp`): which of
+`lox run`'s locklog locks to check when the workspace has several; without
+it, doctor stops and asks you to name one.
 
 An advisory check of what the agent's account can reach where it runs. It is
 not a boundary. Findings: the Docker engine (socket or `DOCKER_HOST`), the
@@ -249,9 +261,11 @@ on the lock in `lockfamily.yaml`, which `lox run` passes to the console as
 `--allowed-uids`. Every agent whose container mounts the socket volume
 reaches the console on it: one volume is one trust domain.
 
-CI builds this snippet into an agent image and calls the console from it
-(job `own-container recipe (e2e)`, for uid 10052 and for an uid admitted by
-`--allowed-uids`).
+CI builds this snippet, read verbatim from this page, into an agent image
+and calls the console from it (job `own-container recipe (e2e)`, for uid
+10052 and for an uid admitted by `--allowed-uids`). The test runs its own
+`docker run`, the line above plus `--network none`, since its agent needs
+no model API; yours keeps the network your agent CLI needs.
 
 The [HolmesGPT recipe](recipes/holmesgpt.md) applies it to HolmesGPT's CLI,
 with locklog as its stdio MCP server.

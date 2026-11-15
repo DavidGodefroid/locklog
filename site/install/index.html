@@ -54,7 +54,7 @@
   <main id="main" tabindex="-1">
     <div class="wrap">
 
-<p class="eyebrow">Install · pre-release v0.2.x</p>
+<p class="eyebrow">Install · pre-release</p>
 <h1>Install locklog</h1>
 <div class="prose">
   <p class="lead">A launcher on the host, the console in its own container, and your agent placed where it cannot read the logs itself.</p>
@@ -63,11 +63,11 @@
 <section aria-labelledby="status">
   <h2 id="status">Status</h2>
   <div class="prose">
-    <p>locklog v0.4.0 is released. Its console is started by <code>lox run</code> (lockhub) only.</p>
+    <p>locklog is pre-release: the latest release is in the CHANGELOG below. Its console is started by <code>lox run</code> (lockhub) only.</p>
     <ul>
       <li><code>lox add locklog</code> and the locklog console in <code>lox run</code> need lockhub v0.10.0 or later (<a href="https://github.com/DavidGodefroid/lockhub/issues/84">lockhub#84</a>, <a href="https://github.com/DavidGodefroid/lockhub/issues/86">#86</a>, <a href="https://github.com/DavidGodefroid/lockhub/issues/87">#87</a>).</li>
-      <li>The tap’s <code>locklog</code> formula installs v0.4.0, and the <code>lockfamily</code> formula includes locklog.</li>
-      <li>Without Homebrew, <code>install.sh</code> installs the latest <strong>published</strong> release of the launcher (v0.4.0 at this writing), whose verbs you can run yourself.</li>
+      <li>The tap’s <code>locklog</code> formula installs the latest release (the launcher alone), and the <code>lockfamily</code> formula includes locklog and <code>lox</code>.</li>
+      <li>Without Homebrew, <code>install.sh</code> installs the latest <strong>published</strong> release of the launcher, whose verbs you can run yourself.</li>
     </ul>
     <p>Follow the <a href="https://github.com/DavidGodefroid/locklog/blob/main/CHANGELOG.md">CHANGELOG</a> and the <a href="https://github.com/DavidGodefroid/locklog/releases">releases page</a>.</p>
   </div>
@@ -93,7 +93,7 @@
     <p class="install-note">Homebrew asks you to trust a third-party tap once. <code>brew install davidgodefroid/tap/locklog</code> installs this Lock alone; <code>lox add</code> and <code>lox run</code> also need <code>davidgodefroid/tap/lox</code>.</p>
   </div>
   <ol class="steps prose">
-    <li><p>From the project whose logs the agent investigates, <code>lox add locklog</code> sets up the lock (or <code>lox init</code>).</p>
+    <li><p>From the project whose logs the agent investigates, <code>lox add locklog</code> (the guided form: it asks for the lock’s name) sets up the lock (or <code>lox init</code>). With a name, <code>lox add locklog &lt;name&gt;</code> only declares a lock whose profile exists.</p>
       <pre tabindex="0"><code>cd ~/projects/shop
 lox add locklog</code></pre></li>
     <li><p>In a terminal of its own, outside the agent, keep <code>lox run</code> open. Approvals live there.</p>
@@ -121,7 +121,7 @@ less install.sh &amp;&amp; sh install.sh</code></pre>
     <ul>
       <li><code>locklog profile add --non-interactive</code>: a profile from the logs this host has (files, journald, containers); never a secret.</li>
       <li><code>locklog init claude</code>: the agent’s <code>.mcp.json</code>, skill and allow list (the free tools only). Also <code>codex</code>, <code>cursor</code> or <code>gemini</code>.</li>
-      <li><code>locklog doctor --fix --yes</code>: what an agent here can reach.</li>
+      <li><code>locklog doctor</code> (advisory, without <code>--fix</code>): what an agent here can reach. To wire another agent, run <code>locklog init &lt;agent&gt;</code> or <code>locklog doctor --fix</code> yourself.</li>
     </ul>
     <p>Then, in another terminal, ask your agent: <em>“when did the 502s start?”</em>. It calls <code>locklog_count</code>, <code>locklog_patterns</code> and <code>locklog_trace</code>: free, masked, audited.</p>
     <p>A scan, an unmask or an approved lookup becomes a ticket that <code>lox run</code> shows you. With the default rules it never approves one on its own.</p>
@@ -135,7 +135,7 @@ less install.sh &amp;&amp; sh install.sh</code></pre>
   <p class="prose">On production the agent must not be able to read the logs, the Docker socket or the backends itself (precondition <a href="../security/#p1">P1</a>). Run it:</p>
   <ul class="cards">
     <li><h3>In lea</h3><p><a href="https://github.com/DavidGodefroid/lea">lea</a> runs the agent in a container of its own, with the lock’s socket mounted.</p></li>
-    <li><h3>In its own container</h3><p><a href="https://github.com/DavidGodefroid/locklog/blob/main/docs/setup.md#the-own-container-recipe">docs/setup.md</a> has a tested Dockerfile snippet for your agent image and the <code>docker run</code> line. The agent user must not have sudo.</p></li>
+    <li><h3>In its own container</h3><p><a href="https://github.com/DavidGodefroid/locklog/blob/main/docs/setup.md#the-own-container-recipe">docs/setup.md</a> has a Dockerfile snippet for your agent image (the e2e test builds it verbatim) and the <code>docker run</code> line. The agent user must not have sudo.</p></li>
   </ul>
   <div class="prose">
     <p>Your agent CLI’s own login is yours to set up.</p>
@@ -179,7 +179,7 @@ less install.sh &amp;&amp; sh install.sh</code></pre>
       </nav>
     </div>
     <div class="wrap footer-bottom">
-      <p>Pre-release (v0.2.x). locklog is licensed under the <a href="https://github.com/DavidGodefroid/locklog/blob/main/LICENSE">Apache License 2.0</a>.</p>
+      <p>Pre-release. locklog is licensed under the <a href="https://github.com/DavidGodefroid/locklog/blob/main/LICENSE">Apache License 2.0</a>.</p>
       <p><a href="https://lockfamily.dev">lockfamily.dev</a> · <a href="https://github.com/DavidGodefroid/lockfamily">the family on GitHub</a></p>
     </div>
   </footer>

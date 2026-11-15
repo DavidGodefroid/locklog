@@ -16,7 +16,7 @@ its socket, with no access to the logs, the Docker socket or the backends.
 From the project, as for any agent (see the [README](../../README.md)):
 
 ```sh
-lox add locklog logs   # runs locklog profile add, init claude and doctor
+lox add locklog        # guided: runs locklog profile add, init claude and doctor
 lox run                # starts the console, hub-attached, and decides the tickets
 ```
 
@@ -110,8 +110,10 @@ A scan beyond the budgets, an unmask or an approved lookup is a ticket on
 `lox run`: the tool answers `pending` with the ticket id at once, and
 Holmes reports it. Decide it at `lox run` (or the deck, a phone), then ask
 Holmes again with the ticket ("continue with ticket <id>"): the same call
-with the same arguments and that ticket runs it. locklog's tickets are
-never auto-approved.
+with the same arguments and that ticket runs it. By default every
+locklog ticket waits for a human (auto rules `ask`); a profile can let
+`lox run`'s auto mode approve scans, unmasks or lookups (`auto`, see
+[usage.md](../usage.md#what-lox-run-decides-and-what-it-asks)).
 
 ## What Holmes sees
 

@@ -1,8 +1,10 @@
 # Performance: spike numbers and the defaults derived from them
 
 The S3 (backends) and S4 (masking throughput) spikes measured these numbers
-on 2026-10-31. Budgets, chunk sizes and perf thresholds start from them.
-The nightly `perf` job replaces them with CI numbers once the engine exists.
+on 2026-10-31. Budgets and chunk sizes start from them. This page is a
+dated record: where the code has moved on since, the row or section says
+so. A CI perf job that would replace these numbers is planned, not built
+(CI has no perf job today).
 
 Spike host: 22 logical CPUs, 30 GiB RAM, NVMe, Docker 29.7.2. The backends
 ran in containers limited to `--cpus 4 --memory 4-6g`. Every client used one
@@ -17,9 +19,9 @@ Data: 2 GiB of lines in one dense hour (15.6 M lines, 12 streams sharded to
 (4.2 M lines). Each line carried structured metadata `trace_id` (always) and
 `user_email` (one line in three).
 
-Ingest overrides needed for a test corpus with past timestamps (to document
-in `TestLokiIncident`): `reject_old_samples: false`, `unordered_writes: true`,
-and high `ingestion_rate_mb` / `per_stream_rate_limit`. The out-of-order
+Ingest overrides needed for a test corpus with past timestamps: `reject_old_samples: false`, `unordered_writes: true`,
+and high `ingestion_rate_mb` / `per_stream_rate_limit` (now in
+[loki.md](loki.md#a-test-loki-with-past-data-testlokiincident)). The out-of-order
 window is not a separate setting: Loki accepts an entry only up to `max_chunk_age / 2` behind the
 newest entry of its stream, so either push in time order or raise
 `max_chunk_age` (24 h used here). The push itself ran at about 22 MiB/s
@@ -48,7 +50,8 @@ the response puts labels in `stream` and moves structured metadata into a
 third array element per value: `{"structuredMetadata": {...}}`. The
 response says so in `encodingFlags`. `detected_level` is added by Loki
 (`discover_log_levels`) as structured metadata. `/labels` lists only real
-stream labels, plus Loki's `__stream_shard__`, which LL-18 must hide.
+stream labels, plus Loki's `__stream_shard__`, which the Loki source hides
+from the agent.
 
 ### Elasticsearch 8.14.3 and OpenSearch 2.19.3 (single node, 1 shard)
 
@@ -122,22 +125,22 @@ continued free).
 | per-call bytes, local (admission) | **512 MiB** (ceiling 64 GiB) | at 60 MB per call, about 9 calls (8 free continuations). Narrowed hour at 1 GiB/day (42 MiB): 1 call. At 7 GiB/day (300 MiB ≈ 315 MB): 6 calls, about 3 min, inside the 5-minute gate |
 | per-call bytes, remote (admission, fetched) | **512 MiB** of response bytes (ceiling 64 GiB) | masking-bound, as local; 512 MiB of responses is ≈ 192 MiB of lines, ≈ 3-4 calls on this corpus |
 | plan chunk (local) | **1 MiB** (one granule, `source.GranuleBytes`) | worst-case cost ≈ 5 µs/B (the encoded corpus, 0.2 MB/s/core): 1 MiB then takes ≈ 5.2 s per core, within the rule "a chunk's worst case ≤ 1/4 of the 30 s deadline" (7.5 s) |
-| calibration corpus | **1 MiB fixed mixed corpus**, 3 passes (3.15 MB, ≈ 1.6-3.1 s at ≈ 1-2 MB/s aggregate on 2 workers) at start, hourly | measured CV 3.5-6.2 %, so a deviation under 10 % (≈ 1.6 σ) is not acted on. Recalibrate when a chunk takes > 1.5× its prediction |
+| calibration corpus | **3 synthetic worst-case events** just under the 256 KiB event cap (free text dense in detector hits, a JSON object of depth 64, a wide logfmt line), one pass keeping the worst ns/byte, stopped at 5 s; at start, hourly | the measured cost × 1.25 (safety factor), with no deadband. Recalibrate at once when a chunk takes > 1.5× its prediction. (The spike's plan was a 1 MiB mixed corpus in 3 passes with a 10 % deadband; the code does not do that.) |
 | worst-case cost per byte (engine constant, before calibration) | **5 µs/B per core** (all detectors) | the slowest corpus (encoded, 0.2 MB/s/core). The 256 KiB event (268 ms) is 4.1 µs per *scanned* byte, since Find scans its first 64 KiB |
 | Loki in-flight per source | **4** | knee of the curve |
 | Loki `limit` | **5000** (Loki's default max) | 1.75 MiB pages: about 367 B per entry in the response (JSON, timestamp, `categorize-labels` metadata) for lines that average 137 B, so about 37.5 % of response bytes are line bytes |
 | Loki rolling requests/min | **600 non-prod / 240 prod** (plan had 240 / 60) | at 4 in flight, Loki serves about 690/min; 600/min does not throttle the masking-bound pipeline. Production must not throttle below masking speed (≈ 2 MB/s of lines on 2 cores): 240/min = 4 req/s × 5000 × 137 B ≈ 2.7 MB/s of lines. 150/min would give ≈ 1.7 MB/s, below it |
 | Loki byte plans | **time slices + bytes actually fetched**, not `index/stats` | `index/stats` was off by −85 %…+1050 %. Use it only as an advisory estimate in `E_OVER_BUDGET` messages. Budgets charge **fetched bytes = decompressed response body bytes** read by the client, whatever the transfer encoding (the spike client let Go's transport negotiate gzip and counted decompressed bytes; ≈ 2.67× the line bytes on this corpus), which depend only on time + trusted selector, never on predicates |
 | Loki structured metadata | always send `X-Loki-Response-Encoding-Flags: categorize-labels` | without it, untrusted metadata is merged into labels |
-| Loki metric counts | per query 7-21 s for 1 h-7 d on 3.2-4.6 GiB processed. The 200 GiB/h prod / 1 TiB/h non-prod "server-processed" budget allows about 40 / 200 such queries per hour | — |
+| Loki metric counts | per query 7-21 s for 1 h-7 d on 3.2-4.6 GiB processed | there is no byte budget on them: metric queries are capped at **120/h (60/h on production)**, `limits.remote.metric_queries_per_hour` |
 | ES/OpenSearch in-flight | **4**, `size` 1000 | OpenSearch's knee (51 MiB/s of responses). Elasticsearch still gains up to 8 (39 MiB/s), but the pipeline is masking-bound well below either |
 | ES/OpenSearch plans | `_count` (exact) | — |
-| approved-scan request rate | 4 in flight, no per-minute cap beyond the backend's own (R6-P2) | — |
-| local index build budget | 20 GiB/h idle-only unchanged. Cold backfill newest-first at full speed: 7 GiB in about 45 s (JSON, 2 cores) | parse-only speed |
-| nightly perf thresholds | fail on a 20 % drop per corpus vs the CI baseline recorded by the first nightly run (the spike table is only the initial reference: CI runners differ from the spike host) | — |
+| approved-scan request rate | 4 in flight, paced at `limits.remote.requests_per_minute` (600, 240 on production), not drawn from the rolling budget of free calls (R6-P2) | — |
+| local index build budget | **20 GiB/h** for every step, backfill included (newest first); upkeep pauses while agent calls run. At 20 GiB/h a 7 GiB cold backfill takes about 21 min | parse-only speed is about 7 GiB in 45 s (JSON, 2 cores) |
 
-**Gate arithmetic** (R6-P2, `TestLokiIncident` without a `level` label):
-the design's corpus for that test is a dense incident hour written at
+**Gate arithmetic** (historical, R6-P2, `TestLokiIncident` without a
+`level` label; the planning below predates lockkit#105 and #104): the
+design's corpus for that test is a dense incident hour written at
 5 GiB/day (213 MiB in the hour) on top of a sparse 7-day background of at
 most 8 GiB (8,192 MiB; the background is sparse, not 5 GiB/day). One
 approved scan over the 7-day range at today's ≈ 1.9 MiB/s of lines for 2 cores
@@ -148,6 +151,12 @@ means the `secret` detector must reach roughly ≥ 4 MiB/s/core (1/total = 1/res
 the dense incident hour (213 MiB) takes about 2 min today. Until lockkit#97 (or a
 follow-up) reaches that speed, LL-16b's variant must scan the narrowed
 range, not 7 days.
+
+What the code does now: the masking pipeline reaches 11-15 MiB/s after
+lockkit#105 ([below](#masking-profile-on-lockkit-v080-104-110)), and an
+approved scan's lifetime is its plan's bound, at most 4 hours
+([Approved-scan TTL](#masking-profile-on-lockkit-v080-104-110)), so one
+approval covers the 7-day scan.
 
 ## Masking profile on lockkit v0.8.0 (#104, #110)
 
@@ -172,7 +181,9 @@ and cached them too. After: 11-15 MiB/s on the same host and setup (2 to
 2.5 times faster); on a CI runner (`GOMAXPROCS=2`), about 5 MiB/s after the
 first changes, up from 4.0. What is left is the message's detection (about
 37 %) and the JSON parser (about 28 %, `encoding/json`'s token decoder,
-which builds an error value at the end of every scalar).
+which builds an error value at the end of every scalar). This profile
+predates #150 (v0.3.0), which replaced that decoder with locklog's own
+scanner: JSON decoding is about 8 times faster since.
 
 The cost model still calibrates on its worst-case corpus without the caches
 (its masker's source is `""`), so call sizing stays conservative.

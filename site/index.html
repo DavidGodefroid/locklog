@@ -56,7 +56,7 @@
 
 <section class="hero" aria-labelledby="hero-title">
   <div class="hero-text">
-    <p class="eyebrow"><span class="badge">v0.2 pre-release</span>A Lock of the Lock&nbsp;Family · open&nbsp;source · Apache&nbsp;2.0</p>
+    <p class="eyebrow"><span class="badge">pre-release</span>A Lock of the Lock&nbsp;Family · open&nbsp;source · Apache&nbsp;2.0</p>
     <h1 id="hero-title">Your agent reads the logs, <span class="key">not the people in them.</span></h1>
     <p class="lead">Any AI agent can find when and where something broke in your logs through locklog. Emails, IPs and secrets come back masked, and a value in clear waits for you.</p>
     <div class="install">
@@ -90,7 +90,7 @@
   </figure>
 </section>
 
-<div class="notice" role="note"><p><strong>Status.</strong> v0.4.0 is out. Its console is started by <code>lox run</code> only, from lockhub v0.10.0. See the <a href="https://github.com/DavidGodefroid/locklog/blob/main/CHANGELOG.md">CHANGELOG</a>.</p></div>
+<div class="notice" role="note"><p><strong>Status.</strong> Pre-release. Its console is started by <code>lox run</code> only, from lockhub v0.10.0. See the <a href="https://github.com/DavidGodefroid/locklog/blob/main/CHANGELOG.md">CHANGELOG</a> for the latest release.</p></div>
 
 <section class="demo-section" aria-labelledby="demo">
   <h2 id="demo" class="visually-hidden">See it run</h2>
@@ -115,14 +115,15 @@
 <thead><tr><th scope="col"><span class="visually-hidden">Property</span></th><th scope="col">Agent reads logs directly</th><th scope="col">Agent with a log backend’s own AI</th><th scope="col">locklog</th></tr></thead>
 <tbody>
 <tr><th scope="row">The agent can answer “when did it start?”</th><td class="yes">Yes</td><td class="yes">Yes</td><td class="yes">Yes</td></tr>
-<tr><th scope="row">Personal values and secrets masked before the model</th><td class="no">No</td><td class="partial">Rarely</td><td class="yes">Yes</td></tr>
+<tr><th scope="row">Personal values and secrets masked before the model</th><td class="no">No</td><td class="partial">Varies</td><td class="yes">Yes</td></tr>
 <tr><th scope="row">The agent never holds the log backend’s credentials</th><td class="no">No</td><td class="yes">Yes</td><td class="yes">Yes</td></tr>
 <tr><th scope="row">Self-hosted, any agent that speaks MCP</th><td class="yes">Yes</td><td class="no">No</td><td class="yes">Yes</td></tr>
 <tr><th scope="row">A clear value reaches the agent only with your approval</th><td class="no">No</td><td class="no">No</td><td class="yes">Yes</td></tr>
-<tr><th scope="row">Every call audited, without clear values</th><td class="no">No</td><td class="partial">Varies</td><td class="yes">Yes</td></tr>
+<tr><th scope="row">Every call audited, without the clear values it masks</th><td class="no">No</td><td class="partial">Varies</td><td class="yes">Yes</td></tr>
 </tbody>
 </table>
 </div>
+<p class="prose"><small>The middle column is a general picture of the assistants log platforms offer, not a test of any one product: check what yours does.</small></p>
 </section>
 
 <section aria-labelledby="highlights">
@@ -150,7 +151,7 @@ lox add locklog</code></pre></li>
     <li><p>Start your agent in the project (<code>claude</code>, <code>codex</code>, <code>gemini</code>, …) and ask: “when did the 502s start?”</p></li>
   </ol>
   <div class="prose">
-    <p><code>lox add</code> wires Claude Code. For Codex, Cursor or Gemini CLI, also run <code>locklog init codex</code> (or <code>cursor</code>, <code>gemini</code>).</p>
+    <p><code>lox add</code> wires Claude Code. For another agent (Codex, Cursor, Gemini CLI, or one installed later), run <code>locklog init &lt;agent&gt;</code> (<code>claude</code>, <code>codex</code>, <code>cursor</code>, <code>gemini</code>).</p>
     <p><a href="install/">Today’s install path, production placement and the details: the install guide</a></p>
   </div>
 </section>
@@ -158,7 +159,7 @@ lox add locklog</code></pre></li>
 <section class="limits" aria-labelledby="limits">
   <h2 id="limits">Know the limits</h2>
   <div class="prose">
-    <p>locklog masks the values it <strong>detects</strong>. Person names (unless opted in), usernames in free text, postal addresses, private IPs, business ids and encoded content are not detected.</p>
+    <p>locklog masks the values it <strong>detects</strong>. Person names (unless opted in), usernames in free text, postal addresses, private IPs, business ids and base64- or hex-encoded content are not detected.</p>
     <p>Pseudonymised data is still personal data under the GDPR. And locklog protects the logs only from an agent that cannot reach them by another path: on production, that is your container’s job, or lea’s.</p>
     <p><a href="security/">Read the security model</a></p>
   </div>
@@ -200,7 +201,7 @@ lox add locklog</code></pre></li>
       </nav>
     </div>
     <div class="wrap footer-bottom">
-      <p>Pre-release (v0.2.x). locklog is licensed under the <a href="https://github.com/DavidGodefroid/locklog/blob/main/LICENSE">Apache License 2.0</a>.</p>
+      <p>Pre-release. locklog is licensed under the <a href="https://github.com/DavidGodefroid/locklog/blob/main/LICENSE">Apache License 2.0</a>.</p>
       <p><a href="https://lockfamily.dev">lockfamily.dev</a> · <a href="https://github.com/DavidGodefroid/lockfamily">the family on GitHub</a></p>
     </div>
   </footer>
