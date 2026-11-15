@@ -65,7 +65,7 @@
   <div class="prose">
     <p>locklog is pre-release: the latest release is in the CHANGELOG below. Its console is started by <code>lox run</code> (lockhub) only.</p>
     <ul>
-      <li><code>lox add locklog</code> and the locklog console in <code>lox run</code> need lockhub v0.10.0 or later (<a href="https://github.com/DavidGodefroid/lockhub/issues/84">lockhub#84</a>, <a href="https://github.com/DavidGodefroid/lockhub/issues/86">#86</a>, <a href="https://github.com/DavidGodefroid/lockhub/issues/87">#87</a>).</li>
+      <li><code>lox add locklog</code> and the locklog console in <code>lox run</code> need lox (lockhub) v0.12.0 or later, the first release that runs locklog v0.4.0’s confined consoles (<a href="https://github.com/DavidGodefroid/lockhub/issues/212">lockhub#212</a>); lockhub v0.10.0 was the first to know the locklog type (<a href="https://github.com/DavidGodefroid/lockhub/issues/84">lockhub#84</a>, <a href="https://github.com/DavidGodefroid/lockhub/issues/86">#86</a>, <a href="https://github.com/DavidGodefroid/lockhub/issues/87">#87</a>).</li>
       <li>The tap’s <code>locklog</code> formula installs the latest release (the launcher alone), and the <code>lockfamily</code> formula includes locklog and <code>lox</code>.</li>
       <li>Without Homebrew, <code>install.sh</code> installs the latest <strong>published</strong> release of the launcher, whose verbs you can run yourself.</li>
     </ul>
@@ -78,7 +78,8 @@
   <ul class="prose">
     <li>A Linux host with the logs.</li>
     <li>Docker 19.03 or later.</li>
-    <li><a href="https://docs.sigstore.dev/cosign/system_config/installation/">cosign</a>, to verify the release and the image.</li>
+    <li><a href="https://docs.sigstore.dev/cosign/system_config/installation/">cosign</a> v2.5.0 or later, to verify the release and the image: <code>lox add</code> and <code>lox run</code> refuse an older one up front.</li>
+    <li>lox v0.12.0 or later, for <code>lox add locklog</code> and <code>lox run</code>.</li>
     <li>Homebrew, or (for <code>install.sh</code>) sudo for <code>/usr/local/bin</code>.</li>
     <li>A terminal you keep in view, where <code>lox run</code> stays open.</li>
   </ul>
@@ -90,7 +91,7 @@
     <div class="install-head"><span>Install the Lock Family with Homebrew</span></div>
     <pre tabindex="0" aria-label="Install commands"><code><span class="cmd">brew trust davidgodefroid/tap</span>
 <span class="cmd">brew install davidgodefroid/tap/lockfamily</span></code></pre>
-    <p class="install-note">Homebrew asks you to trust a third-party tap once. <code>brew install davidgodefroid/tap/locklog</code> installs this Lock alone; <code>lox add</code> and <code>lox run</code> also need <code>davidgodefroid/tap/lox</code>.</p>
+    <p class="install-note">Homebrew asks you to trust a third-party tap once. <code>brew install davidgodefroid/tap/locklog</code> installs this Lock alone; <code>lox add</code> and <code>lox run</code> also need lox v0.12.0+ and cosign v2.5.0+: <code>brew install davidgodefroid/tap/locklog davidgodefroid/tap/lox cosign</code>.</p>
   </div>
   <ol class="steps prose">
     <li><p>From the project whose logs the agent investigates, <code>lox add locklog</code> (the guided form: it asks for the lock’s name) sets up the lock (or <code>lox init</code>). With a name, <code>lox add locklog &lt;name&gt;</code> only declares a lock whose profile exists.</p>
