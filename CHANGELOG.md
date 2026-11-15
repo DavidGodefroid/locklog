@@ -6,6 +6,24 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-15
+
+The texts shipped to agents follow the code (#163, #164). No change to
+the console, the engine or the masking.
+
+### Fixed
+
+- The agent's instructions (`locklog init`: the skill, `AGENTS.md`,
+  `GEMINI.md` and Cursor sections) and the `locklog_scan` tool description
+  say an approved tool's ticket is decided on lockhub (in `lox run`, the
+  deck or a phone), not at the console, and no longer speak of a "hub
+  mode" (the only mode since v0.2.0). `locklog_scan`'s description gives
+  the approved scan's lifetime (`expires_at`: 30 minutes, longer for a
+  long plan, at most 4 hours) instead of a flat 30 minutes.
+- Docs and locklog.dev: the fact-check of #163 (wrong or stale claims on
+  v0.4.0's content, `lox add` and `doctor --fix`, masking and audit
+  wording, budgets, the demo's texts).
+
 ## [0.4.0] - 2026-11-14
 
 Confined agents by default: lockkit v0.20.0. A minor release (pre-1.0
@@ -709,7 +727,8 @@ Still open in this release:
   version, which parses it (`bind-recursive=disabled` from CLI 25), not from
   the engine's.
 
-[Unreleased]: https://github.com/DavidGodefroid/locklog/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/DavidGodefroid/locklog/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/DavidGodefroid/locklog/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/DavidGodefroid/locklog/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/DavidGodefroid/locklog/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/DavidGodefroid/locklog/compare/v0.2.1...v0.3.0
