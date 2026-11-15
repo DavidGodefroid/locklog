@@ -8,8 +8,11 @@ shows every ticket and decides it, by its rules or by you.
 ## Status
 
 - locklog is pre-release: the latest release is in the [CHANGELOG](../CHANGELOG.md).
-- `lox add locklog` and the locklog console in `lox run` need lockhub
-  v0.10.0 or later ([lockhub#84](https://github.com/DavidGodefroid/lockhub/issues/84),
+- `lox add locklog` and the locklog console in `lox run` need lox
+  (lockhub) v0.12.0 or later, the first release that runs locklog v0.4.0's
+  confined consoles ([lockhub#212](https://github.com/DavidGodefroid/lockhub/issues/212));
+  lockhub v0.10.0 was the first to know the locklog type
+  ([lockhub#84](https://github.com/DavidGodefroid/lockhub/issues/84),
   [#86](https://github.com/DavidGodefroid/lockhub/issues/86),
   [#87](https://github.com/DavidGodefroid/lockhub/issues/87)).
 - The tap's `locklog` formula installs the latest release (the launcher
@@ -30,8 +33,11 @@ gates (they stay a preview until then) and a masked export.
 
 - A Linux host with the logs.
 - Docker ≥ 19.03.
-- [cosign](https://docs.sigstore.dev/cosign/system_config/installation/),
-  to verify the release and the image.
+- [cosign](https://docs.sigstore.dev/cosign/system_config/installation/)
+  v2.5.0 or later, to verify the release and the image: `lox add` and
+  `lox run` refuse an older one up front
+  ([lockhub#197](https://github.com/DavidGodefroid/lockhub/issues/197)).
+- lox v0.12.0 or later, for `lox add locklog` and `lox run`.
 - Homebrew, or (for `install.sh`) sudo for `/usr/local/bin`.
 
 ## With Homebrew
@@ -46,7 +52,7 @@ lox run                                      # in a terminal of its own, kept op
 
 `brew install davidgodefroid/tap/locklog` installs locklog's launcher
 alone: `lox add` and `lox run` also need
-`brew install davidgodefroid/tap/lox`.
+`brew install davidgodefroid/tap/lox cosign` (lox v0.12.0+, cosign v2.5.0+).
 
 `lox add locklog`, the guided form (it asks for the lock's name, or takes
 `--name NAME`), runs locklog's three launcher verbs from the project

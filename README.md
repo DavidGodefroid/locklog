@@ -61,15 +61,17 @@ brew install davidgodefroid/tap/lockfamily
 ```
 
 That installs the Lock Family, locklog included. For locklog alone:
-`brew install davidgodefroid/tap/locklog` (with `lox` for `lox add locklog`
-and `lox run`), or the signed install script, which installs the launcher:
+`brew install davidgodefroid/tap/locklog davidgodefroid/tap/lox cosign`
+(`lox add locklog` and `lox run` need lox v0.12.0 or later), or the signed
+install script, which installs the launcher:
 
 ```sh
 curl -fsSL https://locklog.dev/install.sh | sh
 ```
 
 A Linux host with the logs, Docker ≥ 19.03 and
-[cosign](https://docs.sigstore.dev/cosign/system_config/installation/).
+[cosign](https://docs.sigstore.dev/cosign/system_config/installation/)
+v2.5.0 or later (`lox add` and `lox run` verify every image with it).
 Status, the script read first, and production placement:
 [docs/install.md](docs/install.md).
 

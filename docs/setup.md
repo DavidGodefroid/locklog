@@ -29,11 +29,14 @@ lox add locklog                              # guided; or: lox init
 lox run                                      # in a terminal of its own, outside the agent
 ```
 
-`lox add locklog` and the locklog console in `lox run` need lockhub
-v0.10.0 or later, the first release that knows the locklog type (lockhub#84,
-#86, #87). The tap's `lockfamily` formula installs it;
-`brew install davidgodefroid/tap/locklog` installs the launcher alone, and
-then also needs `brew install davidgodefroid/tap/lox`.
+`lox add locklog` and the locklog console in `lox run` need lox (lockhub)
+v0.12.0 or later, the first release that runs locklog v0.4.0's confined
+consoles (lockhub#212; v0.10.0 was the first to know the locklog type,
+lockhub#84, #86, #87), and cosign v2.5.0 or later, with which `lox add` and
+`lox run` verify every image (lockhub#197). The tap's `lockfamily` formula
+installs both; `brew install davidgodefroid/tap/locklog` installs the
+launcher alone, and then also needs
+`brew install davidgodefroid/tap/lox cosign`.
 The alternative, without Homebrew, installs the launcher alone,
 cosign-verified:
 
